@@ -91,12 +91,10 @@ class Coordinator:
                 await self._notify(f"[{fr.account_id}] recompute error: {result}")
             else:
                 self._error_streaks[fr.account_id] = 0
-        self._remember(master=delta.state, account_ids=[fr.account_id for fr in self._followers])
 
-    def _remember(self, master: MasterState, account_ids: list[str]) -> None:
+    def _remember_single(self, account_id: str, master: MasterState) -> None:
         for key, pos in master.positions.items():
-            for account_id in account_ids:
-                self._master_abs[(account_id, f"{key.symbol}:{key.pos_side}")] = abs(pos.qty)
+            self._master_abs[(account_id, f"{key.symbol}:{key.pos_side}")] = abs(pos.qty)
 
     async def _recompute_follower(self, fr: FollowerRuntime, delta: MasterDelta) -> None:
         policy = await self._settings.get_policy(fr.account_id)
@@ -104,6 +102,10 @@ class Coordinator:
             return
         actual = await self._snapshot(fr)
         targets, skips = await self._targets_for(fr.account_id, delta.state, actual, policy)
+        # advance the master-magnitude tracker on EVERY recompute (delta and
+        # sweep alike); sweeps against a stale magnitude misclassify growth and
+        # oscillate targets against the WS-driven ones
+        self._remember_single(fr.account_id, delta.state)
         for skip in skips:
             await self._notify(f"[{fr.account_id}] SKIP {skip.symbol}: {skip.reason}")
         plan = build_plan(
