@@ -1,6 +1,6 @@
 # Архитектура copytradeaster
 
-Статус: базовая архитектура проекта, 21.08.2026.
+Статус: базовая архитектура утверждена 21.08.2026 как целевой ориентир. Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) подтверждаются signed testnet-прогонами до закрепления деталей.
 
 Этот документ фиксирует архитектуру сразу для всех текущих этапов: testnet-движок, Telegram-бот и Aster Code / Builder. Цель — не менять торговое ядро при переходе между этапами.
 
@@ -106,21 +106,22 @@ Telegram и Builder не находятся внутри этого потока
 
 ### `aster/`
 
-Адаптер к Aster V3.
+Адаптер к Aster V3. Не содержит copytrade- и risk-логики.
 
 Отвечает за:
 
-- REST;
-- user-data WebSocket;
-- EIP-712 signing;
+- REST (trading_api) и Agent/Builder management (management_api) — раздельно: разные обязанности и signing contexts;
+- user-data WebSocket (user_stream): listenKey, keepalive, reconnect;
+- EIP-712 signing (signing.py);
 - nonce;
 - разбор ошибок;
-- rate limits;
-- Agent / Builder management.
+- weighted rate limits.
 
-Не содержит copytrade- и risk-логики.
+Signing details:
 
-Trading API и Agent/Builder management лучше держать раздельно, поскольку у них разные обязанности и signing contexts.
+- Контексты EIP-712: trading — chainId 1666 (mainnet) / 714 (testnet); registration (ApproveAgent / ApproveBuilder) — 56 (EVM) / 101 (Solana).
+- Nonce signer-ключа персистентен: хранится в storage, инкрементируется и сохраняется ДО отправки подписи; после рестарта восстанавливается из БД, а не из памяти.
+- При retry после 503/timeout сначала проверяется фактическое состояние биржи (clientOrderId / open orders), затем переподпись с актуальным nonce.
 
 ### `master/`
 
@@ -162,9 +163,11 @@ Risk engine должен возвращать целевое состояние/
 
 ### `credentials/`
 
-Шифрование и получение signer credentials.
+Шифрование и получение signer credentials — только для пути `onboarding/direct`.
 
 Приватные signer keys в БД хранятся только зашифрованными. Master encryption key находится вне БД.
+
+Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder signer-ключи генерирует и хранит билдер — приватные ключи фолловера в систему не попадают. Для этого пути `credentials/` не используется; торговый core получает builder-идентичность (builderId, feeRate) через тот же TradingIdentity.
 
 ### `onboarding/`
 
@@ -288,6 +291,8 @@ followers выполняются параллельно
 ```
 
 То есть операции разных пользователей могут идти конкурентно, но внутри одного follower используется один mutation lock/queue.
+
+Mutation lock также сериализует подписи: nonce signer-ключа инкрементируется строго последовательно внутри lock.
 
 Это упрощает nonce, order sequencing и recovery, не создавая заметного bottleneck при 30–100 followers.
 

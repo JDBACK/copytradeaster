@@ -1,0 +1,2 @@
+[console_scripts]
+copytradeaster = copytradeaster.cli.main:main

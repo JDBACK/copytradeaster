@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 wallet.txt
 .DS_Store
+data/
