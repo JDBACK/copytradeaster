@@ -146,8 +146,9 @@ async def cmd_move_stop(symbol: str, new_stop: Decimal) -> None:
         old = olds[0]
         qty = old.orig_qty
         stop_leg = old.position_side
-        await client.cancel_order("main", symbol, orig_client_order_id=old.client_order_id)
         new_stop = new_stop.quantize(filters.tick_size)
+        # place-new BEFORE cancel-old: if the exchange rejects the new level
+        # (-2021 would-immediately-trigger) the position keeps its protection
         await client.place_order(
             "main",
             PlaceOrderRequest(
@@ -161,6 +162,7 @@ async def cmd_move_stop(symbol: str, new_stop: Decimal) -> None:
                 new_client_order_id=f"manual-stop-{int(new_stop)}",
             ),
         )
+        await client.cancel_order("main", symbol, orig_client_order_id=old.client_order_id)
         print(f"moved stop to {new_stop} (qty {qty})")
     finally:
         await client._http.aclose()  # noqa: SLF001
