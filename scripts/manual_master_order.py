@@ -5,11 +5,15 @@ Usage:
   python scripts/manual_master_order.py move-stop BTCUSDT 63000
   python scripts/manual_master_order.py partial-close BTCUSDT 30  (percent)
   python scripts/manual_master_order.py close BTCUSDT
+
+Position mode is taken from CT_POSITION_MODE (ONE_WAY default; HEDGE sends
+positionSide and no reduceOnly, matching exchange rules).
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -24,7 +28,17 @@ from copytradeaster.config import Settings  # noqa: E402
 from copytradeaster.credentials.service import SqliteCredentials  # noqa: E402
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters  # noqa: E402
 from copytradeaster.storage.database import Database  # noqa: E402
-from copytradeaster.storage.repositories import AccountRepo  # noqa: E402
+
+
+def hedge() -> bool:
+    return os.environ.get("CT_POSITION_MODE", "ONE_WAY") == "HEDGE"
+
+
+def leg_side(pos_side: PosSide) -> PosSide:
+    """In hedge mode orders must carry the concrete LONG/SHORT side."""
+    if hedge() and pos_side == PosSide.BOTH:
+        return PosSide.LONG
+    return pos_side
 
 
 async def make_client() -> tuple[AsterClient, Database]:
@@ -58,12 +72,20 @@ async def get_filters(client: AsterClient, symbol: str) -> SymbolFilters:
     return filters
 
 
+async def positions_of(client: AsterClient, symbol: str):
+    return [p for p in await client.position_risk("main", symbol) if p.position_amt != 0]
+
+
 async def cmd_open(symbol: str, qty: Decimal, stop_pct: Decimal) -> None:
     client, db = await make_client()
     try:
         filters = await get_filters(client, symbol)
-        price = Decimal(str((await client.position_risk("main", symbol))[0].mark_price))
+        marks = await client.position_risk("main", symbol)
+        price = (
+            Decimal(str(marks[0].mark_price)) if marks else await _fallback_price(client, symbol)
+        )
         stop = (price * (Decimal(1) - stop_pct / 100)).quantize(filters.tick_size)
+        ps = leg_side(PosSide.BOTH)
         await client.place_order(
             "main",
             PlaceOrderRequest(
@@ -72,9 +94,14 @@ async def cmd_open(symbol: str, qty: Decimal, stop_pct: Decimal) -> None:
                 type="MARKET",
                 quantity=qty,
                 new_order_resp_type="RESULT",
-                position_side=PosSide.BOTH,
+                position_side=ps,
                 new_client_order_id=f"manual-open-{int(price)}",
             ),
+        )
+        stop_leg = (
+            PosSide.LONG
+            if ps == PosSide.LONG
+            else (PosSide.SHORT if ps == PosSide.SHORT else PosSide.BOTH)
         )
         await client.place_order(
             "main",
@@ -84,16 +111,26 @@ async def cmd_open(symbol: str, qty: Decimal, stop_pct: Decimal) -> None:
                 type="STOP_MARKET",
                 quantity=qty,
                 stop_price=stop,
-                reduce_only=True,
                 working_type="MARK_PRICE",
-                position_side=PosSide.BOTH,
+                position_side=stop_leg,
                 new_client_order_id=f"manual-stop-{int(stop)}",
             ),
         )
-        print(f"opened {symbol} {qty} @~{price}, stop {stop}")
+        print(f"opened {symbol} {qty} @~{price}, stop {stop} ({ps.value})")
     finally:
-        await client._http.aclose()
+        await client._http.aclose()  # noqa: SLF001 - script-level access
         await db.close()
+
+
+async def _fallback_price(client: AsterClient, symbol: str) -> Decimal:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=10) as http:
+        resp = await http.get(
+            "https://fapi.asterdex-testnet.com/fapi/v1/ticker/price", params={"symbol": symbol}
+        )
+        data = resp.json()
+        return Decimal(str(data.get("price", "65000")))
 
 
 async def cmd_move_stop(symbol: str, new_stop: Decimal) -> None:
@@ -101,11 +138,13 @@ async def cmd_move_stop(symbol: str, new_stop: Decimal) -> None:
     try:
         filters = await get_filters(client, symbol)
         orders = await client.open_orders("main", symbol=symbol)
-        old = [o for o in orders if o.type == "STOP_MARKET"]
-        positions = await client.position_risk("main", symbol)
-        qty = abs(Decimal(str(positions[0].position_amt))) if positions else Decimal(0)
-        if old:
-            await client.cancel_order("main", symbol, orig_client_order_id=old[0].client_order_id)
+        olds = [o for o in orders if o.type == "STOP_MARKET"]
+        if not olds:
+            raise SystemExit("no STOP_MARKET to move")
+        old = olds[0]
+        qty = old.orig_qty
+        stop_leg = old.position_side
+        await client.cancel_order("main", symbol, orig_client_order_id=old.client_order_id)
         new_stop = new_stop.quantize(filters.tick_size)
         await client.place_order(
             "main",
@@ -115,15 +154,14 @@ async def cmd_move_stop(symbol: str, new_stop: Decimal) -> None:
                 type="STOP_MARKET",
                 quantity=qty,
                 stop_price=new_stop,
-                reduce_only=True,
                 working_type="MARK_PRICE",
-                position_side=PosSide.BOTH,
+                position_side=stop_leg,
                 new_client_order_id=f"manual-stop-{int(new_stop)}",
             ),
         )
         print(f"moved stop to {new_stop} (qty {qty})")
     finally:
-        await client._http.aclose()
+        await client._http.aclose()  # noqa: SLF001
         await db.close()
 
 
@@ -131,8 +169,10 @@ async def cmd_partial_close(symbol: str, pct: Decimal) -> None:
     client, db = await make_client()
     try:
         filters = await get_filters(client, symbol)
-        positions = await client.position_risk("main", symbol)
-        pos = positions[0]
+        open_positions = await positions_of(client, symbol)
+        if not open_positions:
+            raise SystemExit("no position to reduce")
+        pos = open_positions[0]
         qty = abs(Decimal(str(pos.position_amt))) * pct / 100
         qty = (qty // filters.step_size) * filters.step_size
         side = Side.SELL if pos.position_amt > 0 else Side.BUY
@@ -143,29 +183,24 @@ async def cmd_partial_close(symbol: str, pct: Decimal) -> None:
                 side=side,
                 type="MARKET",
                 quantity=qty,
-                reduce_only=True,
                 new_order_resp_type="RESULT",
-                position_side=PosSide.BOTH,
+                position_side=pos.position_side,
                 new_client_order_id=f"manual-pc-{pct}",
             ),
         )
         print(f"partial close {pct}% -> {qty}")
     finally:
-        await client._http.aclose()
+        await client._http.aclose()  # noqa: SLF001
         await db.close()
 
 
 async def cmd_close(symbol: str) -> None:
     client, db = await make_client()
     try:
-        orders = await client.open_orders("main", symbol=symbol)
-        for o in orders:
+        for o in await client.open_orders("main", symbol=symbol):
             await client.cancel_order("main", symbol, orig_client_order_id=o.client_order_id)
-        positions = await client.position_risk("main", symbol)
-        for pos in positions:
+        for pos in await positions_of(client, symbol):
             qty = abs(Decimal(str(pos.position_amt)))
-            if qty == 0:
-                continue
             side = Side.SELL if pos.position_amt > 0 else Side.BUY
             await client.place_order(
                 "main",
@@ -174,15 +209,14 @@ async def cmd_close(symbol: str) -> None:
                     side=side,
                     type="MARKET",
                     quantity=qty,
-                    reduce_only=True,
                     new_order_resp_type="RESULT",
-                    position_side=PosSide.BOTH,
-                    new_client_order_id="manual-close",
+                    position_side=pos.position_side,
+                    new_client_order_id=f"manual-close-{pos.position_side.value}",
                 ),
             )
         print(f"closed {symbol}")
     finally:
-        await client._http.aclose()
+        await client._http.aclose()  # noqa: SLF001
         await db.close()
 
 
@@ -206,4 +240,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-    del AccountRepo

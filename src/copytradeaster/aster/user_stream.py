@@ -76,7 +76,7 @@ class UserStream:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect loop boundary
-                log.warning("user stream error: %s: %s", type(exc).__name__, exc)
+                log.warning("user stream error: %s: %s", type(exc).__name__, exc, exc_info=True)
             if stop.is_set():
                 break
             jitter = random.uniform(0, backoff * 0.3)
