@@ -1,0 +1,21 @@
+{
+  "description": "ORDER_TRADE_UPDATE TRADE fill 0 -> 0.002 opens position and trade episode",
+  "events": [
+    {
+      "e": "ORDER_TRADE_UPDATE", "E": 2000, "T": 1999,
+      "o": {
+        "s": "BTCUSDT", "c": "coid-open-1", "S": "BUY", "o": "MARKET", "q": "0.002",
+        "p": "0", "ap": "65000", "sp": "0", "x": "TRADE", "X": "FILLED", "i": 2,
+        "l": "0.002", "z": "0.002", "L": "65000", "N": "USDT", "n": "0.01",
+        "R": false, "wt": "MARK_PRICE", "ot": "MARKET", "ps": "BOTH", "rp": "0"
+      }
+    }
+  ],
+  "expected": {
+    "available_usdt": "0",
+    "positions": {
+      "BTCUSDT:BOTH": {"qty": "0.002", "leverage": 0}
+    },
+    "open_trades": 1
+  }
+}

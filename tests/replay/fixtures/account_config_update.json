@@ -1,0 +1,25 @@
+{
+  "description": "ACCOUNT_CONFIG_UPDATE: leverage change on an open position",
+  "events": [
+    {
+      "e": "ACCOUNT_UPDATE", "E": 5000, "T": 4999,
+      "a": {
+        "m": "ORDER", "B": [], "P": [
+          {"s": "BTCUSDT", "pa": "0.002", "ep": "65000", "cr": "0", "up": "0",
+           "mt": "cross", "iw": "0", "ps": "BOTH"}
+        ]
+      }
+    },
+    {
+      "e": "ACCOUNT_CONFIG_UPDATE", "E": 5001, "T": 5000,
+      "ac": {"s": "BTCUSDT", "l": 10}
+    }
+  ],
+  "expected": {
+    "available_usdt": "0",
+    "positions": {
+      "BTCUSDT:BOTH": {"qty": "0.002", "leverage": 10}
+    },
+    "open_trades": 1
+  }
+}

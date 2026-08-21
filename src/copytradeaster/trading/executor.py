@@ -279,6 +279,8 @@ class Executor:
     async def _fail(self, plan: ExecutionPlan, key: str, exc: AsterError) -> CommandResult:
         error = f"{exc.code}:{exc.msg}"
         await self._commands.set_status(key, "FAILED", last_error=error)
+        if self._settings is not None:
+            await self._settings.set_flag("degraded", f"{plan.account_id}:{key}:{error}")
         log.error("command %s failed: %s", key, error)
         return CommandResult(key, "FAILED", error)
 

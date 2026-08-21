@@ -1,0 +1,28 @@
+{
+  "description": "TRADE open then TRADE close: position returns to zero, episode closed",
+  "events": [
+    {
+      "e": "ORDER_TRADE_UPDATE", "E": 3000, "T": 2999,
+      "o": {
+        "s": "BTCUSDT", "c": "coid-o", "S": "BUY", "o": "MARKET", "q": "0.002",
+        "p": "0", "ap": "65000", "sp": "0", "x": "TRADE", "X": "FILLED", "i": 3,
+        "l": "0.002", "z": "0.002", "L": "65000", "N": "USDT", "n": "0",
+        "R": false, "wt": "MARK_PRICE", "ot": "MARKET", "ps": "BOTH", "rp": "0"
+      }
+    },
+    {
+      "e": "ORDER_TRADE_UPDATE", "E": 3001, "T": 3000,
+      "o": {
+        "s": "BTCUSDT", "c": "coid-c", "S": "SELL", "o": "MARKET", "q": "0.002",
+        "p": "0", "ap": "66000", "sp": "0", "x": "TRADE", "X": "FILLED", "i": 4,
+        "l": "0.002", "z": "0.002", "L": "66000", "N": "USDT", "n": "0",
+        "R": true, "wt": "MARK_PRICE", "ot": "MARKET", "ps": "BOTH", "rp": "2"
+      }
+    }
+  ],
+  "expected": {
+    "available_usdt": "0",
+    "positions": {},
+    "open_trades": 0
+  }
+}

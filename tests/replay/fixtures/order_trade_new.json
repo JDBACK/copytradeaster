@@ -1,0 +1,19 @@
+{
+  "description": "ORDER_TRADE_UPDATE NEW for a MARKET order: no position change, no episode",
+  "events": [
+    {
+      "e": "ORDER_TRADE_UPDATE", "E": 1000, "T": 999,
+      "o": {
+        "s": "BTCUSDT", "c": "coid-new-1", "S": "BUY", "o": "MARKET", "q": "0.002",
+        "p": "0", "ap": "0", "sp": "0", "x": "NEW", "X": "NEW", "i": 1, "l": "0",
+        "z": "0", "L": "0", "N": "USDT", "n": "0", "R": false, "wt": "MARK_PRICE",
+        "ot": "MARKET", "ps": "BOTH", "rp": "0"
+      }
+    }
+  ],
+  "expected": {
+    "available_usdt": "0",
+    "positions": {},
+    "open_trades": 0
+  }
+}

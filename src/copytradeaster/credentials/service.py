@@ -8,6 +8,8 @@ reads an in-memory cache warmed once at boot (`load`) and updated by
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from dataclasses import dataclass
 
 from eth_account import Account
@@ -35,6 +37,39 @@ class SqliteCredentials:
         self._trading_chain_id = trading_chain_id
         self._cache: dict[str, _AccountCreds] = {}
         self._roles: dict[str, str] = {}
+        # NonceSource state: in-memory counter mirrored into nonce_store through a
+        # dedicated synchronous connection - commit happens BEFORE next_nonce()
+        # returns (persist-before-send contract, ARCHITECTURE.md section aster/).
+        self._nonce_mem: dict[str, int] = {}
+        self._sync_conn: sqlite3.Connection | None = None
+
+    async def _init_sync_conn(self) -> None:
+        if self._sync_conn is not None:
+            return
+        self._sync_conn = sqlite3.connect(str(self._db.path))
+        self._sync_conn.execute(
+            "CREATE TABLE IF NOT EXISTS nonce_store("
+            "signer_address TEXT PRIMARY KEY, last_nonce INTEGER NOT NULL,"
+            " updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        self._sync_conn.commit()
+        for row in self._sync_conn.execute("SELECT signer_address, last_nonce FROM nonce_store"):
+            self._nonce_mem[str(row[0])] = int(row[1])
+
+    def next_nonce(self, signer_address: str) -> int:
+        if self._sync_conn is None:
+            raise RuntimeError("call load() before signing requests")
+        candidate = max(self._nonce_mem.get(signer_address, 0) + 1, int(time.time()) * 1_000_000)
+        self._sync_conn.execute(
+            "INSERT INTO nonce_store(signer_address, last_nonce, updated_at)"
+            " VALUES (?, ?, datetime('now'))"
+            " ON CONFLICT(signer_address) DO UPDATE SET"
+            " last_nonce=excluded.last_nonce, updated_at=datetime('now')",
+            (signer_address, candidate),
+        )
+        self._sync_conn.commit()
+        self._nonce_mem[signer_address] = candidate
+        return candidate
 
     async def load(self) -> None:
         """Warm the cache from the DB (called once at boot)."""
@@ -50,6 +85,7 @@ class SqliteCredentials:
                 main_key=data.get("main_key"),
             )
             self._roles[account_id] = str(row["role"])
+        await self._init_sync_conn()
         log.info("credentials loaded: %d accounts", len(self._cache))
 
     async def import_identity(

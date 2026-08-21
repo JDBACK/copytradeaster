@@ -1,0 +1,23 @@
+{
+  "description": "ACCOUNT_UPDATE: USDT balance and BTC position update",
+  "events": [
+    {
+      "e": "ACCOUNT_UPDATE", "E": 4000, "T": 3999,
+      "a": {
+        "m": "ORDER",
+        "B": [{"a": "USDT", "wb": "1234.56", "cw": "1200.00", "bc": "0"}],
+        "P": [
+          {"s": "BTCUSDT", "pa": "0.003", "ep": "64900", "cr": "0", "up": "0.5",
+           "mt": "cross", "iw": "0", "ps": "BOTH"}
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "available_usdt": "1234.56",
+    "positions": {
+      "BTCUSDT:BOTH": {"qty": "0.003", "leverage": 0}
+    },
+    "open_trades": 1
+  }
+}

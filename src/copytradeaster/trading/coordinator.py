@@ -113,6 +113,7 @@ class Coordinator:
             self._coid_factory(),
             working_type=self._working_type,
         )
+        plan = await self._stamp_trade_id(fr.account_id, targets, plan)
         if plan.actions:
             log.info(
                 "[%s] plan: %s",
@@ -326,6 +327,18 @@ class Coordinator:
             return f"ct-{symbol}-{kind.value.lower()[:8]}-{seq:04d}"
 
         return factory
+
+    async def _stamp_trade_id(self, account_id: str, targets: list[TargetPosition], plan):
+        """Associate the plan with the active master episode (order_links FK)."""
+        from dataclasses import replace as dc_replace
+
+        trade_id = None
+        for tp in targets:
+            row = await self._trades.active_trade(tp.key.symbol, tp.key.pos_side.value)
+            if row is not None:
+                trade_id = int(row["trade_id"])
+                break
+        return dc_replace(plan, trade_id=trade_id)
 
     async def _notify(self, text: str) -> None:
         if self._on_notify is not None:
