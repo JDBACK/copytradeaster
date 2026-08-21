@@ -17,6 +17,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 
 from eth_account import Account
 
@@ -77,6 +78,16 @@ class SqliteCredentials:
                         "main_key": main_private_key_hex}).encode(),
         )
         await CredentialRepo(self._db).put_encrypted(account_id, blob)
+        # default copy policy so the coordinator can trade the account right away
+        from copytradeaster.domain.models import RiskPolicy
+        from copytradeaster.storage.repositories import SettingsRepo
+
+        if await SettingsRepo(self._db).get_policy(account_id) is None:
+            await SettingsRepo(self._db).upsert_policy(
+                RiskPolicy(risk_percent=Decimal("0.01"), max_leverage=20,
+                           max_entry_deviation_pct=Decimal("0.01")),
+                account_id,
+            )
         self._cache[account_id] = _AccountCreds(
             user_address=user,
             signer_key=signer_private_key_hex,
