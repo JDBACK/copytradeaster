@@ -31,7 +31,9 @@ from copytradeaster.storage.database import Database  # noqa: E402
 
 
 def hedge() -> bool:
-    return os.environ.get("CT_POSITION_MODE", "ONE_WAY") == "HEDGE"
+    from copytradeaster.config import Settings
+
+    return Settings().position_mode == "HEDGE"
 
 
 def leg_side(pos_side: PosSide) -> PosSide:
