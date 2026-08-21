@@ -25,8 +25,11 @@ from copytradeaster.storage.database import Database  # noqa: E402
 
 async def main() -> None:
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else \
-        Path("tests/replay/fixtures/captured_stream.json")
+    out = (
+        Path(sys.argv[2])
+        if len(sys.argv) > 2
+        else Path("tests/replay/fixtures/captured_stream.json")
+    )
 
     cfg = Settings()
     db = Database(cfg.db_path)
@@ -35,20 +38,30 @@ async def main() -> None:
     creds = SqliteCredentials(db, cfg.encryption_key_bytes())
     await creds.load()
     http = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
-    client = AsterClient(http=http, base_url=cfg.rest_base_url,
-                         limiter=RateLimits(cfg.weight_limit_per_min,
-                                            cfg.orders_limit_per_min,
-                                            cfg.orders_limit_per_10s),
-                         identities=creds, keys=creds, nonces=creds)
+    client = AsterClient(
+        http=http,
+        base_url=cfg.rest_base_url,
+        limiter=RateLimits(
+            cfg.weight_limit_per_min, cfg.orders_limit_per_min, cfg.orders_limit_per_10s
+        ),
+        identities=creds,
+        keys=creds,
+        nonces=creds,
+    )
     events: list[dict] = []
 
     async def on_event(event):
         events.append({"received_at": event.received_at, "raw": event.raw})
 
     stop = asyncio.Event()
-    stream = UserStream(client=client, account_id="main", ws_base=cfg.ws_user_base,
-                        keepalive_min=cfg.listenkey_keepalive_min,
-                        on_event=on_event, on_reconnect=lambda: asyncio.sleep(0))
+    stream = UserStream(
+        client=client,
+        account_id="main",
+        ws_base=cfg.ws_user_base,
+        keepalive_min=cfg.listenkey_keepalive_min,
+        on_event=on_event,
+        on_reconnect=lambda: asyncio.sleep(0),
+    )
     task = asyncio.create_task(stream.run(stop))
     print(f"capturing {seconds}s of master stream -> {out}")
     await asyncio.sleep(seconds)

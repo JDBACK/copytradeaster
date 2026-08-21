@@ -77,7 +77,8 @@ class SymbolInfoDTO(BaseModel):
     symbol: str
     status: str
     contractType: str
-    triggerProtect: bool = False
+    # live testnet returns a decimal string (e.g. "0.0200"); mainnet may return bool
+    triggerProtect: Decimal | str | bool = False
     filters: list[SymbolFilterDTO]
     orderTypes: list[str] = []
 

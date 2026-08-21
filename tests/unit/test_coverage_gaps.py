@@ -60,6 +60,13 @@ class TestDatabaseGuards:
         with pytest.raises(RuntimeError, match="connect"):
             await db.execute("SELECT 1")
 
+    async def test_busy_timeout_pragmas_set(self, tmp_path: Path):
+        db = Database(tmp_path / "x.sqlite3")
+        await db.connect()
+        row = await db.fetchone("PRAGMA busy_timeout")
+        assert list(row)[0] == 5000
+        await db.close()
+
     async def test_close_twice_ok(self, tmp_path: Path):
         db = Database(tmp_path / "x.sqlite3")
         await db.connect()

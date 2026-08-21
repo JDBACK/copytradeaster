@@ -46,7 +46,9 @@ class SqliteCredentials:
     async def _init_sync_conn(self) -> None:
         if self._sync_conn is not None:
             return
-        self._sync_conn = sqlite3.connect(str(self._db.path))
+        self._sync_conn = sqlite3.connect(str(self._db.path), timeout=5.0)
+        self._sync_conn.execute("PRAGMA journal_mode=WAL")
+        self._sync_conn.execute("PRAGMA busy_timeout=5000")
         self._sync_conn.execute(
             "CREATE TABLE IF NOT EXISTS nonce_store("
             "signer_address TEXT PRIMARY KEY, last_nonce INTEGER NOT NULL,"

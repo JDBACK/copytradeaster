@@ -142,7 +142,11 @@ class App:
         want_hedge = cfg.position_mode == "HEDGE"
         if mode_is_hedge != want_hedge:
             log.warning("position mode mismatch on master - setting %s", cfg.position_mode)
-            await self.master_client.set_position_mode("main", want_hedge)
+            try:
+                await self.master_client.set_position_mode("main", want_hedge)
+            except Exception as exc:  # noqa: BLE001 - -4068: open positions block switch
+                log.warning("master position mode not changed (%s); continuing as-is", exc)
+                await notify(f"WARN master position mode not changed: {exc}")
         for fr in self.followers:
             try:
                 client = fr.client

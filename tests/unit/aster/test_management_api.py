@@ -141,6 +141,10 @@ class TestApproveBuilder:
 
 
 class TestSettingsValidation:
-    def test_encryption_key_required(self):
-        with __import__("pytest").raises(Exception):
-            Settings()  # no encryption_key -> validation error
+    def test_encryption_key_required(self, monkeypatch):
+        monkeypatch.delenv("CT_ENCRYPTION_KEY", raising=False)
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)  # no encryption_key -> validation error

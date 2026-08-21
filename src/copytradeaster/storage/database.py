@@ -81,6 +81,8 @@ class Database:
         self.conn.row_factory = aiosqlite.Row
         await self.conn.execute("PRAGMA journal_mode=WAL")
         await self.conn.execute("PRAGMA foreign_keys=ON")
+        # concurrent writers: async pool + credentials' synchronous nonce connection
+        await self.conn.execute("PRAGMA busy_timeout=5000")
 
     async def migrate(self) -> int:
         """Applies unapplied MIGRATIONS in order; returns number applied."""
