@@ -59,6 +59,7 @@ class Coordinator:
         fee_buffer_pct: Decimal,
         working_type: str,
         on_notify: Callable[[str], Awaitable[None]] | None = None,
+        stale_master_ms: int = 5000,
     ) -> None:
         self._followers = followers
         self._settings = settings
@@ -71,6 +72,7 @@ class Coordinator:
         self._fee_buffer = fee_buffer_pct
         self._working_type = working_type
         self._on_notify = on_notify
+        self._stale_master_ms = stale_master_ms
         self._error_streaks: dict[str, int] = {}
         self._master_abs: dict[tuple[str, str], Decimal] = {}
 
@@ -91,6 +93,15 @@ class Coordinator:
                 await self._notify(f"[{fr.account_id}] recompute error: {result}")
             else:
                 self._error_streaks[fr.account_id] = 0
+
+    def _state_fresh(self, master: MasterState) -> bool:
+        """False when the master state predates stale_master_ms; event_time==0
+        (manual/snapshot state used by tests and boot) counts as fresh."""
+        if master.event_time <= 0:
+            return True
+        import time
+
+        return (time.time() * 1000 - master.event_time) <= self._stale_master_ms
 
     def _remember_single(self, account_id: str, master: MasterState) -> None:
         for key, pos in master.positions.items():
@@ -203,6 +214,12 @@ class Coordinator:
             leverage = min(master_pos.leverage, policy.max_leverage)
 
             if follower_pos is None or follower_pos.qty == 0:
+                # a-precondition: never open against a stale view of the master -
+                # the position may already be closed on the exchange while the WS
+                # event is still in flight (observed live on testnet)
+                if not self._state_fresh(master):
+                    skips.append(SkipRecord(key.symbol, SkipReason.STALE_MASTER))
+                    continue
                 # a-precondition: no re-entry while the same master episode ended
                 # by THIS follower's own stop fill
                 if await self._closed_by_own_stop(account_id, key, master):
@@ -253,8 +270,9 @@ class Coordinator:
             master_abs = abs(master_qty)
             prev_abs = self._master_abs.get((account_id, f"{key.symbol}:{key.pos_side}"))
             if prev_abs is not None and master_abs > prev_abs:
-                # branch b: master increased -> state-based risk cap
-                target_abs = cap
+                # branch b: master increased -> state-based risk cap; growth is
+                # forbidden against a stale view for the same reason as branch a
+                target_abs = cap if self._state_fresh(master) else current_abs
             elif master_stop != (
                 follower_pos.stop.stop_price if follower_pos.stop is not None else None
             ):

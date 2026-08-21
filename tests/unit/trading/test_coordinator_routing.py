@@ -315,3 +315,46 @@ async def test_self_stop_blocks_reentry_until_new_episode(env):
     await trades_repo.close_trade(int(active["trade_id"]))
     await coordinator.on_master_delta(delta_of(master_state()))
     assert len(fr.client.placed) >= 2
+
+
+async def test_stale_master_blocks_new_entry(env):
+    """Live testnet incident: follower already flat (own stop triggered), master
+    WS event still in flight -> branch a must NOT open against stale state."""
+    import time as _time
+
+    coordinator, followers, db, notifications = env
+    state = master_state()
+    state.event_time = int(_time.time() * 1000) - 60_000  # far beyond 5s window
+    await coordinator.on_master_delta(delta_of(state))
+    assert all(len(fr.client.placed) == 0 for fr in followers)
+    assert any("STALE_MASTER" in n for n in notifications)
+
+
+async def test_stale_master_blocks_growth(env):
+    """Branch b (master increased) must not grow a follower position when the
+    master view is stale - observed as 0.321 BTC churn after master close."""
+    import time as _time
+
+    coordinator, followers, db, _ = env
+    fr = followers[0]
+    key = PositionKey("BTCUSDT")
+    fr.client.positions[key] = {"qty": D("0.05"), "stop": D(64500)}
+    # prime the tracker with the current magnitude
+    await coordinator.on_master_delta(delta_of(master_state(qty=D("0.05"))))
+    fr.client.placed.clear()
+    # stale delta claiming growth
+    grown = master_state(qty=D("0.06"))
+    grown.event_time = int(_time.time() * 1000) - 60_000
+    await coordinator.on_master_delta(delta_of(grown))
+    assert all(p["type"] != "MARKET" for p in fr.client.placed)
+
+
+async def test_fresh_master_still_enters(env):
+    """Freshness guard must not over-block: fresh state enters normally."""
+    import time as _time
+
+    coordinator, followers, db, _ = env
+    state = master_state()
+    state.event_time = int(_time.time() * 1000)
+    await coordinator.on_master_delta(delta_of(state))
+    assert any(len(fr.client.placed) >= 2 for fr in followers)

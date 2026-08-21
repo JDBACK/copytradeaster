@@ -9,6 +9,7 @@ the position returns to zero.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -30,6 +31,8 @@ log = get_logger(__name__)
 class MasterState:
     available_usdt: Decimal = Decimal(0)
     positions: dict[PositionKey, PositionState] = field(default_factory=dict)
+    """Wall-clock ms of the last applied WS event; 0 = snapshot/manual (fresh)."""
+    event_time: int = 0
 
 
 @dataclass(slots=True)
@@ -83,6 +86,7 @@ class MasterProjector:
             await self._events.mark_processed(event_id)
             return
         self._last_event_time = event_time
+        self.state.event_time = int(time.time() * 1000)
 
         if event_type == "ORDER_TRADE_UPDATE":
             await self._on_order_update(raw["o"], event_id)
@@ -129,6 +133,7 @@ class MasterProjector:
                 take_profit=tp,
             )
         self.state = MasterState(available_usdt=available, positions=positions)
+        self.state.event_time = int(time.time() * 1000)
         return self.state
 
     # --- handlers -----------------------------------------------------------------

@@ -61,21 +61,27 @@ class SqliteCredentials:
                 main_key=data.get("main_key"),
             )
             self._roles[account_id] = str(row["role"])
-        for row in await self._db.fetchall(
-                "SELECT signer_address, last_nonce FROM nonce_store"):
+        for row in await self._db.fetchall("SELECT signer_address, last_nonce FROM nonce_store"):
             self._nonces[str(row["signer_address"])] = int(row["last_nonce"])
         self._loaded = True
         log.info("credentials loaded: %d accounts", len(self._cache))
 
-    async def import_identity(self, account_id: str, user: str,
-                              signer_private_key_hex: str, role: str, label: str,
-                              main_private_key_hex: str | None = None) -> None:
+    async def import_identity(
+        self,
+        account_id: str,
+        user: str,
+        signer_private_key_hex: str,
+        role: str,
+        label: str,
+        main_private_key_hex: str | None = None,
+    ) -> None:
         await AccountRepo(self._db).upsert(account_id, role, label, user)
         signer_address = Account.from_key(signer_private_key_hex).address
         blob = crypto.encrypt(
             self._key,
-            json.dumps({"signer_key": signer_private_key_hex,
-                        "main_key": main_private_key_hex}).encode(),
+            json.dumps(
+                {"signer_key": signer_private_key_hex, "main_key": main_private_key_hex}
+            ).encode(),
         )
         await CredentialRepo(self._db).put_encrypted(account_id, blob)
         # default copy policy so the coordinator can trade the account right away
@@ -84,8 +90,11 @@ class SqliteCredentials:
 
         if await SettingsRepo(self._db).get_policy(account_id) is None:
             await SettingsRepo(self._db).upsert_policy(
-                RiskPolicy(risk_percent=Decimal("0.01"), max_leverage=20,
-                           max_entry_deviation_pct=Decimal("0.01")),
+                RiskPolicy(
+                    risk_percent=Decimal("0.01"),
+                    max_leverage=20,
+                    max_entry_deviation_pct=Decimal("0.01"),
+                ),
                 account_id,
             )
         self._cache[account_id] = _AccountCreds(
@@ -94,8 +103,13 @@ class SqliteCredentials:
             main_key=main_private_key_hex,
         )
         self._roles[account_id] = role
-        log.info("imported %s role=%s user=%s signer=%s",
-                 label, role, redact(user), redact(signer_address))
+        log.info(
+            "imported %s role=%s user=%s signer=%s",
+            label,
+            role,
+            redact(user),
+            redact(signer_address),
+        )
 
     # --- KeyProvider surface (sync, cache-backed) ---------------------------------
 
@@ -127,8 +141,7 @@ class SqliteCredentials:
     def next_nonce(self, signer_address: str) -> int:
         if not self._loaded:
             raise RuntimeError("call load() before signing requests")
-        candidate = max(self._nonces.get(signer_address, 0) + 1,
-                        int(time.time()) * 1_000_000)
+        candidate = max(self._nonces.get(signer_address, 0) + 1, int(time.time()) * 1_000_000)
         self._nonces[signer_address] = candidate
         try:
             loop = asyncio.get_running_loop()

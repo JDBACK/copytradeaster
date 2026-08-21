@@ -13,7 +13,6 @@ positionSide and no reduceOnly, matching exchange rules).
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -83,9 +82,10 @@ async def cmd_open(symbol: str, qty: Decimal, stop_pct: Decimal) -> None:
     try:
         filters = await get_filters(client, symbol)
         marks = await client.position_risk("main", symbol)
-        price = (
-            Decimal(str(marks[0].mark_price)) if marks else await _fallback_price(client, symbol)
-        )
+        price = next(
+            (Decimal(str(m.mark_price)) for m in marks if m.mark_price),
+            None,
+        ) or await _fallback_price(client, symbol)
         stop = (price * (Decimal(1) - stop_pct / 100)).quantize(filters.tick_size)
         ps = leg_side(PosSide.BOTH)
         await client.place_order(
@@ -177,6 +177,10 @@ async def cmd_partial_close(symbol: str, pct: Decimal) -> None:
         pos = open_positions[0]
         qty = abs(Decimal(str(pos.position_amt))) * pct / 100
         qty = (qty // filters.step_size) * filters.step_size
+        if qty < filters.min_qty:
+            raise SystemExit(
+                f"partial size {qty} is below min step {filters.step_size}; increase pct"
+            )
         side = Side.SELL if pos.position_amt > 0 else Side.BUY
         await client.place_order(
             "main",

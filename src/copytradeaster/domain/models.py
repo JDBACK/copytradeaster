@@ -40,6 +40,7 @@ class SkipReason(StrEnum):
     ENTRY_DEVIATION = "ENTRY_DEVIATION"
     DISABLED = "DISABLED"
     PAUSED = "PAUSED"
+    STALE_MASTER = "STALE_MASTER"
 
 
 class _DecimalStrict:

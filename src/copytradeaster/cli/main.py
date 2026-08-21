@@ -400,7 +400,7 @@ def build_close_plan(account_id, actual, targets):
     seq = 0
     for tp in targets:
         pos = actual.positions.get(tp.key)
-        if pos is None:
+        if pos is None or pos.qty == 0:
             continue
         for prot in (pos.stop, pos.take_profit):
             if prot is not None:

@@ -119,7 +119,8 @@ async def test_nonce_source_monotonic_and_persisted(db):
     await asyncio.sleep(0.05)  # persistence task
     row = await db.fetchone(
         "SELECT last_nonce FROM nonce_store WHERE signer_address=?",
-        (Account.from_key(SIGNER_KEY).address,))
+        (Account.from_key(SIGNER_KEY).address,),
+    )
     assert int(row["last_nonce"]) == n2
 
 
