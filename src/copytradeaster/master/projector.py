@@ -163,11 +163,11 @@ class MasterProjector:
         """Update position from a TRADE fill; manage trade episodes."""
         last_qty = Decimal(str(o.get("l", "0")))
         side_str = str(o.get("S", "BUY"))
+        # Binance semantics: S is the ORDER side. LONG leg: BUY opens / SELL
+        # closes; SHORT leg: SELL opens / BUY closes. The previous code overrode
+        # direction by pos_side and turned closing fills into opens (live TP-fill
+        # incident: master flat on the exchange, projector re-opened it).
         direction = 1 if side_str == "BUY" else -1
-        if pos_side == PosSide.SHORT:
-            direction = -1
-        elif pos_side == PosSide.LONG:
-            direction = 1
         key = PositionKey(symbol=symbol, pos_side=pos_side)
         current = self.state.positions.get(key)
         old_qty = current.qty if current is not None else Decimal(0)
@@ -248,38 +248,32 @@ class MasterProjector:
         return False
 
     async def _on_account_update(self, a: dict, event_id: int) -> None:
-        changed_symbols: set[str] = set()
+        """USDT balance is applied; position rows are INFORMATIONAL only.
+
+        ORDER_TRADE_UPDATE TRADE deltas are the single mutator of positions -
+        applying both the absolute snapshot and the delta double-counts the
+        same fill (live incident: TP fill re-opened a closed position because
+        ACCOUNT_UPDATE preceded the TRADE event). Drift is logged and healed
+        by rebuild_full on reconnect/boot.
+        """
+        for b in a.get("B", []):
+            if str(b.get("a")) == "USDT":
+                self.state.available_usdt = Decimal(str(b.get("wb", "0")))
         for p in a.get("P", []):
             symbol = str(p.get("s", ""))
             key = PositionKey(symbol=symbol, pos_side=_pos_side(str(p.get("ps", "BOTH"))))
             qty = Decimal(str(p.get("pa", "0")))
             pos = self.state.positions.get(key)
-            if pos is None:
-                if qty != 0:
-                    self.state.positions[key] = PositionState(
-                        key=key,
-                        qty=qty,
-                        entry_price=Decimal(str(p.get("ep", "0"))),
-                        leverage=0,
-                        mark_price=Decimal(str(p.get("ep", "0"))),
-                        liquidation_price=Decimal(0),
-                    )
-                    changed_symbols.add(symbol)
-            else:
-                pos.qty = qty
-                ep = Decimal(str(p.get("ep", "0")))
-                if ep > 0:
-                    pos.entry_price = ep
-                changed_symbols.add(symbol)
-            active = await self._trades.active_trade(symbol, key.pos_side.value)
-            if qty == 0 and active is not None:
-                await self._trades.close_trade(int(active["trade_id"]))
-            elif qty != 0 and active is None:
-                await self._trades.open_trade(symbol, key.pos_side.value, event_id)
-        for b in a.get("B", []):
-            if str(b.get("a")) == "USDT":
-                self.state.available_usdt = Decimal(str(b.get("wb", "0")))
-        await self._emit(frozenset(changed_symbols))
+            projected = pos.qty if pos is not None else Decimal(0)
+            if projected != qty:
+                log.warning(
+                    "master position drift %s/%s: stream=%s exchange=%s "
+                    "(will reconcile on next reconnect)",
+                    symbol,
+                    key.pos_side.value,
+                    projected,
+                    qty,
+                )
         await self._events.mark_processed(event_id)
 
     async def _on_config_update(self, body: dict, event_id: int) -> None:

@@ -273,8 +273,10 @@ class TestDedupAndOrder:
 
 
 class TestAccountUpdate:
-    async def test_balance_and_position_applied(self, deps):
+    async def test_balance_applied_positions_informational(self, deps):
+        """AU must not mutate positions: TRADE deltas are the only mutator."""
         projector, deltas, _ = deps
+        n_before = len(projector.state.positions)
         await projector.apply_raw(
             account_update(
                 B=[{"a": "USDT", "wb": "1234.5", "cw": "1200", "bc": "0"}],
@@ -282,21 +284,16 @@ class TestAccountUpdate:
             )
         )
         assert projector.state.available_usdt == D("1234.5")
-        key = PositionKey("BTCUSDT", PosSide.BOTH)
-        assert projector.state.positions[key].qty == D("0.003")
-        assert projector.state.positions[key].entry_price == D("64900")
-        assert deltas and "BTCUSDT" in deltas[0].changed_symbols
+        assert len(projector.state.positions) == n_before
 
-    async def test_zero_position_closes_episode(self, deps):
+    async def test_zero_position_au_does_not_close_episode(self, deps):
+        """Episode lifecycle belongs to TRADE deltas; a stray AU(pa=0) that lost
+        the race against its own TRADE must not tear the episode down."""
         projector, _, db = deps
         await fill_open(deps)
-        await projector.apply_raw(
-            account_update(
-                P=[position_payload(pa="0")],
-                E=2001,
-            )
-        )
-        assert await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH") is None
+        await projector.apply_raw(account_update(P=[position_payload(pa="0")], E=2001))
+        trade = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert trade is not None and trade["status"] == "OPEN"
 
 
 class TestConfigUpdate:
@@ -374,3 +371,82 @@ class TestRebuildFull:
         assert pos.leverage == 5
         assert pos.stop is not None and pos.stop.stop_price == D("64000")
         assert pos.take_profit is not None and pos.take_profit.stop_price == D("70000")
+
+
+class TestHedgeLegFills:
+    async def test_long_leg_sell_fill_closes_not_reopens(self, deps):
+        """Live incident: TP fill on the LONG leg is a SELL; the projector must
+        close the position, not mirror-increase it (direction by S only)."""
+        from copytradeaster.domain.models import PositionKey, PosSide
+
+        projector, deltas, db = deps
+        await projector.apply_raw(
+            order_trade(
+                E=1000,
+                x="TRADE",
+                X="FILLED",
+                S="BUY",
+                l="0.002",
+                z="0.002",
+                ap="65000",
+                q="0.002",
+                ps="LONG",
+            )
+        )
+        key = PositionKey("BTCUSDT", PosSide.LONG)
+        assert projector.state.positions[key].qty == D("0.002")
+        # live ordering: ACCOUNT_UPDATE(pa=0) precedes the late TP TRADE;
+        # AU is informational, the TRADE delta must still close cleanly
+        await projector.apply_raw(
+            account_update(E=2000, P=[position_payload(pa="0", ep="65000", ps="LONG")])
+        )
+        await projector.apply_raw(
+            order_trade(
+                E=2001,
+                x="TRADE",
+                X="FILLED",
+                S="SELL",
+                l="0.002",
+                z="0.002",
+                ap="65500",
+                q="0",
+                ps="LONG",
+            )
+        )
+        assert projector.state.positions[key].qty == 0
+        assert await CopyTradeRepo(db).active_trade("BTCUSDT", "LONG") is None
+
+    async def test_short_leg_open_and_close(self, deps):
+        from copytradeaster.domain.models import PositionKey, PosSide
+
+        projector, _, db = deps
+        await projector.apply_raw(
+            order_trade(
+                E=1000,
+                x="TRADE",
+                X="FILLED",
+                S="SELL",
+                l="0.002",
+                z="0.002",
+                ap="65000",
+                q="0.002",
+                ps="SHORT",
+            )
+        )
+        key = PositionKey("BTCUSDT", PosSide.SHORT)
+        assert projector.state.positions[key].qty == D("-0.002")
+        await projector.apply_raw(
+            order_trade(
+                E=2001,
+                x="TRADE",
+                X="FILLED",
+                S="BUY",
+                l="0.002",
+                z="0.002",
+                ap="64800",
+                q="0",
+                ps="SHORT",
+            )
+        )
+        assert projector.state.positions[key].qty == 0
+        assert await CopyTradeRepo(db).active_trade("BTCUSDT", "SHORT") is None
