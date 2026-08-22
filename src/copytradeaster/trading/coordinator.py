@@ -115,7 +115,7 @@ class Coordinator:
         targets, skips = await self._targets_for(fr.account_id, delta.state, actual, policy)
         import logging as _l
 
-        _l.getLogger(__name__).warning(
+        _l.getLogger(__name__).debug(
             "DBG %s targets=%s skips=%s master=%s",
             fr.account_id,
             [(t.key.symbol, str(t.qty)) for t in targets],
