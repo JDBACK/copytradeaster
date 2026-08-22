@@ -6,3 +6,4 @@ __pycache__/
 wallet.txt
 .DS_Store
 data/
+.coverage
