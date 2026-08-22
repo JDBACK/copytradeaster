@@ -79,6 +79,7 @@ def _order_payload(
     closing: bool,
     stop_price: Decimal | None = None,
     working_type: str | None = None,
+    limit_price: Decimal | None = None,
 ) -> dict[str, str]:
     payload: dict[str, str] = {
         "symbol": symbol,
@@ -90,6 +91,8 @@ def _order_payload(
         payload["quantity"] = format(quantity, "f")
     if stop_price is not None:
         payload["stopPrice"] = format(stop_price, "f")
+    if limit_price is not None:
+        payload["price"] = format(limit_price, "f")
     if working_type is not None:
         payload["workingType"] = working_type
         payload["priceProtect"] = PRICE_PROTECT
@@ -249,15 +252,23 @@ def _plan_for_target(
         current_level = current.stop_price if current is not None else None
         if _level_equal(current_level, wanted_level, filters.tick_size):
             continue
+        close_side = _close_side(pos_side, qty_sign)
+        # limit-flavor conditionals (STOP / TAKE_PROFIT) require an explicit
+        # limit price: give the fill a 0.05% buffer beyond the trigger
+        limit_price = None
+        if order_type in ("STOP", "TAKE_PROFIT"):
+            drift = wanted_level * Decimal("0.0005")
+            limit_price = wanted_level - drift if close_side == Side.SELL else wanted_level + drift
         payload = _order_payload(
             symbol,
-            _close_side(pos_side, qty_sign),
+            close_side,
             order_type,
             target_abs,
             pos_side,
             closing=True,
             stop_price=wanted_level,
             working_type=working_type,
+            limit_price=limit_price,
         )
         actions.append(
             ExecutionAction(
