@@ -409,7 +409,29 @@ async def test_limit_flavor_stop_mirrored(env):
     key = PositionKey("BTCUSDT")
     fr.client.positions[key] = {"qty": D("0.05"), "stop": D(64500)}
     state = master_state(qty=D("0.05"), stop=D(64500))
-    state.positions[key].stop.type = "STOP"
+    pos = state.positions[key]
+    state.positions[key] = PositionState(
+        key=pos.key,
+        qty=pos.qty,
+        entry_price=pos.entry_price,
+        leverage=pos.leverage,
+        mark_price=pos.mark_price,
+        liquidation_price=pos.liquidation_price,
+        stop=pos.stop,
+        take_profit=None,
+    )
+    frozen_stop = pos.stop
+    object.__setattr__(frozen_stop, "type", "STOP")
+    state.positions[key] = PositionState(
+        key=pos.key,
+        qty=pos.qty,
+        entry_price=pos.entry_price,
+        leverage=pos.leverage,
+        mark_price=pos.mark_price,
+        liquidation_price=pos.liquidation_price,
+        stop=frozen_stop,
+        take_profit=None,
+    )
     state.event_time = int(_time.time() * 1000)
     await coordinator.on_master_delta(delta_of(state))
     stops = [p for p in fr.client.placed if p["type"] in ("STOP_MARKET", "STOP")]
