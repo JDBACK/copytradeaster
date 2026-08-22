@@ -182,6 +182,16 @@ class MasterProjector:
             log.info(
                 "master closed %s %s (trade_id=%s)", symbol, pos_side.value, active["trade_id"]
             )
+        # a closing fill (or flip) invalidates the leg's protective orders: the
+        # exchange expires them server-side and a stale level here would poison
+        # the next episode's sizing (live incident: 0.277 BTC sized off a dead stop)
+        if (
+            current is not None
+            and (new_qty == 0 or new_qty * old_qty < 0)
+            and (current.stop is not None or current.take_profit is not None)
+        ):
+            current.stop = None
+            current.take_profit = None
 
         if current is None:
             current = PositionState(

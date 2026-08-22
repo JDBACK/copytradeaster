@@ -126,9 +126,13 @@ async def cmd_open(
         price = await _mark_price(client, symbol)
         short = direction == "short"
         entry_side = Side.SELL if short else Side.BUY
-        stop = (
-            price * ((Decimal(1) + stop_pct / 100) if short else (Decimal(1) - stop_pct / 100))
-        ).quantize(filters.tick_size)
+        if stop_pct is not None:
+            stop = (
+                price * ((Decimal(1) + stop_pct / 100) if short
+                         else (Decimal(1) - stop_pct / 100))
+            ).quantize(filters.tick_size)
+        else:
+            stop = None
         ps = leg_side(PosSide.SHORT if short else PosSide.LONG)
         await client.place_order(
             "main",

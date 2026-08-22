@@ -113,6 +113,21 @@ class Coordinator:
             return
         actual = await self._snapshot(fr)
         targets, skips = await self._targets_for(fr.account_id, delta.state, actual, policy)
+        import logging as _l
+
+        _l.getLogger(__name__).warning(
+            "DBG %s targets=%s skips=%s master=%s",
+            fr.account_id,
+            [(t.key.symbol, str(t.qty)) for t in targets],
+            [(s.symbol, str(s.reason)) for s in skips],
+            {
+                f"{k.symbol}:{k.pos_side.value}": (
+                    str(p.qty),
+                    str(p.stop.stop_price) if p.stop else None,
+                )
+                for k, p in delta.state.positions.items()
+            },
+        )
         # advance the master-magnitude tracker on EVERY recompute (delta and
         # sweep alike); sweeps against a stale magnitude misclassify growth and
         # oscillate targets against the WS-driven ones
@@ -207,6 +222,17 @@ class Coordinator:
             if master_qty == 0:
                 continue  # handled by the actual-side loop above
 
+            if (
+                master_stop is not None
+                and master_pos.entry_price > 0
+                and (
+                    (master_qty > 0 and master_stop >= master_pos.entry_price)
+                    or (master_qty < 0 and master_stop <= master_pos.entry_price)
+                )
+            ):
+                # stop on the wrong side of entry: stale/invalid level, unusable
+                skips.append(SkipRecord(key.symbol, SkipReason.NO_STOP))
+                continue
             if master_stop is None:
                 skips.append(SkipRecord(key.symbol, SkipReason.NO_STOP))
                 continue
@@ -238,6 +264,15 @@ class Coordinator:
                     self._fee_buffer,
                 )
                 if decision.reason is not None:
+                    log.warning(
+                        "DEBUG entry skip %s %s: eq=%s entry=%s stop=%s reason=%s",
+                        account_id,
+                        key.symbol,
+                        actual.available_usdt,
+                        master_pos.entry_price,
+                        master_stop,
+                        decision.reason,
+                    )
                     skips.append(SkipRecord(key.symbol, decision.reason))
                     continue
                 qty = decision.qty if master_qty > 0 else -decision.qty
