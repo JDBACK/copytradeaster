@@ -258,9 +258,10 @@ def _plan_for_target(
         limit_price = None
         if order_type in ("STOP", "TAKE_PROFIT"):
             drift = wanted_level * Decimal("0.0005")
-            limit_price = (
-                wanted_level - drift if close_side == Side.SELL else wanted_level + drift
-            ).quantize(filters.tick_size)
+            raw_limit = wanted_level - drift if close_side == Side.SELL else wanted_level + drift
+            # Decimal.quantize("0.10") keeps two decimals instead of snapping to
+            # the 0.1 grid; divide by the tick and multiply back for alignment
+            limit_price = (raw_limit / filters.tick_size).to_integral_value() * filters.tick_size
         payload = _order_payload(
             symbol,
             close_side,
