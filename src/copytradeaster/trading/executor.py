@@ -74,8 +74,16 @@ def _dec_or_none(raw: str | None):
 
 
 def command_key_of(plan: ExecutionPlan, action: ExecutionAction) -> str:
+    """Identity of a desired-state TRANSITION, not just the payload.
+
+    revision (per symbol/leg, stamped by the Coordinator from sync_basis)
+    distinguishes two legitimate identical commands (e.g. two consecutive
+    MARKET_CLOSE 0.025 BTC); retries of the same transition keep the same
+    revision and therefore the same logical command id.
+    """
     canonical = json.dumps(action.payload, sort_keys=True, separators=(",", ":"))
-    raw = f"{plan.account_id}|{plan.trade_id}|{action.kind.value}|{canonical}"
+    trade = action.trade_id if action.trade_id is not None else plan.trade_id
+    raw = f"{plan.account_id}|{trade}|{action.kind.value}|{action.revision}|{canonical}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -171,10 +179,17 @@ class Executor:
     async def _submit_order(self, plan: ExecutionPlan, action: ExecutionAction) -> CommandResult:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
-        if existing is not None and existing["status"] in ("CONFIRMED", "SUBMITTED"):
-            return CommandResult(key, str(existing["status"]), None)
-        # idempotent re-submission after UNKNOWN resolution happens below; a FAILED
-        # or PENDING/UNKNOWN record gets a fresh attempt with a new coid.
+        if existing is not None:
+            status = str(existing["status"])
+            if status == "CONFIRMED":
+                return CommandResult(key, status, None)
+            if status == "SUBMITTED":
+                # A previous attempt answered SUBMITTED but was never confirmed
+                # in openOrders. That is NOT terminal success: verify on the
+                # exchange before deciding to skip or re-send.
+                recovered = await self._recover_submitted(plan, action, key, existing)
+                if recovered is not None:
+                    return recovered
 
         attempts = int(existing["attempts"]) if existing is not None else 0
         attempt = attempts + 1
@@ -193,28 +208,28 @@ class Executor:
         else:
             await self._commands.set_status(key, "PENDING", client_order_id=coid)
 
-        req = _payload_for(action)
-        req = _with_coid(req, coid)
+        req = _with_coid(_payload_for(action), coid)
         symbol = action.payload["symbol"]
 
         while True:
             await self._commands.set_status(
                 key, "SENDING", bump_attempts=True, client_order_id=coid
             )
+            order = None
             try:
                 order = await self._clients(plan.account_id).place_order(plan.account_id, req)
+            except AsterError as exc:
+                if exc.code not in UNKNOWN_CODES and exc.http_status not in UNKNOWN_HTTP:
+                    return await self._fail(plan, key, exc)
             except TimeoutError:
-                resolved = await self._resolve_unknown(plan, key, symbol, coid)
+                # built-in timeouts (asyncio); transport timeouts arrive as
+                # AsterError(-1006/-1007) from the adapter boundary
+                pass
+            if order is None:
+                # outcome unknown: check the exchange BEFORE any retry
+                resolved = await self._resolve_unknown(plan, action, key, symbol, coid)
                 if resolved is not None:
                     return resolved
-            except AsterError as exc:
-                if exc.code in UNKNOWN_CODES or exc.http_status in UNKNOWN_HTTP:
-                    resolved = await self._resolve_unknown(plan, key, symbol, coid)
-                    if resolved is not None:
-                        return resolved
-                else:
-                    return await self._fail(plan, key, exc)
-
                 if attempt >= MAX_ATTEMPTS:
                     return await self._degrade(plan, key, "max attempts reached")
                 attempt += 1
@@ -223,10 +238,46 @@ class Executor:
                 continue
 
             await self._commands.set_status(key, "SUBMITTED", client_order_id=coid)
-            confirmed = await self._confirm(plan, key, action, symbol, coid, order)
-            return confirmed
+            return await self._confirm(plan, key, action, symbol, coid, order)
 
     # --- status transitions ---------------------------------------------------------
+
+
+    async def _recover_submitted(
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        key: str,
+        existing,
+    ) -> CommandResult | None:
+        """Resolve a previously SUBMITTED command via the exchange.
+
+        Found -> CONFIRMED (+order_link). Missing -> the caller falls through to
+        a fresh attempt (SUBMITTED is never terminal success on its own).
+        """
+        coid = existing["client_order_id"]
+        if not coid:
+            return None
+        symbol = action.payload["symbol"]
+        try:
+            order = await self._clients(plan.account_id).query_order(
+                plan.account_id, symbol, orig_client_order_id=str(coid)
+            )
+        except AsterError as exc:
+            log.warning("submitted-recovery query failed for %s: %s", key, exc)
+            return None
+        if order is None:
+            return None
+        await self._commands.set_status(
+            key,
+            "CONFIRMED",
+            client_order_id=str(coid),
+            last_error=f"recovered-submitted:{order.status}",
+        )
+        await self._record_link(plan, action, str(coid))
+        if self._on_confirmed is not None and order.status in ("FILLED", "CANCELED", "EXPIRED"):
+            await self._on_confirmed(plan.account_id, action)
+        return CommandResult(key, "CONFIRMED", None)
 
     async def _confirm(
         self, plan: ExecutionPlan, key: str, action: ExecutionAction, symbol: str, coid: str, order
@@ -255,9 +306,9 @@ class Executor:
         return CommandResult(key, "SUBMITTED", None)
 
     async def _resolve_unknown(
-        self, plan: ExecutionPlan, key: str, symbol: str, coid: str
+        self, plan: ExecutionPlan, action: ExecutionAction, key: str, symbol: str, coid: str
     ) -> CommandResult | None:
-        """query_order BEFORE retry: found -> CONFIRMED; missing -> caller retries."""
+        """query_order BEFORE retry: found -> CONFIRMED (+link); missing -> caller retries."""
         try:
             order = await self._clients(plan.account_id).query_order(
                 plan.account_id, symbol, orig_client_order_id=coid
@@ -272,6 +323,7 @@ class Executor:
                 client_order_id=coid,
                 last_error=f"resolved-unknown:{order.status}",
             )
+            await self._record_link(plan, action, coid)
             log.info("UNKNOWN resolved as %s for %s (%s)", order.status, key, coid)
             return CommandResult(key, "CONFIRMED", None)
         return None
@@ -293,48 +345,60 @@ class Executor:
 
     async def _record_link(self, plan: ExecutionPlan, action: ExecutionAction, coid: str) -> None:
         master_coid = action.replaces_client_order_id
+        trade_id = action.trade_id if action.trade_id is not None else plan.trade_id
         await self._links.add(
-            plan.trade_id, plan.account_id, action.kind.value, coid, master_coid=master_coid
+            trade_id, plan.account_id, action.kind.value, coid, master_coid=master_coid
         )
 
 
-def _with_coid(req: PlaceOrderRequest, coid: str) -> PlaceOrderRequest:
-    import dataclasses
-
-    return dataclasses.replace(req, new_client_order_id=coid)
-
-
 async def resolve_boot_unknowns(
-    clients: Callable[[str], AsterClient], commands: CommandRepo
+    clients: Callable[[str], AsterClient],
+    commands: CommandRepo,
+    links: OrderLinkRepo | None = None,
 ) -> int:
-    """Boot-time UNKNOWN resolution across all accounts; returns confirmed count."""
-    rows = await commands.unresolved_unknowns()
+    """Boot-time resolution of every in-flight command: UNKNOWN / SENDING / SUBMITTED.
+
+    Crash windows: SENDING (request left, no response recorded) and SUBMITTED
+    (response seen, confirmation lost) are resolved against exchange state via
+    query_order on the stored client_order_id. Found -> CONFIRMED (+order_link
+    so recovered protective orders re-enter the follower-own-fill guard);
+    missing -> FAILED (reconciliation re-issues a fresh transition if needed).
+    """
+    rows = await commands.in_flight()
     confirmed = 0
     for row in rows:
+        key = str(row["command_key"])
         account_id = str(row["account_id"])
         coid = row["client_order_id"]
         payload = json.loads(str(row["payload"]))
         if not coid:
-            await commands.set_status(
-                str(row["command_key"]), "FAILED", last_error="no coid to resolve"
-            )
+            await commands.set_status(key, "FAILED", last_error="boot: no coid to resolve")
             continue
         try:
             order = await clients(account_id).query_order(
                 account_id, payload["symbol"], orig_client_order_id=str(coid)
             )
         except AsterError as exc:
-            log.warning("boot resolve query failed for %s: %s", row["command_key"], exc)
-            continue
+            log.warning("boot resolve query failed for %s: %s", key, exc)
+            continue  # leave in-flight; retried on next boot
         if order is not None:
-            await commands.set_status(
-                str(row["command_key"]),
-                "CONFIRMED",
-                last_error=f"resolved-unknown-boot:{order.status}",
-            )
+            await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:{order.status}")
+            if links is not None:
+                trade_id = row["trade_id"]
+                await links.add(
+                    int(trade_id) if trade_id is not None else None,
+                    account_id,
+                    str(row["kind"]),
+                    str(coid),
+                    master_coid=None,
+                )
             confirmed += 1
         else:
-            await commands.set_status(
-                str(row["command_key"]), "FAILED", last_error="resolved-unknown-boot:not-found"
-            )
+            await commands.set_status(key, "FAILED", last_error="boot-resolved:not-found")
     return confirmed
+
+
+def _with_coid(req: PlaceOrderRequest, coid: str) -> PlaceOrderRequest:
+    import dataclasses
+
+    return dataclasses.replace(req, new_client_order_id=coid)

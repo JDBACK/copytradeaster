@@ -54,7 +54,7 @@ class ManagementClient:
         params.setdefault("asterChain", "Testnet")
         params["user"] = identity.user
         if "nonce" not in params:
-            params["nonce"] = await self._nonces_async(identity.signer)
+            params["nonce"] = await self._nonces.next_nonce(identity.signer)
         primary_type = "ApproveBuilder" if path.endswith("approveBuilder") else "ApproveAgent"
         signed, qs = sign_registration(
             params, main_key, primary_type=primary_type, chain_id=self._cfg.registration_chain_id
@@ -67,10 +67,6 @@ class ManagementClient:
             raise ManagementError(resp.status_code, resp.text[:200]) from exc
         log.info("%s -> %s", path, body)
         return body
-
-    async def _nonces_async(self, signer: str) -> int:
-        """NonceSource protocol is sync; bridge via direct call."""
-        return self._nonces.next_nonce(signer)
 
     async def approve_agent(
         self,

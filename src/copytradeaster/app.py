@@ -20,16 +20,19 @@ from copytradeaster.storage.repositories import (
     CommandRepo,
     CopyTradeRepo,
     MasterEventRepo,
+    NonceStore,
     OrderLinkRepo,
     SettingsRepo,
+    SyncBasisRepo,
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.reconciler import Reconciler
 
 log = get_logger(__name__)
-
 CLOCK_DRIFT_MAX_MS = 2000
+MASTER_RESNAPSHOT_EVERY_SWEEPS = 10  # ~10x reconcile_interval; heals projector drift
+INGEST_QUEUE_MAX = 1000
 
 
 class App:
@@ -48,8 +51,8 @@ class App:
         self.trades = CopyTradeRepo(self.db)
         self.links = OrderLinkRepo(self.db)
         self.commands = CommandRepo(self.db)
-
-        self.master_client = self._make_client()
+        self.nonces = NonceStore(self.db)
+        self.basis = SyncBasisRepo(self.db)
         self.followers: list[FollowerRuntime] = []
         self.executor = Executor(
             self._client_for,
@@ -59,6 +62,7 @@ class App:
             settings=self.settings,
             on_confirmed=self._on_confirmed,
         )
+        self.master_client = self._make_client()
         self.projector = MasterProjector(
             self.events, self.trades, self.links, self.settings, self._on_delta
         )
@@ -74,10 +78,14 @@ class App:
             fee_buffer_pct=cfg.fee_buffer_pct,
             working_type=cfg.working_type,
             on_notify=notify,
+            basis=self.basis,
         )
         self.reconciler = Reconciler(self.coordinator)
         self.stream: UserStream | None = None
         self.stop_event = asyncio.Event()
+        self._ingest_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=INGEST_QUEUE_MAX)
+        self._ingest_dropped = 0
+        self._ingest_task: asyncio.Task | None = None
         self._sweep_task: asyncio.Task | None = None
         self._filters_cache: dict = {}
         self._ready = False
@@ -91,17 +99,18 @@ class App:
             limiter=self.limiter,
             identities=self.credentials,
             keys=self.credentials,
-            nonces=self.credentials,
+            nonces=self.nonces,
             dry_run=self.cfg.dry_run,
         )
 
     def _client_for(self, account_id: str) -> AsterClient:
+        """Fail closed: an unknown account must NEVER route to the master."""
         if account_id == "main":
             return self.master_client
         for fr in self.followers:
             if fr.account_id == account_id:
                 return fr.client
-        return self.master_client
+        raise KeyError(f"unknown account {account_id!r} - refusing to route to master")
 
     def _filters(self) -> dict:
         return self._filters_cache
@@ -134,7 +143,7 @@ class App:
         log.info("clock drift ok (%dms)", drift)
 
         # 4. resolve UNKNOWN commands from previous run
-        resolved = await resolve_boot_unknowns(self._client_for, self.commands)
+        resolved = await resolve_boot_unknowns(self._client_for, self.commands, self.links)
         log.info("boot unknown-resolution: %d confirmed", resolved)
 
         # 5. bootstrap position modes + snapshots
@@ -170,13 +179,13 @@ class App:
             account_id="main",
             ws_base=cfg.ws_user_base,
             keepalive_min=cfg.listenkey_keepalive_min,
-            on_event=lambda event: self._consume(event.raw),
+            on_event=lambda event: self._enqueue(event.raw),
             on_reconnect=self._on_stream_reconnect,
         )
         stream_task = asyncio.create_task(self.stream.run(self.stop_event))
         self._stream_task = stream_task  # type: ignore[attr-defined]
         self._sweep_task = asyncio.create_task(self._periodic_sweep())
-
+        self._ingest_task = asyncio.create_task(self._ingest_loop())
         # 8. READY
         await self.settings.set_flag("ready", "true")
         self._ready = True
@@ -193,7 +202,11 @@ class App:
     async def stop(self) -> None:
         log.info("stopping...")
         self.stop_event.set()
-        for task in (self._sweep_task, getattr(self, "_stream_task", None)):
+        for task in (
+            self._sweep_task,
+            self._ingest_task,
+            getattr(self, "_stream_task", None),
+        ):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -204,10 +217,27 @@ class App:
         await self.db.close()
         log.info("stopped")
 
-    # --- runtime wiring --------------------------------------------------------------
-
     async def _consume(self, raw: dict) -> None:
         await self.projector.apply_raw(raw)
+
+    def _enqueue(self, raw: dict) -> None:
+        """Decouple WS ingest from follower execution: the stream loop must
+        never wait on dozens of REST calls. Bounded queue drops the oldest
+        event under pressure (state reconciliation heals any gap)."""
+        q = self._ingest_queue
+        if q.qsize() >= q.maxsize:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                q.get_nowait()
+            self._ingest_dropped += 1
+        q.put_nowait(raw)
+
+    async def _ingest_loop(self) -> None:
+        while not self.stop_event.is_set():
+            raw = await self._ingest_queue.get()
+            try:
+                await self._consume(raw)
+            except Exception as exc:  # noqa: BLE001 - one bad event must not kill ingest
+                log.error("ingest processing failed: %s", exc)
 
     async def _on_delta(self, delta) -> None:
         await self.coordinator.on_master_delta(delta)
@@ -220,8 +250,9 @@ class App:
     async def _on_confirmed(self, account_id: str, action) -> None:
         text = f"[{account_id}] {action.kind.value} {action.symbol} ok"
         await notify(text)
-
+        await self.coordinator.on_command_confirmed(account_id, action)
     async def _periodic_sweep(self) -> None:
+        sweep_count = 0
         while not self.stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -231,6 +262,11 @@ class App:
             except TimeoutError:
                 pass
             try:
+                sweep_count += 1
+                if sweep_count % MASTER_RESNAPSHOT_EVERY_SWEEPS == 0:
+                    # authoritative master state: heals projector drift that the
+                    # informational ACCOUNT_UPDATE only logs
+                    await self.projector.rebuild_full(self.master_client, "main")
                 await self.reconciler.reconcile(self.projector.state, reason="sweep")
             except Exception as exc:  # noqa: BLE001
                 log.error("periodic sweep failed: %s", exc)

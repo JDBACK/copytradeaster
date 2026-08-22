@@ -67,6 +67,13 @@ MIGRATIONS: list[str] = [
     """
     CREATE TABLE app_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)
     """,
+    """
+    CREATE TABLE sync_basis(
+      account_id TEXT NOT NULL, symbol TEXT NOT NULL, pos_side TEXT NOT NULL,
+      master_ref_abs TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
+      issued_target TEXT, updated_at TEXT NOT NULL,
+      PRIMARY KEY(account_id, symbol, pos_side))
+    """,
 ]
 
 

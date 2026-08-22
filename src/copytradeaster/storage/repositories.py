@@ -175,6 +175,19 @@ class CopyTradeRepo:
             (symbol, pos_side),
         )
 
+    async def latest_trade(self, symbol: str, pos_side: str) -> Row | None:
+        """Newest episode incl. CLOSED - attribution for late close actions."""
+        return await self.db.fetchone(
+            "SELECT * FROM copy_trades WHERE symbol=? AND pos_side=?"
+            " ORDER BY trade_id DESC LIMIT 1",
+            (symbol, pos_side),
+        )
+
+    async def all_open(self) -> list[Row]:
+        return await self.db.fetchall(
+            "SELECT * FROM copy_trades WHERE status='OPEN' ORDER BY trade_id"
+        )
+
 
 class OrderLinkRepo:
     def __init__(self, db: Database) -> None:
@@ -266,9 +279,11 @@ class CommandRepo:
             "SELECT * FROM execution_commands WHERE command_key=?", (command_key,)
         )
 
-    async def unresolved_unknowns(self) -> list[Row]:
+    async def in_flight(self) -> list[Row]:
+        """Commands whose exchange outcome is not settled: UNKNOWN/SENDING/SUBMITTED."""
         return await self.db.fetchall(
-            "SELECT * FROM execution_commands WHERE status='UNKNOWN' ORDER BY created_at"
+            "SELECT * FROM execution_commands"
+            " WHERE status IN ('UNKNOWN','SENDING','SUBMITTED') ORDER BY created_at"
         )
 
     async def recent(self, limit: int) -> list[Row]:
@@ -303,3 +318,71 @@ class NonceStore:
         )
         await self.db.conn.commit()
         return candidate
+
+
+class SyncBasisRepo:
+    """Persisted per-(account, symbol, leg) sizing basis for state reconciliation.
+
+    master_ref_abs: the master magnitude the follower position was last brought
+    into sync with. Survives restarts, so a master partial close missed while
+    offline still produces scaled_reduce(current, ref, new) on the first sweep.
+    revision: bumped whenever a NEW desired target is issued for the key;
+    feeds command_key idempotency (transition identity, not payload identity).
+    issued_target: canonical JSON of the last issued TargetPosition.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def all_for_account(self, account_id: str) -> dict[str, dict]:
+        rows = await self.db.fetchall(
+            "SELECT * FROM sync_basis WHERE account_id=?", (account_id,)
+        )
+        return {
+            f"{r['symbol']}:{r['pos_side']}": {
+                "master_ref_abs": Decimal(str(r["master_ref_abs"])),
+                "revision": int(r["revision"]),
+                "issued_target": r["issued_target"],
+            }
+            for r in rows
+        }
+
+    async def get(self, account_id: str, symbol: str, pos_side: str) -> Row | None:
+        return await self.db.fetchone(
+            "SELECT * FROM sync_basis WHERE account_id=? AND symbol=? AND pos_side=?",
+            (account_id, symbol, pos_side),
+        )
+
+    async def upsert_ref(
+        self, account_id: str, symbol: str, pos_side: str, ref_abs: Decimal
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO sync_basis(account_id, symbol, pos_side, master_ref_abs, revision,"
+            " updated_at) VALUES (?, ?, ?, ?, 0, ?)"
+            " ON CONFLICT(account_id, symbol, pos_side) DO UPDATE SET"
+            " master_ref_abs=excluded.master_ref_abs, updated_at=excluded.updated_at",
+            (account_id, symbol, pos_side, str(ref_abs), _now_iso()),
+        )
+        await self.db.conn.commit()
+
+    async def bump_revision(self, account_id: str, symbol: str, pos_side: str, issued: str) -> int:
+        """Register `issued` as the current desired state; returns the new revision."""
+        row = await self.get(account_id, symbol, pos_side)
+        revision = (int(row["revision"]) + 1) if row is not None else 1
+        await self.db.execute(
+            "INSERT INTO sync_basis(account_id, symbol, pos_side, master_ref_abs, revision,"
+            " issued_target, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)"
+            " ON CONFLICT(account_id, symbol, pos_side) DO UPDATE SET"
+            " revision=excluded.revision, issued_target=excluded.issued_target,"
+            " updated_at=excluded.updated_at",
+            (account_id, symbol, pos_side, revision, issued, _now_iso()),
+        )
+        await self.db.conn.commit()
+        return revision
+
+    async def clear(self, account_id: str, symbol: str, pos_side: str) -> None:
+        await self.db.execute(
+            "DELETE FROM sync_basis WHERE account_id=? AND symbol=? AND pos_side=?",
+            (account_id, symbol, pos_side),
+        )
+        await self.db.conn.commit()

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from copytradeaster.config import Settings
 from copytradeaster.logging_utils import redact
-from copytradeaster.storage.repositories import SettingsRepo
+from copytradeaster.storage.repositories import NonceStore, SettingsRepo
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -231,7 +231,7 @@ async def _approve_builder(accounts: str, max_fee_rate: str | None) -> int:
         limiter=limiter,
         identities=creds,
         keys=creds,
-        nonces=creds,
+        nonces=NonceStore(db),
         cfg=cfg,
     )
     failures = 0

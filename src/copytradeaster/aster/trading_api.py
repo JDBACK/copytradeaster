@@ -80,6 +80,18 @@ class PlaceOrderRequest:
         return params
 
 
+def _wrap_transport_error(exc: Exception) -> AsterError:
+    """httpx transport failures -> AsterError with UNKNOWN-classified codes.
+
+    The executor treats -1006/-1007 as outcome-unknown (order may or may not
+    exist on the exchange), so timeouts must surface here, not as raw httpx
+    exceptions that no caller catches.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return AsterError(-1007, f"transport timeout: {exc}", None)
+    return AsterError(-1006, f"transport error: {exc}", None)
+
+
 class AsterClient:
     EXCHANGE_INFO_TTL_S = 3600.0
 
@@ -124,7 +136,10 @@ class AsterClient:
         if self._dry_run:
             log.info("DRY-RUN %s %s", method, url)
             return {}
-        resp = await self._http.request(method, url, content=b"")
+        try:
+            resp = await self._http.request(method, url, content=b"")
+        except httpx.TransportError as exc:
+            raise _wrap_transport_error(exc) from exc
         if resp.status_code >= 400:
             raise self._parse_error(resp.status_code, _safe_json(resp))
         body = _safe_json(resp)
@@ -151,14 +166,17 @@ class AsterClient:
             await self._limiter.acquire_order(account_id)
         identity = self._identities.identity(account_id)
         key = self._keys.private_key(account_id)
-        nonce = self._nonces.next_nonce(identity.signer)
+        nonce = await self._nonces.next_nonce(identity.signer)
         qs, full = prepare_signed_request(params, identity, key, nonce)
         url = self._base_url + path + "?" + full
         if self._dry_run:
             masked = url.split("&signature=")[0] + "&signature=" + redact("0x" + "0" * 32)
             log.info("DRY-RUN %s %s", method, masked)
             return {}
-        resp = await self._http.request(method, url, content=b"")
+        try:
+            resp = await self._http.request(method, url, content=b"")
+        except httpx.TransportError as exc:
+            raise _wrap_transport_error(exc) from exc
         if resp.status_code >= 400:
             raise self._parse_error(resp.status_code, _safe_json(resp))
         body = _safe_json(resp)

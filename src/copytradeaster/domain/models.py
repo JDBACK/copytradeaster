@@ -149,6 +149,8 @@ class ExecutionAction:
     client_order_id: str | None
     replaces_client_order_id: str | None
     priority: int
+    trade_id: int | None = None  # episode this action belongs to (overrides plan.trade_id)
+    revision: int = 0  # desired-state transition revision (idempotency identity)
 
 
 @dataclass(frozen=True, slots=True)

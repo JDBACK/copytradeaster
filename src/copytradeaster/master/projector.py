@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from copytradeaster.aster.trading_api import AsterClient
-from copytradeaster.domain.models import PositionKey, PositionState, PosSide, ProtectiveOrder
+from copytradeaster.domain.models import (
+    PositionKey,
+    PositionState,
+    PosSide,
+    ProtectiveOrder,
+    Side,
+)
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.storage.repositories import (
     CopyTradeRepo,
@@ -48,6 +54,14 @@ def _pos_side(raw_ps: str) -> PosSide:
         return PosSide.BOTH
 
 
+
+def _last_fill_price(o: dict) -> Decimal:
+    """L = last fill price of THIS trade event; ap is a cumulative order
+    average and must not be used for incremental averaging."""
+    value = o.get("L") or o.get("ap") or "0"
+    return Decimal(str(value))
+
+
 class MasterProjector:
     def __init__(
         self,
@@ -72,7 +86,9 @@ class MasterProjector:
         event_time = int(raw.get("E", 0))
         if event_type == "ORDER_TRADE_UPDATE":
             o = raw.get("o", {})
-            dedup_key = f"{event_type}:{event_time}:{o.get('i')}:{o.get('x')}"
+            # trade id t distinguishes two partial fills of one order in the
+            # same millisecond E - without it a fill is lost to dedup
+            dedup_key = f"{event_type}:{event_time}:{o.get('i')}:{o.get('x')}:{o.get('t')}"
         else:
             dedup_key = f"{event_type}:{event_time}"
         event_id = await self._events.append(
@@ -81,11 +97,22 @@ class MasterProjector:
         if event_id is None:
             log.debug("duplicate event dropped: %s", dedup_key)
             return
-        if self._last_event_time is not None and event_time < self._last_event_time:
+        raw_o = raw.get("o", {}) if event_type == "ORDER_TRADE_UPDATE" else {}
+        is_trade = event_type == "ORDER_TRADE_UPDATE" and str(raw_o.get("x", "")) == "TRADE"
+        if (
+            not is_trade
+            and self._last_event_time is not None
+            and event_time < self._last_event_time
+        ):
+            # stale non-trade events (protective NEW/CANCELED, config) are
+            # ignored; TRADE fills are applied OUT OF ORDER on purpose -
+            # dropping them loses position deltas when ACCOUNT_UPDATE wins the
+            # race, and only rebuild_full would heal it otherwise.
             log.debug("out-of-order event ignored: E=%s < %s", event_time, self._last_event_time)
             await self._events.mark_processed(event_id)
             return
-        self._last_event_time = event_time
+        if not is_trade or self._last_event_time is None or event_time > self._last_event_time:
+            self._last_event_time = max(event_time, self._last_event_time or 0)
         self.state.event_time = int(time.time() * 1000)
 
         if event_type == "ORDER_TRADE_UPDATE":
@@ -100,7 +127,12 @@ class MasterProjector:
             await self._events.mark_processed(event_id)
 
     async def rebuild_full(self, client: AsterClient, account_id: str) -> MasterState:
-        """REST snapshot: balance + positionRisk + openOrders -> MasterState."""
+        """REST snapshot: balance + positionRisk + openOrders -> MasterState.
+
+        Authoritative recovery source: also re-syncs copy_trades episode
+        lifecycle, so a master close missed while offline does not leave a
+        stale OPEN episode (which would poison sizing and the own-fill guard).
+        """
         balances = await client.balance(account_id)
         available = Decimal(0)
         for b in balances:
@@ -108,13 +140,13 @@ class MasterProjector:
                 available = b.available_balance
                 break
         positions: dict[PositionKey, PositionState] = {}
-        open_orders = {str(o.symbol): [] for o in await client.open_orders(account_id)}
-        for dto in await client.open_orders(account_id):
+        orders = await client.open_orders(account_id)  # single fetch
+        open_orders: dict[str, list] = {str(o.symbol): [] for o in orders}
+        for dto in orders:
             open_orders.setdefault(str(dto.symbol), []).append(dto)
+        held_keys: set[PositionKey] = set()
         for p in await client.position_risk(account_id):
             key = PositionKey(symbol=str(p.symbol), pos_side=p.position_side)
-            if p.position_amt == 0 and key.pos_side == PosSide.BOTH:
-                continue
             same_symbol = [
                 o
                 for o in open_orders.get(str(p.symbol), [])
@@ -126,6 +158,15 @@ class MasterProjector:
             tp = _pick_protective(same_symbol, "TAKE_PROFIT_MARKET") or _pick_protective(
                 same_symbol, "TAKE_PROFIT"
             )
+            if (
+                p.position_amt == 0
+                and key.pos_side == PosSide.BOTH
+                and stop is None
+                and tp is None
+            ):
+                continue
+            if p.position_amt != 0:
+                held_keys.add(key)
             positions[key] = PositionState(
                 key=key,
                 qty=p.position_amt,
@@ -138,7 +179,27 @@ class MasterProjector:
             )
         self.state = MasterState(available_usdt=available, positions=positions)
         self.state.event_time = int(time.time() * 1000)
+        await self._sync_episodes_from_snapshot(held_keys)
         return self.state
+
+    async def _sync_episodes_from_snapshot(self, held_keys: set[PositionKey]) -> None:
+        """Close OPEN episodes whose exchange position is gone; open one where
+        the exchange holds a position without an active episode."""
+        seen: dict[tuple[str, str], PositionKey] = {
+            (k.symbol, k.pos_side.value): k for k in held_keys
+        }
+        for key in held_keys:
+            if await self._trades.active_trade(key.symbol, key.pos_side.value) is None:
+                trade_id = await self._trades.open_trade(key.symbol, key.pos_side.value, None)
+                log.info(
+                    "snapshot opened %s %s (trade_id=%s)", key.symbol, key.pos_side.value, trade_id
+                )
+        open_rows = await self._trades.all_open()
+        for row in open_rows:
+            leg = (str(row["symbol"]), str(row["pos_side"]))
+            if leg not in seen:
+                await self._trades.close_trade(int(row["trade_id"]))
+                log.info("snapshot closed stale episode %s (%s)", row["trade_id"], leg)
 
     # --- handlers -----------------------------------------------------------------
 
@@ -203,21 +264,29 @@ class MasterProjector:
             current = PositionState(
                 key=key,
                 qty=new_qty,
-                entry_price=Decimal(str(o.get("ap", "0"))),
+                entry_price=_last_fill_price(o),
                 leverage=0,
-                mark_price=Decimal(str(o.get("ap", "0"))),
+                mark_price=_last_fill_price(o),
                 liquidation_price=Decimal(0),
             )
             self.state.positions[key] = current
         else:
             current.qty = new_qty
-            fill_price = Decimal(str(o.get("ap", "0")))
-            if fill_price > 0:
+            increasing = new_qty * old_qty >= 0 and abs(new_qty) > abs(old_qty)
+            flipped = old_qty != 0 and new_qty * old_qty < 0
+            fill_price = _last_fill_price(o)
+            if flipped:
+                # flip: the remaining position was opened by THIS fill
+                current.entry_price = fill_price
+            elif increasing:
+                # average in with the LAST fill price (L); ap is the cumulative
+                # order average - using it re-averages already-counted fills
                 total = abs(old_qty) + last_qty
-                if total > 0:
+                if fill_price > 0 and total > 0:
                     current.entry_price = (
                         abs(old_qty) * current.entry_price + last_qty * fill_price
                     ) / total
+            # reductions keep the entry price: exits do not re-average it
         realized = str(o.get("rp", ""))
         if realized:
             log.debug("fill rp=%s", realized)
@@ -322,6 +391,41 @@ class MasterProjector:
         if not symbols:
             return
         await self._on_delta(MasterDelta(changed_symbols=symbols, state=self.state))
+
+
+def _pick_protective(orders: list, order_type: str) -> ProtectiveOrder | None:
+    """Newest conditional protective order of `order_type` for a leg.
+
+    HEDGE script protection carries a concrete positionSide and quantity with
+    NEITHER reduceOnly NOR closePosition - requiring those flags hid real
+    stops from REST recovery. Accept an order when it is explicitly protective
+    (reduce_only/close_position) OR closes against its leg side."""
+    candidates = [
+        o
+        for o in orders
+        if o.type == order_type and (o.reduce_only or o.close_position or _closes_leg(o))
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda o: o.update_time)
+    return ProtectiveOrder(
+        client_order_id=str(latest.client_order_id),
+        order_id=int(latest.order_id),
+        type=str(latest.type),
+        side=latest.side,
+        stop_price=latest.stop_price,
+        reduce_only=bool(latest.reduce_only),
+        close_position=bool(latest.close_position),
+        working_type=str(latest.working_type),
+    )
+
+
+def _closes_leg(order) -> bool:
+    if order.position_side == PosSide.LONG:
+        return order.side == Side.SELL
+    if order.position_side == PosSide.SHORT:
+        return order.side == Side.BUY
+    return False
 
 
 def _side_enum(side: str):

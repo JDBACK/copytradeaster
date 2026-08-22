@@ -120,7 +120,12 @@ def _qty_equal(a: Decimal, b: Decimal, step: Decimal) -> bool:
 def _level_equal(a: Decimal | None, b: Decimal | None, tick: Decimal) -> bool:
     if a is None or b is None:
         return a is None and b is None
-    return abs(a - b) <= tick
+    # exchange levels live ON the tick grid: a one-tick move (64500.0 -> 64500.1
+    # at tick 0.1) is the smallest real change, not float noise - require grid
+    # equality instead of "<= tick"
+    if tick <= 0:
+        return a == b
+    return (a / tick).to_integral_value() == (b / tick).to_integral_value()
 
 
 def _cancel_action(symbol: str, prot_order_coid: str, priority: int) -> ExecutionAction:
@@ -171,16 +176,18 @@ def _plan_for_target(
 
     # --- rule 4: flat target --------------------------------------------------
     if target.qty == 0:
-        if actual_pos is None or actual_abs == 0:
-            return []
-        for prot in (actual_pos.stop, actual_pos.take_profit):
-            if prot is not None:
-                actions.append(_cancel_action(symbol, prot.client_order_id, priority=1))
-        actions.append(
-            _close_action(
-                symbol, pos_side, 1 if actual_qty > 0 else -1, actual_abs, ids, priority=2
-            )
-        )
+        # flat target: cancel orphan protection EVEN without a position
+        # (zero-qty leg rows carrying conditionals are not a converged state)
+        if actual_pos is not None:
+            for prot in (actual_pos.stop, actual_pos.take_profit):
+                if prot is not None:
+                    actions.append(_cancel_action(symbol, prot.client_order_id, priority=1))
+            if actual_abs > 0:
+                actions.append(
+                    _close_action(
+                        symbol, pos_side, 1 if actual_qty > 0 else -1, actual_abs, ids, priority=2
+                    )
+                )
         return actions
 
     # --- sign flip (one-way): close everything now; new side on next reconcile
@@ -247,6 +254,10 @@ def _plan_for_target(
         (ActionKind.PLACE_TP, target.tp_price, actual_pos.take_profit),
     ):
         if wanted_level is None:
+            # target-state semantics: master removed the level -> follower
+            # cancels its own; "continue" here would leak stale protection
+            if current is not None:
+                actions.append(_cancel_action(symbol, current.client_order_id, priority=1))
             continue
         order_type = target.stop_type if kind == ActionKind.PLACE_STOP else target.tp_type
         current_level = current.stop_price if current is not None else None
@@ -305,7 +316,10 @@ def build_plan(
             continue
         actual_pos = actual.positions.get(tp.key)
         # --- rule 1: leverage ---------------------------------------------------
-        if actual_pos is not None and actual_pos.leverage != tp.leverage:
+        if tp.leverage > 0 and (actual_pos is None or actual_pos.leverage != tp.leverage):
+            # also for brand-new legs: a ONE_WAY WS-created position starts with
+            # projected leverage 0/unknown - the entry must land on the target
+            # leverage, not on whatever the account happens to have
             actions.append(
                 ExecutionAction(
                     kind=ActionKind.SET_LEVERAGE,

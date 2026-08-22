@@ -28,6 +28,7 @@ from copytradeaster.config import Settings  # noqa: E402
 from copytradeaster.credentials.service import SqliteCredentials  # noqa: E402
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters  # noqa: E402
 from copytradeaster.storage.database import Database  # noqa: E402
+from copytradeaster.storage.repositories import NonceStore  # noqa: E402
 
 
 def hedge() -> bool:
@@ -56,6 +57,7 @@ async def make_client() -> tuple[AsterClient, Database]:
         creds,
         creds,
         creds,
+        NonceStore(db),
     )
     return client, db
 

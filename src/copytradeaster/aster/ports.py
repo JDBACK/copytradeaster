@@ -26,4 +26,5 @@ class KeyProvider(Protocol):
 
 
 class NonceSource(Protocol):
-    def next_nonce(self, signer: str) -> int: ...
+    async def next_nonce(self, signer: str) -> int:
+        """MUST commit/persist BEFORE returning (persist-before-send contract)."""

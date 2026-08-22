@@ -21,6 +21,7 @@ from copytradeaster.aster.user_stream import UserStream  # noqa: E402
 from copytradeaster.config import Settings  # noqa: E402
 from copytradeaster.credentials.service import SqliteCredentials  # noqa: E402
 from copytradeaster.storage.database import Database  # noqa: E402
+from copytradeaster.storage.repositories import NonceStore  # noqa: E402
 
 
 async def main() -> None:
@@ -46,7 +47,7 @@ async def main() -> None:
         ),
         identities=creds,
         keys=creds,
-        nonces=creds,
+        nonces=NonceStore(db),
     )
     events: list[dict] = []
 

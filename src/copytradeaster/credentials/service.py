@@ -1,21 +1,16 @@
-"""SQLite-backed encrypted credential storage implementing KeyProvider + NonceSource.
+"""SQLite-backed encrypted credential storage implementing KeyProvider.
 
 Blobs are AES-GCM(JSON{"signer_key", "main_key"}). The sync provider surface
 reads an in-memory cache warmed once at boot (`load`) and updated by
 `import_identity` - private keys never touch logs.
 
-Nonces: in-memory counter seeded from max(persisted, wall-clock microseconds),
-persisted asynchronously through the single aiosqlite writer. Monotonic across
-restarts because the wall-clock floor exceeds anything a previous process
-produced; no second connection exists, so the "database is locked" deadlock
-between writers is structurally impossible.
+Nonces live in storage.repositories.NonceStore (async, persist-before-send);
+the signing path awaits them directly.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -44,7 +39,6 @@ class SqliteCredentials:
         self._trading_chain_id = trading_chain_id
         self._cache: dict[str, _AccountCreds] = {}
         self._roles: dict[str, str] = {}
-        self._nonces: dict[str, int] = {}
         self._loaded = False
 
     async def load(self) -> None:
@@ -61,8 +55,6 @@ class SqliteCredentials:
                 main_key=data.get("main_key"),
             )
             self._roles[account_id] = str(row["role"])
-        for row in await self._db.fetchall("SELECT signer_address, last_nonce FROM nonce_store"):
-            self._nonces[str(row["signer_address"])] = int(row["last_nonce"])
         self._loaded = True
         log.info("credentials loaded: %d accounts", len(self._cache))
 
@@ -135,30 +127,6 @@ class SqliteCredentials:
         if role is None:
             return list(self._cache)
         return [a for a, r in self._roles.items() if r == role]
-
-    # --- NonceSource surface --------------------------------------------------------
-
-    def next_nonce(self, signer_address: str) -> int:
-        if not self._loaded:
-            raise RuntimeError("call load() before signing requests")
-        candidate = max(self._nonces.get(signer_address, 0) + 1, int(time.time()) * 1_000_000)
-        self._nonces[signer_address] = candidate
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return candidate
-        loop.create_task(self._persist_nonce(signer_address, candidate))
-        return candidate
-
-    async def _persist_nonce(self, signer_address: str, value: int) -> None:
-        await self._db.execute(
-            "INSERT INTO nonce_store(signer_address, last_nonce, updated_at)"
-            " VALUES (?, ?, datetime('now'))"
-            " ON CONFLICT(signer_address) DO UPDATE SET"
-            " last_nonce=excluded.last_nonce, updated_at=datetime('now')",
-            (signer_address, value),
-        )
-        await self._db.conn.commit()
 
     def _get(self, account_id: str) -> _AccountCreds:
         try:
