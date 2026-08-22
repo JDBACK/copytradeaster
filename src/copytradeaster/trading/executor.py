@@ -1,6 +1,6 @@
 """Durable executor: submits ExecutionPlans through the persistent journal.
 
-Per plan (ARCHITECTURE.md §7):
+Per plan (docs/ARCHITECTURE.md §7):
 - command_key = sha256(account|trade_id|kind|canonical payload)[:24] - long-term
   service idempotency;
 - client_order_id = "ct" + command_key (+ "r{attempt}" on retries), fits

@@ -1,7 +1,7 @@
 """Pure planner: (actual state, target state) -> minimal ExecutionPlan.
 
 No Aster API calls, no I/O. Transition rules are fixed by the stage-1 plan
-(ARCHITECTURE.md §6):
+(docs/ARCHITECTURE.md §6):
 1. leverage mismatch -> SET_LEVERAGE (prio 0);
 2. increase -> MARKET_OPEN delta (prio 1), then missing/shifted protections;
 3. partial reduce -> MARKET_CLOSE delta (prio 1), protections untouched;

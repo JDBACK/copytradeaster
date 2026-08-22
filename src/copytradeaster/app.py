@@ -1,4 +1,4 @@
-"""Application composition root. Boot order is fixed by ARCHITECTURE.md §12."""
+"""Application composition root. Boot order is fixed by docs/ARCHITECTURE.md §12."""
 
 from __future__ import annotations
 
