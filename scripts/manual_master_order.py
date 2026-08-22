@@ -1,13 +1,14 @@
 """Manual master actions for reproducible testnet smoke runs.
 
-Usage:
-  python scripts/manual_master_order.py open BTCUSDT 0.002 0.5   (qty, stop%)
-  python scripts/manual_master_order.py move-stop BTCUSDT 63000
+Commands:
+  python scripts/manual_master_order.py open BTCUSDT 0.002 0.5 [long|short]
+  python scripts/manual_master_order.py open-nostop BTCUSDT 0.002 [long|short]
+  python scripts/manual_master_order.py set-stop BTCUSDT 78000     (place when absent)
+  python scripts/manual_master_order.py move-stop BTCUSDT 78000    (replace existing)
+  python scripts/manual_master_order.py set-tp BTCUSDT 78500       (place when absent)
+  python scripts/manual_master_order.py move-tp BTCUSDT 78500      (replace existing)
   python scripts/manual_master_order.py partial-close BTCUSDT 30  (percent)
   python scripts/manual_master_order.py close BTCUSDT
-
-Position mode is taken from CT_POSITION_MODE (ONE_WAY default; HEDGE sends
-positionSide and no reduceOnly, matching exchange rules).
 """
 
 from __future__ import annotations
@@ -30,8 +31,6 @@ from copytradeaster.storage.database import Database  # noqa: E402
 
 
 def hedge() -> bool:
-    from copytradeaster.config import Settings
-
     return Settings().position_mode == "HEDGE"
 
 
@@ -49,50 +48,93 @@ async def make_client() -> tuple[AsterClient, Database]:
     await db.migrate()
     creds = SqliteCredentials(db, cfg.encryption_key_bytes())
     await creds.load()
-    http = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
-    limiter = RateLimits(
-        cfg.weight_limit_per_min, cfg.orders_limit_per_min, cfg.orders_limit_per_10s
-    )
+    http = httpx.AsyncClient(timeout=httpx.Timeout(20))
     client = AsterClient(
-        http=http,
-        base_url=cfg.rest_base_url,
-        limiter=limiter,
-        identities=creds,
-        keys=creds,
-        nonces=creds,
-        dry_run=cfg.dry_run,
+        http,
+        cfg.rest_base_url,
+        RateLimits(cfg.weight_limit_per_min, cfg.orders_limit_per_min, cfg.orders_limit_per_10s),
+        creds,
+        creds,
+        creds,
     )
     return client, db
 
 
 async def get_filters(client: AsterClient, symbol: str) -> SymbolFilters:
     info = await client.exchange_info()
-    filters = info.tradable_filters().get(symbol)
-    if filters is None:
-        raise SystemExit(f"symbol {symbol} not tradable")
-    return filters
+    filters = info.tradable_filters()
+    if symbol not in filters:
+        raise SystemExit(f"no filters for {symbol}")
+    return filters[symbol]
 
 
 async def positions_of(client: AsterClient, symbol: str):
     return [p for p in await client.position_risk("main", symbol) if p.position_amt != 0]
 
 
-async def cmd_open(symbol: str, qty: Decimal, stop_pct: Decimal) -> None:
+async def _fallback_price(client: AsterClient, symbol: str) -> Decimal:
+    async with httpx.AsyncClient(timeout=10) as http:
+        r = await http.get(
+            f"{Settings().rest_base_url}/fapi/v3/ticker/price",
+            params={"symbol": symbol},
+        )
+        data = r.json()
+        return Decimal(str(data.get("price", "65000")))
+
+
+async def _mark_price(client: AsterClient, symbol: str) -> Decimal:
+    marks = await client.position_risk("main", symbol)
+    price = next((Decimal(str(m.mark_price)) for m in marks if m.mark_price), None)
+    return price or await _fallback_price(client, symbol)
+
+
+def _close_side(pos_amt: Decimal) -> Side:
+    return Side.SELL if pos_amt > 0 else Side.BUY
+
+
+async def _place_protective(
+    client: AsterClient,
+    symbol: str,
+    pos,
+    kind: str,
+    price: Decimal,
+    tick: Decimal,
+) -> None:
+    price_q = price.quantize(tick)
+    coid = f"manual-{kind}-{int(price_q)}"
+    await client.place_order(
+        "main",
+        PlaceOrderRequest(
+            symbol=symbol,
+            side=_close_side(pos.position_amt),
+            type=kind,
+            quantity=abs(Decimal(str(pos.position_amt))),
+            stop_price=price_q,
+            working_type="MARK_PRICE",
+            position_side=pos.position_side,
+            new_client_order_id=coid,
+        ),
+    )
+
+
+async def cmd_open(
+    symbol: str, qty: Decimal, stop_pct: Decimal | None, direction: str = "long"
+) -> None:
     client, db = await make_client()
     try:
         filters = await get_filters(client, symbol)
-        marks = await client.position_risk("main", symbol)
-        price = next(
-            (Decimal(str(m.mark_price)) for m in marks if m.mark_price),
-            None,
-        ) or await _fallback_price(client, symbol)
-        stop = (price * (Decimal(1) - stop_pct / 100)).quantize(filters.tick_size)
-        ps = leg_side(PosSide.BOTH)
+        price = await _mark_price(client, symbol)
+        short = direction == "short"
+        entry_side = Side.SELL if short else Side.BUY
+        stop = (
+            price * ((Decimal(1) + stop_pct / 100) if short else (Decimal(1) - stop_pct / 100))
+        ).quantize(filters.tick_size)
+        ps = leg_side(PosSide.SHORT if short else PosSide.LONG)
         await client.place_order(
             "main",
             PlaceOrderRequest(
                 symbol=symbol,
-                side=Side.BUY,
+                side=entry_side,
                 type="MARKET",
                 quantity=qty,
                 new_order_resp_type="RESULT",
@@ -100,70 +142,82 @@ async def cmd_open(symbol: str, qty: Decimal, stop_pct: Decimal) -> None:
                 new_client_order_id=f"manual-open-{int(price)}",
             ),
         )
-        stop_leg = (
-            PosSide.LONG
-            if ps == PosSide.LONG
-            else (PosSide.SHORT if ps == PosSide.SHORT else PosSide.BOTH)
+        if stop_pct is not None:
+            await _place_protective(
+                client,
+                symbol,
+                type(
+                    "P",
+                    (),
+                    {
+                        "position_amt": -qty if short else qty,
+                        "position_side": ps,
+                    },
+                )(),
+                "STOP_MARKET",
+                stop,
+                filters.tick_size,
+            )
+        print(
+            f"opened {symbol} {qty} {'SHORT' if short else 'LONG'} @~{price}"
+            f"{f', stop {stop}' if stop_pct is not None else ', NO STOP'}"
         )
-        await client.place_order(
-            "main",
-            PlaceOrderRequest(
-                symbol=symbol,
-                side=Side.SELL,
-                type="STOP_MARKET",
-                quantity=qty,
-                stop_price=stop,
-                working_type="MARK_PRICE",
-                position_side=stop_leg,
-                new_client_order_id=f"manual-stop-{int(stop)}",
-            ),
-        )
-        print(f"opened {symbol} {qty} @~{price}, stop {stop} ({ps.value})")
     finally:
         await client._http.aclose()  # noqa: SLF001 - script-level access
         await db.close()
 
 
-async def _fallback_price(client: AsterClient, symbol: str) -> Decimal:
-    import httpx
-
-    async with httpx.AsyncClient(timeout=10) as http:
-        resp = await http.get(
-            "https://fapi.asterdex-testnet.com/fapi/v1/ticker/price", params={"symbol": symbol}
-        )
-        data = resp.json()
-        return Decimal(str(data.get("price", "65000")))
+async def _find_position(client: AsterClient, symbol: str):
+    poss = await positions_of(client, symbol)
+    if not poss:
+        raise SystemExit(f"no open position on {symbol}")
+    return poss[0]
 
 
-async def cmd_move_stop(symbol: str, new_stop: Decimal) -> None:
+async def cmd_set_stop(symbol: str, price: Decimal, replace: bool) -> None:
     client, db = await make_client()
     try:
         filters = await get_filters(client, symbol)
         orders = await client.open_orders("main", symbol=symbol)
         olds = [o for o in orders if o.type == "STOP_MARKET"]
-        if not olds:
+        if olds and not replace:
+            raise SystemExit(f"stop already exists: {olds[0].client_order_id}")
+        if not olds and replace:
             raise SystemExit("no STOP_MARKET to move")
-        old = olds[0]
-        qty = old.orig_qty
-        stop_leg = old.position_side
-        new_stop = new_stop.quantize(filters.tick_size)
-        # place-new BEFORE cancel-old: if the exchange rejects the new level
-        # (-2021 would-immediately-trigger) the position keeps its protection
-        await client.place_order(
-            "main",
-            PlaceOrderRequest(
-                symbol=symbol,
-                side=Side.SELL,
-                type="STOP_MARKET",
-                quantity=qty,
-                stop_price=new_stop,
-                working_type="MARK_PRICE",
-                position_side=stop_leg,
-                new_client_order_id=f"manual-stop-{int(new_stop)}",
-            ),
-        )
-        await client.cancel_order("main", symbol, orig_client_order_id=old.client_order_id)
-        print(f"moved stop to {new_stop} (qty {qty})")
+        pos = await _find_position(client, symbol)
+        if olds:
+            # place-new BEFORE cancel-old: rejected new level keeps protection
+            await _place_protective(client, symbol, pos, "STOP_MARKET", price, filters.tick_size)
+            await client.cancel_order("main", symbol, orig_client_order_id=olds[0].client_order_id)
+        else:
+            await _place_protective(client, symbol, pos, "STOP_MARKET", price, filters.tick_size)
+        print(f"{'moved' if replace else 'set'} stop to {price}")
+    finally:
+        await client._http.aclose()  # noqa: SLF001
+        await db.close()
+
+
+async def cmd_set_tp(symbol: str, price: Decimal, replace: bool) -> None:
+    client, db = await make_client()
+    try:
+        filters = await get_filters(client, symbol)
+        orders = await client.open_orders("main", symbol=symbol)
+        olds = [o for o in orders if o.type == "TAKE_PROFIT_MARKET"]
+        if olds and not replace:
+            raise SystemExit(f"TP already exists: {olds[0].client_order_id}")
+        if not olds and replace:
+            raise SystemExit("no TAKE_PROFIT_MARKET to move")
+        pos = await _find_position(client, symbol)
+        if olds:
+            await _place_protective(
+                client, symbol, pos, "TAKE_PROFIT_MARKET", price, filters.tick_size
+            )
+            await client.cancel_order("main", symbol, orig_client_order_id=olds[0].client_order_id)
+        else:
+            await _place_protective(
+                client, symbol, pos, "TAKE_PROFIT_MARKET", price, filters.tick_size
+            )
+        print(f"{'moved' if replace else 'set'} TP to {price}")
     finally:
         await client._http.aclose()  # noqa: SLF001
         await db.close()
@@ -183,12 +237,11 @@ async def cmd_partial_close(symbol: str, pct: Decimal) -> None:
             raise SystemExit(
                 f"partial size {qty} is below min step {filters.step_size}; increase pct"
             )
-        side = Side.SELL if pos.position_amt > 0 else Side.BUY
         await client.place_order(
             "main",
             PlaceOrderRequest(
                 symbol=symbol,
-                side=side,
+                side=_close_side(pos.position_amt),
                 type="MARKET",
                 quantity=qty,
                 new_order_resp_type="RESULT",
@@ -209,12 +262,11 @@ async def cmd_close(symbol: str) -> None:
             await client.cancel_order("main", symbol, orig_client_order_id=o.client_order_id)
         for pos in await positions_of(client, symbol):
             qty = abs(Decimal(str(pos.position_amt)))
-            side = Side.SELL if pos.position_amt > 0 else Side.BUY
             await client.place_order(
                 "main",
                 PlaceOrderRequest(
                     symbol=symbol,
-                    side=side,
+                    side=_close_side(pos.position_amt),
                     type="MARKET",
                     quantity=qty,
                     new_order_resp_type="RESULT",
@@ -234,9 +286,15 @@ async def main() -> None:
         raise SystemExit(2)
     cmd, symbol = sys.argv[1], sys.argv[2]
     if cmd == "open":
-        await cmd_open(symbol, Decimal(sys.argv[3]), Decimal(sys.argv[4]))
-    elif cmd == "move-stop":
-        await cmd_move_stop(symbol, Decimal(sys.argv[3]))
+        direction = sys.argv[5] if len(sys.argv) > 5 else "long"
+        await cmd_open(symbol, Decimal(sys.argv[3]), Decimal(sys.argv[4]), direction)
+    elif cmd == "open-nostop":
+        direction = sys.argv[4] if len(sys.argv) > 4 else "long"
+        await cmd_open(symbol, Decimal(sys.argv[3]), None, direction)
+    elif cmd in ("set-stop", "move-stop"):
+        await cmd_set_stop(symbol, Decimal(sys.argv[3]), replace=cmd == "move-stop")
+    elif cmd in ("set-tp", "move-tp"):
+        await cmd_set_tp(symbol, Decimal(sys.argv[3]), replace=cmd == "move-tp")
     elif cmd == "partial-close":
         await cmd_partial_close(symbol, Decimal(sys.argv[3]))
     elif cmd == "close":

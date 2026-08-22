@@ -358,3 +358,28 @@ async def test_fresh_master_still_enters(env):
     state.event_time = int(_time.time() * 1000)
     await coordinator.on_master_delta(delta_of(state))
     assert any(len(fr.client.placed) >= 2 for fr in followers)
+
+
+async def test_master_tp_copied_to_follower(env):
+    """Live incident: coordinator never propagated the master's TP level into
+    targets (tp_price hardcoded None) so followers never got take profits."""
+    import time as _time
+
+    coordinator, followers, db, _ = env
+    fr = followers[0]
+    key = PositionKey("BTCUSDT")
+    fr.client.positions[key] = {"qty": D("0.05"), "stop": D(64500)}
+    state = master_state(qty=D("0.05"), stop=D(64500))
+    state.positions[key].take_profit = ProtectiveOrder(
+        client_order_id="m-tp",
+        order_id=2,
+        type="TAKE_PROFIT_MARKET",
+        side=Side.SELL,
+        stop_price=D("65500"),
+        reduce_only=True,
+        close_position=False,
+        working_type="MARK_PRICE",
+    )
+    state.event_time = int(_time.time() * 1000)
+    await coordinator.on_master_delta(delta_of(state))
+    assert any(p["type"] == "TAKE_PROFIT_MARKET" for p in fr.client.placed)
