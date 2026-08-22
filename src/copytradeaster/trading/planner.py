@@ -245,7 +245,7 @@ def _plan_for_target(
     ):
         if wanted_level is None:
             continue
-        order_type = "STOP_MARKET" if kind == ActionKind.PLACE_STOP else "TAKE_PROFIT_MARKET"
+        order_type = target.stop_type if kind == ActionKind.PLACE_STOP else target.tp_type
         current_level = current.stop_price if current is not None else None
         if _level_equal(current_level, wanted_level, filters.tick_size):
             continue

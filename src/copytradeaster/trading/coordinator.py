@@ -218,6 +218,10 @@ class Coordinator:
             master_qty = master_pos.qty
             master_stop = master_pos.stop.stop_price if master_pos.stop else None
             master_tp = master_pos.take_profit.stop_price if master_pos.take_profit else None
+            master_stop_type = master_pos.stop.type if master_pos.stop else "STOP_MARKET"
+            master_tp_type = (
+                master_pos.take_profit.type if master_pos.take_profit else "TAKE_PROFIT_MARKET"
+            )
 
             if master_qty == 0:
                 continue  # handled by the actual-side loop above
@@ -282,6 +286,8 @@ class Coordinator:
                         qty=qty,
                         stop_price=master_stop,
                         tp_price=master_tp,
+                        stop_type=master_stop_type,
+                        tp_type=master_tp_type,
                         leverage=leverage,
                     )
                 )
@@ -343,7 +349,13 @@ class Coordinator:
             qty = target_abs if master_qty > 0 else -target_abs
             targets.append(
                 TargetPosition(
-                    key=key, qty=qty, stop_price=master_stop, tp_price=master_tp, leverage=leverage
+                    key=key,
+                    qty=qty,
+                    stop_price=master_stop,
+                    tp_price=master_tp,
+                    leverage=leverage,
+                    stop_type=master_stop_type,
+                    tp_type=master_tp_type,
                 )
             )
         return targets, skips

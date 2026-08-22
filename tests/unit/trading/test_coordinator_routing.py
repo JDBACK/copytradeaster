@@ -398,3 +398,19 @@ async def test_own_tp_fill_blocks_reentry(env):
     await coordinator.on_master_delta(delta_of(master_state()))
     assert len(fr.client.placed) == 0
     assert any("OWN_PROTECTIVE_FILLED" in n for n in notifications)
+
+
+async def test_limit_flavor_stop_mirrored(env):
+    """Master uses STOP (stop-limit): followers must mirror the exact flavor."""
+    import time as _time
+
+    coordinator, followers, db, _ = env
+    fr = followers[0]
+    key = PositionKey("BTCUSDT")
+    fr.client.positions[key] = {"qty": D("0.05"), "stop": D(64500)}
+    state = master_state(qty=D("0.05"), stop=D(64500))
+    state.positions[key].stop.type = "STOP"
+    state.event_time = int(_time.time() * 1000)
+    await coordinator.on_master_delta(delta_of(state))
+    stops = [p for p in fr.client.placed if p["type"] in ("STOP_MARKET", "STOP")]
+    assert stops and stops[-1]["type"] == "STOP"
