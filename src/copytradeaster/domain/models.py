@@ -129,6 +129,8 @@ class TargetPosition(_DecimalStrict):
     stop_price: Decimal | None
     tp_price: Decimal | None
     leverage: int
+    stop_type: str = "STOP_MARKET"
+    tp_type: str = "TAKE_PROFIT_MARKET"
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("qty", "stop_price", "tp_price")
 

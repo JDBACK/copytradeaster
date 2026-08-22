@@ -120,8 +120,12 @@ class MasterProjector:
                 for o in open_orders.get(str(p.symbol), [])
                 if _matches_position_side(o.position_side, key.pos_side)
             ]
-            stop = _pick_protective(same_symbol, "STOP_MARKET")
-            tp = _pick_protective(same_symbol, "TAKE_PROFIT_MARKET")
+            stop = _pick_protective(same_symbol, "STOP_MARKET") or _pick_protective(
+                same_symbol, "STOP"
+            )
+            tp = _pick_protective(same_symbol, "TAKE_PROFIT_MARKET") or _pick_protective(
+                same_symbol, "TAKE_PROFIT"
+            )
             positions[key] = PositionState(
                 key=key,
                 qty=p.position_amt,
@@ -152,6 +156,8 @@ class MasterProjector:
         elif execution_type in ("NEW", "CANCELED") and order_type in (
             "STOP_MARKET",
             "TAKE_PROFIT_MARKET",
+            "STOP",
+            "TAKE_PROFIT",
         ):
             changed |= await self._update_protective(symbol, pos_side, order_type, status, coid, o)
 
@@ -222,7 +228,7 @@ class MasterProjector:
     ) -> bool:
         key = PositionKey(symbol=symbol, pos_side=pos_side)
         pos = self.state.positions.get(key)
-        slot_name = "stop" if order_type == "STOP_MARKET" else "take_profit"
+        slot_name = "stop" if order_type in ("STOP_MARKET", "STOP") else "take_profit"
         current: ProtectiveOrder | None = getattr(pos, slot_name) if pos else None
 
         if status == "CANCELED" or status == "EXPIRED":
