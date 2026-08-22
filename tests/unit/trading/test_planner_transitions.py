@@ -79,8 +79,14 @@ class TestOpenRules:
     def test_open_with_stop(self):
         p = plan(account(), [TARGET_LONG])
         kinds = [(a.kind, a.priority) for a in p.actions]
-        assert kinds == [(ActionKind.MARKET_OPEN, 1), (ActionKind.PLACE_STOP, 2)]
-        open_action = p.actions[0]
+        # brand-new leg must land on the TARGET leverage (ONE_WAY WS-created
+        # positions start with projected leverage 0)
+        assert kinds == [
+            (ActionKind.SET_LEVERAGE, 0),
+            (ActionKind.MARKET_OPEN, 1),
+            (ActionKind.PLACE_STOP, 2),
+        ]
+        open_action = p.actions[1]
         assert open_action.payload == {
             "symbol": "BTCUSDT",
             "side": "BUY",
@@ -89,7 +95,7 @@ class TestOpenRules:
             "newOrderRespType": "RESULT",
         }
         assert open_action.client_order_id == "ct-market_open-BTCUSDT-1"
-        stop_action = p.actions[1]
+        stop_action = p.actions[2]
         assert stop_action.payload["type"] == "STOP_MARKET"
         assert stop_action.payload["stopPrice"] == "64500"
         assert stop_action.payload["quantity"] == "0.05"
@@ -100,8 +106,12 @@ class TestOpenRules:
     def test_short_open_side_sell(self):
         t = TargetPosition(KEY, D("-0.05"), D(65500), None, 20)
         p = plan(account(), [t])
-        assert [a.kind for a in p.actions] == [ActionKind.MARKET_OPEN, ActionKind.PLACE_STOP]
-        assert p.actions[0].payload["side"] == "SELL"
+        assert [a.kind for a in p.actions] == [
+            ActionKind.SET_LEVERAGE,
+            ActionKind.MARKET_OPEN,
+            ActionKind.PLACE_STOP,
+        ]
+        assert p.actions[1].payload["side"] == "SELL"
 
     def test_delta_smaller_than_step_is_noop_for_size(self):
         existing = pos(KEY, "0.0500")
@@ -188,11 +198,15 @@ class TestStopReplacement:
         assert cancel_old.replaces_client_order_id == "ct-old-stop"
         assert cancel_old.priority == 2
 
-    def test_stop_within_tick_noop(self):
+    def test_one_tick_move_replaces_stop(self):
+        """A one-tick level change is the smallest REAL move on the exchange
+        grid - it must replace the stop, not be swallowed as noise."""
         st = pos(KEY, "0.05", stop=prot("ct-old-stop", 64500))
         t = TargetPosition(KEY, D("0.05"), D(64500 + D("0.1")), None, 20)
         p = plan(account([st]), [t])
-        assert p.actions == []
+        kinds = [a.kind for a in p.actions]
+        assert ActionKind.PLACE_STOP in kinds
+        assert kinds.index(ActionKind.PLACE_STOP) < kinds.index(ActionKind.CANCEL_ORDER)
 
     def test_tp_replacement(self):
         st = pos(
@@ -221,9 +235,17 @@ class TestLeverageRule:
         t = TargetPosition(KEY, D("0.05"), None, None, 20)
         assert plan(account([st]), [t]).actions == []
 
-    def test_new_position_no_set_leverage_action(self):
+    def test_new_position_sets_target_leverage(self):
+        """ONE_WAY WS-created positions start with projected leverage 0 - the
+        entry must carry SET_LEVERAGE to land on the target leverage."""
         p = plan(account(), [TARGET_LONG])
-        assert all(a.kind != ActionKind.SET_LEVERAGE for a in p.actions)
+        assert any(
+            a.kind == ActionKind.SET_LEVERAGE and a.payload["leverage"] == "20" for a in p.actions
+        )
+
+    def test_zero_target_leverage_emits_nothing(self):
+        t = TargetPosition(KEY, D("0.05"), D(64500), None, 0)
+        assert all(a.kind != ActionKind.SET_LEVERAGE for a in plan(account(), [t]).actions)
 
 
 class TestHedgeMode:
@@ -233,7 +255,8 @@ class TestHedgeMode:
     def test_hedge_open_carries_position_side(self):
         t = TargetPosition(self.LONG_KEY, D("0.05"), D(64500), None, 20)
         p = plan(account(), [t])
-        open_a, stop_a = p.actions
+        lev_a, open_a, stop_a = p.actions
+        assert lev_a.kind == ActionKind.SET_LEVERAGE
         assert open_a.payload["positionSide"] == "LONG"
         assert "reduceOnly" not in open_a.payload
         assert stop_a.payload["positionSide"] == "LONG"
@@ -242,10 +265,10 @@ class TestHedgeMode:
 
     def test_hedge_short_open_sells(self):
         t = TargetPosition(self.SHORT_KEY, D("0.05"), D(65500), None, 20)
-        p = plan(account(), [t])
-        assert p.actions[0].payload["side"] == "SELL"
-        assert p.actions[0].payload["positionSide"] == "SHORT"
-        assert p.actions[1].payload["side"] == "BUY"  # protective closes short leg
+        lev_a, open_a, stop_a = plan(account(), [t]).actions
+        assert open_a.payload["side"] == "SELL"
+        assert open_a.payload["positionSide"] == "SHORT"
+        assert stop_a.payload["side"] == "BUY"  # protective closes short leg
 
     def test_hedge_close_no_reduce_only(self):
         st = pos(self.LONG_KEY, "0.05")

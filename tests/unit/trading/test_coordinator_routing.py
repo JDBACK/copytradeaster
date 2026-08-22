@@ -30,6 +30,7 @@ class FakeClient:
         self.available = D(available)
         self.positions: dict[PositionKey, dict] = {}
         self.placed: list[dict] = []
+        self.leverage_calls: list[tuple[str, int]] = []
         self.query_results: dict[str, object] = {}
 
     async def balance(self, account_id):
@@ -45,6 +46,10 @@ class FakeClient:
                 out.append(FakeOrder("STOP_MARKET", v["stop"], k))
             if v.get("tp") is not None:
                 out.append(FakeOrder("TAKE_PROFIT_MARKET", v["tp"], k))
+            if v.get("stop_limit") is not None:
+                out.append(FakeOrder("STOP", v["stop_limit"], k))
+            if v.get("tp_limit") is not None:
+                out.append(FakeOrder("TAKE_PROFIT", v["tp_limit"], k))
         return out
 
     async def place_order(self, account_id, req):
@@ -53,6 +58,9 @@ class FakeClient:
 
     async def cancel_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
         return FakePlaced(None)
+
+    async def set_leverage(self, account_id, symbol, leverage):
+        self.leverage_calls.append((symbol, leverage))
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
         return self.query_results.get(orig_client_order_id)

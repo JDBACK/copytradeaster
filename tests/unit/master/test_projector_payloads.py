@@ -263,13 +263,38 @@ class TestDedupAndOrder:
         count = await db.fetchone("SELECT COUNT(*) AS n FROM master_events")
         assert count["n"] == 1
 
-    async def test_out_of_order_older_E_ignored(self, deps):
+    async def test_out_of_order_trade_applied_not_dropped(self, deps):
+        """A late-arriving older-E TRADE carries a real fill delta - it must be
+        APPLIED, not dropped: dropping it loses position state until the next
+        full REST rebuild. Only non-trade events are E-order guarded."""
         projector, deltas, _ = deps
         await projector.apply_raw(order_trade(E=2000, x="TRADE", l="0.002", ap="65000"))
-        qty_before = sum(abs(p.qty) for p in projector.state.positions.values())
         await projector.apply_raw(order_trade(E=1500, x="TRADE", l="0.002", ap="65000"))
-        qty_after = sum(abs(p.qty) for p in projector.state.positions.values())
-        assert qty_after == qty_before
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        assert projector.state.positions[key].qty == D("0.004")
+
+    async def test_out_of_order_non_trade_ignored(self, deps):
+        projector, deltas, _ = deps
+        await projector.apply_raw(order_trade(E=2000, x="NEW", ot="STOP_MARKET",
+                                              c="ct-a", i=11, sp="64000"))
+        await projector.apply_raw(order_trade(E=1500, x="NEW", ot="STOP_MARKET",
+                                              c="ct-b", i=12, sp="63000"))
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        pos = projector.state.positions.get(key)
+        assert pos is not None and pos.stop is not None and pos.stop.stop_price == D("64000")
+
+    async def test_same_ms_partial_fills_both_applied(self, deps):
+        """Two partial fills of one order within the same millisecond differ by
+        trade id t - dedup must not swallow the second one."""
+        projector, _, _ = deps
+        await projector.apply_raw(
+            order_trade(E=3000, x="TRADE", l="0.001", ap="65000", t=1)
+        )
+        await projector.apply_raw(
+            order_trade(E=3000, x="TRADE", l="0.001", ap="65001", t=2)
+        )
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        assert projector.state.positions[key].qty == D("0.002")
 
 
 class TestAccountUpdate:

@@ -1,4 +1,3 @@
-import asyncio
 import json
 from pathlib import Path
 
@@ -109,22 +108,3 @@ async def AccountRepo_upsert(db):
     await AccountRepo(db).upsert("x", "follower", "x", "0xu")
 
 
-async def test_nonce_source_monotonic_and_persisted(db):
-    svc = SqliteCredentials(db, KEY32)
-    await svc.import_identity("copyc1", USER, SIGNER_KEY, "follower", "copyc1")
-    await svc.load()
-    n1 = svc.next_nonce(Account.from_key(SIGNER_KEY).address)
-    n2 = svc.next_nonce(Account.from_key(SIGNER_KEY).address)
-    assert n2 == n1 + 1
-    await asyncio.sleep(0.05)  # persistence task
-    row = await db.fetchone(
-        "SELECT last_nonce FROM nonce_store WHERE signer_address=?",
-        (Account.from_key(SIGNER_KEY).address,),
-    )
-    assert int(row["last_nonce"]) == n2
-
-
-async def test_nonce_requires_load(db):
-    svc = SqliteCredentials(db, KEY32)
-    with pytest.raises(RuntimeError, match="load"):
-        svc.next_nonce("0xabc")

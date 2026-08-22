@@ -35,7 +35,7 @@ class FakeNonces:
     def __init__(self) -> None:
         self.n = 10_000
 
-    def next_nonce(self, signer: str) -> int:
+    async def next_nonce(self, signer: str) -> int:
         self.n += 1
         return self.n
 

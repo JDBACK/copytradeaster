@@ -110,6 +110,9 @@ class FakeAster:
         return 1 if qty > 0 else (-1 if qty < 0 else 0)
 
     def _fill_order(self, key: str, order: FakeOrder, price: Decimal) -> None:
+        """Exchange-like fill accounting: increases average-in at the last fill
+        price, reductions keep the entry, flips re-base it. The previous fake
+        averaged reductions too - mirroring (and thus hiding) the projector bug."""
         account = key.split("|", 1)[0]
         order.status = "FILLED"
         order.executed_qty = order.orig_qty
@@ -121,11 +124,15 @@ class FakeAster:
         if new_qty == 0:
             self.positions.pop(pk, None)
             self.entry_prices.pop(pk, None)
-        else:
-            ep_old = self.entry_prices.get(pk, abs(old) * self.fill_price or price)
+            return
+        if old != 0 and new_qty * old < 0:
+            self.entry_prices[pk] = price  # flip: remainder opened by this fill
+        elif abs(new_qty) > abs(old):
+            ep_old = self.entry_prices.get(pk, price)
             total = abs(old) + abs(signed_delta)
             self.entry_prices[pk] = (abs(old) * ep_old + abs(signed_delta) * price) / total
-            self.positions[pk] = new_qty
+        # reduction: entry price stays
+        self.positions[pk] = new_qty
 
     def next_coid(self) -> str:
         self._seq += 1

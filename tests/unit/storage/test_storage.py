@@ -141,13 +141,17 @@ async def test_command_repo_status_transitions(db):
     assert row["attempts"] == 1
 
     await repo.set_status("k1", "UNKNOWN", last_error="503")
-    assert len(await repo.unresolved_unknowns()) == 1
+    assert len(await repo.in_flight()) == 1
 
     await repo.set_status("k1", "CONFIRMED")
-    assert await repo.unresolved_unknowns() == []
+    assert await repo.in_flight() == []
     await repo.insert("k2", "copyc2", None, "PLACE_STOP", "{}", 2, "ctk2")
     recent = await repo.recent(10)
     assert [r["command_key"] for r in recent] == ["k2", "k1"]
+    # SENDING/SUBMITTED are in-flight too (crash windows)
+    await repo.insert("k3", "copyc2", None, "MARKET_OPEN", "{}", 1, "ctk3")
+    await repo.set_status("k3", "SENDING")
+    assert [r["command_key"] for r in await repo.in_flight()] == ["k3"]
 
 
 async def test_nonce_store_monotonic_and_persistent(db, tmp_path):

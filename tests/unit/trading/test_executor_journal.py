@@ -100,7 +100,13 @@ class FakeClient:
         return self.open_orders_result
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
-        return self.query_results.get(orig_client_order_id)
+        if orig_client_order_id in self.query_results:
+            return self.query_results[orig_client_order_id]
+        # realistic fallback: the exchange knows every order it accepted
+        for req in self.placed:
+            if req.new_client_order_id == orig_client_order_id:
+                return SimpleOrder(coid=orig_client_order_id or "", status="NEW")
+        return None
 
 
 class SimpleOrder:

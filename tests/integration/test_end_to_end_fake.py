@@ -16,6 +16,7 @@ from copytradeaster.storage.repositories import (
     MasterEventRepo,
     OrderLinkRepo,
     SettingsRepo,
+    SyncBasisRepo,
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
@@ -121,6 +122,7 @@ async def env(tmp_path: Path):
         symbol_whitelist=["BTCUSDT", "ETHUSDT"],
         fee_buffer_pct=D("0.001"),
         working_type="MARK_PRICE",
+        basis=SyncBasisRepo(db),
     )
     yield projector, coordinator, fake, db, deltas, follower_ids
     await db.close()
