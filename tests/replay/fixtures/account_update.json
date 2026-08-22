@@ -1,14 +1,58 @@
 {
-  "description": "ACCOUNT_UPDATE: USDT balance and BTC position update",
+  "description": "ACCOUNT_UPDATE: USDT balance applied; position rows are informational",
   "events": [
     {
-      "e": "ACCOUNT_UPDATE", "E": 4000, "T": 3999,
+      "e": "ORDER_TRADE_UPDATE",
+      "E": 3998,
+      "T": 3997,
+      "o": {
+        "s": "BTCUSDT",
+        "S": "BUY",
+        "o": "MARKET",
+        "f": "GTC",
+        "q": "0.002",
+        "p": "0",
+        "ap": "65000",
+        "X": "FILLED",
+        "l": "0.002",
+        "z": "0.002",
+        "i": 900,
+        "c": "snap1",
+        "L": "65000",
+        "N": "USDT",
+        "n": "0",
+        "R": false,
+        "wt": "MARK_PRICE",
+        "ot": "MARKET",
+        "ps": "BOTH",
+        "rp": "0"
+      }
+    },
+    {
+      "e": "ACCOUNT_UPDATE",
+      "E": 4000,
+      "T": 3999,
       "a": {
         "m": "ORDER",
-        "B": [{"a": "USDT", "wb": "1234.56", "cw": "1200.00", "bc": "0"}],
+        "B": [
+          {
+            "a": "USDT",
+            "wb": "1234.56",
+            "cw": "1200.00",
+            "bc": "0"
+          }
+        ],
         "P": [
-          {"s": "BTCUSDT", "pa": "0.003", "ep": "64900", "cr": "0", "up": "0.5",
-           "mt": "cross", "iw": "0", "ps": "BOTH"}
+          {
+            "s": "BTCUSDT",
+            "pa": "0.002",
+            "ep": "65000",
+            "cr": "0",
+            "up": "0.5",
+            "mt": "cross",
+            "iw": "0",
+            "ps": "BOTH"
+          }
         ]
       }
     }
@@ -16,7 +60,10 @@
   "expected": {
     "available_usdt": "1234.56",
     "positions": {
-      "BTCUSDT:BOTH": {"qty": "0.003", "leverage": 0}
+      "BTCUSDT:BOTH": {
+        "qty": "0.002",
+        "leverage": 0
+      }
     },
     "open_trades": 1
   }

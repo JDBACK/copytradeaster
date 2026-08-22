@@ -1,28 +1,79 @@
 {
-  "description": "MARGIN_CALL warning: position state preserved, degraded flag expected (checked in unit tests)",
+  "description": "MARGIN_CALL: position state preserved, degraded flag checked in unit tests",
   "events": [
     {
-      "e": "ACCOUNT_UPDATE", "E": 6000, "T": 5999,
+      "e": "ORDER_TRADE_UPDATE",
+      "E": 5998,
+      "T": 5997,
+      "o": {
+        "s": "BTCUSDT",
+        "S": "BUY",
+        "o": "MARKET",
+        "f": "GTC",
+        "q": "0.002",
+        "p": "0",
+        "ap": "65000",
+        "X": "FILLED",
+        "l": "0.002",
+        "z": "0.002",
+        "i": 900,
+        "c": "snap1",
+        "L": "65000",
+        "N": "USDT",
+        "n": "0",
+        "R": false,
+        "wt": "MARK_PRICE",
+        "ot": "MARKET",
+        "ps": "BOTH",
+        "rp": "0"
+      }
+    },
+    {
+      "e": "ACCOUNT_UPDATE",
+      "E": 6000,
+      "T": 5999,
       "a": {
-        "m": "ORDER", "B": [], "P": [
-          {"s": "BTCUSDT", "pa": "0.002", "ep": "65000", "cr": "0", "up": "-1",
-           "mt": "cross", "iw": "0", "ps": "BOTH"}
+        "m": "ORDER",
+        "B": [],
+        "P": [
+          {
+            "s": "BTCUSDT",
+            "pa": "0.002",
+            "ep": "65000",
+            "cr": "0",
+            "up": "-1",
+            "mt": "cross",
+            "iw": "0",
+            "ps": "BOTH"
+          }
         ]
       }
     },
     {
-      "e": "MARGIN_CALL", "E": 6001,
+      "e": "MARGIN_CALL",
+      "E": 6001,
       "cw": "100.5",
       "p": [
-        {"s": "BTCUSDT", "ps": "BOTH", "pa": "0.002", "mt": "cross", "iw": "0",
-         "mp": "61000", "up": "-1", "mm": "50"}
+        {
+          "s": "BTCUSDT",
+          "ps": "BOTH",
+          "pa": "0.002",
+          "mt": "cross",
+          "iw": "0",
+          "mp": "61000",
+          "up": "-1",
+          "mm": "50"
+        }
       ]
     }
   ],
   "expected": {
     "available_usdt": "0",
     "positions": {
-      "BTCUSDT:BOTH": {"qty": "0.002", "leverage": 0}
+      "BTCUSDT:BOTH": {
+        "qty": "0.002",
+        "leverage": 0
+      }
     },
     "open_trades": 1
   }

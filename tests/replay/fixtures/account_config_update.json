@@ -1,24 +1,71 @@
 {
-  "description": "ACCOUNT_CONFIG_UPDATE: leverage change on an open position",
+  "description": "ACCOUNT_CONFIG_UPDATE: leverage change on a stream-opened position",
   "events": [
     {
-      "e": "ACCOUNT_UPDATE", "E": 5000, "T": 4999,
+      "e": "ORDER_TRADE_UPDATE",
+      "E": 4998,
+      "T": 4997,
+      "o": {
+        "s": "BTCUSDT",
+        "S": "BUY",
+        "o": "MARKET",
+        "f": "GTC",
+        "q": "0.002",
+        "p": "0",
+        "ap": "65000",
+        "X": "FILLED",
+        "l": "0.002",
+        "z": "0.002",
+        "i": 900,
+        "c": "snap1",
+        "L": "65000",
+        "N": "USDT",
+        "n": "0",
+        "R": false,
+        "wt": "MARK_PRICE",
+        "ot": "MARKET",
+        "ps": "BOTH",
+        "rp": "0"
+      }
+    },
+    {
+      "e": "ACCOUNT_UPDATE",
+      "E": 5000,
+      "T": 4999,
       "a": {
-        "m": "ORDER", "B": [], "P": [
-          {"s": "BTCUSDT", "pa": "0.002", "ep": "65000", "cr": "0", "up": "0",
-           "mt": "cross", "iw": "0", "ps": "BOTH"}
+        "m": "ORDER",
+        "B": [],
+        "P": [
+          {
+            "s": "BTCUSDT",
+            "pa": "0.002",
+            "ep": "65000",
+            "cr": "0",
+            "up": "0",
+            "mt": "cross",
+            "iw": "0",
+            "ps": "BOTH"
+          }
         ]
       }
     },
     {
-      "e": "ACCOUNT_CONFIG_UPDATE", "E": 5001, "T": 5000,
-      "ac": {"s": "BTCUSDT", "l": 10}
+      "e": "ACCOUNT_CONFIG_UPDATE",
+      "E": 5001,
+      "T": 5000,
+      "ac": {
+        "s": "BTCUSDT",
+        "l": 10
+      }
     }
   ],
   "expected": {
     "available_usdt": "0",
     "positions": {
-      "BTCUSDT:BOTH": {"qty": "0.002", "leverage": 10}
+      "BTCUSDT:BOTH": {
+        "qty": "0.002",
+        "leverage": 10
+      }
     },
     "open_trades": 1
   }
