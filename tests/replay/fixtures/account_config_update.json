@@ -25,7 +25,8 @@
         "wt": "MARK_PRICE",
         "ot": "MARKET",
         "ps": "BOTH",
-        "rp": "0"
+        "rp": "0",
+        "x": "TRADE"
       }
     },
     {
