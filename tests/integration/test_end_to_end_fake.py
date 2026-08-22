@@ -363,9 +363,12 @@ class TestSelfStopGuard:
         await projector.apply_raw(
             order_trade(E=1900, x="TRADE", X="FILLED", l="1", z="1", ap="65000", q="1", i=200)
         )
+        # new episode must carry its OWN stop: the dead level from the previous
+        # episode is cleared on close and naked entries are refused
+        await projector.apply_raw(stop_new(E=1905, c="m-stop-5", sp="64400", i=205))
         await asyncio.sleep(0)
-        # new episode entry is sized from the CURRENT master stop (64400 after the
-        # earlier move): budget 10 / (600 * 1.001) -> 0.016
+        # new episode entry is sized from the CURRENT master stop (64400):
+        # budget 10 / (600 * 1.001) -> 0.016
         assert follower_qty(fake, "copyc2") == D("0.016")
 
 
