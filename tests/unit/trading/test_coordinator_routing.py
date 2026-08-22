@@ -408,7 +408,7 @@ async def test_limit_flavor_stop_mirrored(env):
     fr = followers[0]
     key = PositionKey("BTCUSDT")
     fr.client.positions[key] = {"qty": D("0.05"), "stop": D(64500)}
-    state = master_state(qty=D("0.05"), stop=D(64500))
+    state = master_state(qty=D("0.05"), stop=D(64600))
     pos = state.positions[key]
     state.positions[key] = PositionState(
         key=pos.key,
