@@ -41,6 +41,7 @@ class SkipReason(StrEnum):
     DISABLED = "DISABLED"
     PAUSED = "PAUSED"
     STALE_MASTER = "STALE_MASTER"
+    OWN_PROTECTIVE_FILLED = "OWN_PROTECTIVE_FILLED"
 
 
 class _DecimalStrict:

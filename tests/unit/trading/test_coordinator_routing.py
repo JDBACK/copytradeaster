@@ -383,3 +383,18 @@ async def test_master_tp_copied_to_follower(env):
     state.event_time = int(_time.time() * 1000)
     await coordinator.on_master_delta(delta_of(state))
     assert any(p["type"] == "TAKE_PROFIT_MARKET" for p in fr.client.placed)
+
+
+async def test_own_tp_fill_blocks_reentry(env):
+    """Live incident: follower TP filled, master TRADE event still in flight -
+    branch a must not re-open against the ended episode (copyc2 0.041 churn)."""
+    coordinator, followers, db, notifications = env
+    fr = followers[1]
+    trade_id = await CopyTradeRepo(db).open_trade("BTCUSDT", "BOTH", None)
+    await OrderLinkRepo(db).add(trade_id, "copyc2", "PLACE_TP", "ct-ep-tp")
+    fr.client.query_results["ct-ep-tp"] = FakeOrder(
+        "TAKE_PROFIT_MARKET", D(65500), PositionKey("BTCUSDT"), coid="ct-ep-tp", status="FILLED"
+    )
+    await coordinator.on_master_delta(delta_of(master_state()))
+    assert len(fr.client.placed) == 0
+    assert any("OWN_PROTECTIVE_FILLED" in n for n in notifications)

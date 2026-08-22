@@ -221,10 +221,10 @@ class Coordinator:
                 if not self._state_fresh(master):
                     skips.append(SkipRecord(key.symbol, SkipReason.STALE_MASTER))
                     continue
-                # a-precondition: no re-entry while the same master episode ended
-                # by THIS follower's own stop fill
-                if await self._closed_by_own_stop(account_id, key, master):
-                    skips.append(SkipRecord(key.symbol, SkipReason.NO_STOP))
+                # a-precondition: no re-entry while the same master episode was
+                # already ended by THIS follower's own protective fill (stop OR TP)
+                if await self._ended_by_own_protective(account_id, key):
+                    skips.append(SkipRecord(key.symbol, SkipReason.OWN_PROTECTIVE_FILLED))
                     continue
                 if not policy.allow_new_entries:
                     skips.append(SkipRecord(key.symbol, SkipReason.PAUSED))
@@ -313,29 +313,30 @@ class Coordinator:
             )
         return targets, skips
 
-    async def _closed_by_own_stop(
-        self, account_id: str, key: PositionKey, master: MasterState
-    ) -> bool:
-        """True when the follower's protective stop of the ACTIVE master episode
-        already FILLED (re-entry into this episode is forbidden)."""
+    async def _ended_by_own_protective(self, account_id: str, key: PositionKey) -> bool:
+        """True when a protective order (stop OR take-profit) of the ACTIVE
+        master episode already FILLED on this follower - the episode ended for
+        them and re-entry is forbidden until a new master episode opens."""
         trade = await self._trades.active_trade(key.symbol, key.pos_side.value)
         if trade is None:
             return False
         rows = await self._links.by_trade(int(trade["trade_id"]))
-        stop_links = [
-            r for r in rows if r["account_id"] == account_id and r["kind"] == "PLACE_STOP"
+        links = [
+            r
+            for r in rows
+            if r["account_id"] == account_id and r["kind"] in ("PLACE_STOP", "PLACE_TP")
         ]
-        if not stop_links:
+        if not links:
             return False
         client = self._client_for(account_id)
         if client is None:
             return False
-        for row in stop_links:
+        for row in links:
             coid = str(row["follower_client_order_id"])
             try:
                 order = await client.query_order(account_id, key.symbol, orig_client_order_id=coid)
             except Exception as exc:  # noqa: BLE001 - defensive
-                log.warning("self-stop query failed for %s: %s", coid, exc)
+                log.warning("protective query failed for %s: %s", coid, exc)
                 continue
             if order is not None and order.status == "FILLED":
                 return True
