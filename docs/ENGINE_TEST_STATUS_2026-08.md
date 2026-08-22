@@ -62,3 +62,16 @@
   set-stop/move-stop, set-tp/move-tp, partial-close, close.
 - Движок — hub-процесс `engine`; журнал команд — SQLite `execution_commands`,
   события мастера — `master_events`; сверка — query_order/allOrders по coid.
+
+## Рефакторинг по review_stage1 (2026-08-22)
+Проведён рефакторинг по итогам внешнего код-ревью: persisted sizing basis
+(restart после пропущенного partial close), идемпотентность по ревизии перехода,
+boot-recovery SENDING/SUBMITTED/UNKNOWN с order_links, async persist-before-send
+nonce, реальный pause, deviation/post-fill риск, перенос стопа в прибыли,
+tick-grid равенство, TP removal/orphan cleanup, HEDGE-rebuild защита, TRADE вне
+порядка + entry от L, fail-closed routing, decoupled WS ingest.
+Полная инвентаризация и верификация — [REFACTOR_STAGE1_REPORT.md](../REFACTOR_STAGE1_REPORT.md).
+Герметичный сьют: 232 passed / ruff clean. Живой тестнет (signed): 8 passed /
+1 skipped — включая двойной одинаковый partial-close (обе команды исполнены),
+one-tick stop replace и TP removal. До приёмки Stage 1 остаётся builder-e2e
+(main key) и ONE_WAY live-кампания.
