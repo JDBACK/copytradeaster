@@ -1,6 +1,7 @@
 """End-to-end scenarios over FakeAster + real projector/coordinator/planner/executor."""
 
 import asyncio
+import json
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -376,3 +377,160 @@ class TestSelfStopGuard:
 
 def follower_qty_all(fake, account_id):
     return [k for k in fake.positions if k[0] == account_id]
+
+
+def resting_conditionals(fake: FakeAster, account_id: str) -> list[FakeOrder]:
+    return [
+        o
+        for key, o in fake.orders.items()
+        if key.startswith(f"{account_id}|")
+        and o.status == "NEW"
+        and o.type in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+    ]
+
+
+def tp_new(**o):
+    base = {
+        "s": "BTCUSDT",
+        "c": "m-tp",
+        "S": "SELL",
+        "o": "TAKE_PROFIT_MARKET",
+        "ot": "TAKE_PROFIT_MARKET",
+        "q": "1",
+        "sp": "70000",
+        "x": "NEW",
+        "X": "NEW",
+        "i": 300,
+        "R": True,
+        "wt": "MARK_PRICE",
+        "ps": "BOTH",
+        "ap": "0",
+        "p": "0",
+        "L": "0",
+        "l": "0",
+        "z": "0",
+        "n": "0",
+        "N": "USDT",
+        "rp": "0",
+    }
+    base.update(o)
+    return {"e": "ORDER_TRADE_UPDATE", "E": base.get("E", 1100), "T": 1099, "o": base}
+
+
+class TestDuplicateProtectionConvergence:
+    """Reviewer blocker, full engine path (projector -> coordinator -> planner ->
+    executor -> journal): a protection replacement whose dependent CANCEL failed
+    leaves the stale bot-owned level resting next to the new one. Before the fix
+    the next reconcile saw current==target and issued NOTHING; now it must
+    converge the leg to exactly ONE stop and ONE TP."""
+
+    @staticmethod
+    def _fail_next_cancel(fake: FakeAster, coid: str) -> None:
+        """Make the NEXT engine attempt to cancel `coid` die as outcome-known
+        failure (the exchange never saw it), like a real gateway error."""
+        original = fake.cancel_order
+
+        async def flaky(account_id, symbol, *, orig_client_order_id=None, order_id=None):
+            if orig_client_order_id == coid:
+                from copytradeaster.aster.trading_api import AsterError
+
+                raise AsterError(-1000, "simulated gateway loss", http_status=503)
+            return await original(
+                account_id, symbol, orig_client_order_id=orig_client_order_id, order_id=order_id
+            )
+
+        fake.cancel_order = flaky  # type: ignore[method-assign]
+
+    async def test_stale_stop_removed_after_failed_dependent_cancel(self, env):
+        from copytradeaster.master.projector import MasterDelta
+
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        old_stop = follower_stop(fake, fid)
+        assert old_stop is not None and old_stop.stop_price == D("64500")
+
+        self._fail_next_cancel(fake, old_stop.client_order_id)
+        try:
+            # master moves the stop 64500 -> 64000 through the real pipeline;
+            # the engine places the new stop CONFIRMED but its dependent cancel dies
+            await projector.apply_raw(stop_new(E=2000, c="m-stop-b", sp="64000", i=202))
+        finally:
+            del fake.cancel_order  # un-shadow the fake exchange method
+
+        # failure shape on the exchange: BOTH levels rest simultaneously
+        stops = [o for o in resting_conditionals(fake, fid) if o.type == "STOP_MARKET"]
+        assert {o.stop_price for o in stops} == {D("64000"), D("64500")}
+
+        # the NEXT reconciliation must remove the stale level and keep the new one
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+
+        remaining = [o for o in resting_conditionals(fake, fid) if o.type == "STOP_MARKET"]
+        assert [o.stop_price for o in remaining] == [D("64000")]
+        assert remaining[0].client_order_id != old_stop.client_order_id
+
+        # journal proof: a CONFIRMED CANCEL targeted the stale order
+        rows = await CommandRepo(db).recent(10_000)
+        assert any(
+            r["account_id"] == fid
+            and r["kind"] == "CANCEL_ORDER"
+            and r["status"] == "CONFIRMED"
+            and json.loads(str(r["payload"]))["origClientOrderId"] == old_stop.client_order_id
+            for r in rows
+        ), "reconcile must have canceled the stale stop"
+
+        # converged: an identical follow-up pass issues zero commands
+        before = len(await CommandRepo(db).recent(10_000))
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        assert len(await CommandRepo(db).recent(10_000)) == before
+
+    async def test_stale_tp_removed_after_failed_dependent_cancel(self, env):
+        from copytradeaster.master.projector import MasterDelta
+
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        await projector.apply_raw(tp_new(E=2000, c="m-tp-a", sp="70000", i=203))
+        old_tp = next(o for o in resting_conditionals(fake, fid) if o.type == "TAKE_PROFIT_MARKET")
+
+        self._fail_next_cancel(fake, old_tp.client_order_id)
+        try:
+            await projector.apply_raw(tp_new(E=2100, c="m-tp-b", sp="70500", i=204))
+        finally:
+            del fake.cancel_order
+
+        tps = [o for o in resting_conditionals(fake, fid) if o.type == "TAKE_PROFIT_MARKET"]
+        assert {o.stop_price for o in tps} == {D("70000"), D("70500")}
+
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+
+        tps = [o for o in resting_conditionals(fake, fid) if o.type == "TAKE_PROFIT_MARKET"]
+        assert [o.stop_price for o in tps] == [D("70500")]
+
+    async def test_flat_close_removes_picked_and_extra_protection_in_one_pass(self, env):
+
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        old_stop = follower_stop(fake, fid)
+        assert old_stop is not None
+        self._fail_next_cancel(fake, old_stop.client_order_id)
+        try:
+            await projector.apply_raw(stop_new(E=2000, c="m-stop-b", sp="64000", i=202))
+        finally:
+            del fake.cancel_order
+        assert {o.stop_price for o in resting_conditionals(fake, fid)} == {
+            D("64000"),
+            D("64500"),
+        }
+
+        # master flattens while TWO follower stops still rest
+        await projector.apply_raw(
+            order_trade(
+                E=2200, S="SELL", x="TRADE", X="FILLED", l="1", z="1", ap="65000", L="65000", q="1"
+            )
+        )
+        assert follower_qty(fake, fid) == 0
+        assert resting_conditionals(fake, fid) == []

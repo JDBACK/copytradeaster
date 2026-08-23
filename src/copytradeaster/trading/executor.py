@@ -170,15 +170,20 @@ class Executor:
         existing = await self._commands.get(key)
         if existing is not None and existing["status"] in ("CONFIRMED", "SUBMITTED"):
             return CommandResult(key, str(existing["status"]), None)
-        await self._commands.insert(
-            key,
-            plan.account_id,
-            plan.trade_id,
-            action.kind.value,
-            json.dumps(action.payload, sort_keys=True),
-            action.priority,
-            None,
-        )
+        if existing is None:
+            await self._commands.insert(
+                key,
+                plan.account_id,
+                plan.trade_id,
+                action.kind.value,
+                json.dumps(action.payload, sort_keys=True),
+                action.priority,
+                None,
+            )
+        else:
+            # FAILED row of the same logical transition: retry under the
+            # original command key instead of colliding on the UNIQUE index.
+            await self._commands.set_status(key, "PENDING")
         await self._commands.set_status(key, "SENDING")
         try:
             await self._clients(plan.account_id).set_leverage(
@@ -196,15 +201,22 @@ class Executor:
         existing = await self._commands.get(key)
         if existing is not None and existing["status"] in ("CONFIRMED", "SUBMITTED"):
             return CommandResult(key, str(existing["status"]), None)
-        await self._commands.insert(
-            key,
-            plan.account_id,
-            plan.trade_id,
-            action.kind.value,
-            json.dumps(action.payload, sort_keys=True),
-            action.priority,
-            None,
-        )
+        if existing is None:
+            await self._commands.insert(
+                key,
+                plan.account_id,
+                plan.trade_id,
+                action.kind.value,
+                json.dumps(action.payload, sort_keys=True),
+                action.priority,
+                None,
+            )
+        else:
+            # FAILED row of the same logical transition: retry under the
+            # original command key instead of colliding on the UNIQUE index.
+            # Without this a failed dependent cancel could NEVER be retried -
+            # the duplicate protection it guards would rest forever.
+            await self._commands.set_status(key, "PENDING")
         await self._commands.set_status(key, "SENDING")
         symbol = action.payload["symbol"]
         coid = action.payload["origClientOrderId"]
