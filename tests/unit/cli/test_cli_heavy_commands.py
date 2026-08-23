@@ -3,6 +3,7 @@ approve-builder, run dispatch) with respx intercepting all HTTP."""
 
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 
@@ -140,13 +141,18 @@ async def test_emergency_close_all_flattens(env, capsys):
             }
         ]
     )
-    respx.get(f"{BASE}/fapi/v3/positionRisk").respond(json=[POSITION_OPEN])
+    position_snapshots = iter([[POSITION_OPEN], [], [], []])
+
+    def position_risk_response(_request):
+        return httpx.Response(200, json=next(position_snapshots, []))
+
+    respx.get(f"{BASE}/fapi/v3/positionRisk").mock(side_effect=position_risk_response)
     respx.get(f"{BASE}/fapi/v3/openOrders").respond(json=[])
     respx.post(f"{BASE}/fapi/v3/order").respond(json=ORDER_OK)
     rc = await _emergency_close_all()
     out = capsys.readouterr().out
     assert rc == 0
-    assert "closed:" in out
+    assert "flat verified twice" in out
 
 
 @respx.mock

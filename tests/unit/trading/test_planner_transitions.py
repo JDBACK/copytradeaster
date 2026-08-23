@@ -51,16 +51,28 @@ def pos(key, qty, lev=20, stop=None, tp=None) -> PositionState:
     )
 
 
-def prot(coid, stop_price, side=Side.SELL, otype="STOP_MARKET") -> ProtectiveOrder:
+def prot(
+    coid,
+    stop_price,
+    side=Side.SELL,
+    otype="STOP_MARKET",
+    *,
+    qty="0.05",
+    close_position=None,
+    working_type="MARK_PRICE",
+) -> ProtectiveOrder:
+    if close_position is None:
+        close_position = otype in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
     return ProtectiveOrder(
         client_order_id=coid,
         order_id=1,
         type=otype,
         side=side,
         stop_price=D(stop_price),
-        reduce_only=True,
-        close_position=False,
-        working_type="MARK_PRICE",
+        reduce_only=not close_position,
+        close_position=close_position,
+        working_type=working_type,
+        orig_qty=D(qty),
     )
 
 
@@ -98,8 +110,9 @@ class TestOpenRules:
         stop_action = p.actions[2]
         assert stop_action.payload["type"] == "STOP_MARKET"
         assert stop_action.payload["stopPrice"] == "64500"
-        assert stop_action.payload["quantity"] == "0.05"
-        assert stop_action.payload["reduceOnly"] == "true"
+        assert "quantity" not in stop_action.payload
+        assert "reduceOnly" not in stop_action.payload
+        assert stop_action.payload["closePosition"] == "true"
         assert stop_action.payload["workingType"] == "MARK_PRICE"
         assert stop_action.payload["priceProtect"] == "false"
 
@@ -120,11 +133,19 @@ class TestOpenRules:
         assert [a.kind for a in p.actions] == [ActionKind.PLACE_STOP]
 
     def test_increase_existing_position(self):
-        st = pos(KEY, "0.02", stop=prot("ct-old-stop", 64500))
+        st = pos(
+            KEY,
+            "0.02",
+            stop=prot("ct-old-stop", 64500, qty="0.02", close_position=False),
+        )
         t = TargetPosition(KEY, D("0.05"), D(64500), None, 20)
         p = plan(account([st]), [t])
-        # same stop level -> only the open; protections untouched
-        assert [(a.kind, a.priority) for a in p.actions] == [(ActionKind.MARKET_OPEN, 1)]
+        assert [(a.kind, a.priority) for a in p.actions] == [
+            (ActionKind.MARKET_OPEN, 1),
+            (ActionKind.PLACE_STOP, 2),
+            (ActionKind.CANCEL_ORDER, 2),
+        ]
+        assert p.actions[1].payload["closePosition"] == "true"
 
     def test_increase_and_move_stop(self):
         st = pos(KEY, "0.02", stop=prot("ct-old-stop", 64500))
@@ -220,6 +241,66 @@ class TestStopReplacement:
         assert p.actions[0].payload["type"] == "TAKE_PROFIT_MARKET"
         assert p.actions[0].payload["stopPrice"] == "71000"
         assert p.actions[0].payload["side"] == "SELL"
+
+    def test_fixed_limit_stop_same_level_wrong_qty_is_replaced(self):
+        st = pos(
+            KEY,
+            "0.02",
+            stop=prot("ct-old-stop", 64500, otype="STOP", qty="0.02"),
+        )
+        target = TargetPosition(
+            KEY,
+            D("0.05"),
+            D(64500),
+            None,
+            20,
+            stop_type="STOP",
+        )
+        p = plan(account([st]), [target])
+        kinds = [a.kind for a in p.actions]
+        assert kinds == [ActionKind.MARKET_OPEN, ActionKind.PLACE_STOP, ActionKind.CANCEL_ORDER]
+        assert p.actions[1].payload["quantity"] == "0.05"
+        assert p.actions[2].depends_on_client_order_id == p.actions[1].client_order_id
+
+    def test_fixed_limit_stop_partial_reduce_resizes_to_remainder(self):
+        st = pos(
+            KEY,
+            "0.10",
+            stop=prot("ct-old-stop", 64500, otype="STOP", qty="0.10"),
+        )
+        target = TargetPosition(
+            KEY,
+            D("0.07"),
+            D(64500),
+            None,
+            20,
+            stop_type="STOP",
+        )
+        p = plan(account([st]), [target])
+        assert [a.kind for a in p.actions] == [
+            ActionKind.MARKET_CLOSE,
+            ActionKind.PLACE_STOP,
+            ActionKind.CANCEL_ORDER,
+        ]
+        assert p.actions[1].payload["quantity"] == "0.07"
+
+    def test_working_type_mismatch_replaces_protection(self):
+        st = pos(
+            KEY,
+            "0.05",
+            stop=prot("ct-old-stop", 64500, working_type="CONTRACT_PRICE"),
+        )
+        p = plan(account([st]), [TARGET_LONG])
+        assert [a.kind for a in p.actions] == [ActionKind.PLACE_STOP, ActionKind.CANCEL_ORDER]
+
+    def test_market_protection_payload_is_close_position_in_hedge(self):
+        key = PositionKey("BTCUSDT", PosSide.LONG)
+        target = TargetPosition(key, D("0.05"), D(64500), None, 20)
+        stop = next(a for a in plan(account(), [target]).actions if a.kind == ActionKind.PLACE_STOP)
+        assert stop.payload["closePosition"] == "true"
+        assert stop.payload["positionSide"] == "LONG"
+        assert "quantity" not in stop.payload
+        assert "reduceOnly" not in stop.payload
 
 
 class TestLeverageRule:
@@ -344,9 +425,9 @@ class TestDuplicateProtectionConvergence:
         assert sum(1 for a in cancels if a.depends_on_client_order_id is not None) == 1
 
     def test_extra_tp_canceled_even_when_target_matches(self):
-        tp = prot("ct-new-tp", 70000, side=Side.BUY, otype="TAKE_PROFIT_MARKET")
+        tp = prot("ct-new-tp", 70000, side=Side.SELL, otype="TAKE_PROFIT_MARKET")
         st = pos(KEY, "0.05", tp=tp)
-        st.extra_tps = (prot("ct-old-tp", 71000, side=Side.BUY, otype="TAKE_PROFIT_MARKET"),)
+        st.extra_tps = (prot("ct-old-tp", 71000, side=Side.SELL, otype="TAKE_PROFIT_MARKET"),)
         t = TargetPosition(KEY, D("0.05"), None, D(70000), 20)
         p = plan(account([st]), [t])
         assert [(a.kind, a.priority) for a in p.actions] == [(ActionKind.CANCEL_ORDER, 1)]

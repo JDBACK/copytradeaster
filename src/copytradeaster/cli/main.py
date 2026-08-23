@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from pathlib import Path
 
 from copytradeaster.config import Settings
@@ -279,11 +280,21 @@ async def _status() -> int:
     await db.connect()
     await db.migrate()
     settings = SettingsRepo(db)
-    ready = await settings.get_flag("ready")
-    degraded = await settings.get_flag("degraded")
+    stored_ready = await settings.get_flag("ready")
+    heartbeat_raw = await settings.get_flag("heartbeat_at")
+    heartbeat_at = int(heartbeat_raw) if heartbeat_raw and heartbeat_raw.isdigit() else 0
+    heartbeat_age_ms = max(int(__import__("time").time() * 1000) - heartbeat_at, 0)
+    stale_after_ms = max(2 * cfg.reconcile_interval_s, 30) * 1000
+    fresh = heartbeat_at > 0 and heartbeat_age_ms <= stale_after_ms
+    ready = stored_ready == "true" and fresh
+    runtime_state = "ready" if ready else ("stale" if stored_ready == "true" else "stopped")
+    degraded_active = await settings.get_flag("degraded_active")
+    degraded_reason = await settings.get_flag("degraded_reason")
     paused = await settings.get_flag("allow_new_entries")
     print(
-        f"ready={ready or 'false'} degraded={degraded or '-'} "
+        f"ready={'true' if ready else 'false'} runtime={runtime_state} "
+        f"heartbeat_age_ms={heartbeat_age_ms if heartbeat_at else '-'} "
+        f"degraded={degraded_reason if degraded_active == 'true' else '-'} "
         f"allow_new_entries={paused if paused is not None else 'true'}"
     )
     trades = await db.fetchall("SELECT * FROM copy_trades WHERE status='OPEN' ORDER BY trade_id")
@@ -344,7 +355,12 @@ async def _set_pause(paused: bool) -> int:
     db = Database(cfg.db_path)
     await db.connect()
     await db.migrate()
-    await SettingsRepo(db).set_flag("allow_new_entries", "false" if paused else "true")
+    settings = SettingsRepo(db)
+    await settings.set_flag("allow_new_entries", "false" if paused else "true")
+    if not paused:
+        # Resume is deliberately explicit: emergency never re-enables entries
+        # by itself, but the operator can do so after inspecting status.
+        await settings.set_flag("emergency_active", "false")
     await db.close()
     print("paused" if paused else "resumed")
     return 0
@@ -357,36 +373,86 @@ async def _emergency_close_all() -> int:
     )
 
     app = App(_load_settings())
+    operation_id = uuid.uuid4().hex
+    failures: list[str] = []
     try:
         await app.db.connect()
         await app.db.migrate()
+        # Fail closed before any exchange snapshot or close. A concurrently
+        # running Coordinator reads both flags before issuing entries.
+        await app.settings.set_flag("emergency_active", "true")
+        await app.settings.set_flag("allow_new_entries", "false")
+        await app.settings.set_flag("emergency_operation_id", operation_id)
         await app.credentials.load()
-        accounts = await app.db.fetchall("SELECT id FROM accounts WHERE role='follower'")
+        accounts = await app.db.fetchall(
+            "SELECT id FROM accounts WHERE role='follower' AND enabled=1 ORDER BY id"
+        )
         for row in accounts:
             app.followers.append(_follower_runtime(app, str(row["id"])))
         exchange = await app.master_client.exchange_info(force=True)
         app._filters_cache = exchange.tradable_filters()
-        for fr in app.followers:
-            actual = await app.coordinator._snapshot(fr)
-            targets = [
-                TargetPosition(
-                    key=key, qty=0, stop_price=None, tp_price=None, leverage=pos.leverage
-                )
-                for key, pos in actual.positions.items()
-            ]
-            plan = build_close_plan(fr.account_id, actual, targets)
-            if plan.actions:
-                results = await app.executor.submit(plan)
-                print(f"[{fr.account_id}] closed: {[r.status for r in results]}")
+        stable_flat = 0
+        for pass_index in range(1, 6):
+            pass_failures: list[str] = []
+            all_flat = True
+            for fr in app.followers:
+                try:
+                    actual = await app.coordinator._snapshot(fr)
+                    targets = [
+                        TargetPosition(
+                            key=key,
+                            qty=0,
+                            stop_price=None,
+                            tp_price=None,
+                            leverage=pos.leverage,
+                        )
+                        for key, pos in actual.positions.items()
+                    ]
+                    plan = build_close_plan(
+                        fr.account_id,
+                        actual,
+                        targets,
+                        operation_id=operation_id,
+                        revision=pass_index,
+                    )
+                    if plan.actions:
+                        results = await app.executor.submit(plan)
+                        statuses = [r.status for r in results]
+                        print(f"[{fr.account_id}] pass={pass_index}: {statuses}")
+                        if any(status != "CONFIRMED" for status in statuses):
+                            pass_failures.append(f"{fr.account_id}:commands={statuses}")
+                    verified = await app.coordinator._snapshot(fr)
+                    if not _emergency_state_flat(verified):
+                        all_flat = False
+                        pass_failures.append(f"{fr.account_id}:not-flat")
+                except Exception as exc:  # noqa: BLE001 - continue every follower
+                    all_flat = False
+                    pass_failures.append(f"{fr.account_id}:{exc}")
+                    print(f"[{fr.account_id}] FAILED: {exc}", file=sys.stderr)
+            failures.extend(pass_failures)
+            if all_flat and not pass_failures:
+                stable_flat += 1
+                if stable_flat >= 2:
+                    break
             else:
-                print(f"[{fr.account_id}] already flat")
+                stable_flat = 0
+            await asyncio.sleep(0.25)
+        if stable_flat < 2:
+            await app.settings.set_flag(
+                "emergency_last_result", f"FAILED:{operation_id}:{';'.join(failures[-20:])}"
+            )
+            return 1
+        await app.settings.set_flag("emergency_last_result", f"CONFIRMED:{operation_id}")
+        print(f"emergency operation {operation_id}: flat verified twice; entries remain paused")
     finally:
         await app.http.aclose()
         await app.db.close()
     return 0
 
 
-def build_close_plan(account_id, actual, targets):
+def build_close_plan(
+    account_id, actual, targets, *, operation_id: str | None = None, revision: int = 0
+):
     """Emergency plan: cancel protections then close full remainder."""
     from copytradeaster.domain.models import (
         ActionKind,
@@ -399,9 +465,9 @@ def build_close_plan(account_id, actual, targets):
     seq = 0
     for tp in targets:
         pos = actual.positions.get(tp.key)
-        if pos is None or pos.qty == 0:
+        if pos is None:
             continue
-        for prot in (pos.stop, pos.take_profit):
+        for prot in (pos.stop, pos.take_profit, *pos.extra_stops, *pos.extra_tps):
             if prot is not None:
                 actions.append(
                     ExecutionAction(
@@ -414,8 +480,12 @@ def build_close_plan(account_id, actual, targets):
                         client_order_id=None,
                         replaces_client_order_id=prot.client_order_id,
                         priority=1,
+                        revision=revision,
+                        position_side=tp.key.pos_side,
                     )
                 )
+        if pos.qty == 0:
+            continue
         hedge = tp.key.pos_side != PosSide.BOTH
         qty = abs(pos.qty)
         side = "SELL" if pos.qty > 0 else "BUY"
@@ -441,10 +511,34 @@ def build_close_plan(account_id, actual, targets):
                 client_order_id=f"ct-emergency-{tp.key.symbol}-{seq}",
                 replaces_client_order_id=None,
                 priority=2,
+                revision=revision,
+                position_side=tp.key.pos_side,
             )
         )
     actions.sort(key=lambda a: a.priority)
-    return ExecutionPlan(account_id=account_id, trade_id=None, actions=actions)
+    return ExecutionPlan(
+        account_id=account_id,
+        trade_id=None,
+        actions=actions,
+        operation_id=operation_id,
+    )
+
+
+def _emergency_state_flat(actual) -> bool:
+    for position in actual.positions.values():
+        if position.qty != 0:
+            return False
+        if any(
+            protection is not None
+            for protection in (
+                position.stop,
+                position.take_profit,
+                *position.extra_stops,
+                *position.extra_tps,
+            )
+        ):
+            return False
+    return True
 
 
 if __name__ == "__main__":

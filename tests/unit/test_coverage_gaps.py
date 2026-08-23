@@ -48,6 +48,36 @@ class TestConfig:
         monkeypatch.setenv("CT_UNRELATED", "x")
         Settings()
 
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("position_mode", "invalid"),
+            ("working_type", "last_price"),
+            ("reconcile_interval_s", 0),
+            ("orders_limit_per_min", -1),
+        ],
+    )
+    def test_invalid_runtime_settings_rejected(self, field, value):
+        with pytest.raises(ValueError):
+            Settings(encryption_key="ab" * 32, **{field: value})
+
+    def test_symbols_are_normalized_and_must_not_be_empty(self):
+        settings = Settings(
+            encryption_key="ab" * 32,
+            symbol_whitelist=[" btcusdt ", "BTCUSDT", "ethusdt"],
+        )
+        assert settings.symbol_whitelist == ["BTCUSDT", "ETHUSDT"]
+        with pytest.raises(ValueError, match="must not be empty"):
+            Settings(encryption_key="ab" * 32, symbol_whitelist=[])
+
+    def test_mainnet_urls_fail_closed_without_explicit_override(self):
+        with pytest.raises(ValueError, match="refuses non-testnet"):
+            Settings(
+                encryption_key="ab" * 32,
+                rest_base_url="https://fapi.asterdex.com",
+                ws_user_base="wss://fstream.asterdex.com/ws",
+            )
+
 
 class TestDatabaseGuards:
     async def test_migrate_before_connect_raises(self, tmp_path: Path):
@@ -119,6 +149,43 @@ class TestUserStreamRobustness:
         stop.set()
         await asyncio.wait_for(task, timeout=2)
         assert [e.raw["e"] for e in collected] == ["MARGIN_CALL"]
+
+
+class TestAppStartupGap:
+    async def test_connected_callback_resnapshots_before_stream_ready_once(self):
+        from copytradeaster.app import App
+
+        calls: list[str] = []
+
+        class Projector:
+            state = object()
+
+            async def rebuild_full(self, client, account_id):
+                assert client is master_client and account_id == "main"
+                assert not app._stream_ready.is_set()
+                calls.append("rebuild")
+
+        class Reconciler:
+            async def reconcile(self, state, reason):
+                assert state is Projector.state and reason == "post-stream-startup"
+                assert not app._stream_ready.is_set()
+                calls.append("reconcile")
+
+        master_client = object()
+        app = App.__new__(App)
+        app.master_client = master_client
+        app.projector = Projector()
+        app.reconciler = Reconciler()
+        app._stream_ready = asyncio.Event()
+        app._stream_connect_count = 0
+
+        await app._on_stream_connected()
+        assert calls == ["rebuild", "reconcile"]
+        assert app._stream_ready.is_set() and app._stream_connect_count == 1
+
+        await app._on_stream_connected()
+        assert calls == ["rebuild", "reconcile"]
+        assert app._stream_connect_count == 2
 
 
 class TestCliDispatch:

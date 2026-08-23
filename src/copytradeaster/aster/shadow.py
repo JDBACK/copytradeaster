@@ -22,6 +22,8 @@ from copytradeaster.aster.models import BalanceDTO, ExchangeInfo, OrderDTO, Posi
 from copytradeaster.aster.trading_api import AsterError, PlaceOrderRequest
 from copytradeaster.domain.models import PosSide, Side
 
+CONDITIONAL_TYPES = {"STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"}
+
 
 @dataclass(slots=True)
 class _ShadowOrder:
@@ -103,6 +105,7 @@ class ShadowExchange:
         self._leverage: dict[tuple[str, str], int] = {}
         self.metrics: Counter[str] = Counter()
         self.signed_requests = 0
+        self.partial_market_fill_ratio: Decimal | None = None
 
     def add_account(self, account_id: str, balance: Decimal | None = None) -> None:
         self.balances.setdefault(account_id, balance or self.initial_balance)
@@ -232,17 +235,25 @@ class ShadowExchange:
     async def place_order(self, account_id: str, req: PlaceOrderRequest) -> OrderDTO:
         self._ensure_account(account_id)
         self.metrics["place_order"] += 1
+        if req.close_position and (
+            req.type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+            or req.quantity is not None
+            or req.reduce_only
+        ):
+            raise AsterError(-1102, "closePosition is incompatible with quantity/reduceOnly")
+        if req.position_side != PosSide.BOTH and req.reduce_only:
+            raise AsterError(-1106, "reduceOnly is not accepted in Hedge Mode")
+        if req.type == "MARKET" and (req.quantity is None or req.quantity <= 0):
+            raise AsterError(-1102, "quantity is mandatory for MARKET")
+        if (
+            req.type in CONDITIONAL_TYPES
+            and not req.close_position
+            and (req.quantity is None or req.quantity <= 0)
+        ):
+            raise AsterError(-1102, "quantity is mandatory for fixed conditional")
         self._order_seq += 1
         self._update_seq += 1
-        quantity = req.quantity
-        if quantity is None and req.close_position:
-            quantity = abs(
-                self._positions.get(
-                    (account_id, req.symbol, req.position_side),
-                    _ShadowPosition(account_id, req.symbol, req.position_side),
-                ).qty
-            )
-        quantity = quantity or Decimal(0)
+        quantity = req.quantity or Decimal(0)
         order = _ShadowOrder(
             account_id=account_id,
             symbol=req.symbol,
@@ -251,7 +262,7 @@ class ShadowExchange:
             orig_qty=quantity,
             price=req.price or Decimal(0),
             stop_price=req.stop_price or Decimal(0),
-            reduce_only=req.reduce_only,
+            reduce_only=req.reduce_only or req.close_position or req.type in CONDITIONAL_TYPES,
             close_position=req.close_position,
             position_side=req.position_side,
             working_type=req.working_type or "MARK_PRICE",
@@ -259,9 +270,32 @@ class ShadowExchange:
             order_id=self._order_seq,
             update_time=self._update_seq,
         )
-        self._orders[(account_id, order.client_order_id)] = order
         if req.type == "MARKET":
+            key = (account_id, req.symbol, req.position_side)
+            old = self._positions.get(
+                key, _ShadowPosition(account_id, req.symbol, req.position_side)
+            ).qty
+            signed = quantity if req.side == Side.BUY else -quantity
+            opens_hedge = (
+                req.position_side == PosSide.LONG
+                and req.side == Side.BUY
+                or req.position_side == PosSide.SHORT
+                and req.side == Side.SELL
+            )
+            if req.position_side != PosSide.BOTH:
+                if not opens_hedge and (old == 0 or old * signed >= 0 or abs(signed) > abs(old)):
+                    raise AsterError(-2022, "ReduceOnly Order is rejected.")
+            elif (
+                req.reduce_only
+                and (old == 0 or old * signed >= 0 or abs(signed) > abs(old))
+                and not opens_hedge
+            ):
+                raise AsterError(-2022, "ReduceOnly Order is rejected.")
+            if self.partial_market_fill_ratio is not None:
+                ratio = min(max(self.partial_market_fill_ratio, Decimal(0)), Decimal(1))
+                order.orig_qty *= ratio
             self._fill_market(order, self.market_price)
+        self._orders[(account_id, order.client_order_id)] = order
         return order.dto()
 
     async def cancel_order(
@@ -348,7 +382,22 @@ class ShadowExchange:
             )
             self._positions[key] = position
         old_qty = position.qty
-        signed_delta = order.orig_qty if order.side == Side.BUY else -order.orig_qty
+        fill_qty = abs(old_qty) if order.close_position else order.orig_qty
+        signed_delta = fill_qty if order.side == Side.BUY else -fill_qty
+        closes = old_qty != 0 and old_qty * signed_delta < 0
+        if order.type in CONDITIONAL_TYPES and not closes:
+            order.status = "EXPIRED"
+            return
+        if (
+            closes
+            and abs(signed_delta) > abs(old_qty)
+            and (order.position_side != PosSide.BOTH or order.reduce_only or order.close_position)
+        ):
+            if order.position_side != PosSide.BOTH and not order.close_position:
+                order.status = "EXPIRED"
+                return
+            signed_delta = -old_qty
+            fill_qty = abs(old_qty)
         new_qty = old_qty + signed_delta
         if (old_qty != 0 and new_qty * old_qty < 0) or (old_qty == 0 and new_qty != 0):
             position.entry_price = price
@@ -360,7 +409,7 @@ class ShadowExchange:
                 ) / total
         position.qty = new_qty
         order.status = "FILLED"
-        order.executed_qty = order.orig_qty
+        order.executed_qty = fill_qty
         order.avg_price = price
         self._update_seq += 1
         order.update_time = self._update_seq
@@ -371,23 +420,18 @@ class ShadowExchange:
                     and candidate.symbol == order.symbol
                     and candidate.position_side == order.position_side
                     and candidate.status == "NEW"
-                    and candidate.type
-                    in {"STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"}
+                    and candidate.type in CONDITIONAL_TYPES
                 ):
                     candidate.status = "EXPIRED"
                     candidate.update_time = self._update_seq
 
     def _trigger_conditionals(self) -> None:
         for order in list(self._orders.values()):
-            if order.status != "NEW" or order.type not in {
-                "STOP_MARKET",
-                "STOP",
-                "TAKE_PROFIT_MARKET",
-                "TAKE_PROFIT",
-            }:
+            if order.status != "NEW" or order.type not in CONDITIONAL_TYPES:
                 continue
             position = self._positions.get((order.account_id, order.symbol, order.position_side))
             if position is None or position.qty == 0:
+                order.status = "EXPIRED"
                 continue
             is_long = position.qty > 0
             is_stop = order.type in {"STOP_MARKET", "STOP"}

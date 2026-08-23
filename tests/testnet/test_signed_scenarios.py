@@ -273,6 +273,422 @@ async def _flatten_main(client) -> None:
                 )
 
 
+async def test_close_position_contract_one_way_and_hedge(clients):
+    """REAL-01: Aster accepts closePosition without quantity/reduceOnly in
+    both position modes and reports the normalized exchange fields."""
+    from copytradeaster.aster.trading_api import PlaceOrderRequest
+    from copytradeaster.domain.models import PosSide, Side
+
+    client = clients["main"]
+    original_hedge = await _is_hedge(client)
+    try:
+        for hedge in (False, True):
+            await _flatten_main(client)
+            if await _is_hedge(client) != hedge:
+                await client.set_position_mode("main", hedge)
+            position_side = PosSide.LONG if hedge else PosSide.BOTH
+            stamp = int(time.time() * 1000)
+            await client.place_order(
+                "main",
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.BUY,
+                    type="MARKET",
+                    quantity=QTY,
+                    position_side=position_side,
+                    new_client_order_id=f"cp-open-{int(hedge)}-{stamp}"[:36],
+                    new_order_resp_type="RESULT",
+                ),
+            )
+            position = next(
+                p for p in await client.position_risk("main", SYMBOL) if p.position_amt != 0
+            )
+            info = await client.exchange_info()
+            tick = info.tradable_filters()[SYMBOL].tick_size
+            for order_type, level in (
+                ("STOP_MARKET", position.entry_price - D("1500")),
+                ("TAKE_PROFIT_MARKET", position.entry_price + D("1500")),
+            ):
+                trigger = (level / tick).to_integral_value() * tick
+                coid = f"cp-{order_type[:2].lower()}-{int(hedge)}-{stamp}"[:36]
+                placed = await client.place_order(
+                    "main",
+                    PlaceOrderRequest(
+                        symbol=SYMBOL,
+                        side=Side.SELL,
+                        type=order_type,
+                        quantity=None,
+                        stop_price=trigger,
+                        reduce_only=False,
+                        close_position=True,
+                        position_side=position_side,
+                        working_type="MARK_PRICE",
+                        new_client_order_id=coid,
+                    ),
+                )
+                queried = await client.query_order(
+                    "main", SYMBOL, orig_client_order_id=placed.client_order_id
+                )
+                assert queried is not None
+                assert queried.close_position is True
+                assert queried.orig_qty == 0
+                assert queried.position_side == position_side
+                # Observed Aster response normalization: reduceOnly is true
+                # although the signed request correctly omitted it.
+                assert queried.reduce_only is True
+                await client.cancel_order(
+                    "main", SYMBOL, orig_client_order_id=placed.client_order_id
+                )
+        await _flatten_main(client)
+    finally:
+        await _flatten_main(client)
+        if await _is_hedge(client) != original_hedge:
+            await client.set_position_mode("main", original_hedge)
+
+
+async def test_emergency_close_all_twice_uses_distinct_real_generations(clients, creds, db):
+    """REAL-04: two identical real follower episodes produce two signed
+    closes, distinct persisted operation ids, and remain paused afterwards."""
+    import contextlib
+
+    from copytradeaster.aster.trading_api import PlaceOrderRequest
+    from copytradeaster.cli.main import _emergency_close_all, _set_pause
+    from copytradeaster.domain.models import PosSide, Side
+    from copytradeaster.storage.repositories import SettingsRepo
+
+    if "copyc1" not in creds.account_ids():
+        pytest.skip("copyc1 is required for emergency signed proof")
+    client = clients["main"]
+
+    async def flatten_copy() -> None:
+        for order in await client.open_orders("copyc1", SYMBOL):
+            with contextlib.suppress(Exception):
+                await client.cancel_order(
+                    "copyc1", SYMBOL, orig_client_order_id=order.client_order_id
+                )
+        for position in await client.position_risk("copyc1", SYMBOL):
+            if position.position_amt == 0:
+                continue
+            with contextlib.suppress(Exception):
+                await client.place_order(
+                    "copyc1",
+                    PlaceOrderRequest(
+                        symbol=SYMBOL,
+                        side=Side.SELL if position.position_amt > 0 else Side.BUY,
+                        type="MARKET",
+                        quantity=abs(position.position_amt),
+                        reduce_only=position.position_side == PosSide.BOTH,
+                        position_side=position.position_side,
+                        new_client_order_id=f"emg-clean-{time.time_ns()}"[:36],
+                        new_order_resp_type="RESULT",
+                    ),
+                )
+
+    async def open_same_qty() -> None:
+        hedge = await client.get_position_mode("copyc1")
+        await client.place_order(
+            "copyc1",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=QTY,
+                position_side=PosSide.LONG if hedge else PosSide.BOTH,
+                new_client_order_id=f"emg-open-{time.time_ns()}"[:36],
+                new_order_resp_type="RESULT",
+            ),
+        )
+
+    started = time.time()
+    try:
+        await flatten_copy()
+        await _set_pause(False)
+        await open_same_qty()
+        assert await _emergency_close_all() == 0
+        assert all(p.position_amt == 0 for p in await client.position_risk("copyc1", SYMBOL))
+
+        await _set_pause(False)
+        await open_same_qty()
+        assert await _emergency_close_all() == 0
+        assert all(p.position_amt == 0 for p in await client.position_risk("copyc1", SYMBOL))
+
+        rows = await db.fetchall(
+            "SELECT operation_id, status FROM execution_commands"
+            " WHERE account_id='copyc1' AND kind='MARKET_CLOSE'"
+            " AND operation_id IS NOT NULL AND created_at>=?",
+            (time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started)),),
+        )
+        operation_ids = {str(row["operation_id"]) for row in rows}
+        assert len(operation_ids) == 2, operation_ids
+        assert all(str(row["status"]) == "CONFIRMED" for row in rows)
+        settings = SettingsRepo(db)
+        assert await settings.get_flag("allow_new_entries") == "false"
+        assert await settings.get_flag("emergency_active") == "true"
+    finally:
+        await flatten_copy()
+
+
+async def test_boot_recovery_real_found_and_not_found(clients, db):
+    """REAL-05: resolve a real resting conditional and an authoritative
+    missing clientOrderId without any duplicate placement."""
+    import json
+
+    from copytradeaster.aster.trading_api import PlaceOrderRequest
+    from copytradeaster.domain.models import PosSide, Side
+    from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo
+    from copytradeaster.trading.executor import resolve_boot_unknowns
+
+    client = clients["main"]
+    await _flatten_main(client)
+    hedge = await _is_hedge(client)
+    position_side = PosSide.LONG if hedge else PosSide.BOTH
+    stamp = time.time_ns()
+    try:
+        await client.place_order(
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=QTY,
+                position_side=position_side,
+                new_client_order_id=f"boot-open-{stamp}"[:36],
+                new_order_resp_type="RESULT",
+            ),
+        )
+        position = next(
+            p for p in await client.position_risk("main", SYMBOL) if p.position_amt != 0
+        )
+        level = (position.entry_price - D("1800")).quantize(D("0.1"))
+        found_coid = f"boot-found-{stamp}"[:36]
+        await client.place_order(
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="STOP_MARKET",
+                quantity=QTY,
+                stop_price=level,
+                reduce_only=not hedge,
+                position_side=position_side,
+                working_type="MARK_PRICE",
+                new_client_order_id=found_coid,
+            ),
+        )
+        commands = CommandRepo(db)
+        found_key = f"boot-found-key-{stamp}"
+        await commands.insert(
+            found_key,
+            "main",
+            None,
+            "PLACE_STOP",
+            json.dumps({"symbol": SYMBOL}),
+            1,
+            found_coid,
+        )
+        await commands.set_status(found_key, "SENDING")
+        missing_key = f"boot-missing-key-{stamp}"
+        missing_coid = f"boot-missing-{stamp}"[:36]
+        await commands.insert(
+            missing_key,
+            "main",
+            None,
+            "PLACE_STOP",
+            json.dumps({"symbol": SYMBOL}),
+            1,
+            missing_coid,
+        )
+        await commands.set_status(missing_key, "UNKNOWN")
+
+        before = len(await client.open_orders("main", SYMBOL))
+        report = await resolve_boot_unknowns(
+            lambda _account_id: client, commands, OrderLinkRepo(db)
+        )
+        after = len(await client.open_orders("main", SYMBOL))
+        assert report.confirmed >= 1 and report.failed_not_found >= 1
+        assert (await commands.get(found_key))["status"] == "CONFIRMED"
+        assert (await commands.get(missing_key))["status"] == "FAILED"
+        assert before == after
+    finally:
+        await _flatten_main(client)
+
+
+async def test_real_app_ws_ready_reconnect_and_cleanup(clients, creds):
+    """REAL-06: actual App reaches READY after WS-gated resnapshot, receives a
+    real master order event, reconnects after listenKey close, and stops with
+    ready=false without duplicating follower protection."""
+    import contextlib
+
+    from copytradeaster.app import App
+    from copytradeaster.aster.trading_api import PlaceOrderRequest
+    from copytradeaster.cli.main import _emergency_close_all, _set_pause
+    from copytradeaster.domain.models import PosSide, Side
+    from copytradeaster.storage.repositories import SettingsRepo
+
+    real_followers = [aid for aid in ("copyc1", "copyc2", "copyc3") if aid in creds.account_ids()]
+    if not real_followers:
+        pytest.skip("at least one imported follower is required")
+    client = clients["main"]
+    await _emergency_close_all()
+    await _set_pause(False)
+    await _flatten_main(client)
+    app = App(Settings())
+    started = False
+
+    async def wait_for(predicate, timeout: float, what: str) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await predicate():
+                return
+            await asyncio.sleep(1)
+        raise TimeoutError(f"timed out waiting for {what}")
+
+    try:
+        await app.start()
+        started = True
+        assert app._ready and app._stream_connect_count >= 1
+        assert await app.settings.get_flag("ready") == "true"
+        hedge = await client.get_position_mode("main")
+        position_side = PosSide.LONG if hedge else PosSide.BOTH
+        stamp = time.time_ns()
+        await client.place_order(
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=QTY,
+                position_side=position_side,
+                new_client_order_id=f"app-open-{stamp}"[:36],
+                new_order_resp_type="RESULT",
+            ),
+        )
+        position = next(
+            p for p in await client.position_risk("main", SYMBOL) if p.position_amt != 0
+        )
+        stop_level = (position.entry_price - D("1200")).quantize(D("0.1"))
+        master_stop = await client.place_order(
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="STOP_MARKET",
+                quantity=QTY,
+                stop_price=stop_level,
+                reduce_only=not hedge,
+                position_side=position_side,
+                working_type="MARK_PRICE",
+                new_client_order_id=f"app-stop-{stamp}"[:36],
+            ),
+        )
+
+        async def followers_protected() -> bool:
+            for account_id in real_followers:
+                positions = await client.position_risk(account_id, SYMBOL)
+                if not any(p.position_amt != 0 for p in positions):
+                    return False
+                protections = [
+                    order
+                    for order in await client.open_orders(account_id, SYMBOL)
+                    if order.client_order_id.startswith("ct") and order.type.startswith("STOP")
+                ]
+                if len(protections) != 1:
+                    return False
+            return True
+
+        await wait_for(followers_protected, 60, "followers protected from real WS event")
+        before = {
+            aid: (
+                sum(
+                    abs(p.position_amt)
+                    for p in await client.position_risk(aid, SYMBOL)
+                    if p.position_amt != 0
+                ),
+                len(
+                    [
+                        o
+                        for o in await client.open_orders(aid, SYMBOL)
+                        if o.client_order_id.startswith("ct") and o.type.startswith("STOP")
+                    ]
+                ),
+            )
+            for aid in real_followers
+        }
+
+        await app.master_client.close_listen_key("main")
+
+        async def reconnected() -> bool:
+            return app._stream_reconnect_count >= 1
+
+        await wait_for(reconnected, 60, "master user stream reconnect")
+        await asyncio.sleep(2)
+        after = {
+            aid: (
+                sum(
+                    abs(p.position_amt)
+                    for p in await client.position_risk(aid, SYMBOL)
+                    if p.position_amt != 0
+                ),
+                len(
+                    [
+                        o
+                        for o in await client.open_orders(aid, SYMBOL)
+                        if o.client_order_id.startswith("ct") and o.type.startswith("STOP")
+                    ]
+                ),
+            )
+            for aid in real_followers
+        }
+        assert after == before
+
+        await client.cancel_order("main", SYMBOL, orig_client_order_id=master_stop.client_order_id)
+        await client.place_order(
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="MARKET",
+                quantity=abs(position.position_amt),
+                reduce_only=not hedge,
+                position_side=position_side,
+                new_client_order_id=f"app-close-{stamp}"[:36],
+                new_order_resp_type="RESULT",
+            ),
+        )
+        # REAL-07: the critical signal itself is synthetic (we do not induce a
+        # liquidation), but its callback performs a REAL authoritative REST
+        # rebuild after the master was closed directly on the exchange.
+        await app._on_master_critical("signed-synthetic-autoclose")
+
+        async def everybody_flat() -> bool:
+            for account_id in ["main", *real_followers]:
+                if any(p.position_amt != 0 for p in await client.position_risk(account_id, SYMBOL)):
+                    return False
+            return True
+
+        await wait_for(everybody_flat, 60, "App-driven follower cleanup")
+    finally:
+        with contextlib.suppress(Exception):
+            await _flatten_main(client)
+        if started:
+            with contextlib.suppress(Exception):
+                await app.stop()
+        else:
+            with contextlib.suppress(Exception):
+                await app.http.aclose()
+            with contextlib.suppress(Exception):
+                await app.db.close()
+        with contextlib.suppress(Exception):
+            await _emergency_close_all()
+
+    audit = Database(Settings().db_path)
+    await audit.connect()
+    try:
+        assert await SettingsRepo(audit).get_flag("ready") == "false"
+    finally:
+        await audit.close()
+
+
 def _executor(clients, db):
     from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo
     from copytradeaster.trading.executor import Executor

@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from copytradeaster.domain.models import (
 )
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo, SettingsRepo
-from copytradeaster.trading.executor import Executor, command_key_of
+from copytradeaster.trading.executor import Executor, command_key_of, resolve_boot_unknowns
 
 KEY_BTC = {"symbol": "BTCUSDT"}
 
@@ -98,6 +99,7 @@ class FakeClient:
         self.positions_result: list = []
         self.place_error: AsterError | None = None
         self.place_timeout = False
+        self.query_error: AsterError | None = None
 
     async def place_order(self, account_id, req):
         if self.place_timeout:
@@ -123,6 +125,8 @@ class FakeClient:
         return self.positions_result
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
+        if self.query_error is not None:
+            raise self.query_error
         if orig_client_order_id in self.query_results:
             return self.query_results[orig_client_order_id]
         # realistic fallback: the exchange knows every order it accepted
@@ -336,3 +340,75 @@ async def test_command_key_stable_and_distinct():
     assert k1 != k2
     assert len(k1) == 24
     assert k1 == command_key_of(plan_of(open_action()), a1)
+
+
+async def test_command_key_distinguishes_operation_generations():
+    action = close_action()
+    first = dataclasses.replace(plan_of(action), operation_id="emergency-1")
+    second = dataclasses.replace(plan_of(action), operation_id="emergency-2")
+    assert command_key_of(first, action) != command_key_of(second, action)
+
+
+async def test_existing_sending_is_never_resubmitted(env):
+    executor, client, commands, links, _ = env
+    del links
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        "ct-unresolved",
+    )
+    await commands.set_status(key, "SENDING")
+    result = await executor.submit(plan)
+    assert result[0].status == "SENDING"
+    assert client.placed == []
+
+
+async def test_boot_query_error_remains_unresolved_after_bounded_retries(env):
+    executor, client, commands, links, _ = env
+    del executor
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        "ct-unresolved",
+    )
+    await commands.set_status(key, "SENDING")
+    client.query_error = AsterError(-1006, "transport unavailable")
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.unresolved_query_error == 1
+    assert len(await commands.in_flight()) == 1
+    assert client.placed == []
+
+
+async def test_boot_authoritative_not_found_marks_failed(env):
+    executor, client, commands, links, _ = env
+    del executor
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        "ct-not-found",
+    )
+    await commands.set_status(key, "UNKNOWN")
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.failed_not_found == 1 and report.unresolved == 0
+    assert (await commands.get(key))["status"] == "FAILED"

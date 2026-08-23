@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 
 import httpx
 
@@ -100,8 +101,11 @@ class App:
         self._ingest_dropped = 0
         self._ingest_task: asyncio.Task | None = None
         self._sweep_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         self._filters_cache: dict = {}
         self._ready = False
+        self._stream_connect_count = 0
+        self._stream_reconnect_count = 0
 
     # --- construction helpers ------------------------------------------------------
 
@@ -138,6 +142,9 @@ class App:
         # 1-2. storage + accounts/settings
         await self.db.connect()
         await self.db.migrate()
+        self._runtime_id = uuid.uuid4().hex
+        await self.settings.start_runtime(self._runtime_id, now_ms())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         accounts = await AccountRepo_all(self.db)
         shadow_rows = [row for row in accounts if str(row["execution_mode"] or "REAL") == "SHADOW"]
         if shadow_rows:
@@ -175,7 +182,19 @@ class App:
 
         # 4. resolve UNKNOWN commands from previous run
         resolved = await resolve_boot_unknowns(self._client_for, self.commands, self.links)
-        log.info("boot unknown-resolution: %d confirmed", resolved)
+        in_flight = await self.commands.in_flight()
+        log.info(
+            "boot resolution: confirmed=%d not_found=%d unresolved=%d",
+            resolved.confirmed,
+            resolved.failed_not_found,
+            resolved.unresolved,
+        )
+        if in_flight or resolved.unresolved:
+            await self.settings.set_flag("ready", "false")
+            await self.settings.set_flag("degraded", f"boot-unresolved:{len(in_flight)}")
+            raise RuntimeError(
+                f"boot recovery required: {len(in_flight)} in-flight command(s) unresolved"
+            )
 
         # 5. bootstrap position modes + snapshots
         mode_is_hedge = await self.master_client.get_position_mode("main")
@@ -231,8 +250,8 @@ class App:
         log.info("READY")
 
     async def run_until_stopped(self) -> None:
-        await self.start()
         try:
+            await self.start()
             await self.stop_event.wait()
         finally:
             await self.stop()
@@ -243,6 +262,7 @@ class App:
         for task in (
             self._sweep_task,
             self._ingest_task,
+            self._heartbeat_task,
             getattr(self, "_stream_task", None),
         ):
             if task is not None:
@@ -255,6 +275,19 @@ class App:
         await self.db.close()
         log.info("stopped")
 
+    async def _heartbeat_loop(self) -> None:
+        interval = min(max(self.cfg.reconcile_interval_s / 2, 1.0), 10.0)
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            if not await self.settings.heartbeat(self._runtime_id, now_ms()):
+                log.error("runtime lease changed; stopping stale process")
+                self.stop_event.set()
+                return
+
     async def _consume(self, raw: dict) -> None:
         await self.projector.apply_raw(raw)
 
@@ -263,6 +296,13 @@ class App:
         self._enqueue(event.raw)
 
     async def _on_stream_connected(self) -> None:
+        self._stream_connect_count += 1
+        if not self._stream_ready.is_set():
+            # UserStream awaits this callback before reading its first frame.
+            # Therefore the second authoritative snapshot cannot race queued
+            # pre-snapshot TRADE events and READY is published only afterwards.
+            await self.projector.rebuild_full(self.master_client, "main")
+            await self.reconciler.reconcile(self.projector.state, reason="post-stream-startup")
         self._stream_ready.set()
 
     def _enqueue(self, raw: dict) -> None:
@@ -314,6 +354,7 @@ class App:
             await notify(f"CRITICAL master resnapshot failed ({reason}): {exc}")
 
     async def _on_stream_reconnect(self) -> None:
+        self._stream_reconnect_count += 1
         log.info("master stream reconnected - resnapshotting")
         await self.projector.rebuild_full(self.master_client, "main")
         await self.reconciler.reconcile(self.projector.state, reason="reconnect")
@@ -339,7 +380,11 @@ class App:
                     # authoritative master state: heals projector drift that the
                     # informational ACCOUNT_UPDATE only logs
                     await self.projector.rebuild_full(self.master_client, "main")
-                await self.reconciler.reconcile(self.projector.state, reason="sweep")
+                report = await self.reconciler.reconcile(self.projector.state, reason="sweep")
+                if all(created >= 0 for created in report.per_account.values()) and not (
+                    await self.commands.in_flight()
+                ):
+                    await self.settings.clear_degraded()
             except Exception as exc:  # noqa: BLE001
                 log.error("periodic sweep failed: %s", exc)
 

@@ -128,6 +128,35 @@ class SettingsRepo:
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+        if key == "degraded":
+            await self.db.execute_write(
+                "INSERT INTO app_state(key, value) VALUES ('degraded_active', 'true')"
+                " ON CONFLICT(key) DO UPDATE SET value='true'"
+            )
+            await self.db.execute_write(
+                "INSERT INTO app_state(key, value) VALUES ('degraded_reason', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (value,),
+            )
+
+    async def start_runtime(self, runtime_id: str, now_ms: int) -> None:
+        await self.set_flag("ready", "false")
+        await self.set_flag("runtime_id", runtime_id)
+        await self.set_flag("started_at", str(now_ms))
+        await self.set_flag("heartbeat_at", str(now_ms))
+        await self.set_flag("degraded_active", "false")
+        await self.set_flag("degraded_reason", "")
+
+    async def heartbeat(self, runtime_id: str, now_ms: int) -> bool:
+        current = await self.get_flag("runtime_id")
+        if current != runtime_id:
+            return False
+        await self.set_flag("heartbeat_at", str(now_ms))
+        return True
+
+    async def clear_degraded(self) -> None:
+        await self.set_flag("degraded_active", "false")
+        await self.set_flag("degraded_reason", "")
 
 
 class MasterEventRepo:
@@ -178,6 +207,14 @@ class CopyTradeRepo:
         await self.db.execute_write(
             "UPDATE copy_trades SET closed_at=?, status='CLOSED' WHERE trade_id=?",
             (_now_iso(), trade_id),
+        )
+
+    async def set_direction(self, trade_id: int, direction: int) -> None:
+        if direction not in {-1, 1}:
+            raise ValueError("copy trade direction must be -1 or 1")
+        await self.db.execute_write(
+            "UPDATE copy_trades SET direction=? WHERE trade_id=? AND direction=0",
+            (direction, trade_id),
         )
 
     async def active_trade(self, symbol: str, pos_side: str) -> Row | None:
@@ -244,12 +281,13 @@ class CommandRepo:
         payload_json: str,
         priority: int,
         client_order_id: str | None,
+        operation_id: str | None = None,
     ) -> None:
         now = _now_iso()
         await self.db.execute_write(
             "INSERT INTO execution_commands(command_key, account_id, trade_id, kind, payload,"
-            " priority, status, attempts, client_order_id, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)",
+            " priority, status, attempts, client_order_id, operation_id, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?)",
             (
                 command_key,
                 account_id,
@@ -258,6 +296,7 @@ class CommandRepo:
                 payload_json,
                 priority,
                 client_order_id,
+                operation_id,
                 now,
                 now,
             ),

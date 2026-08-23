@@ -84,6 +84,7 @@ def _order_payload(
     stop_price: Decimal | None = None,
     working_type: str | None = None,
     limit_price: Decimal | None = None,
+    close_position: bool = False,
 ) -> dict[str, str]:
     payload: dict[str, str] = {
         "symbol": symbol,
@@ -100,7 +101,10 @@ def _order_payload(
     if working_type is not None:
         payload["workingType"] = working_type
         payload["priceProtect"] = PRICE_PROTECT
-    if closing:
+    if close_position:
+        payload["closePosition"] = "true"
+        _apply_open_mode(payload, pos_side)
+    elif closing:
         _apply_close_mode(payload, pos_side)
     else:
         _apply_open_mode(payload, pos_side)
@@ -130,6 +134,41 @@ def _level_equal(a: Decimal | None, b: Decimal | None, tick: Decimal) -> bool:
     if tick <= 0:
         return a == b
     return (a / tick).to_integral_value() == (b / tick).to_integral_value()
+
+
+def _protection_matches(
+    current,
+    *,
+    order_type: str,
+    side: Side,
+    level: Decimal,
+    quantity: Decimal,
+    working_type: str,
+    filters: SymbolFilters,
+) -> bool:
+    """Compare every exchange field that defines protection convergence."""
+    if current is None:
+        return False
+    if not _level_equal(current.stop_price, level, filters.tick_size):
+        return False
+    if current.type != order_type or current.side != side:
+        return False
+    if current.working_type != working_type:
+        return False
+    market_protection = order_type in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+    if market_protection:
+        # closePosition protects the live remainder, including later partial
+        # fills. The REQUEST must omit reduceOnly, but live Aster openOrders /
+        # queryOrder normalize the RESPONSE to reduceOnly=true together with
+        # closePosition=true; convergence therefore keys on closePosition.
+        return current.close_position
+    if current.close_position:
+        return False
+    # Like closePosition orders, Aster normalizes accepted HEDGE fixed
+    # conditionals to reduceOnly=true in responses even though the request
+    # correctly omitted reduceOnly. positionSide is already represented by
+    # the PositionKey used to select this order.
+    return _qty_equal(current.orig_qty, quantity, filters.step_size)
 
 
 def _cancel_action(
@@ -283,10 +322,17 @@ def _plan_for_target(
                 )
             continue
         order_type = target.stop_type if kind == ActionKind.PLACE_STOP else target.tp_type
-        current_level = current.stop_price if current is not None else None
-        if _level_equal(current_level, wanted_level, filters.tick_size):
-            continue
         close_side = _close_side(pos_side, qty_sign)
+        if _protection_matches(
+            current,
+            order_type=order_type,
+            side=close_side,
+            level=wanted_level,
+            quantity=target_abs,
+            working_type=working_type,
+            filters=filters,
+        ):
+            continue
         # limit-flavor conditionals (STOP / TAKE_PROFIT) require an explicit
         # limit price: give the fill a 0.05% buffer beyond the trigger
         limit_price = None
@@ -300,12 +346,13 @@ def _plan_for_target(
             symbol,
             close_side,
             order_type,
-            target_abs,
+            None if order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET") else target_abs,
             pos_side,
-            closing=True,
+            closing=order_type in ("STOP", "TAKE_PROFIT"),
             stop_price=wanted_level,
             working_type=working_type,
             limit_price=limit_price,
+            close_position=order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET"),
         )
         place_action = ExecutionAction(
             kind=kind,

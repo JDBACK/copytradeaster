@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
@@ -34,6 +35,8 @@ log = get_logger(__name__)
 UNKNOWN_HTTP = {503}
 UNKNOWN_CODES = {-1000, -1006, -1007}
 MAX_ATTEMPTS = 3
+BOOT_QUERY_ATTEMPTS = 3
+BOOT_QUERY_BACKOFF_S = 0.05
 
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
 
@@ -50,6 +53,18 @@ class CommandResult(NamedTuple):
     command_key: str
     status: str
     error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BootResolutionReport:
+    confirmed: int = 0
+    failed_not_found: int = 0
+    unresolved_query_error: int = 0
+    unresolved_without_coid: int = 0
+
+    @property
+    def unresolved(self) -> int:
+        return self.unresolved_query_error + self.unresolved_without_coid
 
 
 def _payload_for(action: ExecutionAction) -> PlaceOrderRequest:
@@ -91,7 +106,10 @@ def command_key_of(plan: ExecutionPlan, action: ExecutionAction) -> str:
     """
     canonical = json.dumps(action.payload, sort_keys=True, separators=(",", ":"))
     trade = action.trade_id if action.trade_id is not None else plan.trade_id
-    raw = f"{plan.account_id}|{trade}|{action.kind.value}|{action.revision}|{canonical}"
+    raw = (
+        f"{plan.account_id}|{trade}|{plan.operation_id}|"
+        f"{action.kind.value}|{action.revision}|{canonical}"
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -168,6 +186,8 @@ class Executor:
     ) -> CommandResult | None:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
+        if existing is not None and existing["status"] in ("SENDING", "UNKNOWN"):
+            return CommandResult(key, str(existing["status"]), "boot resolution required")
         if existing is not None and existing["status"] in ("CONFIRMED", "SUBMITTED"):
             return CommandResult(key, str(existing["status"]), None)
         if existing is None:
@@ -179,6 +199,7 @@ class Executor:
                 json.dumps(action.payload, sort_keys=True),
                 action.priority,
                 None,
+                plan.operation_id,
             )
         else:
             # FAILED row of the same logical transition: retry under the
@@ -199,6 +220,8 @@ class Executor:
     ) -> CommandResult | None:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
+        if existing is not None and existing["status"] in ("SENDING", "UNKNOWN"):
+            return CommandResult(key, str(existing["status"]), "boot resolution required")
         if existing is not None and existing["status"] in ("CONFIRMED", "SUBMITTED"):
             return CommandResult(key, str(existing["status"]), None)
         if existing is None:
@@ -210,6 +233,7 @@ class Executor:
                 json.dumps(action.payload, sort_keys=True),
                 action.priority,
                 None,
+                plan.operation_id,
             )
         else:
             # FAILED row of the same logical transition: retry under the
@@ -239,6 +263,8 @@ class Executor:
             status = str(existing["status"])
             if status == "CONFIRMED":
                 return CommandResult(key, status, None)
+            if status in ("SENDING", "UNKNOWN"):
+                return CommandResult(key, status, "boot resolution required")
             if status == "SUBMITTED":
                 # A previous attempt answered SUBMITTED but was never confirmed
                 # in openOrders. That is NOT terminal success: verify on the
@@ -260,6 +286,7 @@ class Executor:
                 payload_json,
                 action.priority,
                 coid,
+                plan.operation_id,
             )
         else:
             await self._commands.set_status(key, "PENDING", client_order_id=coid)
@@ -348,8 +375,9 @@ class Executor:
             )
         except AsterError as exc:
             log.warning("submitted-recovery query failed for %s: %s", key, exc)
-            return None
+            return CommandResult(key, "SUBMITTED", f"resolution query failed:{exc}")
         if order is None:
+            await self._commands.set_status(key, "FAILED", last_error="submitted:not-found")
             return None
         await self._commands.set_status(
             key,
@@ -438,7 +466,7 @@ async def resolve_boot_unknowns(
     clients: Callable[[str], AsterClient],
     commands: CommandRepo,
     links: OrderLinkRepo | None = None,
-) -> int:
+) -> BootResolutionReport:
     """Boot-time resolution of every in-flight command: UNKNOWN / SENDING / SUBMITTED.
 
     Crash windows: SENDING (request left, no response recorded) and SUBMITTED
@@ -449,21 +477,47 @@ async def resolve_boot_unknowns(
     """
     rows = await commands.in_flight()
     confirmed = 0
+    failed_not_found = 0
+    unresolved_query_error = 0
+    unresolved_without_coid = 0
     for row in rows:
         key = str(row["command_key"])
         account_id = str(row["account_id"])
         coid = row["client_order_id"]
         payload = json.loads(str(row["payload"]))
         if not coid:
-            await commands.set_status(key, "FAILED", last_error="boot: no coid to resolve")
+            await commands.set_status(key, "UNKNOWN", last_error="boot: no coid to resolve")
+            unresolved_without_coid += 1
             continue
-        try:
-            order = await clients(account_id).query_order(
-                account_id, payload["symbol"], orig_client_order_id=str(coid)
+        order = None
+        query_succeeded = False
+        last_error: AsterError | None = None
+        for attempt in range(BOOT_QUERY_ATTEMPTS):
+            try:
+                order = await clients(account_id).query_order(
+                    account_id, payload["symbol"], orig_client_order_id=str(coid)
+                )
+                query_succeeded = True
+                break
+            except AsterError as exc:
+                last_error = exc
+                log.warning(
+                    "boot resolve query failed for %s (%d/%d): %s",
+                    key,
+                    attempt + 1,
+                    BOOT_QUERY_ATTEMPTS,
+                    exc,
+                )
+                if attempt + 1 < BOOT_QUERY_ATTEMPTS:
+                    await asyncio.sleep(BOOT_QUERY_BACKOFF_S * (attempt + 1))
+        if not query_succeeded:
+            unresolved_query_error += 1
+            await commands.set_status(
+                key,
+                str(row["status"]),
+                last_error=f"boot-query-unresolved:{last_error}",
             )
-        except AsterError as exc:
-            log.warning("boot resolve query failed for %s: %s", key, exc)
-            continue  # leave in-flight; retried on next boot
+            continue
         if order is not None:
             await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:{order.status}")
             if links is not None:
@@ -478,7 +532,13 @@ async def resolve_boot_unknowns(
             confirmed += 1
         else:
             await commands.set_status(key, "FAILED", last_error="boot-resolved:not-found")
-    return confirmed
+            failed_not_found += 1
+    return BootResolutionReport(
+        confirmed=confirmed,
+        failed_not_found=failed_not_found,
+        unresolved_query_error=unresolved_query_error,
+        unresolved_without_coid=unresolved_without_coid,
+    )
 
 
 def _with_coid(req: PlaceOrderRequest, coid: str) -> PlaceOrderRequest:

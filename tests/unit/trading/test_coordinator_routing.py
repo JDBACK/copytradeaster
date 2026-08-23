@@ -45,13 +45,13 @@ class FakeClient:
         out = []
         for k, v in self.positions.items():
             if v.get("stop") is not None:
-                out.append(FakeOrder("STOP_MARKET", v["stop"], k))
+                out.append(FakeOrder("STOP_MARKET", v["stop"], k, qty=abs(v["qty"])))
             if v.get("tp") is not None:
-                out.append(FakeOrder("TAKE_PROFIT_MARKET", v["tp"], k))
+                out.append(FakeOrder("TAKE_PROFIT_MARKET", v["tp"], k, qty=abs(v["qty"])))
             if v.get("stop_limit") is not None:
-                out.append(FakeOrder("STOP", v["stop_limit"], k))
+                out.append(FakeOrder("STOP", v["stop_limit"], k, qty=abs(v["qty"])))
             if v.get("tp_limit") is not None:
-                out.append(FakeOrder("TAKE_PROFIT", v["tp_limit"], k))
+                out.append(FakeOrder("TAKE_PROFIT", v["tp_limit"], k, qty=abs(v["qty"])))
         return out
 
     async def place_order(self, account_id, req):
@@ -90,19 +90,20 @@ class FakeOrder:
     def model_dump(self):
         return {"coid": self.client_order_id}
 
-    def __init__(self, type_, stop_price, key, coid="ct-stop", status="NEW", ut=1):
+    def __init__(self, type_, stop_price, key, coid="ct-stop", status="NEW", ut=1, qty=D("0.05")):
         self.type = type_
         self.stop_price = stop_price
         self.symbol = key.symbol
         self.position_side = key.pos_side
         self.client_order_id = coid
         self.status = status
-        self.reduce_only = True
-        self.close_position = False
+        self.close_position = type_ in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+        self.reduce_only = not self.close_position
         self.side = Side.SELL
         self.working_type = "MARK_PRICE"
         self.order_id = 5
         self.update_time = ut
+        self.orig_qty = D(0) if self.close_position else qty
 
 
 class FakePlaced:

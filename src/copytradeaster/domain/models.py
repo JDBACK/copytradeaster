@@ -79,8 +79,12 @@ class ProtectiveOrder(_DecimalStrict):
     reduce_only: bool
     close_position: bool
     working_type: str
+    # Fixed-quantity STOP/TP orders protect only this amount. Exchange
+    # closePosition orders normally report zero here because their coverage is
+    # evaluated against the live position at trigger time.
+    orig_qty: Decimal = Decimal(0)
 
-    _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("stop_price",)
+    _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("stop_price", "orig_qty")
 
 
 @dataclass(slots=True)
@@ -129,6 +133,15 @@ class RiskPolicy(_DecimalStrict):
     allow_new_entries: bool = True
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("risk_percent", "max_entry_deviation_pct")
+
+    def __post_init__(self) -> None:
+        _DecimalStrict.__post_init__(self)
+        if not Decimal(0) < self.risk_percent <= Decimal(1):
+            raise ValueError("RiskPolicy.risk_percent must be in (0, 1]")
+        if self.max_leverage <= 0:
+            raise ValueError("RiskPolicy.max_leverage must be positive")
+        if not Decimal(0) <= self.max_entry_deviation_pct <= Decimal(1):
+            raise ValueError("RiskPolicy.max_entry_deviation_pct must be in [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +193,9 @@ class ExecutionPlan:
     account_id: str
     trade_id: int | None
     actions: list[ExecutionAction]
+    # Persisted logical operation generation. Used by operator workflows such
+    # as emergency-close-all to distinguish two valid identical invocations.
+    operation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

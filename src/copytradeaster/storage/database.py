@@ -87,6 +87,9 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE copy_trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 0
     """,
+    """
+    ALTER TABLE execution_commands ADD COLUMN operation_id TEXT
+    """,
 ]
 
 

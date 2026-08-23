@@ -246,6 +246,13 @@ async def _submit_master_order(
     close/open.
     """
     current = request
+    before_abs = await _master_position_abs(client, "main", request.position_side)
+    requested_abs = abs(request.quantity or Decimal(0))
+    target_abs = (
+        before_abs + requested_abs
+        if request.side == Side.BUY
+        else max(before_abs - requested_abs, Decimal(0))
+    )
     for attempt in range(3):
         try:
             order = await client.place_order("main", current)
@@ -265,15 +272,18 @@ async def _submit_master_order(
                 if current.type != "MARKET":
                     continue
                 actual_abs = await _master_position_abs(client, "main", current.position_side)
-                requested_abs = abs(current.quantity or Decimal(0))
-                if current.side == Side.BUY and actual_abs >= requested_abs:
+                if current.side == Side.BUY and actual_abs >= target_abs:
                     retry_stats["resolved_by_position"] += 1
                     return current.new_client_order_id
-                if current.side == Side.SELL and actual_abs == 0:
+                if current.side == Side.SELL and actual_abs <= target_abs:
                     retry_stats["resolved_by_position"] += 1
                     return current.new_client_order_id
-                if 0 < actual_abs < requested_abs:
-                    current = replace(current, quantity=actual_abs)
+                if current.side == Side.BUY and before_abs < actual_abs < target_abs:
+                    current = replace(current, quantity=target_abs - actual_abs)
+                    retry_stats["partial_residuals"] += 1
+                    break
+                if current.side == Side.SELL and target_abs < actual_abs < before_abs:
+                    current = replace(current, quantity=actual_abs - target_abs)
                     retry_stats["partial_residuals"] += 1
                     break
             if attempt == 2:
@@ -343,6 +353,32 @@ async def _follower_state(app, want_open: bool, want_protection: bool | None = N
         if want_protection is not None:
             checks.append(bool(protections) == want_protection)
     return all(checks)
+
+
+async def _follower_protection_complete(app) -> bool:
+    """Every live leg has one full bot protection under the exchange contract."""
+    for fr in app.followers:
+        positions, orders = await asyncio.gather(
+            fr.client.position_risk(fr.account_id, SYMBOL),
+            fr.client.open_orders(fr.account_id, SYMBOL),
+        )
+        for position in (p for p in positions if p.position_amt != 0):
+            matching = [
+                order
+                for order in orders
+                if order.type in {"STOP_MARKET", "STOP"}
+                and order.client_order_id.startswith("ct")
+                and order.position_side in {position.position_side, PosSide.BOTH}
+            ]
+            if len(matching) != 1:
+                return False
+            protection = matching[0]
+            if protection.type == "STOP_MARKET":
+                if not protection.close_position:
+                    return False
+            elif protection.orig_qty != abs(position.position_amt):
+                return False
+    return True
 
 
 async def _wait_follower_state_with_recovery(
@@ -500,6 +536,10 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
     from copytradeaster.app import App
 
     app = App(run_cfg)
+    # Per-command console notifications make 30-way runs unreadable; the JSON
+    # progress and durable journal remain the authoritative load evidence.
+    app.coordinator._on_notify = None
+    app.executor._on_confirmed = None
     started = True
     cycles: list[dict[str, object]] = []
     cleanup: dict[str, object] = {"errors": ["not-run"]}
@@ -584,6 +624,69 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 description=f"follower open/protection cycle {cycle}",
                 retry_stats=master_retry_stats,
             )
+            if not await _follower_protection_complete(app):
+                raise RuntimeError(f"incomplete follower protection after open, cycle {cycle}")
+
+            # Corrective profile: real partial reduce and grow while the master
+            # trigger remains unchanged. Followers must stay protected after
+            # both transitions (closePosition or exact fixed quantity).
+            resize_qty = _snap_down(abs(position.position_amt) / 2, filters.step_size)
+            if resize_qty < filters.min_qty:
+                raise RuntimeError(
+                    f"quantity {position.position_amt} is too small for resize phase"
+                )
+            await _submit_master_order(
+                main,
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.SELL,
+                    type="MARKET",
+                    quantity=resize_qty,
+                    reduce_only=not hedge,
+                    position_side=position_side,
+                    new_order_resp_type="RESULT",
+                    new_client_order_id=f"hl-reduce-{cycle}-{time.time_ns()}"[:36],
+                ),
+                master_retry_stats,
+            )
+            await _wait_follower_state_with_recovery(
+                app,
+                main,
+                want_open=True,
+                want_protection=True,
+                timeout=args.timeout,
+                description=f"follower reduce/protection cycle {cycle}",
+                retry_stats=master_retry_stats,
+            )
+            if not await _follower_protection_complete(app):
+                raise RuntimeError(f"incomplete follower protection after reduce, cycle {cycle}")
+
+            await _submit_master_order(
+                main,
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.BUY,
+                    type="MARKET",
+                    quantity=resize_qty,
+                    position_side=position_side,
+                    new_order_resp_type="RESULT",
+                    new_client_order_id=f"hl-grow-{cycle}-{time.time_ns()}"[:36],
+                ),
+                master_retry_stats,
+            )
+            await _wait_follower_state_with_recovery(
+                app,
+                main,
+                want_open=True,
+                want_protection=True,
+                timeout=args.timeout,
+                description=f"follower grow/protection cycle {cycle}",
+                retry_stats=master_retry_stats,
+            )
+            if not await _follower_protection_complete(app):
+                raise RuntimeError(f"incomplete follower protection after grow, cycle {cycle}")
+
+            position = (await _position(main, "main"))[0]
             stop_orders = await main.open_orders("main", SYMBOL)
             live_stop = next((o for o in stop_orders if o.client_order_id == live_stop_coid), None)
             if live_stop is None:
@@ -641,7 +744,25 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
         )
         command_counts = {str(row["status"]): int(row["n"]) for row in command_rows}
         final_audit = await _audit(app)
+        non_confirmed = {
+            status: count for status, count in command_counts.items() if status != "CONFIRMED"
+        }
+        if non_confirmed:
+            raise RuntimeError(f"non-confirmed execution journal rows: {non_confirmed}")
+        dirty_accounts = {
+            account_id: state
+            for account_id, state in final_audit.items()
+            if state["positions"] or state["open_orders"]  # type: ignore[index]
+        }
+        if dirty_accounts:
+            raise RuntimeError(f"pre-cleanup audit is not flat/order-free: {dirty_accounts}")
         shadow_metrics = dict(app.shadow_exchange.metrics)
+        elapsed_values = sorted(float(cycle["elapsed_s"]) for cycle in cycles)
+
+        def percentile(fraction: float) -> float:
+            index = min(int((len(elapsed_values) - 1) * fraction), len(elapsed_values) - 1)
+            return elapsed_values[index]
+
         result = {
             "started_at": datetime.now(UTC).isoformat(),
             "rest_base_url": run_cfg.rest_base_url,
@@ -653,6 +774,11 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             "cycles_requested": args.cycles,
             "cycles_completed": len(cycles),
             "cycles": cycles,
+            "cycle_latency_s": {
+                "p50": percentile(0.50),
+                "p95": percentile(0.95),
+                "max": max(elapsed_values),
+            },
             "command_counts_before_cleanup": command_counts,
             "master_retry_stats": master_retry_stats,
             "shadow_signed_requests": app.shadow_exchange.signed_requests,

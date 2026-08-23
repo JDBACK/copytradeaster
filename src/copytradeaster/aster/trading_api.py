@@ -49,7 +49,7 @@ class PlaceOrderRequest:
     position_side: PosSide = PosSide.BOTH
     new_client_order_id: str = ""
     new_order_resp_type: str = "ACK"
-    working_type: str | None = None  # only for STOP_MARKET / TAKE_PROFIT_MARKET
+    working_type: str | None = None  # STOP/TP market and limit flavors
 
     def to_params(self) -> dict[str, str]:
         params: dict[str, str] = {
@@ -74,7 +74,9 @@ class PlaceOrderRequest:
         params["newOrderRespType"] = self.new_order_resp_type
         if self.working_type is not None and self.type in (
             "STOP_MARKET",
+            "STOP",
             "TAKE_PROFIT_MARKET",
+            "TAKE_PROFIT",
         ):
             params["workingType"] = self.working_type
         return params
@@ -133,9 +135,6 @@ class AsterClient:
 
             url += "?" + urlencode(list(params.items()))
         await self._limiter.acquire_request(weight)
-        if self._dry_run:
-            log.info("DRY-RUN %s %s", method, url)
-            return {}
         try:
             resp = await self._http.request(method, url, content=b"")
         except httpx.TransportError as exc:
@@ -169,7 +168,7 @@ class AsterClient:
         nonce = await self._nonces.next_nonce(identity.signer)
         qs, full = prepare_signed_request(params, identity, key, nonce)
         url = self._base_url + path + "?" + full
-        if self._dry_run:
+        if self._dry_run and method != "GET":
             masked = url.split("&signature=")[0] + "&signature=" + redact("0x" + "0" * 32)
             log.info("DRY-RUN %s %s", method, masked)
             return {}

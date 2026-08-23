@@ -7,8 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from copytradeaster.domain.models import RiskPolicy
-from copytradeaster.master.projector import MasterProjector
+from copytradeaster.domain.models import (
+    PositionKey,
+    PosSide,
+    RiskPolicy,
+    Side,
+    TargetPosition,
+    TargetState,
+)
+from copytradeaster.master.projector import MasterProjector, MasterState
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
     AccountRepo,
@@ -21,6 +28,7 @@ from copytradeaster.storage.repositories import (
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
+from copytradeaster.trading.planner import build_plan
 from tests.integration.fake_aster import FakeAster, FakeOrder, btc_filters
 
 D1 = D
@@ -159,7 +167,7 @@ class TestOpenAndClose:
             assert follower_qty(fake, fid) == D("0.019"), fid
             stop = follower_stop(fake, fid)
             assert stop is not None and stop.stop_price == D("64500")
-            assert stop.reduce_only and stop.side.value == "SELL"
+            assert stop.close_position and stop.reduce_only and stop.side.value == "SELL"
 
     async def test_master_close_flattens_everyone(self, env):
         projector, coordinator, fake, db, deltas, fids = env
@@ -278,6 +286,171 @@ class TestFailureIsolation:
         assert any(c.endswith("r2") for c in coids)
 
 
+class TestProtectionQuantitySafety:
+    async def test_fixed_stop_grow_same_level_then_trigger_flattens(self, env):
+        """PROT-I01: the exact P0 baseline reproduction through snapshot,
+        planner, journal, executor and exchange trigger semantics."""
+        projector, coordinator, fake, db, deltas, fids = env
+        del projector, db, deltas, fids
+        fid = "copyc1"
+        key = PositionKey("BTCUSDT")
+        fake.positions[(fid, "BTCUSDT:BOTH")] = D("0.02")
+        fake.entry_prices[(fid, "BTCUSDT:BOTH")] = D("65000")
+        fake.orders[f"{fid}|ct-old-fixed"] = FakeOrder(
+            symbol="BTCUSDT",
+            side=Side.SELL,
+            type="STOP",
+            orig_qty=D("0.02"),
+            stop_price=D("64500"),
+            reduce_only=True,
+            close_position=False,
+            position_side=PosSide.BOTH,
+            client_order_id="ct-old-fixed",
+            order_id=901,
+            update_seq=1,
+        )
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        actual = await coordinator._snapshot(fr)
+        target = TargetPosition(
+            key=key,
+            qty=D("0.05"),
+            stop_price=D("64500"),
+            tp_price=None,
+            leverage=20,
+            stop_type="STOP",
+        )
+        plan = build_plan(
+            actual,
+            TargetState(fid, [target]),
+            {"BTCUSDT": btc_filters()},
+            coordinator._coid_factory(),
+        )
+        assert [action.kind.value for action in plan.actions] == [
+            "MARKET_OPEN",
+            "PLACE_STOP",
+            "CANCEL_ORDER",
+        ]
+        await coordinator._executor.submit(plan)
+        new_stop = next(
+            order
+            for order in fake.orders.values()
+            if order.client_order_id != "ct-old-fixed" and order.status == "NEW"
+        )
+        assert new_stop.orig_qty == D("0.05")
+        fake.set_price(D("64400"))
+        assert follower_qty(fake, fid) == 0
+
+    async def test_partial_market_fill_is_protected_at_live_remainder(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        del coordinator, db, deltas
+        fake.partial_market_fill_ratio = D("0.5")
+        await open_master_long(projector, fake)
+        for fid in fids:
+            qty = follower_qty(fake, fid)
+            assert D(0) < qty < D("0.019")
+            stop = follower_stop(fake, fid)
+            assert stop is not None and stop.close_position
+        fake.partial_market_fill_ratio = None
+
+    async def test_grow_is_flattened_when_replacement_stop_fails_twice(self, env):
+        """PROT-I05/INV-06: a confirmed increase may not remain partly
+        protected by the old fixed-quantity Stop."""
+        projector, coordinator, fake, db, deltas, fids = env
+        del projector, deltas, fids
+        fid = "copyc1"
+        key = PositionKey("BTCUSDT")
+        fake.positions[(fid, "BTCUSDT:BOTH")] = D("0.02")
+        fake.entry_prices[(fid, "BTCUSDT:BOTH")] = D("65000")
+        fake.orders[f"{fid}|ct-old-grow-fixed"] = FakeOrder(
+            symbol="BTCUSDT",
+            side=Side.SELL,
+            type="STOP",
+            orig_qty=D("0.02"),
+            price=D("64450"),
+            stop_price=D("64500"),
+            reduce_only=True,
+            close_position=False,
+            position_side=PosSide.BOTH,
+            client_order_id="ct-old-grow-fixed",
+            order_id=903,
+            update_seq=1,
+        )
+        target = TargetPosition(
+            key=key,
+            qty=D("0.05"),
+            stop_price=D("64500"),
+            tp_price=None,
+            leverage=20,
+            stop_type="STOP",
+        )
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        actual = await coordinator._snapshot(fr)
+        plan = build_plan(
+            actual,
+            TargetState(fid, [target]),
+            {"BTCUSDT": btc_filters()},
+            coordinator._coid_factory(),
+        )
+        fake.fail_order_types[(fid, "STOP")] = 2
+        results = await coordinator._executor.submit(plan)
+        assert results[0].status == "CONFIRMED" and follower_qty(fake, fid) == D("0.05")
+
+        safety_results = await coordinator._post_execution_converge(
+            fr, MasterState(), [target], plan, results
+        )
+
+        assert any(result.status == "FAILED" for result in [*results, *safety_results])
+        assert follower_qty(fake, fid) == 0
+        assert not any(
+            order.status == "NEW"
+            and order.type in {"STOP_MARKET", "STOP"}
+            and coid.startswith(f"{fid}|")
+            for coid, order in fake.orders.items()
+        )
+        degraded = await SettingsRepo(db).get_flag("degraded")
+        assert degraded is not None and "unprotected-entry-flattened" in degraded
+
+    async def test_entry_is_flattened_when_stop_fails_twice(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        del coordinator, deltas, fids
+        fake.fail_order_types[("copyc1", "STOP_MARKET")] = 2
+        await open_master_long(projector, fake)
+        assert follower_qty(fake, "copyc1") == 0
+        assert follower_stop(fake, "copyc1") is None
+        degraded = await SettingsRepo(db).get_flag("degraded")
+        assert degraded is not None and "unprotected-entry-flattened" in degraded
+
+    async def test_manual_conditional_is_neither_selected_nor_canceled(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        del projector, db, deltas, fids
+        fid = "copyc1"
+        fake.positions[(fid, "BTCUSDT:BOTH")] = D("0.02")
+        fake.orders[f"{fid}|manual-stop"] = FakeOrder(
+            symbol="BTCUSDT",
+            side=Side.SELL,
+            type="STOP_MARKET",
+            orig_qty=D(0),
+            stop_price=D("64500"),
+            close_position=True,
+            client_order_id="manual-stop",
+            order_id=902,
+            update_seq=1,
+        )
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        actual = await coordinator._snapshot(fr)
+        assert actual.positions[PositionKey("BTCUSDT")].stop is None
+        target = TargetPosition(PositionKey("BTCUSDT"), D("0.02"), D("64500"), None, 20)
+        plan = build_plan(
+            actual,
+            TargetState(fid, [target]),
+            {"BTCUSDT": btc_filters()},
+            coordinator._coid_factory(),
+        )
+        assert all(
+            action.payload.get("origClientOrderId") != "manual-stop" for action in plan.actions
+        )
+
+
 class TestRestartRecovery:
     async def test_boot_resolve_unknown_no_duplicates(self, env):
         projector, coordinator, fake, db, deltas, fids = env
@@ -303,8 +476,8 @@ class TestRestartRecovery:
             ('{"symbol": "BTCUSDT"}', coid),
         )
         await db.conn.commit()
-        confirmed = await resolve_boot_unknowns(lambda aid: fake, CommandRepo(db))
-        assert confirmed == 1
+        report = await resolve_boot_unknowns(lambda aid: fake, CommandRepo(db))
+        assert report.confirmed == 1 and report.unresolved == 0
         # no duplicate order was sent
         assert ("copyc1", coid) not in [(a, c) for a, c in fake.placed_log]
         row = await db.fetchone("SELECT status FROM execution_commands WHERE command_key='k-crash'")

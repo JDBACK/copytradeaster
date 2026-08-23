@@ -224,6 +224,14 @@ class MasterProjector:
                     active_direction = int(active["direction"])
                 except (KeyError, IndexError, TypeError, ValueError):
                     active_direction = 0
+                if active_direction == 0:
+                    await self._trades.set_direction(int(active["trade_id"]), pos_sign)
+                    active_direction = pos_sign
+                    log.info(
+                        "snapshot backfilled direction for episode %s: %s",
+                        active["trade_id"],
+                        pos_sign,
+                    )
                 if active_direction != 0 and active_direction != pos_sign:
                     await self._trades.close_trade(int(active["trade_id"]))
                     log.info(
@@ -391,6 +399,7 @@ class MasterProjector:
                 reduce_only=bool(o.get("R", False)),
                 close_position=bool(o.get("cp", False)),
                 working_type=str(o.get("wt", "CONTRACT_PRICE")),
+                orig_qty=Decimal(str(o.get("q", "0"))),
             )
             if pos is None:
                 pos = PositionState(
@@ -497,6 +506,7 @@ def _pick_protective(orders: list, order_type: str) -> ProtectiveOrder | None:
         reduce_only=bool(latest.reduce_only),
         close_position=bool(latest.close_position),
         working_type=str(latest.working_type),
+        orig_qty=latest.orig_qty,
     )
 
 

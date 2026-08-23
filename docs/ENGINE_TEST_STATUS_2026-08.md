@@ -4,15 +4,20 @@
 
 ## Текущее состояние
 
+- **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
+  заявленному testnet scope не осталось; код можно фиксировать и пушить для
+  перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
 - Движок работает на futures testnet (`fapi.asterdex-testnet.com`), HEDGE-режим;
   ONE_WAY официально поддержан и покрыт signed E2E через ядро (см. ниже).
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный suite: **258 passed / 1 skipped**, coverage **87%**, ruff check/
-  format clean (без CT_TESTNET: testnet-сценарии скипаются маркером).
-- Все реальные счёта плоские, открытых ордеров нет (REST-аудит после
-  ONE_WAY E2E и hybrid-кампании, 2026-08-23).
+- Актуальный offline gate: **284 passed / 2 skipped / 16 deselected**,
+  coverage **88.41%** при пороге 87%; ruff check/format и diff-check clean.
+  Signed testnet gate: **15 passed / 1 skipped**; единственный skip — Builder
+  Stage 3.
+- Независимый signed REST-аудит после полного набора и двухчасового soak:
+  `main` и `copyc1`–`copyc3` в HEDGE, позиции 0, открытых ордеров 0.
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -34,6 +39,11 @@
 | 14 | **Dust-сокращение до нуля переоткрывало позицию** | при `scaled_reduce → 0` внутри живого эпизода мастера `_persist_refs` стирал строку basis; следующий recompute видел «мастер в позиции + follower flat» и трактовал это как дрейф — немедленный re-entry сразу после намеренного закрытия | флаг `sync_basis.zero_target` (миграция #12): намеренный флэт персистится до конца эпизода мастера; входная ветка skip'ает `INTENTIONAL_FLAT`; флаг снимают новый эпизод мастера (`open_trade`) и `mark_zero_target` (сброс `issued_target`, чтобы следующий ненулевой таргет получил новую ревизию) |
 | 15 | **Фикс №14 ломал ONE_WAY flip** | `_persist_refs` клеймил ЛЮБОЙ `qty=0` при живом мастере как intentional-flat: транзитный ноль ветки flip («мастер перевернулся — закрой эту сторону») получал маркер и навсегда блокировал открытие обратной стороны | явная причина нуля: `TargetPosition.hold_flat_until_episode_end=True` только для same-direction редукции в ноль; flip-ноль — транзитный, basis очищается; флаг входит в `_canonical_target` (разные command keys) (`79be6b1`) |
 | 16 | **Flip не был границей эпизода** | `_apply_fill` открывал новый episode только при `active is None`: после флипа LONG→SHORT жил старый эпизод, а снапшот-синк вообще не смотрел на знак позиции | flip = закрыть старый episode + открыть новый с `direction=±1` (миграция #13 `copy_trades.direction`); snapshot-синк детектит рассинхрон направления после офлайна; новый эпизод автоматически снимает sticky-маркеры (`8ea3dbd`) |
+| 17 | **Fixed Stop/TP не покрывал grow остаток** | follower snapshot терял `origQty`, а planner сравнивал только trigger level | `ProtectiveOrder.orig_qty`; market protection через `closePosition=true`; fixed STOP/TP quantity-aware replacement; authoritative post-fill safety и fail-safe flatten |
+| 18 | **Повторный emergency проглатывался историческим CONFIRMED** | одинаковые payload/revision давали прежний command key, а pause не был частью аварийного flow | persisted UUID `operation_id`, pause до snapshots, bounded passes и два flat verification snapshots |
+| 19 | **Boot мог дать READY при неизвестном финансовом исходе** | query-error оставлял in-flight, но startup не проверял остаток | структурированный boot report, bounded retry, unresolved блокирует READY и новые mutations |
+| 20 | **READY переживал kill как ложный живой статус** | SQLite-флаг сбрасывался только graceful stop | runtime UUID + heartbeat; CLI считает старый heartbeat stale; kill/recovery доказан реальным SIGKILL |
+| 21 | **Fake/Shadow скрывали exchange semantics защиты** | doubles допускали flip/oversize и не моделировали closePosition/fixed remainder | строгие ONE_WAY/HEDGE reduce rules, conditional expiration, closePosition и partial-fill hooks |
 
 ## Известные ограничения (осознанные решения этапа 1)
 
@@ -43,9 +53,13 @@
    исполнения (fill-copy). Зеркалирование висящих лимиток — этап 2.
 3. `availableBalance` тестнета колеблется сильнее wallet balance — сайзинг
    считается от него (policy risk_base=available_balance).
-4. Возможны дублирующие стопы одного уровня у копира при быстрой конвергенции
-   размера; биржа нормализует reduceOnly, переполнения не происходит
-   (наблюдение 02:50 UTC; кандидат на полировку).
+4. **Один runtime process.** Heartbeat обнаруживает kill/stale и смену runtime,
+   но не является распределённым mutex для двух одновременно запущенных App.
+   Для одного трейдера это операционное правило запуска, а не повод добавлять
+   Redis/оркестратор в Stage 1.
+5. Перед запуском оператор подтверждает одинаковый position mode аккаунтов.
+   Signed preflight и финальный audit это делают; автоматическая смена mode на
+   аккаунте с открытой позицией может быть отклонена самой биржей.
 
 ## Кампания полной проверки (12 пунктов) — 2026-08-22
 
@@ -209,3 +223,43 @@ post-fill recompute видел «мастер открыт + follower flat» и 
 - Оба пункта первого gate + dust edge case второго прохода + оба дефекта
   третьего прохода закрыты с офлайн-регрессами и живыми signed-доказательствами.
   Решение о статусе этапа — за владельцем проекта/ревьюером.
+
+## Corrective acceptance — 2026-08-23
+
+Повторное открытие Stage 1 по CR-1..CR-5 завершено. Детальная хронология,
+включая все непринятые попытки, находится в
+[STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md](reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md).
+
+Финальные gates:
+
+- offline: **284 passed / 2 skipped / 16 deselected**, coverage **88.41%**;
+- static/package: ruff check, ruff format check, git diff check — clean;
+  `uv build` создал sdist и wheel без прежнего README-warning;
+- signed testnet: **15 passed / 1 skipped за 510.48 s**; REAL-01..08 включают
+  ONE_WAY/HEDGE protection sizing, closePosition contract, emergency дважды,
+  boot found/not-found и настоящий App/WS reconnect/critical recovery;
+- hermetic scale: 30 SHADOW × 100 и 100 SHADOW × 20 расширенных циклов;
+- hybrid: 3 REAL + 27 SHADOW, 20/20 циклов, **3642 CONFIRMED**, остальные
+  statuses 0, p50 35.118 s / p95 39.253 s / max 39.918 s, 31/31 account
+  flat/no-orders;
+- SOAK-01: **7203.589 s**, 6/6 signed cycles, forced reconnect, graceful
+  restart, реальный child SIGKILL (`-9`) + stale heartbeat 33.709 s + recovery,
+  24 periodic flat audits, **218 CONFIRMED**, in-flight/ingest drops/cleanup
+  errors 0;
+- независимый финальный signed REST: `main`, `copyc1`, `copyc2`, `copyc3`
+  HEDGE и flat/no-orders; run и рабочая SQLite: in-flight 0, sticky zero 0,
+  stopped runtime `ready=false`.
+
+Финальные локальные артефакты:
+
+- hybrid JSON SHA-256
+  `6c0f8fe461d159377215d454500266256d5a410197b1fc27f8a6b42234cebd9e`;
+- hybrid SQLite SHA-256
+  `fc011bb8f30a380e9ca895e852cdc19d448c4269db1ac6862c6cc939db2ac62a`;
+- soak JSON SHA-256
+  `a6fbb57a1f06abb51843d5af30a35a8565c82b2e66da86be9cd08a4f5c59793d`;
+- soak SQLite SHA-256
+  `42dfdd4b23bc5234cf503ba38d0c6f67b623f2ad9f6faca17d5aeac6eb5ad1aa`.
+
+Verdict: **Stage 1 CLOSED, push approved for the testnet trading core.**
+Builder остаётся Stage 3; mainnet не разрешён этим verdict.

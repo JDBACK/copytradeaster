@@ -87,7 +87,7 @@ pydantic v2            — схемы ордеров/событий/конфиг
 - Монетизация: builder fee (кап 0.001 futures).
 - Торговое ядро и стрим не меняются — меняется только источник кредов.
 
-**Статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
+**Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,
 биржевая сверка каждого ордера по clientOrderId) — в
@@ -99,6 +99,24 @@ Builder-e2e (approveBuilder ждёт `main private key` в wallet.txt) оста�
 Stage 3; зеркало висящих лимиток мастера — кандидат в этап 2.
 
 Критерий перехода: этап 1 закрыт, когда проходят все signed-сценарии раздела «Как проводить тесты»; этап 2 — когда онбординг и уведомления работают на тестнете с ключами, введёнными через бота.
+
+### Corrective gate после независимого аудита (2026-08-23)
+
+Corrective gate завершён 2026-08-23: найденные P0/P1 исправлены и доказаны
+offline, signed testnet, load и двухчасовым soak. Stage 1 снова `CLOSED`,
+переход к Stage 2 разрешён; mainnet в этот verdict не входит.
+
+Полный обязательный scope, реальные testnet-сценарии, load/soak matrix, стек и
+Definition of Done вынесены в
+[STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md](reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md).
+
+- [x] Quantity/`closePosition`-aware Stop/TP convergence и строгие Fake/Shadow adapters.
+- [x] Повторяемый emergency с persisted pause, operation generation и REST verification.
+- [x] Fail-closed boot при любом неразрешённом `SENDING/SUBMITTED/UNKNOWN`.
+- [x] Heartbeat READY/degraded lifecycle и второй snapshot после WS handshake.
+- [x] Полный offline, signed ONE_WAY/HEDGE, emergency/recovery и hybrid/load gate.
+- [x] Двухчасовой SOAK-01 и завершающий независимый REST/SQLite audit.
+- [x] Новый независимый verdict `Stage 1 = CLOSED`.
 
 ### Финальный Stage 1 gate — follow-up по `review_stage1_new.md` (2026-08-22)
 

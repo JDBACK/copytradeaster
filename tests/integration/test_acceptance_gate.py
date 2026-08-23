@@ -269,8 +269,8 @@ class TestCrashWindows:
             status="NEW",
         )
         placed_before = list(fake.placed_log)
-        confirmed = await resolve_boot_unknowns(lambda aid: fake, commands, links)
-        assert confirmed == 1
+        report = await resolve_boot_unknowns(lambda aid: fake, commands, links)
+        assert report.confirmed == 1 and report.unresolved == 0
         assert (await commands.get("k-sub"))["status"] == "CONFIRMED"
         assert (await commands.get("k-send"))["status"] == "FAILED"
         assert fake.placed_log == placed_before  # no duplicate exchange orders

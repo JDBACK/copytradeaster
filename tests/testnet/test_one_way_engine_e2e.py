@@ -127,8 +127,14 @@ async def stack():
 
     info = await client.exchange_info(force=True)
     filters_cache.update(info.tradable_filters())
-    if await SettingsRepo(db).get_policy("copyc1") is None:
-        await SettingsRepo(db).upsert_policy(
+    settings_repo = SettingsRepo(db)
+    # The emergency signed scenario intentionally leaves the shared operator
+    # state paused.  This independent engine scenario must opt back into
+    # entries explicitly instead of depending on test execution order.
+    await settings_repo.set_flag("allow_new_entries", "true")
+    await settings_repo.set_flag("emergency_active", "false")
+    if await settings_repo.get_policy("copyc1") is None:
+        await settings_repo.upsert_policy(
             RiskPolicy(risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("1")),
             "copyc1",
         )
@@ -676,8 +682,12 @@ async def test_one_way_full_engine_signed_cycle(stack):
         assert statuses.get("BLOCKED", 0) == 0, statuses
         for row in own:
             payload = json.loads(str(row["payload"]))
-            if str(row["kind"]) in ("PLACE_STOP", "PLACE_TP", "MARKET_CLOSE"):
+            if str(row["kind"]) == "MARKET_CLOSE":
                 assert payload.get("reduceOnly") == "true", (row["kind"], payload)
+                assert "positionSide" not in payload, (row["kind"], payload)
+            if str(row["kind"]) in ("PLACE_STOP", "PLACE_TP"):
+                assert payload.get("closePosition") == "true", (row["kind"], payload)
+                assert "quantity" not in payload and "reduceOnly" not in payload
                 assert "positionSide" not in payload, (row["kind"], payload)
         kinds = [str(r["kind"]) for r in own]
         assert "MARKET_OPEN" in kinds and "PLACE_STOP" in kinds, kinds
@@ -694,3 +704,144 @@ async def test_one_way_full_engine_signed_cycle(stack):
         if original_follower_hedge:
             with contextlib.suppress(Exception):
                 await client.set_position_mode(fr_id, True)
+
+
+async def test_hedge_fixed_protection_resizes_long_and_short(stack):
+    """REAL-03: production Coordinator/Planner/Executor against a REAL HEDGE
+    follower. A fixed STOP is resized on both reduce and grow at the same
+    trigger, separately for LONG and SHORT legs."""
+    from copytradeaster.domain.models import (
+        PositionKey,
+        PositionState,
+        ProtectiveOrder,
+    )
+    from copytradeaster.master.projector import MasterDelta, MasterState
+
+    client: AsterClient = stack["client"]
+    coordinator: Coordinator = stack["coordinator"]
+    filters: SymbolFilters = stack["filters"][SYMBOL]
+    fr_id = "copyc1"
+    trades = CopyTradeRepo(stack["db"])
+    test_trade_ids: list[int] = []
+    original_hedge = await client.get_position_mode(fr_id)
+    await _flatten(client, fr_id, original_hedge, f"hedge-pre-{int(time.time())}")
+    if not original_hedge:
+        await client.set_position_mode(fr_id, True)
+
+    async def current_leg(key: PositionKey):
+        rows = await client.position_risk(fr_id, SYMBOL)
+        return next((row for row in rows if row.position_side == key.pos_side), None)
+
+    try:
+        for pos_side, sign, close_side in (
+            (PosSide.LONG, D(1), Side.SELL),
+            (PosSide.SHORT, D(-1), Side.BUY),
+        ):
+            await _flatten(client, fr_id, True, f"hedge-leg-{pos_side.value}-{int(time.time())}")
+            key = PositionKey(SYMBOL, pos_side)
+            # This synthetic MasterState represents a new master episode. Use
+            # the production episode lifecycle so old intentional-flat or
+            # own-protective latches from the persistent signed-test DB cannot
+            # suppress an otherwise valid entry.
+            active = await trades.active_trade(SYMBOL, pos_side.value)
+            if active is not None:
+                await trades.close_trade(int(active["trade_id"]))
+            test_trade_ids.append(
+                await trades.open_trade(SYMBOL, pos_side.value, None, direction=int(sign))
+            )
+            # Seed a fresh persisted execution generation. Deleting the row
+            # would reset revision to 1 and could intentionally collide with a
+            # historical synthetic test transition that has no trade_id.
+            await SyncBasisRepo(stack["db"]).bump_revision(
+                fr_id,
+                SYMBOL,
+                pos_side.value,
+                f"signed-hedge-seed-{time.time_ns()}",
+            )
+            rows = await client.position_risk(fr_id, SYMBOL)
+            mode_row = next(row for row in rows if row.position_side == pos_side)
+            mark = mode_row.mark_price
+            # This test verifies fixed-quantity replacement, not triggering.
+            # Keep the order far enough from a volatile public testnet market.
+            stop_level = _snap(
+                mark - D("3000") if sign > 0 else mark + D("3000"), filters.tick_size
+            )
+
+            def state(
+                master_abs: D,
+                key=key,
+                sign=sign,
+                close_side=close_side,
+                stop_level=stop_level,
+                mark=mark,
+                pos_side=pos_side,
+            ) -> MasterState:
+                stop = ProtectiveOrder(
+                    client_order_id=f"master-{pos_side.value}",
+                    order_id=1,
+                    type="STOP",
+                    side=close_side,
+                    stop_price=stop_level,
+                    reduce_only=False,
+                    close_position=False,
+                    working_type="MARK_PRICE",
+                    orig_qty=master_abs,
+                )
+                position = PositionState(
+                    key=key,
+                    qty=master_abs * sign,
+                    entry_price=mark,
+                    leverage=20,
+                    mark_price=mark,
+                    liquidation_price=D(0),
+                    stop=stop,
+                )
+                return MasterState(available_usdt=D("100000"), positions={key: position})
+
+            initial = state(D(1))
+            await coordinator.on_master_delta(MasterDelta(frozenset({SYMBOL}), initial))
+            first_position = await current_leg(key)
+            assert first_position is not None and first_position.position_amt * sign > 0
+            first_abs = abs(first_position.position_amt)
+            first_stop = next(
+                order
+                for order in await client.open_orders(fr_id, SYMBOL)
+                if order.type == "STOP" and order.position_side == pos_side
+            )
+            assert first_stop.orig_qty == first_abs
+            assert first_stop.working_type == "MARK_PRICE"
+
+            reduced = state(D("0.5"))
+            await coordinator.on_master_delta(MasterDelta(frozenset({SYMBOL}), reduced))
+            reduced_position = await current_leg(key)
+            assert reduced_position is not None
+            reduced_abs = abs(reduced_position.position_amt)
+            assert D(0) < reduced_abs < first_abs
+            reduced_stop = next(
+                order
+                for order in await client.open_orders(fr_id, SYMBOL)
+                if order.type == "STOP" and order.position_side == pos_side
+            )
+            assert reduced_stop.orig_qty == reduced_abs
+            assert reduced_stop.stop_price == stop_level
+
+            grown = state(D(1))
+            await coordinator.on_master_delta(MasterDelta(frozenset({SYMBOL}), grown))
+            grown_position = await current_leg(key)
+            assert grown_position is not None
+            grown_abs = abs(grown_position.position_amt)
+            assert grown_abs > reduced_abs
+            grown_stop = next(
+                order
+                for order in await client.open_orders(fr_id, SYMBOL)
+                if order.type == "STOP" and order.position_side == pos_side
+            )
+            assert grown_stop.orig_qty == grown_abs
+            assert grown_stop.stop_price == stop_level
+            assert grown_stop.client_order_id != reduced_stop.client_order_id
+    finally:
+        await _flatten(client, fr_id, True, f"hedge-clean-{int(time.time())}")
+        for trade_id in test_trade_ids:
+            await trades.close_trade(trade_id)
+        if not original_hedge:
+            await client.set_position_mode(fr_id, False)

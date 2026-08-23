@@ -116,6 +116,17 @@ class TestToParams:
         )
         assert "workingType" not in req.to_params()
 
+        stop_limit = PlaceOrderRequest(
+            symbol="X",
+            side=Side.SELL,
+            type="STOP",
+            quantity=D(1),
+            price=D(99),
+            stop_price=D(100),
+            working_type="MARK_PRICE",
+        )
+        assert stop_limit.to_params()["workingType"] == "MARK_PRICE"
+
 
 class TestSignedRequests:
     @respx.mock
@@ -213,6 +224,7 @@ class TestDryRun:
 
 
 class TestWeights:
+    @respx.mock
     async def test_weights_reach_limiter(self):
         seen: list[tuple[str, int]] = []
 
@@ -221,5 +233,18 @@ class TestWeights:
                 seen.append(("req", weight))
 
         client = make_client(SpyLimiter(10**9, 10**9, 10**9), dry_run=True)
+        route = respx.get(f"{BASE}/fapi/v3/balance").respond(
+            json=[
+                {
+                    "asset": "USDT",
+                    "balance": "1",
+                    "crossWalletBalance": "1",
+                    "crossUnPnl": "0",
+                    "availableBalance": "1",
+                    "maxWithdrawAmount": "1",
+                }
+            ]
+        )
         await client.balance("copyc1")
         assert ("req", 5) in seen
+        assert len(route.calls) == 1

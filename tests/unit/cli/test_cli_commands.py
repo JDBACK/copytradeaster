@@ -72,6 +72,21 @@ async def test_status_reports_state(env, capsys):
     assert "account main" not in out or "role=" in out
 
 
+async def test_status_does_not_trust_stale_ready_flag(env, capsys):
+    tmp_path, db_path = env
+    del tmp_path
+    await _init_db()
+    db = Database(db_path)
+    await db.connect()
+    settings = SettingsRepo(db)
+    await settings.set_flag("ready", "true")
+    await settings.set_flag("heartbeat_at", "1")
+    await db.close()
+    assert await _status() == 0
+    out = capsys.readouterr().out
+    assert "ready=false" in out and "runtime=stale" in out
+
+
 async def test_pause_resume_flags(env, capsys):
     await _init_db()
     assert await _set_pause(True) == 0
@@ -139,6 +154,39 @@ def test_build_close_plan_hedge_side():
     close = plan.actions[0]
     assert close.payload["side"] == "BUY"  # closes short leg
     assert close.payload["positionSide"] == "SHORT"
+
+
+def test_build_close_plan_cancels_orphan_and_extra_protections():
+    key = PositionKey("BTCUSDT")
+
+    def protection(coid, price):
+        return ProtectiveOrder(
+            client_order_id=coid,
+            order_id=1,
+            type="STOP_MARKET",
+            side=Side.SELL,
+            stop_price=D(price),
+            reduce_only=False,
+            close_position=True,
+            working_type="MARK_PRICE",
+        )
+
+    pos = PositionState(
+        key=key,
+        qty=D(0),
+        entry_price=D(0),
+        leverage=20,
+        mark_price=D(0),
+        liquidation_price=D(0),
+        stop=protection("ct-new", 64000),
+        extra_stops=(protection("ct-old", 64500),),
+    )
+    actual = AccountState(account_id="c", available_usdt=D(0), positions={key: pos})
+    target = TargetPosition(key, D(0), None, None, 20)
+    plan = build_close_plan("c", actual, [target], operation_id="emg-1", revision=2)
+    assert {a.payload["origClientOrderId"] for a in plan.actions} == {"ct-new", "ct-old"}
+    assert plan.operation_id == "emg-1"
+    assert all(action.revision == 2 for action in plan.actions)
 
 
 async def test_import_wallet_end_to_end(env, capsys):

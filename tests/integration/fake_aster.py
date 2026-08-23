@@ -13,9 +13,11 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 
+from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters
 
 D = Decimal
+CONDITIONAL_TYPES = {"STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"}
 
 
 class InjectedFailure(Exception):
@@ -76,8 +78,10 @@ class FakeAster:
         self._seq = 0
         self._lock = asyncio.Lock()
         self.fail_next: dict[str, str | None] = {}  # account -> "503"|"timeout"|"-2019"
+        self.fail_order_types: dict[tuple[str, str], int] = {}
         self.placed_log: list[tuple[str, str]] = []
         self.canceled_log: list[tuple[str, str]] = []
+        self.partial_market_fill_ratio: Decimal | None = None
 
     # --- helpers ---------------------------------------------------------------
 
@@ -94,13 +98,26 @@ class FakeAster:
         self.price = price
         triggered: list[FakeOrder] = []
         for key, order in self.orders.items():
-            if order.status != "NEW" or order.type != "STOP_MARKET":
+            if order.status != "NEW" or order.type not in CONDITIONAL_TYPES:
                 continue
             account = key.split("|", 1)[0]
-            long_pos = self._position_sign(account, order.symbol) > 0
-            if (long_pos and order.side == Side.SELL and price <= order.stop_price) or (
-                not long_pos and order.side == Side.BUY and price >= order.stop_price
-            ):
+            qty = self.positions.get((account, f"{order.symbol}:{order.position_side.value}"), D(0))
+            if qty == 0:
+                order.status = "EXPIRED"
+                self.open_order_coids.get(account, set()).discard(order.client_order_id)
+                continue
+            long_pos = qty > 0
+            is_stop = order.type in {"STOP_MARKET", "STOP"}
+            trigger = (
+                (long_pos and order.side == Side.SELL and price <= order.stop_price)
+                or (not long_pos and order.side == Side.BUY and price >= order.stop_price)
+                if is_stop
+                else (
+                    (long_pos and order.side == Side.SELL and price >= order.stop_price)
+                    or (not long_pos and order.side == Side.BUY and price <= order.stop_price)
+                )
+            )
+            if trigger:
                 self._fill_order(key, order, price)
                 triggered.append(order)
         return triggered
@@ -114,16 +131,34 @@ class FakeAster:
         price, reductions keep the entry, flips re-base it. The previous fake
         averaged reductions too - mirroring (and thus hiding) the projector bug."""
         account = key.split("|", 1)[0]
-        order.status = "FILLED"
-        order.executed_qty = order.orig_qty
-        order.avg_price = price
-        signed_delta = order.orig_qty * (1 if order.side == Side.BUY else -1)
         pk = (account, f"{order.symbol}:{order.position_side.value}")
         old = self.positions.get(pk, D(0))
+        fill_qty = abs(old) if order.close_position else order.orig_qty
+        signed_delta = fill_qty * (1 if order.side == Side.BUY else -1)
+        closes = old != 0 and old * signed_delta < 0
+        if order.type in CONDITIONAL_TYPES and not closes:
+            order.status = "EXPIRED"
+            return
+        if (
+            closes
+            and abs(signed_delta) > abs(old)
+            and (order.position_side != PosSide.BOTH or order.reduce_only or order.close_position)
+        ):
+            if order.position_side != PosSide.BOTH and not order.close_position:
+                # Fixed oversized HEDGE conditionals are exchange-invalid at
+                # trigger time; they do not silently flip the leg.
+                order.status = "EXPIRED"
+                return
+            signed_delta = -old
+            fill_qty = abs(old)
+        order.status = "FILLED"
+        order.executed_qty = fill_qty
+        order.avg_price = price
         new_qty = old + signed_delta
         if new_qty == 0:
             self.positions.pop(pk, None)
             self.entry_prices.pop(pk, None)
+            self._expire_conditionals(account, order.symbol, order.position_side, except_=order)
             return
         if old != 0 and new_qty * old < 0:
             self.entry_prices[pk] = price  # flip: remainder opened by this fill
@@ -133,6 +168,20 @@ class FakeAster:
             self.entry_prices[pk] = (abs(old) * ep_old + abs(signed_delta) * price) / total
         # reduction: entry price stays
         self.positions[pk] = new_qty
+
+    def _expire_conditionals(
+        self, account_id: str, symbol: str, pos_side: PosSide, *, except_: FakeOrder
+    ) -> None:
+        for key, candidate in self.orders.items():
+            if (
+                candidate is not except_
+                and key.startswith(f"{account_id}|")
+                and candidate.symbol == symbol
+                and candidate.position_side == pos_side
+                and candidate.status == "NEW"
+                and candidate.type in CONDITIONAL_TYPES
+            ):
+                candidate.status = "EXPIRED"
 
     def next_coid(self) -> str:
         self._seq += 1
@@ -144,7 +193,7 @@ class FakeAster:
             if (
                 key.startswith(f"{account_id}|")
                 and order.status == "NEW"
-                and order.type == "STOP_MARKET"
+                and order.type in {"STOP_MARKET", "STOP"}
             ):
                 self._fill_order(key, order, order.stop_price)
 
@@ -261,17 +310,35 @@ class FakeAster:
         return self.orders.get(self._k(account_id, orig_client_order_id))
 
     async def place_order(self, account_id: str, req):
+        failure_key = (account_id, req.type)
+        remaining = self.fail_order_types.get(failure_key, 0)
+        if remaining > 0:
+            self.fail_order_types[failure_key] = remaining - 1
+            raise AsterError(-2019, f"injected {req.type} failure")
         failure = self._consume_failure(account_id)
         if failure == "timeout":
             raise TimeoutError
         if failure == "503":
-            from copytradeaster.aster.trading_api import AsterError
-
             raise AsterError(-1000, "Unknown error, please check your request.", http_status=503)
         if failure == "-2019":
-            from copytradeaster.aster.trading_api import AsterError
-
             raise AsterError(-2019, "Margin is insufficient.")
+
+        if req.close_position and (
+            req.type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+            or req.quantity is not None
+            or req.reduce_only
+        ):
+            raise AsterError(-1102, "closePosition is incompatible with quantity/reduceOnly")
+        if req.position_side != PosSide.BOTH and req.reduce_only:
+            raise AsterError(-1106, "reduceOnly is not accepted in Hedge Mode")
+        if req.type == "MARKET" and (req.quantity is None or req.quantity <= 0):
+            raise AsterError(-1102, "quantity is mandatory for MARKET")
+        if (
+            req.type in CONDITIONAL_TYPES
+            and not req.close_position
+            and (req.quantity is None or req.quantity <= 0)
+        ):
+            raise AsterError(-1102, "quantity is mandatory for fixed conditional")
 
         self._seq += 1
         order = FakeOrder(
@@ -281,7 +348,9 @@ class FakeAster:
             orig_qty=req.quantity or D(0),
             price=req.price or D(0),
             stop_price=req.stop_price or D(0),
-            reduce_only=req.reduce_only,
+            # Live Aster reports reduceOnly=true for accepted closePosition
+            # conditionals even though the request correctly omits the field.
+            reduce_only=req.reduce_only or req.close_position or req.type in CONDITIONAL_TYPES,
             close_position=req.close_position,
             position_side=req.position_side,
             working_type=req.working_type or "MARK_PRICE",
@@ -290,6 +359,27 @@ class FakeAster:
             update_seq=self._seq,
         )
         if req.type == "MARKET":
+            pk = (account_id, f"{req.symbol}:{req.position_side.value}")
+            old = self.positions.get(pk, D(0))
+            signed = order.orig_qty if order.side == Side.BUY else -order.orig_qty
+            opens_hedge = (
+                req.position_side == PosSide.LONG
+                and req.side == Side.BUY
+                or req.position_side == PosSide.SHORT
+                and req.side == Side.SELL
+            )
+            if req.position_side != PosSide.BOTH:
+                if not opens_hedge and (old == 0 or old * signed >= 0 or abs(signed) > abs(old)):
+                    raise AsterError(-2022, "ReduceOnly Order is rejected.")
+            elif (
+                req.reduce_only
+                and (old == 0 or old * signed >= 0 or abs(signed) > abs(old))
+                and not opens_hedge
+            ):
+                raise AsterError(-2022, "ReduceOnly Order is rejected.")
+            if self.partial_market_fill_ratio is not None:
+                ratio = min(max(self.partial_market_fill_ratio, D(0)), D(1))
+                order.orig_qty *= ratio
             self._fill_order(self._k(account_id, req.new_client_order_id), order, self.fill_price)
             order.status = "FILLED"
             self.orders[self._k(account_id, req.new_client_order_id)] = order
@@ -308,8 +398,6 @@ class FakeAster:
         orig_client_order_id: str | None = None,
         order_id: int | None = None,
     ):
-        from copytradeaster.aster.trading_api import AsterError
-
         key = self._k(account_id, orig_client_order_id or "")
         order = self.orders.get(key)
         if order is None or order.status != "NEW":

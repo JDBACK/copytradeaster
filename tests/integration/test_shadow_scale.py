@@ -37,12 +37,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def test_thirty_shadow_followers_one_hundred_round_trips(tmp_path: Path):
+@pytest.mark.parametrize(("follower_count", "cycle_count"), [(30, 100), (100, 20)])
+async def test_shadow_protection_resize_profiles(
+    tmp_path: Path, follower_count: int, cycle_count: int
+):
     db = Database(tmp_path / "shadow-scale.sqlite3")
     await db.connect()
     await db.migrate()
     exchange = ShadowExchange(hedge=False, fill_price=D("65000"))
-    follower_ids = [f"shadow-{index:03d}" for index in range(1, 31)]
+    follower_ids = [f"shadow-{index:03d}" for index in range(1, follower_count + 1)]
     try:
         await AccountRepo(db).upsert("main", "master", "main", "shadow://main")
         for account_id in follower_ids:
@@ -92,7 +95,7 @@ async def test_thirty_shadow_followers_one_hundred_round_trips(tmp_path: Path):
             coordinator.on_master_delta,
         )
         started = time.monotonic()
-        for cycle in range(1, 101):
+        for cycle in range(1, cycle_count + 1):
             base_event = cycle * 10_000
             await projector.apply_raw(
                 order_trade(
@@ -113,18 +116,66 @@ async def test_thirty_shadow_followers_one_hundred_round_trips(tmp_path: Path):
                     c=f"master-stop-{cycle}",
                     sp="64500",
                     i=cycle * 2,
+                    o="STOP",
+                    ot="STOP",
                 )
             )
             for account_id in follower_ids:
                 audit = exchange.audit(account_id)
                 assert len(audit["positions"]) == 1, account_id
                 assert len(audit["open_orders"]) == 1, account_id
+                position = await exchange.position_risk(account_id, "BTCUSDT")
+                protection = await exchange.open_orders(account_id, "BTCUSDT")
+                assert protection[0].type == "STOP"
+                assert protection[0].orig_qty == abs(position[0].position_amt)
+
+            # Same trigger, smaller position: fixed protection must resize.
             await projector.apply_raw(
                 order_trade(
                     E=base_event + 2,
+                    c=f"master-reduce-{cycle}",
+                    S="SELL",
+                    x="TRADE",
+                    X="FILLED",
+                    l="0.5",
+                    z="0.5",
+                    ap="65000",
+                    L="65000",
+                    q="0.5",
+                )
+            )
+            for account_id in follower_ids:
+                position = await exchange.position_risk(account_id, "BTCUSDT")
+                protection = await exchange.open_orders(account_id, "BTCUSDT")
+                assert len(position) == len(protection) == 1
+                assert protection[0].orig_qty == abs(position[0].position_amt)
+
+            # Grow back at the unchanged trigger; fixed protection resizes up.
+            await projector.apply_raw(
+                order_trade(
+                    E=base_event + 3,
+                    c=f"master-grow-{cycle}",
+                    S="BUY",
+                    x="TRADE",
+                    X="FILLED",
+                    l="0.5",
+                    z="0.5",
+                    ap="65000",
+                    L="65000",
+                    q="0.5",
+                )
+            )
+            for account_id in follower_ids:
+                position = await exchange.position_risk(account_id, "BTCUSDT")
+                protection = await exchange.open_orders(account_id, "BTCUSDT")
+                assert len(position) == len(protection) == 1
+                assert protection[0].orig_qty == abs(position[0].position_amt)
+            await projector.apply_raw(
+                order_trade(
+                    E=base_event + 4,
                     c=f"master-stop-{cycle}",
-                    o="STOP_MARKET",
-                    ot="STOP_MARKET",
+                    o="STOP",
+                    ot="STOP",
                     x="CANCELED",
                     X="CANCELED",
                     sp="64500",
@@ -133,7 +184,7 @@ async def test_thirty_shadow_followers_one_hundred_round_trips(tmp_path: Path):
             )
             await projector.apply_raw(
                 order_trade(
-                    E=base_event + 3,
+                    E=base_event + 5,
                     c=f"master-close-{cycle}",
                     S="SELL",
                     x="TRADE",

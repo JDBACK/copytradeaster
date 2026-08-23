@@ -28,9 +28,11 @@ from copytradeaster.domain.models import (
     AccountState,
     ActionKind,
     ExecutionAction,
+    ExecutionPlan,
     PositionKey,
     PositionState,
     PosSide,
+    ProtectiveOrder,
     RiskPolicy,
     SkipReason,
     SymbolFilters,
@@ -107,6 +109,25 @@ def _filters_for(filters_by_symbol: dict[str, SymbolFilters], symbol: str) -> Sy
     return filters
 
 
+def _bot_owned(order) -> bool:
+    """Follower orders owned by this engine use Executor's reserved prefix."""
+    return str(order.client_order_id).startswith("ct")
+
+
+def _as_protective(order) -> ProtectiveOrder:
+    return ProtectiveOrder(
+        client_order_id=str(order.client_order_id),
+        order_id=int(order.order_id),
+        type=str(order.type),
+        side=order.side,
+        stop_price=order.stop_price,
+        reduce_only=bool(order.reduce_only),
+        close_position=bool(order.close_position),
+        working_type=str(order.working_type),
+        orig_qty=order.orig_qty,
+    )
+
+
 def _pick_with_extras(orders: list, order_types: tuple[str, ...]):
     """Newest protective order of the slot plus every duplicate beyond it.
 
@@ -116,10 +137,13 @@ def _pick_with_extras(orders: list, order_types: tuple[str, ...]):
     only the newest order made the next reconciliation see current==target and
     converge to an empty plan with the stale level still resting.
     """
-    candidates = sorted((o for o in orders if o.type in order_types), key=lambda o: o.update_time)
+    candidates = sorted(
+        (o for o in orders if o.type in order_types and _bot_owned(o)),
+        key=lambda o: o.update_time,
+    )
     if not candidates:
         return None, ()
-    return candidates[-1], tuple(candidates[:-1])
+    return _as_protective(candidates[-1]), tuple(_as_protective(o) for o in candidates[:-1])
 
 
 class Coordinator:
@@ -231,7 +255,8 @@ class Coordinator:
         if not policy.allow_new_entries:
             return False
         flag = await self._app_flags.get_flag("allow_new_entries")
-        return flag != "false"
+        emergency = await self._app_flags.get_flag("emergency_active")
+        return flag != "false" and emergency != "true"
 
     async def _recompute_follower(
         self,
@@ -288,11 +313,133 @@ class Coordinator:
         )
         plan = await self._bind_plan_context(fr.account_id, targets, plan, actual)
         results = await self._executor.submit(plan)
+        if any(
+            action.kind in (ActionKind.MARKET_OPEN, ActionKind.MARKET_CLOSE)
+            and result.status == "CONFIRMED"
+            for action, result in zip(plan.actions, results, strict=True)
+        ):
+            safety_results = await self._post_execution_converge(
+                fr, delta.state, targets, plan, results
+            )
+            results.extend(safety_results)
         # SUBMITTED and BLOCKED are not converged: in particular, a blocked
         # protection cancel must keep the previous sizing basis so the next
         # reconciliation retries the complete safety transition.
         failed = any(r.status != "CONFIRMED" for r in results)
         await self._persist_refs(fr.account_id, targets, failed=failed, master=delta.state)
+
+    async def _post_execution_converge(
+        self,
+        fr: FollowerRuntime,
+        master: MasterState,
+        targets: list[TargetPosition],
+        executed_plan: ExecutionPlan,
+        executed_results: list,
+    ) -> list:
+        """Synchronously protect the authoritative post-fill remainder.
+
+        Market RESULT can differ from the planned quantity (partial fill or a
+        concurrent protective exit). The outer follower lock is still held, so
+        this snapshot and any safety mutation belong to the same generation.
+        If an entry/increase cannot obtain a complete Stop after one immediate
+        retry, the affected leg is flattened. For a small single-operator bot,
+        closing the whole leg is safer and simpler than tracking a synthetic
+        partially protected sub-position.
+        """
+        actual = await self._snapshot(fr)
+        adjusted = self._targets_at_actual_qty(targets, actual)
+        protection_plan = build_plan(
+            actual,
+            TargetState(account_id=fr.account_id, targets=adjusted),
+            self._filters_provider(),  # type: ignore[arg-type]
+            self._coid_factory(),
+            working_type=self._working_type,
+        )
+        protection_plan = dc_replace(
+            protection_plan,
+            actions=[
+                action
+                for action in protection_plan.actions
+                if action.kind
+                in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP, ActionKind.CANCEL_ORDER)
+            ],
+        )
+        results: list = []
+        if protection_plan.actions:
+            protection_plan = await self._bind_plan_context(
+                fr.account_id, adjusted, protection_plan, actual
+            )
+            results.extend(await self._executor.submit(protection_plan))
+
+        verified = await self._snapshot(fr)
+        verified_targets = self._targets_at_actual_qty(targets, verified)
+        verification = build_plan(
+            verified,
+            TargetState(account_id=fr.account_id, targets=verified_targets),
+            self._filters_provider(),  # type: ignore[arg-type]
+            self._coid_factory(),
+            working_type=self._working_type,
+        )
+        unresolved_stop_keys = {
+            PositionKey(
+                action.symbol,
+                PosSide(action.payload.get("positionSide", PosSide.BOTH.value)),
+            )
+            for action in verification.actions
+            if action.kind == ActionKind.PLACE_STOP
+        }
+        opened_keys = {
+            PositionKey(
+                action.symbol,
+                PosSide(action.payload.get("positionSide", PosSide.BOTH.value)),
+            )
+            for action, result in zip(executed_plan.actions, executed_results, strict=True)
+            if action.kind == ActionKind.MARKET_OPEN and result.status == "CONFIRMED"
+        }
+        unsafe_opened = opened_keys & unresolved_stop_keys
+        if not unsafe_opened:
+            return results
+
+        zero_targets = [
+            TargetPosition(
+                key=key,
+                qty=Decimal(0),
+                stop_price=None,
+                tp_price=None,
+                leverage=verified.positions[key].leverage,
+            )
+            for key in sorted(unsafe_opened, key=lambda k: (k.symbol, k.pos_side.value))
+            if key in verified.positions and verified.positions[key].qty != 0
+        ]
+        if zero_targets:
+            close_plan = build_plan(
+                verified,
+                TargetState(account_id=fr.account_id, targets=zero_targets),
+                self._filters_provider(),  # type: ignore[arg-type]
+                self._coid_factory(),
+                working_type=self._working_type,
+            )
+            close_plan = await self._bind_plan_context(
+                fr.account_id, zero_targets, close_plan, verified
+            )
+            results.extend(await self._executor.submit(close_plan))
+        reason = ",".join(f"{key.symbol}:{key.pos_side.value}" for key in unsafe_opened)
+        await self._app_flags.set_flag(
+            "degraded", f"{fr.account_id}:unprotected-entry-flattened:{reason}"
+        )
+        await self._notify(f"[{fr.account_id}] unsafe entry flattened: {reason}")
+        return results
+
+    @staticmethod
+    def _targets_at_actual_qty(
+        targets: list[TargetPosition], actual: AccountState
+    ) -> list[TargetPosition]:
+        adjusted: list[TargetPosition] = []
+        for target in targets:
+            position = actual.positions.get(target.key)
+            qty = position.qty if position is not None else Decimal(0)
+            adjusted.append(dc_replace(target, qty=qty))
+        return adjusted
 
     async def _persist_refs(
         self,
@@ -384,7 +531,7 @@ class Coordinator:
         # backing positionRisk row (flat leg). Not surfaced -> never canceled.
         CONDITIONAL_TYPES = STOP_TYPES + TP_TYPES
         for o in orders:
-            if o.type not in CONDITIONAL_TYPES:
+            if o.type not in CONDITIONAL_TYPES or not _bot_owned(o):
                 continue
             key = PositionKey(symbol=o.symbol, pos_side=o.position_side)
             if key in positions:

@@ -92,6 +92,55 @@ async def test_shadow_stop_can_fill_and_expires_other_protection(shadow):
     assert await shadow.open_orders("shadow-001", "BTCUSDT") == []
 
 
+async def test_shadow_hedge_grow_and_close_position_dynamic_remainder(shadow):
+    for coid in ("grow-a", "grow-b"):
+        await shadow.place_order(
+            "shadow-001",
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.BUY,
+                type="MARKET",
+                quantity=D("0.002"),
+                position_side=PosSide.LONG,
+                new_client_order_id=coid,
+            ),
+        )
+    assert (await shadow.position_risk("shadow-001", "BTCUSDT"))[0].position_amt == D("0.004")
+    stop = await shadow.place_order(
+        "shadow-001",
+        PlaceOrderRequest(
+            symbol="BTCUSDT",
+            side=Side.SELL,
+            type="STOP_MARKET",
+            stop_price=D("64000"),
+            close_position=True,
+            position_side=PosSide.LONG,
+            new_client_order_id="dynamic-stop",
+        ),
+    )
+    assert stop.orig_qty == 0 and stop.close_position
+    shadow.set_market_price(D("63999"))
+    assert await shadow.position_risk("shadow-001", "BTCUSDT") == []
+
+
+async def test_shadow_rejected_close_does_not_leave_open_order(shadow):
+    from copytradeaster.aster.trading_api import AsterError
+
+    with pytest.raises(AsterError, match="ReduceOnly"):
+        await shadow.place_order(
+            "shadow-001",
+            PlaceOrderRequest(
+                symbol="BTCUSDT",
+                side=Side.SELL,
+                type="MARKET",
+                quantity=D("0.002"),
+                position_side=PosSide.LONG,
+                new_client_order_id="invalid-close",
+            ),
+        )
+    assert await shadow.open_orders("shadow-001", "BTCUSDT") == []
+
+
 async def test_shadow_deterministic_mode_does_not_auto_trigger():
     exchange = ShadowExchange(
         hedge=True,

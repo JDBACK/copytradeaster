@@ -376,6 +376,37 @@ class TestMarginCall:
 
 
 class TestRebuildFull:
+    async def test_snapshot_backfills_legacy_zero_direction(self, deps):
+        projector, _, db = deps
+        trade_id = await CopyTradeRepo(db).open_trade("BTCUSDT", "BOTH", None, direction=0)
+
+        class Balance:
+            asset = "USDT"
+            available_balance = D("500")
+
+        class Position:
+            symbol = "BTCUSDT"
+            position_amt = D("0.002")
+            entry_price = D("65000")
+            mark_price = D("65000")
+            leverage = 5
+            liquidation_price = D("30000")
+            position_side = PosSide.BOTH
+
+        class Client:
+            async def balance(self, account_id):
+                return [Balance()]
+
+            async def position_risk(self, account_id, symbol=None):
+                return [Position()]
+
+            async def open_orders(self, account_id, symbol=None):
+                return []
+
+        await projector.rebuild_full(Client(), "main")
+        row = await db.fetchone("SELECT direction FROM copy_trades WHERE trade_id=?", (trade_id,))
+        assert int(row["direction"]) == 1
+
     async def test_rest_snapshot(self, deps, monkeypatch):
         projector, _, _ = deps
 
@@ -407,6 +438,7 @@ class TestRebuildFull:
                 self.side = "SELL"
                 self.working_type = "MARK_PRICE"
                 self.update_time = ut
+                self.orig_qty = D("0.002")
 
         class FakeClient:
             async def balance(self, account_id):
@@ -459,6 +491,7 @@ class TestRebuildFull:
             side = "SELL"
             working_type = "MARK_PRICE"
             update_time = 1
+            orig_qty = D("0.002")
 
         class Client:
             async def balance(self, account_id):
