@@ -424,6 +424,45 @@ async def test_one_way_full_engine_signed_cycle(stack):
 
         await wait_until(follower_reduced, 45, "follower partial reduction", rebuilds=2)
 
+        # --- phase 4b: dust reduction -> intentional flat, NO re-entry -------
+        # Master cuts to a level whose proportional follower target rounds
+        # below the step: the leg must flatten ON PURPOSE and stay flat
+        # through repeated reconciles (no accidental re-entry), because the
+        # master episode is still open.
+        dust_left = _snap(master_qty * D("0.005"), step)  # 0.3% of entry size
+        if expected_target > 0 and dust_left >= step and dust_left < abs(master_left):
+            await _place(
+                client,
+                "main",
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.SELL,
+                    type="MARKET",
+                    quantity=abs(master_left) - dust_left,
+                    reduce_only=True,
+                    position_side=PosSide.BOTH,
+                    new_order_resp_type="RESULT",
+                    new_client_order_id=f"owe2e-dust-{base}"[:36],
+                ),
+            )
+            master_left = await _position_qty(client, "main")
+            await projector.apply_raw(
+                _master_trade(base, 45, str(abs(master_left)), str(entry), side="SELL")
+            )
+
+            async def follower_flat_on_dust() -> bool:
+                return await _position_qty(client, fr_id) == 0
+
+            await wait_until(follower_flat_on_dust, 45, "dust-target intentional flat", rebuilds=1)
+            # repeated reconciles must NOT re-open while the episode is open
+            for _ in range(2):
+                await projector.rebuild_full(client, "main")
+                await asyncio.sleep(1.0)
+                assert await _position_qty(client, fr_id) == 0, (
+                    "intentional flat must survive reconciliation"
+                )
+            assert not await _conditionals(client, fr_id)
+
         # --- phase 5: master TP -> follower mirrors it -----------------------
         tp_level = _snap(entry + D("900"), tick)
         await _place(
