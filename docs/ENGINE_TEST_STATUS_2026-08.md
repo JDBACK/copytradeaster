@@ -101,7 +101,8 @@ tick-grid равенство, TP removal/orphan cleanup, HEDGE-rebuild защи�
 - независимый signed REST после прогона: `main` и copyc1–copyc3 flat,
   `open_orders=0`;
 - `CT_LOAD=1` production-path integration: **1 passed** (30×100 shadow
-  cycles), full suite после изменений: **247 passed / 11 skipped**.
+  cycles), full suite после изменений: **247 passed / 11 skipped** (счётчик
+  той кампании; актуальный — в «Текущем состоянии» и разделе 4).
 
 Финальный JSON: `data/hybrid-load-20260822T233258Z.json`. Полная матрица
 evidence и ограничения shadow-контура: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md).

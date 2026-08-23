@@ -61,6 +61,8 @@ HYBRID_LOAD_TEST_JOURNAL_2026-08.md: время (MSK) → действие → �
 - Signed testnet CT_TESTNET=1: прежние 9 passed / 1 skipped (Builder skip — нет
   main private key) + ONE_WAY E2E passed.
 
+(Счётчики зафиксированы на момент этого прохода; текущие — в разделе 8.)
+
 ## 6. Документация
 
 - docs/DEV_PLAN_SKELETON.md — чеклист «Финальный gate по внешнему код-ревью».

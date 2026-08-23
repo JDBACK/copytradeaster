@@ -251,6 +251,26 @@ Stop и **ровно один** bot-owned TP. Дубликатные услов�
 `extra_stops/extra_tps`, и planner отменяет их отдельными независимыми
 `CANCEL_ORDER` (priority 1) — в том числе на flat-ноге.
 
+Семантика нулевого таргета (добавлено 2026-08-23, третий проход ревью):
+
+```text
+qty=0 при живом эпизоде мастера ≠ всегда «намеренный флэт».
+```
+
+Причина нуля переносится явно — `TargetPosition.hold_flat_until_episode_end`:
+
+- `True` — только same-direction пропорциональная редукция, округлившаяся ниже
+  step (dust-нога): персистится маркер `sync_basis.zero_target`, вход запрещён
+  (skip `INTENTIONAL_FLAT`) до конца эпизода мастера;
+- `False` — транзитный ноль flip'а («мастер перевернулся»): basis очищается,
+  обратная сторона открывается следующим проходом.
+
+Флип является границей эпизода: `_apply_fill` закрывает старый episode и
+открывает новый с колонкой `copy_trades.direction = ±1` (миграция #13).
+Snapshot-sync `rebuild_full` детектит рассинхрон направления после офлайна и
+делает тот же close+open. Новый эпизод автоматически снимает sticky-маркеры,
+поэтому dust-flat одного направления не блокирует вход в противоположном.
+
 Reconciliation запускается не только после ошибок, а является нормальной частью работы:
 
 - startup;
@@ -410,9 +430,14 @@ execution_commands
 - `credentials` — encrypted signer credentials;
 - `copy_settings` — risk %, limits, enable/disable;
 - `master_events` — raw event ledger для replay/recovery;
-- `copy_trades` — внутренние торговые эпизоды;
+- `copy_trades` — внутренние торговые эпизоды (с `direction = ±1` — сторона
+  эпизода, миграция #13);
 - `order_links` — master ↔ follower order mapping;
 - `execution_commands` — durable execution journal/queue.
+
+(В реализации также есть `sync_basis` — per-follower sizing reference с
+`zero_target`-маркером намеренного dust-flat и `issued_target` для
+идемпотентности ревизий; `nonce_store` — атомарная выдача nonces.)
 
 Подробная схема появляется только по мере реализации конкретного этапа.
 

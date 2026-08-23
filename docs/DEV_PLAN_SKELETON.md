@@ -132,7 +132,7 @@ Builder signed e2e не является блокером торгового я�
 - [x] SQLite write path усилен autocommit, cursor lifecycle и общим write lock;
   nonce allocation атомарен на том же aiosqlite connection.
 - [x] Полный suite: 247 passed / 11 skipped, coverage 87%, ruff и diff-check
-  clean.
+  clean. (Счётчик той кампании; актуальный — в блоке третьего прохода ниже.)
 
 Подробности, включая неуспешные промежуточные прогоны и ограничения shadow
 evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md)
@@ -155,8 +155,9 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-0
   partial close → TP → close через Projector→Coordinator→Risk→Planner→Executor→
   journal→REAL follower (`copyc1`), с аудитом журнала (0 FAILED/UNKNOWN/BLOCKED,
   `reduceOnly=true`, без `positionSide`) и восстановлением режима.
-- [x] Полный офлайн-suite: 256 passed / 12 skipped, coverage 87%; ruff
-  check/format clean.
+- [x] Полный офлайн-suite на момент того прохода: 256 passed / 12 skipped,
+  coverage 87%; ruff check/format clean. (Текущий счётчик — см. ниже,
+  третий проход.)
 
 ### Dust zero-target edge case — второй проход ревью (2026-08-23)
 
