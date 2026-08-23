@@ -536,6 +536,123 @@ class TestDuplicateProtectionConvergence:
         assert resting_conditionals(fake, fid) == []
 
 
+class TestMasterFlipEpisodeSemantics:
+    """Reviewer regression (pass 3): a master sign flip is a TRANSITIONAL zero
+    for the follower - close the old side, then open the reversed side on the
+    next pass. The projector must close the old episode and open a new one for
+    the new direction (which also clears sticky zero_target markers); the flip
+    zero itself must NEVER latch INTENTIONAL_FLAT."""
+
+    async def test_flip_closes_long_opens_short_with_new_episode(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        assert follower_qty(fake, fid) == D("0.019")
+        first = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert first is not None and int(first["direction"]) == 1
+
+        # one fill flips the master LONG +1 -> SHORT -0.5
+        await projector.apply_raw(
+            order_trade(
+                E=1200,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="1.5",
+                z="1.5",
+                ap="65000",
+                L="65000",
+                q="1.5",
+            )
+        )
+        await asyncio.sleep(0)
+        # transitional zero: the LONG side is closed, NOTHING latches
+        assert follower_qty(fake, fid) == 0, "flip must close the old side"
+        row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert row is None or int(row["zero_target"]) == 0, "flip zero must not latch"
+
+        flipped = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert flipped is not None, "flip must leave an active episode"
+        assert int(flipped["trade_id"]) != int(first["trade_id"]), "flip must open a NEW episode"
+        assert int(flipped["direction"]) == -1, "new episode must carry the SHORT direction"
+
+        # master protects the SHORT leg (BUY stop above the market) ...
+        await projector.apply_raw(stop_new(E=1210, c="m-stop-s", sp="65500", S="BUY"))
+        await asyncio.sleep(0)
+        # ... and the follower opens the SHORT on the next pass
+        qty = follower_qty(fake, fid)
+        assert qty < 0, "follower must open the reversed side after a flip"
+        stop = follower_stop(fake, fid)
+        assert stop is not None and stop.stop_price == D("65500")
+
+        # repeated reconciles KEEP the SHORT: no marker blocks the position
+        from copytradeaster.master.projector import MasterDelta
+
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        for _ in range(2):
+            await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        assert follower_qty(fake, fid) == qty
+
+    async def test_flip_from_dust_flat_still_opens_short(self, env):
+        """The exact reviewer sequence: dust-flat marker set INSIDE an episode,
+        then the master flips. The new-direction entry must NOT be blocked."""
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        assert follower_qty(fake, fid) == D("0.019")
+        first = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+
+        # dust: master 1.0 -> 0.03 floors the follower target to zero;
+        # the intentional flat LATCHES (sticky marker)
+        await projector.apply_raw(
+            order_trade(
+                E=1200,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="0.97",
+                z="0.97",
+                ap="65000",
+                L="65000",
+                q="1",
+            )
+        )
+        await asyncio.sleep(0)
+        assert follower_qty(fake, fid) == 0
+        row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert row is not None and int(row["zero_target"]) == 1, "dust flat must latch"
+
+        # master flips +0.03 -> -0.02 in one fill
+        await projector.apply_raw(
+            order_trade(
+                E=1250,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="0.05",
+                z="0.05",
+                ap="65000",
+                L="65000",
+                q="1",
+            )
+        )
+        await asyncio.sleep(0)
+        flipped = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert flipped is not None
+        assert int(flipped["trade_id"]) != int(first["trade_id"])
+        short_dir = int(flipped["direction"])
+        assert short_dir == -1
+        row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert row is None or int(row["zero_target"]) == 0, (
+            "the flip's new episode must clear the sticky marker"
+        )
+
+        # short protection -> follower enters the reversed side
+        await projector.apply_raw(stop_new(E=1260, c="m-stop-s", sp="65500", S="BUY"))
+        await asyncio.sleep(0)
+        assert follower_qty(fake, fid) < 0, "SHORT entry must not be blocked by the old marker"
+
+
 class TestDustReductionNoReentry:
     """Reviewer edge case: a proportional reduction that rounds down to zero
     (master 1.0 -> 0.5 vs a minQty follower) is an INTENTIONAL flat inside the
