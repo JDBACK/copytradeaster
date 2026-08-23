@@ -139,7 +139,8 @@ shadow_signed_requests=0, 31/31 flat до и после. Артефакты:
 
 Все пункты трёх проходов ревью закрыты: protective convergence (+retry),
 ONE_WAY через ядро, dust zero-target, flip-регрессия, честное dust-evidence —
-каждое с офлайн-регрессом и живым signed-доказательством. Основание
-зафиксировать Stage 1 = CLOSED (по критериям ревьюера) и переходить к Stage 2.
+каждое с офлайн-регрессом и живым signed-доказательством. Решение о статусе
+этапа (закрытие Stage 1 / переход к Stage 2) — за владельцем проекта и
+ревьюером, не за исполнителем.
 Неблокирующие хвосты без изменений: startup-gap resnapshot, symbol-scoped
 follower snapshot к 100 копирам, Builder в Stage 3.
