@@ -1,7 +1,7 @@
 # Журнал финального gate по внешнему код-ревью — 2026-08-23
 
 Хронология работы по двум пунктам последнего независимого ревью
-([review_stage1_final.md](review_stage1_final.md)). Формат — как в
+([review_stage1_final.md](../reviews/review_stage1_final.md)). Формат — как в
 HYBRID_LOAD_TEST_JOURNAL_2026-08.md: время (MSK) → действие → факт.
 
 ## 1. Изучение ревью и кода

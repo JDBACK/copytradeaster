@@ -127,9 +127,11 @@ Signing details:
 
 Получает события master account и строит нормализованное состояние.
 
-`observer` отвечает только за соединение, listenKey, keepalive, reconnect и получение raw events.
-
-`projector` преобразует Aster payloads в внутреннее состояние проекта.
+В Stage 1 соединение, listenKey, keepalive, reconnect и приём raw events
+обеспечивает `aster/user_stream.py` (`UserStream`); `master/projector.py`
+(`MasterProjector`) преобразует Aster payloads во внутреннее состояние проекта,
+ведёт copy_trades-эпизоды и эмитит дельты в coordinator. Выделение
+`master/observer.py` — этап 2 (план см. §16).
 
 ### `risk/`
 
@@ -164,38 +166,35 @@ Risk engine должен возвращать целевое состояние/
 Для load-only проверки масштаба `accounts.execution_mode` может быть `REAL` или
 `SHADOW`. `SHADOW` rows не имеют credentials и направляются в локальный
 `aster/shadow.py`; режим разрешён только явным opt-in на testnet и не является
-production execution path. Финальный hybrid gate: 30 slots (3 REAL + 27
-SHADOW), 100 циклов, 12 302 подтверждённые команды; подробности в
-`HYBRID_LOAD_TEST_REPORT_2026-08.md`.
+production execution path. Миграции — упорядоченный список в
+`storage/database.py` (`MIGRATIONS`), репозитории — `storage/repositories.py`.
+Финальный hybrid gate: 30 slots (3 REAL + 27 SHADOW), 100 циклов, 12 302
+подтверждённые команды (пост-фикс rerun 20260823: 12 207/12 207);
+подробности в `reports/HYBRID_LOAD_TEST_REPORT_2026-08.md`.
 
 ### `credentials/`
 
 Шифрование и получение signer credentials — только для пути `onboarding/direct`.
 
-Приватные signer keys в БД хранятся только зашифрованными. Master encryption key находится вне БД.
+Приватные signer keys в БД хранятся только зашифрованными (AESGCM, ключ вне БД:
+`CT_ENCRYPTION_KEY`). Реализация: `credentials/service.py` + `credentials/crypto.py`.
 
 Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder signer-ключи генерирует и хранит билдер — приватные ключи фолловера в систему не попадают. Для этого пути `credentials/` не используется; торговый core получает builder-идентичность (builderId, feeRate) через тот же TradingIdentity.
 
 ### `onboarding/`
 
-Способ получения `TradingIdentity`.
-
-Два независимых адаптера:
-
-- `direct` — прямой V3 набор для testnet/MVP;
-- `builder` — ApproveAgent + ApproveBuilder.
+Способ получения `TradingIdentity`. Два независимых адаптера: `direct`
+(прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). В Stage 1
+direct-набор принимается CLI-импортом (`cli/main.py`) и складывается в
+`credentials/`; отдельные пакеты `onboarding/` появятся на этапах 2–3.
 
 Trading core не должен знать, каким способом credentials появились.
 
-### `telegram/`
+### `notifications/`
 
-Только пользовательский интерфейс:
-
-- onboarding;
-- настройки риска;
-- enable/disable;
-- статус;
-- уведомления.
+Пользовательские уведомления. В Stage 1 — консольный вывод
+(`notifications/console.py`, logging INFO); Telegram-интерфейс (онбординг,
+настройки риска, enable/disable, статус) — этап 2.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.
 
@@ -528,87 +527,83 @@ Risk, planner, reconciler и master flow не меняются.
 copytradeaster/
 │
 ├── pyproject.toml
-├── README.md
-├── AGENTS.md
-├── ARCHITECTURE.md
-├── ASTER_API_RESEARCH_2026-08.md
-├── DEV_PLAN_SKELETON.md
+├── AGENTS.md                       # правила работы агентов с репо
+├── docs/                           # документация; карта — docs/docs_map.md
+│   ├── docs_map.md                 # что где лежит и когда читать
+│   ├── ARCHITECTURE.md             # этот файл
+│   ├── DEV_PLAN_SKELETON.md        # roadmap + чеклисты этапов
+│   ├── ENGINE_TEST_STATUS_2026-08.md  # ЕДИНЫЙ живой статус движка
+│   ├── ASTER_API_RESEARCH_2026-08.md  # справочник по V3 API
+│   ├── reports/                    # исторические отчёты кампаний и журналы прогонов
+│   ├── reviews/                    # дословные тексты внешних ревью (не редактируются)
+│   └── history/                    # выполненный план Stage 1, исходный брифинг
 │
 ├── src/
 │   └── copytradeaster/
 │       ├── __init__.py
 │       ├── __main__.py
-│       ├── app.py                 # composition root / startup
-│       ├── config.py
+│       ├── app.py                 # composition root / startup (§12 boot order)
+│       ├── config.py              # Settings (.env)
+│       ├── logging_utils.py
 │       │
 │       ├── domain/
-│       │   ├── __init__.py
-│       │   └── models.py          # основные внутренние модели
+│       │   └── models.py          # основные внутренние модели (PositionKey,
+│       │                           #   TargetPosition, ExecutionAction, ...)
 │       │
-│       ├── aster/
-│       │   ├── __init__.py
-│       │   ├── trading_api.py     # account/trading REST
-│       │   ├── shadow.py           # explicit load-only shadow adapter
+│       ├── aster/                  # адаптер Aster V3, без copytrade-логики
+│       │   ├── trading_api.py     # account/trading REST (AsterClient)
 │       │   ├── management_api.py  # Agent / Builder management
-│       │   ├── user_stream.py     # listenKey + WebSocket
-│       │   ├── signing.py
+│       │   ├── user_stream.py     # listenKey + WebSocket (UserStream)
+│       │   ├── signing.py         # EIP-712 trading/registration contexts
 │       │   ├── models.py          # Aster DTO
-│       │   └── rate_limits.py
+│       │   ├── ports.py           # exchange-порт для тестов
+│       │   ├── rate_limits.py     # weighted limits
+│       │   └── shadow.py          # load-only SHADOW adapter (без кредов)
 │       │
 │       ├── master/
-│       │   ├── __init__.py
-│       │   ├── observer.py
-│       │   └── projector.py
+│       │   └── projector.py       # MasterProjector: raw WS -> MasterState +
+│       │                          #   deltas, episode lifecycle, rebuild_full
 │       │
 │       ├── risk/
-│       │   ├── __init__.py
-│       │   └── engine.py
+│       │   └── engine.py          # entry_quantity / scaled_reduce / post_fill_cap
 │       │
-│       ├── trading/
-│       │   ├── __init__.py
-│       │   ├── coordinator.py
-│       │   ├── planner.py
-│       │   ├── executor.py
-│       │   └── reconciler.py
+│       ├── trading/                # прикладное ядро
+│       │   ├── coordinator.py     # master delta -> targets per follower
+│       │   ├── planner.py         # actual vs target -> minimal plan
+│       │   ├── executor.py        # durable command execution + retry/recovery
+│       │   └── reconciler.py      # periodic full sweep
 │       │
-│       ├── storage/
-│       │   ├── __init__.py
-│       │   ├── database.py
-│       │   ├── repositories.py
-│       │   └── migrations/
+│       ├── storage/                # SQLite: миграции + репозитории
+│       │   ├── database.py        # aiosqlite, WAL, write_lock, MIGRATIONS
+│       │   └── repositories.py    # CopyTradeRepo / SyncBasisRepo / CommandRepo ...
 │       │
 │       ├── credentials/
-│       │   ├── __init__.py
-│       │   ├── service.py
+│       │   ├── service.py         # SqliteCredentials (AESGCM-v1)
 │       │   └── crypto.py
 │       │
-│       ├── onboarding/
-│       │   ├── __init__.py
-│       │   ├── direct.py
-│       │   └── builder.py
-│       │
-│       ├── telegram/
-│       │   ├── __init__.py
-│       │   ├── app.py
-│       │   └── handlers.py
-│       │
 │       ├── notifications/
-│       │   ├── __init__.py
-│       │   └── service.py
+│       │   └── console.py         # Stage-1 console notifier
 │       │
 │       └── cli/
-│           ├── __init__.py
-│           └── main.py
+│           └── main.py            # import-wallet / admin commands
 │
-└── tests/
-    ├── unit/
-    ├── integration/
-    ├── replay/
-    │   └── fixtures/
-    └── testnet/
+├── tests/
+│   ├── unit/                      # risk/planner/storage/domain
+│   ├── integration/               # FakeAster e2e через реальное ядро
+│   ├── testnet/                   # signed scenarios (маркер `testnet`, CT_TESTNET=1)
+│   └── replay/                    # replay захваченных стримов
+│
+├── scripts/                        # operational scripts (hybrid_load_test.py, ...)
+└── data/                           # SQLite БД и артефакты load-прогонов (git-ignored)
 ```
 
-Этот tree — целевая структура, а не требование создать все пустые файлы заранее. Модуль/файл добавляется тогда, когда появляется его реальная реализация.
+Плановые пакеты `master/observer`, `onboarding/`, `telegram/` появляются на
+этапах 2–3 (см. §16); в Stage 1 их роли закрыты `aster/user_stream.py`,
+CLI-импортом и `notifications/console.py` соответственно.
+
+Этот tree — фактическая структура Stage 1. Плановые модули (`master/observer`,
+`onboarding/`, `telegram/`) добавляются тогда, когда появляется их реальная
+реализация (этапы 2–3).
 
 ## 18. Архитектурные правила проекта
 

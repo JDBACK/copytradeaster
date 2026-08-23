@@ -78,7 +78,7 @@ boot-recovery SENDING/SUBMITTED/UNKNOWN с order_links, async persist-before-sen
 nonce, реальный pause, deviation/post-fill риск, перенос стопа в прибыли,
 tick-grid равенство, TP removal/orphan cleanup, HEDGE-rebuild защита, TRADE вне
 порядка + entry от L, fail-closed routing, decoupled WS ingest.
-Полная инвентаризация и верификация — [REFACTOR_STAGE1_REPORT.md](../REFACTOR_STAGE1_REPORT.md).
+Полная инвентаризация и верификация — [REFACTOR_STAGE1_REPORT.md](reports/REFACTOR_STAGE1_REPORT.md).
 На момент закрытия review-specific доработок герметичный сьют дал **240 passed /
 10 skipped** без
 `CT_TESTNET`, `ruff check` и `ruff format --check` — clean. Signed testnet:
@@ -105,11 +105,11 @@ tick-grid равенство, TP removal/orphan cleanup, HEDGE-rebuild защи�
   той кампании; актуальный — в «Текущем состоянии» и разделе 4).
 
 Финальный JSON: `data/hybrid-load-20260822T233258Z.json`. Полная матрица
-evidence и ограничения shadow-контура: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md).
+evidence и ограничения shadow-контура: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2026-08.md).
 
 ## Финальный gate по внешнему код-ревью — 2026-08-23
 
-Текст ревью: [review_stage1_final.md](../review_stage1_final.md). Два пункта:
+Текст ревью: [review_stage1_final.md](reviews/review_stage1_final.md). Два пункта:
 
 ### 1. P1 — защитная конвергенция (последний code blocker)
 

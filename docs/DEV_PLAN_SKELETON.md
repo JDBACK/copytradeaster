@@ -135,8 +135,8 @@ Builder signed e2e не является блокером торгового я�
   clean. (Счётчик той кампании; актуальный — в блоке третьего прохода ниже.)
 
 Подробности, включая неуспешные промежуточные прогоны и ограничения shadow
-evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md)
-и [HYBRID_LOAD_TEST_JOURNAL_2026-08.md](../HYBRID_LOAD_TEST_JOURNAL_2026-08.md).
+evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2026-08.md)
+и [HYBRID_LOAD_TEST_JOURNAL_2026-08.md](reports/HYBRID_LOAD_TEST_JOURNAL_2026-08.md).
 27 shadow slots подтверждают масштаб внутреннего pipeline, но не заменяют 27
 независимых signed Aster accounts для 30-real acceptance.
 
@@ -243,4 +243,4 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-0
 
 ---
 
-Источники: [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md) — status 20–21.08.2026; [REPORTS_FACTUAL_COMPARISON_2026-08.md](REPORTS_FACTUAL_COMPARISON_2026-08.md).
+Источники: [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md) — status 20–21.08.2026; [REPORTS_FACTUAL_COMPARISON_2026-08.md](reports/REPORTS_FACTUAL_COMPARISON_2026-08.md).
