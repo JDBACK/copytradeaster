@@ -31,6 +31,7 @@
 | 11 | -4014 Price not increased by tick size | `quantize("0.10")` держит 2 знака вместо сетки 0.1 | выравнивание делением на тик (`d834e9c`) |
 | 12 | **Stale защита после FAILED dependent cancel** | `_pick()` снапшота выбирал только новейший Stop/TP: при `PLACE B CONFIRMED → CANCEL A FAILED` следующий reconcile видел current==target и выдавал пустой план — старый уровень висел рядом с новым | снапшот отдаёт дубликаты слота (`extra_stops`/`extra_tps`), planner-правило 9 всегда их отменяет, включая flat-ветку |
 | 13 | **Ретрай CANCEL/SET_LEVERAGE после FAILED невозможен** | `_submit_cancel`/`_submit_leverage` всегда делали INSERT и падали на `UNIQUE(command_key)` при повторе той же транзиции | существующая FAILED-строка переводится в PENDING и ретраится под исходным командным ключом (вскрыто e2e-тестом пункта 12) |
+| 14 | **Dust-сокращение до нуля переоткрывало позицию** | при `scaled_reduce → 0` внутри живого эпизода мастера `_persist_refs` стирал строку basis; следующий recompute видел «мастер в позиции + follower flat» и трактовал это как дрейф — немедленный re-entry сразу после намеренного закрытия | флаг `sync_basis.zero_target` (миграция #12): намеренный флэт персистится до конца эпизода мастера; входная ветка skip'ает `INTENTIONAL_FLAT`; флаг снимают новый эпизод мастера (`open_trade`) и `mark_zero_target` (сброс `issued_target`, чтобы следующий ненулевой таргет получил новую ревизию) |
 
 ## Известные ограничения (осознанные решения этапа 1)
 
@@ -133,12 +134,34 @@ BLOCKED; все закрывающие команды с `reduceOnly=true` и б
 самого сценария (снятие baseline после события, неверное ожидание при
 минимальном размере копира) — предикаты приведены к семантике движка.
 
+### 3. Dust zero-target edge case (второй проход ревью, 2026-08-23)
+
+Ревьюер принял оба пункта gate и нашёл последний edge case: при
+`scaled_reduce → 0` (мастер режет позицию так, что пропорция follower'а
+округляется ниже step) `_persist_refs` стирал basis-строку; следующий
+post-fill recompute видел «мастер открыт + follower flat» и **немедленно
+переоткрывал** намеренно закрытую ногу.
+
+Фикс: персистентный маркер `sync_basis.zero_target` (новая миграция #12):
+- `_persist_refs`: `t.qty == 0` при живом эпизоде мастера → `mark_zero_target`
+  вместо `clear`; реальное закрытие эпизода → `clear` как раньше;
+- входная ветка координатора: skip `INTENTIONAL_FLAT`, пока маркер активен
+  (после OWN_PROTECTIVE_FILLED, до PAUSED);
+- маркер снимают: новый эпизод мастера (`CopyTradeRepo.open_trade`) и сам
+  `mark_zero_target` (сбрасывает и `issued_target` — иначе следующий ненулевой
+  таргет совпал бы с нулевым в ревизии и новый MARKET_OPEN проглотила бы
+  идемпотентность по command_key).
+
+Контрольный тест защищает починенный drift-recovery: ненулевой таргет +
+ручное закрытие follower'а → движок по-прежнему восстанавливает позицию той же
+величины. Live dust-фаза добавлена в signed ONE_WAY E2E (phase 4b).
+
 ### Итог прогона
 
-- Полный офлайн-suite: **254 passed / 12 skipped**, coverage 87%; ruff check +
+- Полный офлайн-suite: **256 passed / 12 skipped**, coverage 87%; ruff check +
   format clean.
 - Signed testnet (CT_TESTNET=1): прежние сценарии **9 passed / 1 skipped**
-  (Builder — нет main private key, Stage 3) + новый ONE_WAY E2E **passed**
-  (36 c) = 10 passed из 10 исполняемых.
-- Оба пункта ревьюера закрыты → основание зафиксировать `Stage 1 = CLOSED`
-  без нового большого код-ревью (по шкале самого ревьюера).
+  (Builder — нет main private key, Stage 3) + ONE_WAY E2E с dust-фазой
+  **passed** = 10 passed из 10 исполняемых.
+- Оба пункта первого gate + dust edge case второго прохода закрыты → основание
+  зафиксировать `Stage 1 = CLOSED` (по критериям ревьюера).

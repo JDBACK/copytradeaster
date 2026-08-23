@@ -68,9 +68,34 @@ HYBRID_LOAD_TEST_JOURNAL_2026-08.md: время (MSK) → действие → �
 - docs/ARCHITECTURE.md §6 — инвариант конвергенции защиты (правило 9).
 - review_stage1_final.md — сохранённый текст ревью.
 
+## 7. Второй проход ревью — dust zero-target edge case (2026-08-23)
+
+Ревьюер проверил ветку в GitHub, принял оба пункта gate и нашёл последний
+edge case: `scaled_reduce → 0` внутри живого эпизода мастера стирал basis
+(`clear()`), и следующий post-fill recompute трактовал намеренный флэт как
+дрейф — немедленный re-entry.
+
+Реализация:
+- миграция #12: колонка `sync_basis.zero_target`;
+- `SyncBasisRepo.mark_zero_target/is_zero_target/clear_zero_target`; при
+  маркировке сбрасывается и `issued_target` (отладка e2e вскрыла: без этого
+  следующий ненулевой таргет совпадал с нулевым в ревизии, новый MARKET_OPEN
+  получал command_key исторического CONFIRMED OPEN и глотался
+  идемпотентностью);
+- `_persist_refs`: `t.qty == 0` + мастер в позиции → `mark_zero_target`,
+  реальное закрытие эпизода → `clear` как раньше;
+- входная ветка координатора: skip `INTENTIONAL_FLAT` (новый SkipReason);
+- `CopyTradeRepo.open_trade`: новый эпизод мастера снимает маркеры ноги.
+
+Тесты: `TestDustReductionNoReentry` (2 сценария: dust-флэт держится через 3+
+reconcile/stop-move до нового эпизода; контрольный — ненулевой таргет +
+ручное закрытие → восстановление той же величины). Live: phase 4b добавлена в
+signed ONE_WAY E2E. Полный офлайн: 256 passed / 12 skipped, coverage 87%.
+
 ## Статус
 
-Оба пункта gate закрыты с живыми signed-доказательствами → основание
-зафиксировать Stage 1 = CLOSED (по критериям самого ревьюера) и переходить к
-Stage 2. Неблокирующие хвосты без изменений: startup-gap resnapshot,
+Оба пункта первого gate закрыты с живыми signed-доказательствами; dust
+edge case второго прохода исправлен и покрыт (офлайн + live phase 4b).
+Основание зафиксировать Stage 1 = CLOSED (по критериям ревьюера) и переходить
+к Stage 2. Неблокирующие хвосты без изменений: startup-gap resnapshot,
 symbol-scoped follower snapshot к 100 копирам, Builder в Stage 3.

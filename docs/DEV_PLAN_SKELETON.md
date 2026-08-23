@@ -155,8 +155,19 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-0
   partial close → TP → close через Projector→Coordinator→Risk→Planner→Executor→
   journal→REAL follower (`copyc1`), с аудитом журнала (0 FAILED/UNKNOWN/BLOCKED,
   `reduceOnly=true`, без `positionSide`) и восстановлением режима.
-- [x] Полный офлайн-suite: 254 passed / 12 skipped, coverage 87%; ruff
+- [x] Полный офлайн-suite: 256 passed / 12 skipped, coverage 87%; ruff
   check/format clean.
+
+### Dust zero-target edge case — второй проход ревью (2026-08-23)
+
+- [x] **Dust-сокращение до нуля больше не переоткрывает позицию.**
+  `sync_basis.zero_target` (миграция #12) персистит намеренный флэт внутри
+  живого эпизода мастера; входная ветка skip'ает `INTENTIONAL_FLAT`; маркер
+  снимают новый эпизод мастера и `mark_zero_target` (со сбросом
+  `issued_target` против глотания идемпотентностью).
+- [x] Контрольный тест: ненулевой таргет + ручное закрытие follower'а →
+  drift-recovery по-прежнему восстанавливает позицию.
+- [x] Live dust-фаза в signed ONE_WAY E2E (phase 4b).
 
 
 ## 5. MVP vs Продакшн
