@@ -534,3 +534,98 @@ class TestDuplicateProtectionConvergence:
         )
         assert follower_qty(fake, fid) == 0
         assert resting_conditionals(fake, fid) == []
+
+
+class TestDustReductionNoReentry:
+    """Reviewer edge case: a proportional reduction that rounds down to zero
+    (master 1.0 -> 0.5 vs a minQty follower) is an INTENTIONAL flat inside the
+    still-open master episode. The engine must not re-open the follower on the
+    next post-fill/periodic reconcile - and must NOT lose the repaired
+    drift-recovery behavior when the target was genuinely non-zero."""
+
+    async def test_zero_rounded_target_stays_flat_until_new_episode(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        # normal entry: followers size 0.019 from their own risk budget
+        await open_master_long(projector, fake)
+        assert follower_qty(fake, fid) == D("0.019")
+
+        # master cuts 1.0 -> 0.03: scaled target = floor(0.019 * 0.03 / 1.0)
+        # = floor(0.00057) = 0 -> the whole follower leg must close ON PURPOSE
+        await projector.apply_raw(
+            order_trade(
+                E=1200,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="0.97",
+                z="0.97",
+                ap="65000",
+                L="65000",
+                q="1",
+            )
+        )
+        await asyncio.sleep(0)
+        assert follower_qty(fake, fid) == 0, "dust target must flatten the leg"
+
+        # post-fill recompute + repeated reconciles must NOT re-open:
+        from copytradeaster.master.projector import MasterDelta
+
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        for _ in range(3):
+            await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        assert follower_qty(fake, fid) == 0, "intentional flat must persist"
+
+        # master stop move inside the SAME episode - still no re-entry
+        await projector.apply_raw(stop_new(E=1300, c="m-stop-b", sp="64000", i=202))
+        assert follower_qty(fake, fid) == 0
+
+        # only a NEW master episode re-enables entry (same price: this bare
+        # harness has no mark-price refresher, so +1.5% would trip the
+        # legitimate ENTRY_DEVIATION gate)
+        await projector.apply_raw(
+            order_trade(
+                E=1400,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="0.03",
+                z="0.03",
+                ap="65000",
+                L="65000",
+                q="1",
+            )
+        )  # closes the episode (master flat)
+        assert follower_qty(fake, fid) == 0
+        await projector.apply_raw(
+            order_trade(
+                E=1500, x="TRADE", X="FILLED", l="1", z="1", ap="65000", L="65000", q="1", i=300
+            )
+        )  # new episode
+        await projector.apply_raw(stop_new(E=1510, c="m-stop-c", sp="64500", i=302))
+        qty = follower_qty(fake, fid)
+        assert qty > D("0"), "new episode must allow normal entry again"
+
+    async def test_manual_close_with_nonzero_target_still_recovers(self, env):
+        """Control: when the issued target was NON-zero, an actual-vs-target
+        drift (manual close) must still be repaired by re-entry."""
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        # master long 1.0 with stop; followers enter 0.019 as usual
+        await open_master_long(projector, fake)
+        assert follower_qty(fake, fid) > 0
+        entered = follower_qty(fake, fid)
+
+        # simulate a MANUAL external close of the follower position
+        key = ("copyc1", "BTCUSDT:BOTH")
+        fake.positions.pop(key, None)
+        fake.entry_prices.pop(key, None)
+
+        from copytradeaster.master.projector import MasterDelta
+
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        recovered = follower_qty(fake, fid)
+        assert recovered > 0, "genuine drift must be repaired"
+        # same magnitude: the persisted basis is unchanged, this is recovery
+        assert recovered == entered

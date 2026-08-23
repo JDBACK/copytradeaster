@@ -42,6 +42,7 @@ class SkipReason(StrEnum):
     PAUSED = "PAUSED"
     STALE_MASTER = "STALE_MASTER"
     OWN_PROTECTIVE_FILLED = "OWN_PROTECTIVE_FILLED"
+    INTENTIONAL_FLAT = "INTENTIONAL_FLAT"  # dust target=0 inside an open episode
 
 
 class _DecimalStrict:

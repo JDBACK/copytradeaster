@@ -81,6 +81,9 @@ MIGRATIONS: list[str] = [
     ALTER TABLE accounts ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'REAL'
       CHECK(execution_mode IN ('REAL','SHADOW'))
     """,
+    """
+    ALTER TABLE sync_basis ADD COLUMN zero_target INTEGER NOT NULL DEFAULT 0
+    """,
 ]
 
 

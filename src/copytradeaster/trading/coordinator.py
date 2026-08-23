@@ -310,7 +310,18 @@ class Coordinator:
         for t in targets:
             key = t.key
             if t.qty == 0:
-                await self._basis.clear(account_id, key.symbol, key.pos_side.value)
+                mpos = master.positions.get(key)
+                master_still_open = mpos is not None and mpos.qty != 0
+                if master_still_open and self._basis is not None:
+                    # Intentional flat INSIDE an open master episode: the
+                    # proportional target rounded down to zero (dust leg).
+                    # Persist the marker instead of clearing the row, or the
+                    # next recompute would see "master open + follower flat"
+                    # and immediately re-open the position just closed.
+                    await self._basis.mark_zero_target(account_id, key.symbol, key.pos_side.value)
+                elif self._basis is not None:
+                    # Master episode really ended: full cleanup as before.
+                    await self._basis.clear(account_id, key.symbol, key.pos_side.value)
                 continue
             mpos = master.positions.get(key)
             if mpos is not None:
@@ -474,6 +485,16 @@ class Coordinator:
                 # already ended by THIS follower's own protective fill (stop OR tp)
                 if await self._ended_by_own_protective(account_id, key):
                     skips.append(SkipRecord(key.symbol, SkipReason.OWN_PROTECTIVE_FILLED))
+                    continue
+                # a-precondition: the follower is flat on purpose INSIDE this
+                # master episode - a proportional reduction target rounded down
+                # to zero (dust leg). Without the marker the post-fill
+                # recompute would treat the intentional close as drift and
+                # immediately re-open. A NEW master episode clears it.
+                if self._basis is not None and await self._basis.is_zero_target(
+                    account_id, key.symbol, key.pos_side.value
+                ):
+                    skips.append(SkipRecord(key.symbol, SkipReason.INTENTIONAL_FLAT))
                     continue
                 if not entries_allowed:
                     skips.append(SkipRecord(key.symbol, SkipReason.PAUSED))

@@ -163,6 +163,13 @@ class CopyTradeRepo:
             " VALUES (?, ?, ?, ?)",
             (symbol, pos_side, _now_iso(), master_event_id),
         )
+        # A NEW master episode invalidates per-follower intentional-flat
+        # markers for this leg: followers may enter normally again.
+        await self.db.execute_write(
+            "UPDATE sync_basis SET zero_target=0, updated_at=?"
+            " WHERE symbol=? AND pos_side=? AND zero_target<>0",
+            (_now_iso(), symbol, pos_side),
+        )
         return int(lastrowid)
 
     async def close_trade(self, trade_id: int) -> None:
@@ -388,4 +395,37 @@ class SyncBasisRepo:
         await self.db.execute_write(
             "DELETE FROM sync_basis WHERE account_id=? AND symbol=? AND pos_side=?",
             (account_id, symbol, pos_side),
+        )
+
+    async def mark_zero_target(
+        self, account_id: str, symbol: str, pos_side: str, *, zero: bool = True
+    ) -> None:
+        """Persist that the CURRENT desired target for an active master episode
+        is zero (e.g. a proportional reduction rounded down to dust).
+
+        The row itself must survive while the master episode stays open:
+        deleting it (the old behavior) made the very next recompute see a
+        non-zero master vs a flat follower and re-open the position the engine
+        had just closed on purpose.
+        """
+        await self.db.execute_write(
+            "INSERT INTO sync_basis(account_id, symbol, pos_side, master_ref_abs,"
+            " revision, issued_target, zero_target, updated_at)"
+            " VALUES (?, ?, ?, 0, 0, NULL, ?, ?)"
+            " ON CONFLICT(account_id, symbol, pos_side) DO UPDATE SET"
+            " issued_target=NULL, zero_target=excluded.zero_target,"
+            " updated_at=excluded.updated_at",
+            (account_id, symbol, pos_side, int(zero), _now_iso()),
+        )
+
+    async def is_zero_target(self, account_id: str, symbol: str, pos_side: str) -> bool:
+        row = await self.get(account_id, symbol, pos_side)
+        return row is not None and bool(row["zero_target"])
+
+    async def clear_zero_target(self, account_id: str, symbol: str, pos_side: str) -> None:
+        """Drop the intentional-flat marker without touching revision/ref state."""
+        await self.db.execute_write(
+            "UPDATE sync_basis SET zero_target=0, updated_at=?"
+            " WHERE account_id=? AND symbol=? AND pos_side=?",
+            (_now_iso(), account_id, symbol, pos_side),
         )
