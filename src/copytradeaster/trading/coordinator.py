@@ -103,12 +103,19 @@ def _filters_for(filters_by_symbol: dict[str, SymbolFilters], symbol: str) -> Sy
     return filters
 
 
-def _pick(orders: list, order_types: tuple[str, ...]):
-    """Newest protective order across flavour variants (STOP_MARKET/STOP etc.)."""
-    candidates = [o for o in orders if o.type in order_types]
+def _pick_with_extras(orders: list, order_types: tuple[str, ...]):
+    """Newest protective order of the slot plus every duplicate beyond it.
+
+    The exchange can legitimately hold TWO bot-owned conditionals of one slot:
+    the replacement was CONFIRMED but its dependent cancel FAILED (transport
+    error, -2019 on a later pass, crash between the two commands). Surfacing
+    only the newest order made the next reconciliation see current==target and
+    converge to an empty plan with the stale level still resting.
+    """
+    candidates = sorted((o for o in orders if o.type in order_types), key=lambda o: o.update_time)
     if not candidates:
-        return None
-    return max(candidates, key=lambda o: o.update_time)
+        return None, ()
+    return candidates[-1], tuple(candidates[:-1])
 
 
 class Coordinator:
@@ -341,6 +348,8 @@ class Coordinator:
             ]
             if p.position_amt == 0 and key.pos_side == PosSide.BOTH and not leg_orders:
                 continue
+            stop, extra_stops = _pick_with_extras(leg_orders, STOP_TYPES)
+            tp, extra_tps = _pick_with_extras(leg_orders, TP_TYPES)
             positions[key] = PositionState(
                 key=key,
                 qty=p.position_amt,
@@ -348,8 +357,10 @@ class Coordinator:
                 leverage=int(p.leverage),
                 mark_price=p.mark_price,
                 liquidation_price=p.liquidation_price,
-                stop=_pick(leg_orders, STOP_TYPES),
-                take_profit=_pick(leg_orders, TP_TYPES),
+                stop=stop,
+                take_profit=tp,
+                extra_stops=extra_stops,
+                extra_tps=extra_tps,
             )
         # orphan protection: a conditional resting on the exchange WITHOUT a
         # backing positionRisk row (flat leg). Not surfaced -> never canceled.
@@ -363,6 +374,8 @@ class Coordinator:
             leg_orders = [
                 x for x in orders_by_symbol.get(o.symbol, []) if x.position_side == o.position_side
             ]
+            stop, extra_stops = _pick_with_extras(leg_orders, STOP_TYPES)
+            tp, extra_tps = _pick_with_extras(leg_orders, TP_TYPES)
             positions[key] = PositionState(
                 key=key,
                 qty=Decimal(0),
@@ -370,8 +383,10 @@ class Coordinator:
                 leverage=0,
                 mark_price=Decimal(0),
                 liquidation_price=Decimal(0),
-                stop=_pick(leg_orders, STOP_TYPES),
-                take_profit=_pick(leg_orders, TP_TYPES),
+                stop=stop,
+                take_profit=tp,
+                extra_stops=extra_stops,
+                extra_tps=extra_tps,
             )
         return AccountState(
             account_id=fr.account_id,

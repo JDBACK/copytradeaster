@@ -92,6 +92,14 @@ class PositionState(_DecimalStrict):
     liquidation_price: Decimal
     stop: ProtectiveOrder | None = None
     take_profit: ProtectiveOrder | None = None
+    # Additional bot-visible conditional orders of the same slot found on the
+    # exchange BEYOND the picked (newest) stop/take_profit. A failed dependent
+    # CANCEL after a successful replacement leaves exactly this shape; the
+    # planner cancels them so one leg converges to ONE stop and ONE TP.
+    # Items are exchange order DTOs (duck-typed: client_order_id/update_time),
+    # mirroring how snapshot code stores `stop`/`take_profit`.
+    extra_stops: tuple[ProtectiveOrder, ...] = ()
+    extra_tps: tuple[ProtectiveOrder, ...] = ()
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = (
         "qty",

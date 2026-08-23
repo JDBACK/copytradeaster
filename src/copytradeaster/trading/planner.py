@@ -10,7 +10,11 @@ No Aster API calls, no I/O. Transition rules are fixed by the stage-1 plan
    short double-protection window is allowed, unprotected window is not;
 6. hedge mode: closing orders carry positionSide, no reduceOnly;
    one-way: reduceOnly=true, no positionSide;
-8. actual == target -> empty plan.
+8. actual == target -> empty plan;
+9. duplicate protection convergence: every additional bot-owned conditional
+   beyond the picked stop/take_profit (left by a FAILED dependent cancel after
+   a CONFIRMED replacement) is canceled - one leg keeps exactly ONE stop and
+   ONE take-profit.
 """
 
 from __future__ import annotations
@@ -186,9 +190,15 @@ def _plan_for_target(
     # --- rule 4: flat target --------------------------------------------------
     if target.qty == 0:
         # flat target: cancel orphan protection EVEN without a position
-        # (zero-qty leg rows carrying conditionals are not a converged state)
+        # (zero-qty legs carrying conditionals are not a converged state);
+        # duplicate extras follow the same rule as rule 9 below
         if actual_pos is not None:
-            for prot in (actual_pos.stop, actual_pos.take_profit):
+            for prot in (
+                actual_pos.stop,
+                actual_pos.take_profit,
+                *actual_pos.extra_stops,
+                *actual_pos.extra_tps,
+            ):
                 if prot is not None:
                     actions.append(
                         _cancel_action(symbol, prot.client_order_id, priority=1, pos_side=pos_side)
@@ -315,6 +325,25 @@ def _plan_for_target(
                     depends_on_client_order_id=place_action.client_order_id,
                     pos_side=pos_side,
                 )
+            )
+
+    # --- rule 9: duplicate protection convergence ------------------------------
+    # A dependent cancel that FAILED after its replacement was CONFIRMED leaves
+    # the previous stop/tp resting next to the new one. The snapshot keeps such
+    # orders in extra_stops/extra_tps; without this sweep the next reconcile
+    # would see current==target and converge to "no actions" with TWO bot-owned
+    # stops resting (live-observed duplicate-stop incident). Cancel them at
+    # priority 1: they carry no dependency, so a retry next pass is guaranteed.
+    for extras in (actual_pos.extra_stops, actual_pos.extra_tps):
+        for extra in extras:
+            if extra is None or extra.client_order_id in {
+                action.payload.get("origClientOrderId")
+                for action in actions
+                if action.kind == ActionKind.CANCEL_ORDER
+            }:
+                continue
+            actions.append(
+                _cancel_action(symbol, extra.client_order_id, priority=1, pos_side=pos_side)
             )
     return actions
 

@@ -311,3 +311,55 @@ class TestIdempotency:
         t = TargetPosition(PositionKey("SOLUSDT"), D("1"), None, None, 20)
         p = plan(account(), [t], flt={"BTCUSDT": filters()})
         assert p.actions == []
+
+
+class TestDuplicateProtectionConvergence:
+    """Rule 9: a FAILED dependent cancel leaves the old protection resting next
+    to the new one; the next reconcile must remove the stale order even though
+    current==target produced an empty plan before the fix."""
+
+    def test_extra_stale_stop_canceled_even_when_target_matches(self):
+        st = pos(KEY, "0.05", stop=prot("ct-new-stop", 64000))
+        st.extra_stops = (prot("ct-old-stop", 64500),)
+        t = TargetPosition(KEY, D("0.05"), D(64000), None, 20)
+        p = plan(account([st]), [t])
+        assert [(a.kind, a.priority) for a in p.actions] == [(ActionKind.CANCEL_ORDER, 1)]
+        assert p.actions[0].payload["origClientOrderId"] == "ct-old-stop"
+
+    def test_extras_canceled_alongside_normal_replacement_without_double_cancel(self):
+        st = pos(KEY, "0.05", stop=prot("ct-newest-stop", 63500))
+        st.extra_stops = (prot("ct-stale-1", 64500), prot("ct-stale-2", 65000))
+        t = TargetPosition(KEY, D("0.05"), D(63000), None, 20)
+        p = plan(account([st]), [t])
+        places = [a for a in p.actions if a.kind == ActionKind.PLACE_STOP]
+        assert len(places) == 1 and places[0].payload["stopPrice"] == "63000"
+        cancels = [a for a in p.actions if a.kind == ActionKind.CANCEL_ORDER]
+        # picked stop's cancel + both stale extras
+        assert {a.payload["origClientOrderId"] for a in cancels} == {
+            "ct-newest-stop",
+            "ct-stale-1",
+            "ct-stale-2",
+        }
+        # only the PICKED stop's cancel waits for the new place; extras are free
+        assert sum(1 for a in cancels if a.depends_on_client_order_id is not None) == 1
+
+    def test_extra_tp_canceled_even_when_target_matches(self):
+        tp = prot("ct-new-tp", 70000, side=Side.BUY, otype="TAKE_PROFIT_MARKET")
+        st = pos(KEY, "0.05", tp=tp)
+        st.extra_tps = (prot("ct-old-tp", 71000, side=Side.BUY, otype="TAKE_PROFIT_MARKET"),)
+        t = TargetPosition(KEY, D("0.05"), None, D(70000), 20)
+        p = plan(account([st]), [t])
+        assert [(a.kind, a.priority) for a in p.actions] == [(ActionKind.CANCEL_ORDER, 1)]
+        assert p.actions[0].payload["origClientOrderId"] == "ct-old-tp"
+
+    def test_flat_leg_cancels_picked_and_extra_protection(self):
+        st = pos(KEY, "0")
+        st.extra_stops = (prot("ct-orphan-stop-b", 64500),)
+        st.take_profit = prot("ct-orphan-tp", 70000, side=Side.BUY, otype="TAKE_PROFIT_MARKET")
+        st.extra_tps = (prot("ct-orphan-tp-b", 70500, side=Side.BUY, otype="TAKE_PROFIT_MARKET"),)
+        t = TargetPosition(KEY, D(0), None, None, 20)
+        p = plan(account([st]), [t])
+        cancels = {
+            a.payload["origClientOrderId"] for a in p.actions if a.kind == ActionKind.CANCEL_ORDER
+        }
+        assert cancels == {"ct-orphan-stop-b", "ct-orphan-tp", "ct-orphan-tp-b"}
