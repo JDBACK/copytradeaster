@@ -157,11 +157,13 @@ class CopyTradeRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    async def open_trade(self, symbol: str, pos_side: str, master_event_id: int | None) -> int:
+    async def open_trade(
+        self, symbol: str, pos_side: str, master_event_id: int | None, direction: int = 0
+    ) -> int:
         _, lastrowid = await self.db.execute_write(
-            "INSERT INTO copy_trades(symbol, pos_side, opened_at, master_event_id)"
-            " VALUES (?, ?, ?, ?)",
-            (symbol, pos_side, _now_iso(), master_event_id),
+            "INSERT INTO copy_trades(symbol, pos_side, direction, opened_at, master_event_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (symbol, pos_side, int(direction), _now_iso(), master_event_id),
         )
         # A NEW master episode invalidates per-follower intentional-flat
         # markers for this leg: followers may enter normally again.

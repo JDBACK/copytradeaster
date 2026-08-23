@@ -209,15 +209,44 @@ class MasterProjector:
 
     async def _sync_episodes_from_snapshot(self, held_keys: set[PositionKey]) -> None:
         """Close OPEN episodes whose exchange position is gone; open one where
-        the exchange holds a position without an active episode."""
+        the exchange holds a position without an active episode. A direction
+        mismatch (position sign flipped while we were away) closes the stale
+        episode and opens a new one for the new side."""
         seen: dict[tuple[str, str], PositionKey] = {
             (k.symbol, k.pos_side.value): k for k in held_keys
         }
         for key in held_keys:
-            if await self._trades.active_trade(key.symbol, key.pos_side.value) is None:
-                trade_id = await self._trades.open_trade(key.symbol, key.pos_side.value, None)
+            pos = self.state.positions.get(key)
+            pos_sign = 0 if pos is None or pos.qty == 0 else (1 if pos.qty > 0 else -1)
+            active = await self._trades.active_trade(key.symbol, key.pos_side.value)
+            if active is not None and pos_sign != 0:
+                try:
+                    active_direction = int(active["direction"])
+                except (KeyError, IndexError, TypeError, ValueError):
+                    active_direction = 0
+                if active_direction != 0 and active_direction != pos_sign:
+                    await self._trades.close_trade(int(active["trade_id"]))
+                    log.info(
+                        "snapshot flipped %s %s: closed episode %s (dir=%s -> %s)",
+                        key.symbol,
+                        key.pos_side.value,
+                        active["trade_id"],
+                        active_direction,
+                        pos_sign,
+                    )
+                    active = None
+            if active is None:
+                trade_id = await self._trades.open_trade(
+                    key.symbol,
+                    key.pos_side.value,
+                    None,
+                    direction=pos_sign,
+                )
                 log.info(
-                    "snapshot opened %s %s (trade_id=%s)", key.symbol, key.pos_side.value, trade_id
+                    "snapshot opened %s %s (trade_id=%s)",
+                    key.symbol,
+                    key.pos_side.value,
+                    trade_id,
                 )
         open_rows = await self._trades.all_open()
         for row in open_rows:
@@ -265,11 +294,32 @@ class MasterProjector:
         old_qty = current.qty if current is not None else Decimal(0)
         new_qty = old_qty + direction * last_qty
 
+        # Episode semantics around a sign flip: LONG episode -> SHORT episode.
+        # The old side is CLOSED and the new side OPENS its own episode, so
+        # bookkeeping (and the zero_target markers cleared by open_trade)
+        # matches the Coordinator comment "master flipped". Without this the
+        # flip inherited the previous episode and a sticky dust-flat marker of
+        # the old side could block the reversed entry.
+        flipped = old_qty != 0 and old_qty * new_qty < 0
         active = await self._trades.active_trade(symbol, pos_side.value)
-        if (old_qty == 0 or old_qty * new_qty < 0) and active is None:
-            trade_id = await self._trades.open_trade(symbol, pos_side.value, event_id)
+        if (old_qty == 0 or flipped) and active is None:
+            trade_id = await self._trades.open_trade(
+                symbol, pos_side.value, event_id, direction=1 if new_qty > 0 else -1
+            )
             log.info("master opened %s %s (trade_id=%s)", symbol, pos_side.value, trade_id)
-        if new_qty == 0 and active is not None:
+        elif flipped and active is not None:
+            await self._trades.close_trade(int(active["trade_id"]))
+            log.info(
+                "master flipped %s %s: closed episode %s",
+                symbol,
+                pos_side.value,
+                active["trade_id"],
+            )
+            trade_id = await self._trades.open_trade(
+                symbol, pos_side.value, event_id, direction=1 if new_qty > 0 else -1
+            )
+            log.info("master opened %s %s (trade_id=%s)", symbol, pos_side.value, trade_id)
+        if new_qty == 0 and active is not None and not flipped:
             await self._trades.close_trade(int(active["trade_id"]))
             log.info(
                 "master closed %s %s (trade_id=%s)", symbol, pos_side.value, active["trade_id"]

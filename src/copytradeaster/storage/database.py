@@ -84,6 +84,9 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE sync_basis ADD COLUMN zero_target INTEGER NOT NULL DEFAULT 0
     """,
+    """
+    ALTER TABLE copy_trades ADD COLUMN direction INTEGER NOT NULL DEFAULT 0
+    """,
 ]
 
 
