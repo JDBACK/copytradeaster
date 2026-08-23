@@ -169,6 +169,28 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-0
   drift-recovery по-прежнему восстанавливает позицию.
 - [x] Live dust-фаза в signed ONE_WAY E2E (phase 4b).
 
+### Третий проход ревью: flip-регрессия + честное dust-evidence (2026-08-23)
+
+Ревьюер вскрыл: (1) фикс №14 клеймил ЛЮБОЙ ноль при живом мастере —
+транзитный ноль flip'а блокировал открытие обратной стороны навсегда;
+(2) dust-фаза signed E2E молча пропускалась (`0.003*0.005 < step`) и
+передавала остаток вместо fill-qty — «live proof» ничего не доказывал.
+
+- [x] **`TargetPosition.hold_flat_until_episode_end`** — явная причина нулевого
+  таргета; sticky только для same-direction редукции в ноль, flip-ноль
+  транзитный; флаг в `_canonical_target` (разные command keys) (`79be6b1`).
+- [x] **Episode-семантика флипа**: flip = close старого episode + open нового с
+  `direction=±1`; миграция #13 `copy_trades.direction`; snapshot-синк детектит
+  смену знака после офлайна; новый эпизод снимает sticky-маркеры (`8ea3dbd`).
+- [x] Офлайн `TestMasterFlipEpisodeSemantics`: plain flip + «dust-flat → flip».
+- [x] Signed E2E: dust-фаза ОБЯЗАТЕЛЬНА (assert вместо skip; первый прогон
+  честно упал на новом assert'е), остаток мастера = ровно один step,
+  `rebuild_full` вместо синтетики, явный recompute_follower в харнессе,
+  фаза 4c — реальный signed flip LONG→SHORT через полное ядро (`7122a28`).
+- [x] Прогон после фиксов: офлайн 258 passed / 1 skipped (87%); signed testnet
+  10 passed / 1 skipped (E2E PASSED 155 c); hybrid gate 100/100 циклов ×
+  30 слотов — 12207/12207 CONFIRMED, 0 не-ConFIRMED статусов, 31/31 flat.
+
 
 ## 5. MVP vs Продакшн
 

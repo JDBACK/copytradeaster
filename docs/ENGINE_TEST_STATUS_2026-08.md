@@ -9,10 +9,10 @@
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный suite: **254 passed / 12 skipped**, coverage **87%**, ruff check/
+- Актуальный suite: **258 passed / 1 skipped**, coverage **87%**, ruff check/
   format clean (без CT_TESTNET: testnet-сценарии скипаются маркером).
 - Все реальные счёта плоские, открытых ордеров нет (REST-аудит после
-  ONE_WAY E2E, 2026-08-23).
+  ONE_WAY E2E и hybrid-кампании, 2026-08-23).
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -32,6 +32,8 @@
 | 12 | **Stale защита после FAILED dependent cancel** | `_pick()` снапшота выбирал только новейший Stop/TP: при `PLACE B CONFIRMED → CANCEL A FAILED` следующий reconcile видел current==target и выдавал пустой план — старый уровень висел рядом с новым | снапшот отдаёт дубликаты слота (`extra_stops`/`extra_tps`), planner-правило 9 всегда их отменяет, включая flat-ветку |
 | 13 | **Ретрай CANCEL/SET_LEVERAGE после FAILED невозможен** | `_submit_cancel`/`_submit_leverage` всегда делали INSERT и падали на `UNIQUE(command_key)` при повторе той же транзиции | существующая FAILED-строка переводится в PENDING и ретраится под исходным командным ключом (вскрыто e2e-тестом пункта 12) |
 | 14 | **Dust-сокращение до нуля переоткрывало позицию** | при `scaled_reduce → 0` внутри живого эпизода мастера `_persist_refs` стирал строку basis; следующий recompute видел «мастер в позиции + follower flat» и трактовал это как дрейф — немедленный re-entry сразу после намеренного закрытия | флаг `sync_basis.zero_target` (миграция #12): намеренный флэт персистится до конца эпизода мастера; входная ветка skip'ает `INTENTIONAL_FLAT`; флаг снимают новый эпизод мастера (`open_trade`) и `mark_zero_target` (сброс `issued_target`, чтобы следующий ненулевой таргет получил новую ревизию) |
+| 15 | **Фикс №14 ломал ONE_WAY flip** | `_persist_refs` клеймил ЛЮБОЙ `qty=0` при живом мастере как intentional-flat: транзитный ноль ветки flip («мастер перевернулся — закрой эту сторону») получал маркер и навсегда блокировал открытие обратной стороны | явная причина нуля: `TargetPosition.hold_flat_until_episode_end=True` только для same-direction редукции в ноль; flip-ноль — транзитный, basis очищается; флаг входит в `_canonical_target` (разные command keys) (`79be6b1`) |
+| 16 | **Flip не был границей эпизода** | `_apply_fill` открывал новый episode только при `active is None`: после флипа LONG→SHORT жил старый эпизод, а снапшот-синк вообще не смотрел на знак позиции | flip = закрыть старый episode + открыть новый с `direction=±1` (миграция #13 `copy_trades.direction`); snapshot-синк детектит рассинхрон направления после офлайна; новый эпизод автоматически снимает sticky-маркеры (`8ea3dbd`) |
 
 ## Известные ограничения (осознанные решения этапа 1)
 
@@ -156,12 +158,52 @@ post-fill recompute видел «мастер открыт + follower flat» и 
 ручное закрытие follower'а → движок по-прежнему восстанавливает позицию той же
 величины. Live dust-фаза добавлена в signed ONE_WAY E2E (phase 4b).
 
+### 4. Третий проход ревью: flip-регрессия и фальшивое dust-evidence (2026-08-23)
+
+Ревьюер вскрыл два дефекта предыдущего фикса, оба подтверждены кодом и живыми
+прогонами:
+
+1. **Flip-регрессия**: фикс №14 трактовал ЛЮБОЙ `qty=0` при живом мастере как
+   intentional-flat. Транзитный ноль ветки flip получал маркер → SHORT после
+   LONG→SHORT не открывался никогда (до следующего «настоящего» эпизода).
+2. **Dust-фаза signed E2E не выполнялась**: guard
+   `dust_left = snap(master_qty*0.005) >= step` при `0.003*0.005=0.000015`
+   давал `0 < step` → вся фаза молча пропускалась, «passed за 38 c» ничего не
+   доказывал. Плюс в синтетическое событие передавался ОСТАТОК позиции вместо
+   объёма исполненного SELL.
+
+Исправление (глобальное, по требованию ревьюера — не точечные заплатки):
+
+- **Явная причина нулевого таргета** — `TargetPosition.hold_flat_until_episode_end`:
+  ставится только для same-direction редукции в ноль; flip-ноль транзитный.
+  `_persist_refs` клеит маркер только при флаге; флаг входит в
+  `_canonical_target` → разные command keys для sticky-dust и flip-zero (`79be6b1`).
+- **Episode-семантика флипа**: `_apply_fill` при flip закрывает старый episode и
+  открывает новый с `direction=±1`; миграция #13 `copy_trades.direction`;
+  snapshot-синк детектит смену знака после офлайна; новый эпизод снимает
+  sticky-маркеры автоматически — система самосогласована (`8ea3dbd`).
+- **Тесты**: офлайн `TestMasterFlipEpisodeSemantics` (оба сценария ревьюера,
+  включая «dust-flat → flip»); в signed E2E dust-фаза стала ОБЯЗАТЕЛЬНОЙ
+  (assert вместо тихого skip: первый же прогон честно упал на новом assert'е —
+  математическое доказательство того, что раньше она не выполнялась), остаток
+  мастера = ровно один step (цель follower'а гарантированно флорится в ноль),
+  состояние проектора — из авторитетного `rebuild_full`, а харнесс явно гонит
+  recompute_follower (у голого харнесса нет своего reconcile-цикла);
+  новая фаза 4c — реальный signed flip LONG→SHORT через полное ядро с
+  направленно-осознанной защитой/TP/закрытием (`7122a28`).
+
 ### Итог прогона
 
-- Полный офлайн-suite: **256 passed / 12 skipped**, coverage 87%; ruff check +
+- Полный офлайн-suite: **258 passed / 1 skipped**, coverage 87%; ruff check +
   format clean.
-- Signed testnet (CT_TESTNET=1): прежние сценарии **9 passed / 1 skipped**
-  (Builder — нет main private key, Stage 3) + ONE_WAY E2E с dust-фазой
-  **passed** = 10 passed из 10 исполняемых.
+- Signed testnet (CT_TESTNET=1): **10 passed / 1 skipped** (Builder — нет main
+  private key, Stage 3), включая ONE_WAY E2E с обязательной dust-фазой и
+  live-flip: PASSED за 155 с (run 7); полный сьют — 203 с.
+- Hybrid load gate (после всех фиксов): **100/100 циклов**, 30 слотов
+  (3 REAL + 27 SHADOW), **12207/12207 CONFIRMED**, 0 FAILED / UNKNOWN /
+  SUBMITTED / SENDING / BLOCKED, ingest_dropped=0, cleanup errors=0,
+  shadow_signed_requests=0, 31/31 аккаунтов flat/no-orders до и после cleanup;
+  1 авторитетная рекавери мастера. Артефакты:
+  `data/hybrid-load-20260823T075504Z.{json,sqlite3}`.
 - Оба пункта первого gate + dust edge case второго прохода закрыты → основание
   зафиксировать `Stage 1 = CLOSED` (по критериям ревьюера).

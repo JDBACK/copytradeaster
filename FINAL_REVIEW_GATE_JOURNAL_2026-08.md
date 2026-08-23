@@ -92,10 +92,52 @@ reconcile/stop-move до нового эпизода; контрольный —
 ручное закрытие → восстановление той же величины). Live: phase 4b добавлена в
 signed ONE_WAY E2E. Полный офлайн: 256 passed / 12 skipped, coverage 87%.
 
+## 8. Третий проход ревью — flip-регрессия + фальшивое dust-evidence (2026-08-23)
+
+Ревьюер (уже после «Stage 1 закрыт») перечитал итоговый код и нашёл два дефекта:
+
+1. **Фикс №14 сломал ONE_WAY flip**: `_persist_refs` клеймил любой `qty=0` при
+   живом мастере как intentional-flat. Транзитный ноль ветки flip («мастер
+   перевернулся — закрой эту сторону, обратную открой следующим проходом»)
+   получал sticky-маркер → SHORT не открывался никогда.
+2. **Dust-фаза signed E2E не выполнялась**: guard `dust_left >= step` при
+   `0.003*0.005=0.000015 < step=0.001` молча пропускал всю фазу; в событие
+   передавался остаток позиции вместо fill-qty. «PASSED за 38 c» ничего не
+   доказывал.
+
+Исправление — глобальное, по требованию ревьюера:
+
+- `TargetPosition.hold_flat_until_episode_end` — явная причина нулевого таргета;
+  sticky только для same-direction редукции в ноль; флаг в `_canonical_target`
+  (разные command keys) (`79be6b1`).
+- Episode-семантика флипа: `_apply_fill` при flip = close+open нового эпизода с
+  `direction`; миграция #13; snapshot-синк детектит смену знака после офлайна;
+  новый эпизод снимает sticky-маркеры (`8ea3dbd`).
+- Офлайн-регресс `TestMasterFlipEpisodeSemantics`: оба сценария ревьюера (`c374589`).
+- Signed E2E переписан: dust-фаза обязательна (assert вместо skip), остаток
+  мастера = ровно step, `rebuild_full` вместо синтетики, явный recompute_follower,
+  фаза 4c — реальный signed flip через полное ядро (`7122a28`).
+
+Промежуточные прогоны журналируются честно:
+- run 4: E2E упал на НОВОМ assert'е dust-фазы (`dust_left=0 < step`) — прямое
+  доказательство того, что раньше фаза никогда не исполнялась;
+- run 5: таймаут dust-фазы — вскрыто, что `rebuild_full` не эмитит delta, а у
+  голого харнесса нет reconcile-цикла; добавлен явный recompute_follower;
+- run 6: flip-ордер с `reduce_only=True` обрезался биржей до флэта; фазы 5–6
+  захардкожены под лонг (-2021 на шорте) — направленная нейтральность;
+- run 7: **PASSED за 155 с** — все фазы, включая обязательную dust и live-flip.
+
+Финальные прогоны: офлайн 258 passed / 1 skipped (87%); signed testnet
+10 passed / 1 skipped; hybrid gate 100/100 × 30 слотов — 12207/12207 CONFIRMED,
+0 FAILED/UNKNOWN/SUBMITTED/SENDING/BLOCKED, ingest_dropped=0, cleanup errors=0,
+shadow_signed_requests=0, 31/31 flat до и после. Артефакты:
+`data/hybrid-load-20260823T075504Z.{json,sqlite3}`.
+
 ## Статус
 
-Оба пункта первого gate закрыты с живыми signed-доказательствами; dust
-edge case второго прохода исправлен и покрыт (офлайн + live phase 4b).
-Основание зафиксировать Stage 1 = CLOSED (по критериям ревьюера) и переходить
-к Stage 2. Неблокирующие хвосты без изменений: startup-gap resnapshot,
-symbol-scoped follower snapshot к 100 копирам, Builder в Stage 3.
+Все пункты трёх проходов ревью закрыты: protective convergence (+retry),
+ONE_WAY через ядро, dust zero-target, flip-регрессия, честное dust-evidence —
+каждое с офлайн-регрессом и живым signed-доказательством. Основание
+зафиксировать Stage 1 = CLOSED (по критериям ревьюера) и переходить к Stage 2.
+Неблокирующие хвосты без изменений: startup-gap resnapshot, symbol-scoped
+follower snapshot к 100 копирам, Builder в Stage 3.
