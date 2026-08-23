@@ -140,6 +140,12 @@ class TargetPosition(_DecimalStrict):
     leverage: int
     stop_type: str = "STOP_MARKET"
     tp_type: str = "TAKE_PROFIT_MARKET"
+    # WHY is the target zero. True ONLY when a proportional reduction of the
+    # SAME direction rounded down to zero (dust leg): the follower must stay
+    # flat until the master episode ends. A TRANSITIONAL zero (master flipped:
+    # close this side now, open the other side next pass) must NOT carry it -
+    # otherwise zero_target blocks the new-direction entry forever.
+    hold_flat_until_episode_end: bool = False
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("qty", "stop_price", "tp_price")
 

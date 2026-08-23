@@ -90,6 +90,10 @@ def _canonical_target(t: TargetPosition) -> str:
             "stop_type": t.stop_type,
             "tp_type": t.tp_type,
             "leverage": t.leverage,
+            # the WHY of a zero target is part of the desired state: a sticky
+            # dust-flat and a transitional flip-zero with identical qty must
+            # not share command keys
+            "hold_flat_until_episode_end": t.hold_flat_until_episode_end,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -312,15 +316,18 @@ class Coordinator:
             if t.qty == 0:
                 mpos = master.positions.get(key)
                 master_still_open = mpos is not None and mpos.qty != 0
-                if master_still_open and self._basis is not None:
-                    # Intentional flat INSIDE an open master episode: the
-                    # proportional target rounded down to zero (dust leg).
+                if t.hold_flat_until_episode_end and master_still_open:
+                    # Sticky dust-flat INSIDE an open master episode: the
+                    # same-direction proportional target rounded down to zero.
                     # Persist the marker instead of clearing the row, or the
                     # next recompute would see "master open + follower flat"
                     # and immediately re-open the position just closed.
                     await self._basis.mark_zero_target(account_id, key.symbol, key.pos_side.value)
-                elif self._basis is not None:
-                    # Master episode really ended: full cleanup as before.
+                else:
+                    # Either the master episode really ended, or this zero is
+                    # TRANSITIONAL (master flip: close this side now, open the
+                    # other side next pass). Full cleanup - latching here would
+                    # block the reversed entry forever.
                     await self._basis.clear(account_id, key.symbol, key.pos_side.value)
                 continue
             mpos = master.positions.get(key)
@@ -548,10 +555,19 @@ class Coordinator:
             )
             same_direction = current * master_qty > 0
             if not same_direction:
-                # master flipped; close follower side entirely this pass
+                # master flipped; close follower side entirely this pass.
+                # TRANSITIONAL zero: the new-direction entry happens on the
+                # next pass (the projector closes/opens episodes around the
+                # flip). No hold-flat marker here - it would block the
+                # reversed position forever.
                 targets.append(
                     TargetPosition(
-                        key=key, qty=Decimal(0), stop_price=None, tp_price=None, leverage=leverage
+                        key=key,
+                        qty=Decimal(0),
+                        stop_price=None,
+                        tp_price=None,
+                        leverage=leverage,
+                        hold_flat_until_episode_end=False,
                     )
                 )
                 continue
@@ -605,6 +621,11 @@ class Coordinator:
             # the ACTUAL follower entry and the effective stop distance
             if effective_stop is not None and cap < current_abs and master_fresh:
                 target_abs = min(target_abs, cap)
+            # A proportional reduction of the SAME direction rounded down to
+            # zero is the ONLY sticky dust-flat case. The post-fill cap can
+            # also produce a transient zero (e.g. fresh stop far away right
+            # after entry); it must NOT latch - the next pass recomputes it.
+            dust_flat = target_abs == 0 and current_abs > 0
             target_stop, target_stop_type = self._target_stop_for_existing(
                 master_pos, master_stop, master_stop_type, follower_pos
             )
@@ -618,6 +639,7 @@ class Coordinator:
                     stop_type=target_stop_type,
                     tp_type=master_tp_type,
                     leverage=leverage,
+                    hold_flat_until_episode_end=dust_flat,
                 )
             )
         return targets, skips
