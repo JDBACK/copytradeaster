@@ -4,14 +4,15 @@
 
 ## Текущее состояние
 
-- Движок работает на futures testnet (`fapi.asterdex-testnet.com`), HEDGE-режим.
+- Движок работает на futures testnet (`fapi.asterdex-testnet.com`), HEDGE-режим;
+  ONE_WAY официально поддержан и покрыт signed E2E через ядро (см. ниже).
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный suite: **247 passed / 11 skipped**, coverage **87%**, ruff и
-  `git diff --check` clean.
-- Все реальные счёта плоские, открытых ордеров нет (независимый REST-аудит
-  после hybrid load campaign).
+- Актуальный suite: **254 passed / 12 skipped**, coverage **87%**, ruff check/
+  format clean (без CT_TESTNET: testnet-сценарии скипаются маркером).
+- Все реальные счёта плоские, открытых ордеров нет (REST-аудит после
+  ONE_WAY E2E, 2026-08-23).
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -28,6 +29,8 @@
 | 9 | STOP/TAKE_PROFIT (лимитные флейворы) игнорировались | проектор знал только *_MARKET | слоты принимают оба флейвора, тип ордера копируется (`f85c9a8`) |
 | 10 | Лимитные защиты отклоняются (-1102) | не отправлялся обязательный `price` | planner выводит price = trigger ±0.05% (`bce8c5b`) |
 | 11 | -4014 Price not increased by tick size | `quantize("0.10")` держит 2 знака вместо сетки 0.1 | выравнивание делением на тик (`d834e9c`) |
+| 12 | **Stale защита после FAILED dependent cancel** | `_pick()` снапшота выбирал только новейший Stop/TP: при `PLACE B CONFIRMED → CANCEL A FAILED` следующий reconcile видел current==target и выдавал пустой план — старый уровень висел рядом с новым | снапшот отдаёт дубликаты слота (`extra_stops`/`extra_tps`), planner-правило 9 всегда их отменяет, включая flat-ветку |
+| 13 | **Ретрай CANCEL/SET_LEVERAGE после FAILED невозможен** | `_submit_cancel`/`_submit_leverage` всегда делали INSERT и падали на `UNIQUE(command_key)` при повторе той же транзиции | существующая FAILED-строка переводится в PENDING и ретраится под исходным командным ключом (вскрыто e2e-тестом пункта 12) |
 
 ## Известные ограничения (осознанные решения этапа 1)
 
@@ -99,3 +102,43 @@ tick-grid равенство, TP removal/orphan cleanup, HEDGE-rebuild защи�
 
 Финальный JSON: `data/hybrid-load-20260822T233258Z.json`. Полная матрица
 evidence и ограничения shadow-контура: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md).
+
+## Финальный gate по внешнему код-ревью — 2026-08-23
+
+Текст ревью: [review_stage1_final.md](../review_stage1_final.md). Два пункта:
+
+### 1. P1 — защитная конвергенция (последний code blocker)
+
+Сценарий ревьюера воспроизведён и закрыт на трёх уровнях:
+
+- юнит (`test_planner_transitions.py::TestDuplicateProtectionConvergence`):
+  extras отменяются при совпадающем target, рядом с обычной заменой (без
+  двойного cancel), для TP и в flat-ветке;
+- e2e на FakeAster (`test_end_to_end_fake.py::TestDuplicateProtectionConvergence`):
+  инжект FAILED dependent cancel после CONFIRMED replacement → оба уровня
+  висят → следующий reconcile удаляет stale, журнал содержит CONFIRMED CANCEL
+  по старому coid, повторный проход выдаёт 0 команд; то же для TP и flat;
+- **побочный наход e2e:** ретрай CANCEL/SET_LEVERAGE после FAILED падал на
+  `UNIQUE(command_key)` — зависимый cancel не мог повториться вообще. Исправлено
+  (FAILED → PENDING под исходным ключом), покрыто тем же e2e.
+
+### 2. ONE_WAY signed E2E через ядро
+
+Новый `tests/testnet/test_one_way_engine_e2e.py`: master open → stop →
+stop move (замена защиты) → partial close → TP → master close, всё через
+Projector→Coordinator→Risk→Planner→Executor→journal на REAL follower `copyc1`.
+Живой прогон 2026-08-23: **PASSED за 36 с**. Аудит журнала: 0 FAILED / UNKNOWN /
+BLOCKED; все закрывающие команды с `reduceOnly=true` и без `positionSide`;
+финал — оба аккаунта flat, открытых ордеров нет. Первый запуск вскрыл ошибки
+самого сценария (снятие baseline после события, неверное ожидание при
+минимальном размере копира) — предикаты приведены к семантике движка.
+
+### Итог прогона
+
+- Полный офлайн-suite: **254 passed / 12 skipped**, coverage 87%; ruff check +
+  format clean.
+- Signed testnet (CT_TESTNET=1): прежние сценарии **9 passed / 1 skipped**
+  (Builder — нет main private key, Stage 3) + новый ONE_WAY E2E **passed**
+  (36 c) = 10 passed из 10 исполняемых.
+- Оба пункта ревьюера закрыты → основание зафиксировать `Stage 1 = CLOSED`
+  без нового большого код-ревью (по шкале самого ревьюера).

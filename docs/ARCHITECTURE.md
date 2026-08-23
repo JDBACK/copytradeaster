@@ -244,6 +244,13 @@ plan:
 
 Повторный `reconcile()` при уже совпадающем состоянии должен создавать **0 новых команд**.
 
+Инвариант конвергенции защиты (правило 9 planner, добавлено 2026-08-23):
+после reconciliation на одной follower-leg остаётся **ровно один** bot-owned
+Stop и **ровно один** bot-owned TP. Дубликатные условные ордера слота
+(остаток FAILED dependent cancel после CONFIRMED replacement) снапшот отдаёт в
+`extra_stops/extra_tps`, и planner отменяет их отдельными независимыми
+`CANCEL_ORDER` (priority 1) — в том числе на flat-ноге.
+
 Reconciliation запускается не только после ошибок, а является нормальной частью работы:
 
 - startup;

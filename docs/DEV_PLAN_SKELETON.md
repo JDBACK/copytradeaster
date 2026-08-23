@@ -140,6 +140,24 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-0
 27 shadow slots подтверждают масштаб внутреннего pipeline, но не заменяют 27
 независимых signed Aster accounts для 30-real acceptance.
 
+### Финальный gate по внешнему код-ревью (2026-08-23)
+
+Два пункта последнего независимого ревью (см. `REVIEW_STAGE1_FINAL_2026-08.md`):
+
+- [x] **P1 — защитная конвергенция.** Инвариант «одна нога = один bot-owned
+  Stop + один TP»: снапшот координатора отдаёт дубликатные условные ордера
+  слота (`extra_stops`/`extra_tps`), planner-правило 9 всегда их отменяет
+  (приоритет 1, без зависимостей → гарантированный ретрай), включая flat-ветку.
+  Попутно закрыт латентный баг: ретрай `CANCEL_ORDER`/`SET_LEVERAGE` после
+  FAILED падал на `UNIQUE(command_key)` и физически не мог повториться.
+- [x] **ONE_WAY E2E через ядро.** Новый signed-сценарий
+  `tests/testnet/test_one_way_engine_e2e.py`: master open → stop → stop move →
+  partial close → TP → close через Projector→Coordinator→Risk→Planner→Executor→
+  journal→REAL follower (`copyc1`), с аудитом журнала (0 FAILED/UNKNOWN/BLOCKED,
+  `reduceOnly=true`, без `positionSide`) и восстановлением режима.
+- [x] Полный офлайн-suite: 254 passed / 12 skipped, coverage 87%; ruff
+  check/format clean.
+
 
 ## 5. MVP vs Продакшн
 
