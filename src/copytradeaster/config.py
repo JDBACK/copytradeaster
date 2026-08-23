@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     builder_name: str = "copytradeaster"
     max_fee_rate: str = "0.0001"  # builder fee cap (futures limit 0.001)
     dry_run: bool = False  # True: commands are logged, no HTTP sent
+    shadow_accounts_enabled: bool = False
+    # Shadow load runs may disable synthetic market-triggered exits so a
+    # live testnet price move cannot invalidate a deterministic copy cycle.
+    shadow_auto_trigger_conditionals: bool = True
+    # Explicit load-profile optimization. Empty keeps the authoritative
+    # all-symbol follower snapshot used by normal production reconciliation.
+    follower_snapshot_symbols: list[str] = []
 
     @field_validator("encryption_key")
     @classmethod

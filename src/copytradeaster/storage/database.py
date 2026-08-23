@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import aiosqlite
+
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 MIGRATIONS: list[str] = [
     """
@@ -74,6 +77,10 @@ MIGRATIONS: list[str] = [
       issued_target TEXT, updated_at TEXT NOT NULL,
       PRIMARY KEY(account_id, symbol, pos_side))
     """,
+    """
+    ALTER TABLE accounts ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'REAL'
+      CHECK(execution_mode IN ('REAL','SHADOW'))
+    """,
 ]
 
 
@@ -81,15 +88,23 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.conn: aiosqlite.Connection | None = None
+        self.write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = await aiosqlite.connect(self.path)
+        # Repositories deliberately keep each write short and commit it in
+        # the same coroutine.  Explicit autocommit prevents an implicit
+        # transaction from remaining open between the awaited ``execute``
+        # and ``commit`` calls when many follower reconciliations fan out at
+        # once.  Ordinary writes and nonce allocation are serialized through
+        # ``write_lock`` below.
+        self.conn = await aiosqlite.connect(self.path, isolation_level=None)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.execute("PRAGMA journal_mode=WAL")
         await self.conn.execute("PRAGMA foreign_keys=ON")
-        # concurrent writers: async pool + credentials' synchronous nonce connection
-        await self.conn.execute("PRAGMA busy_timeout=5000")
+        # concurrent writers: repository writes and nonce allocation share a
+        # single connection-level lock.
+        await self.conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
 
     async def migrate(self) -> int:
         """Applies unapplied MIGRATIONS in order; returns number applied."""
@@ -99,7 +114,10 @@ class Database:
         await self.conn.execute(MIGRATIONS[0])
         await self.conn.commit()
         cur = await self.conn.execute("SELECT COALESCE(MAX(version), -1) FROM schema_migrations")
-        (last_version,) = await cur.fetchone()
+        try:
+            (last_version,) = await cur.fetchone()
+        finally:
+            await cur.close()
         applied = 0
         for version in range(last_version + 1, len(MIGRATIONS)):
             await self.conn.execute("BEGIN")
@@ -125,10 +143,36 @@ class Database:
             raise RuntimeError("Database.connect() must be called first")
         return await self.conn.execute(sql, params)
 
+    async def execute_write(self, sql: str, params: tuple = ()) -> tuple[int, int | None]:
+        """Execute one short write and finalize its cursor before commit.
+
+        aiosqlite cursors are backed by real SQLite statements. Leaving a
+        cursor alive across the commit boundary can retain a lock on some
+        SQLite builds. Repositories use this helper for all ordinary writes so
+        the statement lifetime is explicit and bounded.
+        """
+        async with self.write_lock:
+            cur = await self.execute(sql, params)
+            try:
+                rowcount = cur.rowcount
+                lastrowid = cur.lastrowid
+            finally:
+                await cur.close()
+            if self.conn is None:
+                raise RuntimeError("Database.connect() must be called first")
+            await self.conn.commit()
+        return rowcount, lastrowid
+
     async def fetchone(self, sql: str, params: tuple = ()) -> object | None:
         cur = await self.execute(sql, params)
-        return await cur.fetchone()
+        try:
+            return await cur.fetchone()
+        finally:
+            await cur.close()
 
     async def fetchall(self, sql: str, params: tuple = ()) -> list:
         cur = await self.execute(sql, params)
-        return list(await cur.fetchall())
+        try:
+            return list(await cur.fetchall())
+        finally:
+            await cur.close()

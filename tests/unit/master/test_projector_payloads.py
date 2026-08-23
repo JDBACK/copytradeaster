@@ -275,10 +275,12 @@ class TestDedupAndOrder:
 
     async def test_out_of_order_non_trade_ignored(self, deps):
         projector, deltas, _ = deps
-        await projector.apply_raw(order_trade(E=2000, x="NEW", ot="STOP_MARKET",
-                                              c="ct-a", i=11, sp="64000"))
-        await projector.apply_raw(order_trade(E=1500, x="NEW", ot="STOP_MARKET",
-                                              c="ct-b", i=12, sp="63000"))
+        await projector.apply_raw(
+            order_trade(E=2000, x="NEW", ot="STOP_MARKET", c="ct-a", i=11, sp="64000")
+        )
+        await projector.apply_raw(
+            order_trade(E=1500, x="NEW", ot="STOP_MARKET", c="ct-b", i=12, sp="63000")
+        )
         key = PositionKey("BTCUSDT", PosSide.BOTH)
         pos = projector.state.positions.get(key)
         assert pos is not None and pos.stop is not None and pos.stop.stop_price == D("64000")
@@ -287,12 +289,8 @@ class TestDedupAndOrder:
         """Two partial fills of one order within the same millisecond differ by
         trade id t - dedup must not swallow the second one."""
         projector, _, _ = deps
-        await projector.apply_raw(
-            order_trade(E=3000, x="TRADE", l="0.001", ap="65000", t=1)
-        )
-        await projector.apply_raw(
-            order_trade(E=3000, x="TRADE", l="0.001", ap="65001", t=2)
-        )
+        await projector.apply_raw(order_trade(E=3000, x="TRADE", l="0.001", ap="65000", t=1))
+        await projector.apply_raw(order_trade(E=3000, x="TRADE", l="0.001", ap="65001", t=2))
         key = PositionKey("BTCUSDT", PosSide.BOTH)
         assert projector.state.positions[key].qty == D("0.002")
 
@@ -339,6 +337,42 @@ class TestMarginCall:
         await projector.apply_raw(raw)
         flag = await SettingsRepo(db).get_flag("degraded")
         assert flag is not None and flag.startswith("margin_call")
+
+    async def test_margin_call_requests_immediate_authoritative_rebuild(self, deps):
+        projector, _, _ = deps
+        reasons: list[str] = []
+
+        async def on_critical(reason: str) -> None:
+            reasons.append(reason)
+
+        projector._on_critical = on_critical
+        await projector.apply_raw({"e": "MARGIN_CALL", "E": 4001, "cw": "100", "p": []})
+        assert reasons == ["margin_call"]
+
+    async def test_calculated_autoclose_requests_immediate_rebuild(self, deps):
+        projector, _, _ = deps
+        reasons: list[str] = []
+
+        async def on_critical(reason: str) -> None:
+            reasons.append(reason)
+
+        projector._on_critical = on_critical
+        await projector.apply_raw(
+            {
+                "e": "ORDER_TRADE_UPDATE",
+                "E": 4002,
+                "o": {
+                    "s": "BTCUSDT",
+                    "c": "autoclose-123",
+                    "x": "CALCULATED",
+                    "X": "NEW_ADL",
+                    "o": "MARKET",
+                    "ot": "MARKET",
+                    "ps": "BOTH",
+                },
+            }
+        )
+        assert reasons == ["position-changing-order:CALCULATED"]
 
 
 class TestRebuildFull:
@@ -396,6 +430,50 @@ class TestRebuildFull:
         assert pos.leverage == 5
         assert pos.stop is not None and pos.stop.stop_price == D("64000")
         assert pos.take_profit is not None and pos.take_profit.stop_price == D("70000")
+
+    async def test_hedge_protection_without_reduce_only_is_recovered(self, deps):
+        projector, _, _ = deps
+
+        class Balance:
+            asset = "USDT"
+            available_balance = D("500")
+
+        class Position:
+            symbol = "BTCUSDT"
+            position_amt = D("0.002")
+            entry_price = D("65000")
+            mark_price = D("65500")
+            leverage = 5
+            liquidation_price = D("30000")
+            position_side = PosSide.LONG
+
+        class HedgeStop:
+            symbol = "BTCUSDT"
+            type = "STOP_MARKET"
+            stop_price = D("64000")
+            reduce_only = False
+            close_position = False
+            position_side = PosSide.LONG
+            client_order_id = "hedge-stop"
+            order_id = 7
+            side = "SELL"
+            working_type = "MARK_PRICE"
+            update_time = 1
+
+        class Client:
+            async def balance(self, account_id):
+                return [Balance()]
+
+            async def position_risk(self, account_id, symbol=None):
+                return [Position()]
+
+            async def open_orders(self, account_id, symbol=None):
+                return [HedgeStop()]
+
+        state = await projector.rebuild_full(Client(), "main")
+        pos = state.positions[PositionKey("BTCUSDT", PosSide.LONG)]
+        assert pos.stop is not None
+        assert pos.stop.client_order_id == "hedge-stop"
 
 
 class TestHedgeLegFills:

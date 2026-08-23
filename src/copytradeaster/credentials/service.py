@@ -43,7 +43,12 @@ class SqliteCredentials:
 
     async def load(self) -> None:
         """Warm caches from the DB (called once at boot)."""
-        accounts = await self._db.fetchall("SELECT id, role, user_address FROM accounts")
+        # SHADOW followers deliberately have no credential row. They are wired
+        # to a local exchange adapter by App and must never enter this cache.
+        accounts = await self._db.fetchall(
+            "SELECT id, role, user_address FROM accounts "
+            "WHERE COALESCE(execution_mode, 'REAL')='REAL'"
+        )
         cred_repo = CredentialRepo(self._db)
         for row in accounts:
             account_id = str(row["id"])

@@ -130,8 +130,7 @@ async def cmd_open(
         entry_side = Side.SELL if short else Side.BUY
         if stop_pct is not None:
             stop = (
-                price * ((Decimal(1) + stop_pct / 100) if short
-                         else (Decimal(1) - stop_pct / 100))
+                price * ((Decimal(1) + stop_pct / 100) if short else (Decimal(1) - stop_pct / 100))
             ).quantize(filters.tick_size)
         else:
             stop = None

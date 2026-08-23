@@ -151,6 +151,13 @@ class ExecutionAction:
     priority: int
     trade_id: int | None = None  # episode this action belongs to (overrides plan.trade_id)
     revision: int = 0  # desired-state transition revision (idempotency identity)
+    # Planner-only stable id used to gate a dependent action inside one plan.
+    # For protection replacement, CANCEL_ORDER must not run unless the new
+    # PLACE_STOP/PLACE_TP was confirmed by the exchange.
+    depends_on_client_order_id: str | None = None
+    # CANCEL_ORDER payloads intentionally contain only the exchange cancel
+    # parameters; retain the leg here for trade/revision attribution.
+    position_side: PosSide = PosSide.BOTH
 
 
 @dataclass(frozen=True, slots=True)

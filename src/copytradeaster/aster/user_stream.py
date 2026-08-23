@@ -44,6 +44,7 @@ class UserStream:
         on_event: Callable[[StreamEvent], Awaitable[None]],
         on_reconnect: Callable[[], Awaitable[None]],
         *,
+        on_connected: Callable[[], Awaitable[None]] | None = None,
         ws_factory: Callable[[str], Any] | None = None,
         backoff_base_s: float = BACKOFF_BASE_S,
         backoff_max_s: float = BACKOFF_MAX_S,
@@ -55,6 +56,7 @@ class UserStream:
         self._keepalive_s = keepalive_min * 60
         self._on_event = on_event
         self._on_reconnect = on_reconnect
+        self._on_connected = on_connected
         self._ws_factory = ws_factory or default_ws_factory
         self._backoff_base = backoff_base_s
         self._backoff_max = backoff_max_s
@@ -72,6 +74,8 @@ class UserStream:
                     if not first:
                         await self._safe_on_reconnect()
                     first = False
+                    if self._on_connected is not None:
+                        await self._on_connected()
                     await self._session(ws, stop)
             except asyncio.CancelledError:
                 raise

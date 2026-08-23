@@ -62,6 +62,8 @@ async def creds(settings, db):
 async def clients(settings, creds, db):
     import httpx
 
+    if "testnet" not in settings.rest_base_url.lower():
+        pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
     from copytradeaster.aster.rate_limits import RateLimits
     from copytradeaster.aster.trading_api import AsterClient
 
@@ -71,7 +73,6 @@ async def clients(settings, creds, db):
     )
     main = AsterClient(http, settings.rest_base_url, limiter, creds, creds, NonceStore(db))
     yield {"main": main}
-
 
 
 async def test_server_time_drift(clients):
@@ -352,6 +353,7 @@ async def test_double_identical_close_sends_both_commands(clients, db):
     client = clients["main"]
     executor = _executor(clients, db)
     await _flatten_main(client)
+
     hedge = await _is_hedge(client)
     await _open_long(client, D("0.003"), hedge)
     assert await _btc_position(client) >= D("0.003")
@@ -429,6 +431,7 @@ async def test_one_tick_stop_replace_reaches_exchange(clients, db):
         replaces_client_order_id=old_coid,
         priority=2,
         revision=1,
+        depends_on_client_order_id=place2.client_order_id,
     )
     res2 = await executor.submit(ExecutionPlan("main", None, [place2, cancel_old]))
     assert all(r.status == "CONFIRMED" for r in res2), res2
@@ -444,6 +447,7 @@ async def test_tp_removal_cancels_resting_take_profit(clients, db):
     client = clients["main"]
     executor = _executor(clients, db)
     await _flatten_main(client)
+
     hedge = await _is_hedge(client)
     await _open_long(client, D("0.002"), hedge)
     pos = next(p for p in await client.position_risk("main", SYMBOL) if p.position_amt != 0)
@@ -479,6 +483,145 @@ async def test_tp_removal_cancels_resting_take_profit(clients, db):
     ]
     assert tps_after == []
     await _flatten_main(client)
+
+
+async def test_one_way_signed_cycle(clients, creds):
+    """Run the core open/protect/replace/partial-close cycle in ONE_WAY mode.
+
+    The account mode is restored in ``finally`` so this live proof does not
+    leave the local testnet wallet in a different configuration.
+    """
+    from copytradeaster.aster.trading_api import PlaceOrderRequest
+    from copytradeaster.domain.models import PosSide, Side
+
+    client = clients["main"]
+    main_id = next((a for a in creds.account_ids() if a == "main"), creds.account_ids()[0])
+    original_hedge = await client.get_position_mode(main_id)
+    await _flatten_main(client)
+    if original_hedge:
+        await client.set_position_mode(main_id, False)
+
+    ts = int(time.time() * 1000)
+    try:
+        info = await client.exchange_info(force=True)
+        filters = info.tradable_filters()[SYMBOL]
+        open_order = await client.place_order(
+            main_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=QTY,
+                position_side=PosSide.BOTH,
+                new_client_order_id=f"tn-ow-open-{ts}",
+                new_order_resp_type="RESULT",
+            ),
+        )
+        assert open_order.status in ("FILLED", "NEW")
+        position = next(
+            p for p in await client.position_risk(main_id, SYMBOL) if p.position_amt != 0
+        )
+        assert position.position_side == PosSide.BOTH
+        assert abs(position.position_amt) >= QTY
+
+        first_stop_price = (
+            (position.entry_price - D("500")) / filters.tick_size
+        ).to_integral_value() * filters.tick_size
+        first_stop = await client.place_order(
+            main_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="STOP_MARKET",
+                quantity=QTY,
+                stop_price=first_stop_price,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                working_type="MARK_PRICE",
+                new_client_order_id=f"tn-ow-sl-a-{ts}",
+            ),
+        )
+        assert first_stop.status in ("NEW", "FILLED")
+        await client.cancel_order(main_id, SYMBOL, orig_client_order_id=first_stop.client_order_id)
+
+        second_stop_price = first_stop_price - filters.tick_size
+        second_stop = await client.place_order(
+            main_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="STOP_MARKET",
+                quantity=QTY,
+                stop_price=second_stop_price,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                working_type="MARK_PRICE",
+                new_client_order_id=f"tn-ow-sl-b-{ts}",
+            ),
+        )
+        assert second_stop.stop_price == second_stop_price
+
+        await client.place_order(
+            main_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="MARKET",
+                quantity=QTY_RED,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                new_client_order_id=f"tn-ow-partial-{ts}",
+                new_order_resp_type="RESULT",
+            ),
+        )
+        remaining = next(
+            (
+                abs(p.position_amt)
+                for p in await client.position_risk(main_id, SYMBOL)
+                if p.position_amt
+            ),
+            D(0),
+        )
+        assert remaining < QTY
+
+        tp = await client.place_order(
+            main_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="TAKE_PROFIT_MARKET",
+                quantity=remaining,
+                stop_price=position.entry_price + D("800"),
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                working_type="MARK_PRICE",
+                new_client_order_id=f"tn-ow-tp-{ts}",
+            ),
+        )
+        assert tp.status in ("NEW", "FILLED")
+
+        for order in await client.open_orders(main_id, symbol=SYMBOL):
+            await client.cancel_order(main_id, SYMBOL, orig_client_order_id=order.client_order_id)
+        if remaining > 0:
+            await client.place_order(
+                main_id,
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.SELL,
+                    type="MARKET",
+                    quantity=remaining,
+                    reduce_only=True,
+                    position_side=PosSide.BOTH,
+                    new_client_order_id=f"tn-ow-flat-{ts}",
+                    new_order_resp_type="RESULT",
+                ),
+            )
+        assert await _btc_position(client) == 0
+        assert await client.open_orders(main_id, symbol=SYMBOL) == []
+    finally:
+        await _flatten_main(client)
+        if original_hedge:
+            await client.set_position_mode(main_id, True)
 
 
 async def test_builder_e2e_last(clients, creds, settings, db):

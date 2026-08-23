@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,24 @@ def stop_action(coid="ct-bbb", stop="64000"):
     )
 
 
+def close_action(coid="ct-close"):
+    return ExecutionAction(
+        kind=ActionKind.MARKET_CLOSE,
+        symbol="BTCUSDT",
+        payload={
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": "0.05",
+            "positionSide": "LONG",
+            "newOrderRespType": "RESULT",
+        },
+        client_order_id=coid,
+        replaces_client_order_id=None,
+        priority=2,
+    )
+
+
 def cancel_action(coid="ct-old"):
     return ExecutionAction(
         kind=ActionKind.CANCEL_ORDER,
@@ -76,6 +95,7 @@ class FakeClient:
         self.leverage_calls: list[tuple[str, int]] = []
         self.open_orders_result: list = []
         self.query_results: dict[str, object | None] = {}
+        self.positions_result: list = []
         self.place_error: AsterError | None = None
         self.place_timeout = False
 
@@ -98,6 +118,9 @@ class FakeClient:
 
     async def open_orders(self, account_id, symbol=None):
         return self.open_orders_result
+
+    async def position_risk(self, account_id, symbol=None):
+        return self.positions_result
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
         if orig_client_order_id in self.query_results:
@@ -172,6 +195,16 @@ async def test_503_unknown_query_finds_order_confirmed(env):
     assert row["last_error"].startswith("resolved-unknown")
 
 
+async def test_gateway_timeout_code_zero_is_outcome_unknown(env):
+    executor, client, commands, links, _ = env
+    client.place_error = AsterError(0, "The request has timed out.", http_status=504)
+    results = await executor.submit(plan_of(open_action()))
+    assert results[0].status == "CONFIRMED"
+    row = await commands.get(results[0].command_key)
+    assert row["status"] == "CONFIRMED"
+    assert len(client.placed) == 1
+
+
 async def test_unknown_exhausts_attempts_failed_and_degraded(env):
     executor, client, commands, links, settings = env
 
@@ -195,6 +228,16 @@ async def test_margin_error_fails_immediately(env):
     row = await commands.get(results[0].command_key)
     assert row["attempts"] == 1
     assert "-2019" in row["last_error"]
+
+
+async def test_reduceonly_close_rejected_after_fill_is_confirmed_flat(env):
+    executor, client, commands, _, _ = env
+    client.place_error = AsterError(-2022, "ReduceOnly Order is rejected.")
+    results = await executor.submit(plan_of(close_action()))
+    assert results[0].status == "CONFIRMED"
+    row = await commands.get(results[0].command_key)
+    assert row["status"] == "CONFIRMED"
+    assert row["last_error"].startswith("already-flat:-2022")
 
 
 async def test_conditional_confirmed_via_open_orders(env):
@@ -229,6 +272,24 @@ async def test_cancel_2011_treated_confirmed(env):
     client.cancel_order = cancel  # type: ignore[method-assign]
     results = await executor.submit(plan_of(cancel_action()))
     assert results[0].status == "CONFIRMED"
+
+
+async def test_failed_protection_place_does_not_cancel_old_protection(env):
+    executor, client, commands, links, _ = env
+    client.place_error = AsterError(-2019, "margin insufficient")
+    new_stop = stop_action(coid="planner-new-stop", stop="64500")
+    cancel_old = cancel_action("ct-old-stop")
+    cancel_old = dataclasses.replace(
+        cancel_old,
+        priority=2,
+        depends_on_client_order_id=new_stop.client_order_id,
+    )
+
+    results = await executor.submit(plan_of(new_stop, cancel_old))
+
+    assert [result.status for result in results] == ["FAILED", "BLOCKED"]
+    assert client.canceled == []
+    assert await commands.get(results[1].command_key) is None
 
 
 async def test_idempotent_resubmit_skips_confirmed(env):

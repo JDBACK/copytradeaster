@@ -51,7 +51,7 @@ from copytradeaster.storage.repositories import (
     SettingsRepo,
     SyncBasisRepo,
 )
-from copytradeaster.trading.executor import Executor
+from copytradeaster.trading.executor import Executor, command_key_of
 from copytradeaster.trading.planner import build_plan
 
 log = get_logger(__name__)
@@ -68,6 +68,7 @@ class FollowerRuntime:
     client: AsterClient
     identity: object
     lock: asyncio.Lock = None  # type: ignore[assignment]
+    execution_mode: str = "REAL"
 
     def __post_init__(self) -> None:
         if self.lock is None:
@@ -126,6 +127,7 @@ class Coordinator:
         on_notify: Callable[[str], Awaitable[None]] | None = None,
         stale_master_ms: int = 5000,
         basis: SyncBasisRepo | None = None,
+        snapshot_symbols: set[str] | None = None,
     ) -> None:
         self._followers = followers
         self._settings = settings
@@ -141,14 +143,22 @@ class Coordinator:
         self._stale_master_ms = stale_master_ms
         self._error_streaks: dict[str, int] = {}
         self._basis = basis
+        self._snapshot_symbols = snapshot_symbols
         self._last_master_state: MasterState | None = None
         self._last_postfill_recompute: dict[str, float] = {}
         self._postfill_tasks: set[asyncio.Task] = set()
 
     async def on_master_delta(self, delta: MasterDelta) -> None:
         self._last_master_state = delta.state
+        # Capture freshness once for the whole fan-out generation. A slow
+        # signed follower must not make later followers reject the same
+        # authoritative master delta halfway through the gather.
+        master_fresh = self._state_fresh(delta.state)
         results = await asyncio.gather(
-            *(self._recompute_follower(fr, delta) for fr in self._followers),
+            *(
+                self._recompute_follower(fr, delta, master_fresh=master_fresh)
+                for fr in self._followers
+            ),
             return_exceptions=True,
         )
         for fr, result in zip(self._followers, results, strict=True):
@@ -189,6 +199,11 @@ class Coordinator:
 
     async def _postfill_recompute(self, fr: FollowerRuntime, state: MasterState) -> None:
         try:
+            # on_confirmed is called while Executor holds the account mutation
+            # lock. Wait for the whole originating plan (including its new
+            # protection) before taking the snapshot; otherwise a post-fill
+            # task can observe the brief pre-STOP window and place a duplicate.
+            await self._executor.wait_until_idle(fr.account_id)
             await self._recompute_follower(fr, MasterDelta(frozenset({"*"}), state))
         except Exception as exc:  # noqa: BLE001 - notification path must not raise
             log.warning("post-fill recompute failed for %s: %s", fr.account_id, exc)
@@ -207,12 +222,38 @@ class Coordinator:
         flag = await self._app_flags.get_flag("allow_new_entries")
         return flag != "false"
 
-    async def _recompute_follower(self, fr: FollowerRuntime, delta: MasterDelta) -> None:
+    async def _recompute_follower(
+        self,
+        fr: FollowerRuntime,
+        delta: MasterDelta,
+        *,
+        master_fresh: bool | None = None,
+    ) -> None:
+        # Snapshot and mutation must be one per-follower generation. The
+        # executor lock serializes exchange writes, but without this outer lock
+        # a post-fill recompute could snapshot the same position concurrently
+        # with a master-delta recompute and issue contradictory closes.
+        async with fr.lock:
+            await self._recompute_follower_locked(fr, delta, master_fresh=master_fresh)
+
+    async def _recompute_follower_locked(
+        self,
+        fr: FollowerRuntime,
+        delta: MasterDelta,
+        *,
+        master_fresh: bool | None = None,
+    ) -> None:
         policy = await self._settings.get_policy(fr.account_id)
         if policy is None or not policy.enabled:
             return
         actual = await self._snapshot(fr)
-        targets, skips = await self._targets_for(fr.account_id, delta.state, actual, policy)
+        targets, skips = await self._targets_for(
+            fr.account_id,
+            delta.state,
+            actual,
+            policy,
+            master_fresh=master_fresh,
+        )
         for skip in skips:
             await self._notify(f"[{fr.account_id}] SKIP {skip.symbol}: {skip.reason}")
         plan = build_plan(
@@ -234,9 +275,12 @@ class Coordinator:
                 for a in plan.actions
             ],
         )
-        plan = await self._bind_plan_context(fr.account_id, targets, plan)
+        plan = await self._bind_plan_context(fr.account_id, targets, plan, actual)
         results = await self._executor.submit(plan)
-        failed = any(r.status == "FAILED" for r in results)
+        # SUBMITTED and BLOCKED are not converged: in particular, a blocked
+        # protection cancel must keep the previous sizing basis so the next
+        # reconciliation retries the complete safety transition.
+        failed = any(r.status != "CONFIRMED" for r in results)
         await self._persist_refs(fr.account_id, targets, failed=failed, master=delta.state)
 
     async def _persist_refs(
@@ -275,14 +319,24 @@ class Coordinator:
                 available = b.available_balance
                 break
         positions: dict[PositionKey, PositionState] = {}
-        orders = await fr.client.open_orders(fr.account_id)  # single fetch: weight 40, not 80
+        if self._snapshot_symbols:
+            batches = await asyncio.gather(
+                *(
+                    fr.client.open_orders(fr.account_id, symbol=symbol)
+                    for symbol in sorted(self._snapshot_symbols)
+                )
+            )
+            orders = [order for batch in batches for order in batch]
+        else:
+            orders = await fr.client.open_orders(fr.account_id)  # all-symbol authoritative fetch
         orders_by_symbol: dict[str, list] = {}
         for o in orders:
             orders_by_symbol.setdefault(o.symbol, []).append(o)
         for p in await fr.client.position_risk(fr.account_id):
             key = PositionKey(symbol=p.symbol, pos_side=p.position_side)
             leg_orders = [
-                o for o in orders_by_symbol.get(p.symbol, [])
+                o
+                for o in orders_by_symbol.get(p.symbol, [])
                 if o.position_side in (key.pos_side, PosSide.BOTH)
             ]
             if p.position_amt == 0 and key.pos_side == PosSide.BOTH and not leg_orders:
@@ -307,8 +361,7 @@ class Coordinator:
             if key in positions:
                 continue
             leg_orders = [
-                x for x in orders_by_symbol.get(o.symbol, [])
-                if x.position_side == o.position_side
+                x for x in orders_by_symbol.get(o.symbol, []) if x.position_side == o.position_side
             ]
             positions[key] = PositionState(
                 key=key,
@@ -328,10 +381,18 @@ class Coordinator:
         )
 
     async def _targets_for(
-        self, account_id: str, master: MasterState, actual: AccountState, policy: RiskPolicy
+        self,
+        account_id: str,
+        master: MasterState,
+        actual: AccountState,
+        policy: RiskPolicy,
+        *,
+        master_fresh: bool | None = None,
     ) -> tuple[list[TargetPosition], list[SkipRecord]]:
         targets: list[TargetPosition] = []
         skips: list[SkipRecord] = []
+        if master_fresh is None:
+            master_fresh = self._state_fresh(master)
         entries_allowed = await self._entries_allowed(policy)
         for key in actual.positions:
             if key.symbol not in self._whitelist:
@@ -391,7 +452,7 @@ class Coordinator:
                 # a-precondition: never open against a stale view of the master -
                 # the position may already be closed on the exchange while the WS
                 # event is still in flight (observed live on testnet)
-                if not self._state_fresh(master):
+                if not master_fresh:
                     skips.append(SkipRecord(key.symbol, SkipReason.STALE_MASTER))
                     continue
                 # a-precondition: no re-entry while the same master episode was
@@ -409,6 +470,7 @@ class Coordinator:
                     master_stop,
                     _filters_for(self._filters_provider(), key.symbol),
                     self._fee_buffer,
+                    leverage=leverage,
                 )
                 if decision.reason is not None:
                     log.warning(
@@ -463,7 +525,7 @@ class Coordinator:
             if prev_abs is not None and master_abs > prev_abs:
                 # branch b: master increased -> state-based risk cap; growth is
                 # forbidden against a stale view for the same reason as branch a
-                target_abs = cap if self._state_fresh(master) else current_abs
+                target_abs = cap if master_fresh else current_abs
             elif prev_abs is not None and master_abs < prev_abs:
                 # branch c takes priority over a stop change when the master
                 # magnitude DROPPED vs the persisted reference (incl. restart
@@ -505,7 +567,7 @@ class Coordinator:
                 target_abs = current_abs  # pause: increases blocked
             # post-fill protection: never hold more than the real risk cap from
             # the ACTUAL follower entry and the effective stop distance
-            if effective_stop is not None and cap < current_abs and self._state_fresh(master):
+            if effective_stop is not None and cap < current_abs and master_fresh:
                 target_abs = min(target_abs, cap)
             target_stop, target_stop_type = self._target_stop_for_existing(
                 master_pos, master_stop, master_stop_type, follower_pos
@@ -616,7 +678,13 @@ class Coordinator:
 
         return factory
 
-    async def _bind_plan_context(self, account_id: str, targets: list[TargetPosition], plan):
+    async def _bind_plan_context(
+        self,
+        account_id: str,
+        targets: list[TargetPosition],
+        plan,
+        actual: AccountState,
+    ):
         """Per-action trade attribution + idempotency revision.
 
         trade_id: active episode of the action's own leg; fallback to the latest
@@ -628,31 +696,123 @@ class Coordinator:
         same logical command keys.
         """
         target_by_leg = {(t.key.symbol, t.key.pos_side.value): t for t in targets}
+        actions_by_leg: dict[tuple[str, str], list[tuple[int, ExecutionAction, int | None]]] = {}
+        action_trade_ids: dict[int, int | None] = {}
+        for index, action in enumerate(plan.actions):
+            pos_side_raw = str(action.payload.get("positionSide", action.position_side.value))
+            trade_id = await self._resolve_trade(action.symbol, pos_side_raw)
+            action_trade_ids[index] = trade_id
+            actions_by_leg.setdefault((action.symbol, pos_side_raw), []).append(
+                (index, action, trade_id)
+            )
+
         issued_revisions: dict[tuple[str, str], int] = {}
         for leg, t in target_by_leg.items():
+            leg_actions = actions_by_leg.get(leg, [])
+            if not leg_actions:
+                continue
             canonical = _canonical_target(t)
             row = await self._basis.get(account_id, leg[0], leg[1]) if self._basis else None
-            if row is not None and row["issued_target"] == canonical:
-                issued_revisions[leg] = int(row["revision"])
-            elif self._basis is not None:
-                issued_revisions[leg] = await self._basis.bump_revision(
-                    account_id, leg[0], leg[1], canonical
-                )
-            else:
-                issued_revisions[leg] = 0
+            if row is None or row["issued_target"] != canonical:
+                if self._basis is not None:
+                    issued_revisions[leg] = await self._basis.bump_revision(
+                        account_id, leg[0], leg[1], canonical
+                    )
+                else:
+                    issued_revisions[leg] = 0
+                continue
+
+            revision = int(row["revision"])
+            # A target is not enough to identify a reconciliation operation.
+            # If the exchange has drifted after the old command was confirmed,
+            # a new generation is required even though the desired target is
+            # byte-for-byte unchanged. In-flight/FAILED commands keep their
+            # revision so the executor can recover/retry the same operation.
+            drifted_confirmed = False
+            for _index, action, trade_id in leg_actions:
+                if await self._confirmed_command_has_actual_drift(
+                    plan,
+                    action,
+                    trade_id if trade_id is not None else plan.trade_id,
+                    revision,
+                    actual,
+                    t,
+                ):
+                    drifted_confirmed = True
+                    break
+            if drifted_confirmed and self._basis is not None:
+                revision = await self._basis.bump_revision(account_id, leg[0], leg[1], canonical)
+            issued_revisions[leg] = revision
 
         new_actions: list[ExecutionAction] = []
-        for a in plan.actions:
-            pos_side_raw = str(a.payload.get("positionSide", PosSide.BOTH.value))
-            trade_id = await self._resolve_trade(a.symbol, pos_side_raw)
+        for index, action in enumerate(plan.actions):
+            pos_side_raw = str(action.payload.get("positionSide", action.position_side.value))
+            trade_id = action_trade_ids[index]
             new_actions.append(
                 dc_replace(
-                    a,
+                    action,
                     trade_id=trade_id if trade_id is not None else plan.trade_id,
-                    revision=issued_revisions.get((a.symbol, pos_side_raw), 0),
+                    revision=issued_revisions.get((action.symbol, pos_side_raw), 0),
                 )
             )
         return dc_replace(plan, actions=new_actions)
+
+    async def _confirmed_command_has_actual_drift(
+        self,
+        plan,
+        action: ExecutionAction,
+        trade_id: int | None,
+        revision: int,
+        actual: AccountState,
+        target: TargetPosition,
+    ) -> bool:
+        candidate = dc_replace(action, trade_id=trade_id, revision=revision)
+        key = command_key_of(plan, candidate)
+        row = await self.commands.get(key)
+        if row is None or str(row["status"]) != "CONFIRMED":
+            return False
+        return self._action_actual_drifted(action, actual, target)
+
+    @staticmethod
+    def _action_actual_drifted(
+        action: ExecutionAction, actual: AccountState, target: TargetPosition
+    ) -> bool:
+        """Return whether a previously confirmed action's effect is absent.
+
+        This deliberately inspects the fresh follower snapshot rather than
+        inventing a second desired-state store. It is used only to create a new
+        execution generation; ordinary FAILED/SUBMITTED rows still retry under
+        their original command key.
+        """
+        position = actual.positions.get(target.key)
+        kind = action.kind
+        if kind == ActionKind.SET_LEVERAGE:
+            return position is None or position.leverage != target.leverage
+        if kind == ActionKind.MARKET_OPEN:
+            return position is None or abs(position.qty) < abs(target.qty)
+        if kind == ActionKind.MARKET_CLOSE:
+            return position is not None and abs(position.qty) > abs(target.qty)
+        if kind in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP):
+            current = None
+            if position is not None:
+                current = position.stop if kind == ActionKind.PLACE_STOP else position.take_profit
+            wanted = Decimal(action.payload["stopPrice"])
+            return current is None or current.stop_price != wanted
+        if kind == ActionKind.CANCEL_ORDER:
+            old_coid = action.replaces_client_order_id or action.payload.get("origClientOrderId")
+            if old_coid is None:
+                return False
+            if position is not None and any(
+                prot is not None and prot.client_order_id == old_coid
+                for prot in (position.stop, position.take_profit)
+            ):
+                return True
+            for raw in actual.open_orders:
+                if not isinstance(raw, dict):
+                    continue
+                if raw.get("client_order_id", raw.get("clientOrderId")) == old_coid:
+                    return True
+        return False
 
     async def _resolve_trade(self, symbol: str, pos_side_value: str) -> int | None:
         row = await self._trades.active_trade(symbol, pos_side_value)

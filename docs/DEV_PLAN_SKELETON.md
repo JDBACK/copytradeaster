@@ -95,10 +95,50 @@ pydantic v2            — схемы ордеров/событий/конфиг
 (фантомное переоткрытие позиции из-за направления филла, двойной учёт
 ACCOUNT_UPDATE, отсутствие копирования TP, STALE-guard против гонок,
 лимитные флейворы STOP/TAKE_PROFIT).
-Осталось до полного закрытия: builder-e2e (approveBuilder ждёт `main privte key`
-в wallet.txt); зеркало висящих лимиток мастера — кандидат в этап 2.
+Builder-e2e (approveBuilder ждёт `main private key` в wallet.txt) оставлен для
+Stage 3; зеркало висящих лимиток мастера — кандидат в этап 2.
 
 Критерий перехода: этап 1 закрыт, когда проходят все signed-сценарии раздела «Как проводить тесты»; этап 2 — когда онбординг и уведомления работают на тестнете с ключами, введёнными через бота.
+
+### Финальный Stage 1 gate — follow-up по `review_stage1_new.md` (2026-08-22)
+
+- [x] Safety sequencing: при неуспешном `PLACE_STOP/PLACE_TP` не выполнять
+  зависимый `CANCEL_ORDER` старой защиты.
+- [x] Reconciliation generation: при неизменном target, но свежем
+  `actual != target`, не переиспользовать исторический `CONFIRMED` command.
+- [x] HEDGE REST recovery: убрать дубликат `_pick_protective` и покрыть защиту
+  `positionSide=LONG/SHORT` без `reduceOnly/closePosition`.
+- [x] Fresh market reference: перед stop/deviation decisions обновлять mark
+  price затронутых master symbols через authoritative REST `positionRisk`.
+- [x] Liquidation recovery: `MARGIN_CALL`, `CALCULATED`, autoclose/ADL и
+  неизвестные position-changing execution types запускают немедленный
+  authoritative master resnapshot и reconciliation.
+- [x] Nonce/margin hardening: атомарно резервировать nonce в SQLite и проверять
+  entry margin по фактически выбранному leverage.
+- [x] Signed proof: выполнить и записать полноценный ONE_WAY цикл на testnet с
+  локальными кошельками, включая cleanup; mainnet не используется.
+
+Builder signed e2e не является блокером торгового ядра Stage 1 и остаётся в
+контуре Stage 3, где реализуется Aster Code onboarding.
+
+### Финальный hybrid load gate — 30 follower slots (2026-08-23)
+
+- [x] Добавлен явный `execution_mode=REAL|SHADOW`; shadow rows не получают
+  credentials и разрешены только на testnet при opt-in.
+- [x] Production `App`/coordinator/planner/executor/journal прогнаны на 30
+  follower slots: 3 signed REAL testnet followers + 27 SHADOW.
+- [x] Выполнено 100 циклов open → protection → close; финал — 12 302/12 302
+  `CONFIRMED`, ingest drops 0, cleanup и REST audit flat/no-orders.
+- [x] SQLite write path усилен autocommit, cursor lifecycle и общим write lock;
+  nonce allocation атомарен на том же aiosqlite connection.
+- [x] Полный suite: 247 passed / 11 skipped, coverage 87%, ruff и diff-check
+  clean.
+
+Подробности, включая неуспешные промежуточные прогоны и ограничения shadow
+evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md)
+и [HYBRID_LOAD_TEST_JOURNAL_2026-08.md](../HYBRID_LOAD_TEST_JOURNAL_2026-08.md).
+27 shadow slots подтверждают масштаб внутреннего pipeline, но не заменяют 27
+независимых signed Aster accounts для 30-real acceptance.
 
 
 ## 5. MVP vs Продакшн

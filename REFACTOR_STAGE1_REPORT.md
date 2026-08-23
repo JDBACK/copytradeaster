@@ -130,3 +130,21 @@
 - Builder e2e — единственный skip: ждёт main private key в wallet.txt.
 - ONE_WAY signed-cycle отдельно не гонялся в этой сессии; логика покрыта юнит/e2e;
   перед этапом 2 прогнать CT_POSITION_MODE=ONE_WAY кампанию на тестнете.
+
+## Последующая проверка масштаба — 2026-08-23
+
+После закрытия review-gate выполнен отдельный hybrid load campaign. Production
+`App`/coordinator/planner/executor/journal прогнаны на 30 follower slots:
+3 REAL signed testnet followers и 27 явно помеченных SHADOW rows. За 100
+циклов получено 12 302/12 302 `CONFIRMED`, dropped events — 0, cleanup и
+независимый REST-аудит исходных `main`/`copyc1`–`copyc3` — flat/no-orders.
+
+27 shadow slots не считаются 27 signed Aster accounts: они проверяют только
+масштаб внутреннего pipeline. Полный результат, включая найденные на
+промежуточных прогонах SQLite/timeout/protective-fill race и их исправления,
+зафиксирован в [HYBRID_LOAD_TEST_REPORT_2026-08.md](HYBRID_LOAD_TEST_REPORT_2026-08.md).
+
+Примечание: ограничение про отсутствие отдельного ONE_WAY signed-cycle выше
+относится к историческому срезу этого отчёта и закрыто последующим
+`FINAL_STAGE1_FOLLOWUP_REPORT_2026-08.md`; hybrid load campaign не заменяет
+отдельную signed-проверку позиционного режима.

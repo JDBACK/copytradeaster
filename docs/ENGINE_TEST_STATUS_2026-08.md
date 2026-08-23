@@ -8,15 +8,17 @@
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Suite: 220 passed / coverage 90.28% / ruff clean.
-- Все счёта плоские, открытых ордеров нет (финальный слепок кампании 03:00 UTC).
+- Актуальный suite: **247 passed / 11 skipped**, coverage **87%**, ruff и
+  `git diff --check` clean.
+- Все реальные счёта плоские, открытых ордеров нет (независимый REST-аудит
+  после hybrid load campaign).
 
 ## Найденные и исправленные баги (живой тестнет)
 
 | # | Баг | Корневая причина | Фикс |
 |---|-----|------------------|------|
 | 1 | Осцилляция таргетов свипами | трекер master-магнитуд обновлялся только на WS-дельтах | remember на каждом recompute (`5e32837`) |
-| 2 | Deadlock «database is locked» | синхронная запись nonce против aiosqlite | nonce в памяти + асинхронная персистенция (`ca2f87b`) |
+| 2 | Deadlock «database is locked» | implicit transactions/cursor lifetime и конкурирующий nonce path при fan-out | autocommit, закрытие cursors, общий `Database.write_lock`, atomic nonce `INSERT…RETURNING`; проверено 30×100 live |
 | 3 | Координатор молча пропускал аккаунты | import не создавал copy_settings | дефолтная политика при импорте (`7f4a8b0`) |
 | 4 | Дорастивание позиций после partial-close | ветка b считала cap от близкого стопа по устаревшему состоянию | STALE_MASTER guard (<5 c) (`0ae383a`) |
 | 5 | Копиры никогда не получают TP | `_targets_for` хардкодил `tp_price=None` | уровень TP мастера в таргете (`b2a892d`) |
@@ -71,7 +73,29 @@ nonce, реальный pause, deviation/post-fill риск, перенос ст
 tick-grid равенство, TP removal/orphan cleanup, HEDGE-rebuild защита, TRADE вне
 порядка + entry от L, fail-closed routing, decoupled WS ingest.
 Полная инвентаризация и верификация — [REFACTOR_STAGE1_REPORT.md](../REFACTOR_STAGE1_REPORT.md).
-Герметичный сьют: 232 passed / ruff clean. Живой тестнет (signed): 8 passed /
-1 skipped — включая двойной одинаковый partial-close (обе команды исполнены),
-one-tick stop replace и TP removal. До приёмки Stage 1 остаётся builder-e2e
-(main key) и ONE_WAY live-кампания.
+На момент закрытия review-specific доработок герметичный сьют дал **240 passed /
+10 skipped** без
+`CT_TESTNET`, `ruff check` и `ruff format --check` — clean. Signed testnet:
+**9 passed / 1 skipped**; отдельно после финальной правки dependency gate
+повторены one-tick stop replace и ONE_WAY cycle — **2 passed**. Read-only
+сверка после cleanup: `main` снова HEDGE, `main` и copyc1–copyc3 flat,
+открытых ордеров нет. Единственный skip — Builder e2e, который не блокирует
+торговое ядро Stage 1 и перенесён в контур Stage 3.
+
+## Hybrid load campaign — 2026-08-23
+
+Проведён отдельный testnet-only нагрузочный гейт перед ревью:
+
+- `scripts/hybrid_load_test.py`, 30 follower slots, 100 циклов;
+- 3 REAL подписанных follower-а (`copyc1`–`copyc3`) + 27 явно помеченных
+  SHADOW rows; fake credentials не создавались;
+- **12 302/12 302 `CONFIRMED`**, `FAILED/UNKNOWN/non-terminal=0`,
+  `ingest_dropped=0`, cleanup errors=0;
+- run-БД до/после cleanup: 31 account flat/no-orders;
+- независимый signed REST после прогона: `main` и copyc1–copyc3 flat,
+  `open_orders=0`;
+- `CT_LOAD=1` production-path integration: **1 passed** (30×100 shadow
+  cycles), full suite после изменений: **247 passed / 11 skipped**.
+
+Финальный JSON: `data/hybrid-load-20260822T233258Z.json`. Полная матрица
+evidence и ограничения shadow-контура: [HYBRID_LOAD_TEST_REPORT_2026-08.md](../HYBRID_LOAD_TEST_REPORT_2026-08.md).

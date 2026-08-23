@@ -197,6 +197,7 @@ class TestStopReplacement:
         assert cancel_old.payload["origClientOrderId"] == "ct-old-stop"
         assert cancel_old.replaces_client_order_id == "ct-old-stop"
         assert cancel_old.priority == 2
+        assert cancel_old.depends_on_client_order_id == new_stop.client_order_id
 
     def test_one_tick_move_replaces_stop(self):
         """A one-tick level change is the smallest REAL move on the exchange

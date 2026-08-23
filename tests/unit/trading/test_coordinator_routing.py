@@ -1,6 +1,8 @@
 """Coordinator routing tests: fan-out, error isolation, pause, branches a-e,
 self-stop re-entry guard - all against fake clients, no HTTP."""
 
+import asyncio
+import time
 from decimal import Decimal as D
 
 import pytest
@@ -211,6 +213,25 @@ async def test_fanout_all_followers_receive_plan(env):
     # sizing: budget 1000*0.01=10; distance 500*1.001 -> qty 0.019
     open_params = [p for p in followers[0].client.placed if p["type"] == "MARKET"][0]
     assert open_params["quantity"] == "0.019"
+
+
+async def test_fanout_freshness_is_captured_once_for_slow_followers(env):
+    coordinator, followers, db, notifications = env
+    del db
+    coordinator._stale_master_ms = 1
+    for follower in followers:
+        original_balance = follower.client.balance
+
+        async def slow_balance(account_id, original_balance=original_balance):
+            await asyncio.sleep(0.01)
+            return await original_balance(account_id)
+
+        follower.client.balance = slow_balance  # type: ignore[method-assign]
+    state = master_state()
+    state.event_time = int(time.time() * 1000)
+    await coordinator.on_master_delta(delta_of(state))
+    assert not any("STALE_MASTER" in text for text in notifications)
+    assert all(len(follower.client.placed) >= 2 for follower in followers)
 
 
 async def test_one_follower_failure_isolated(env):

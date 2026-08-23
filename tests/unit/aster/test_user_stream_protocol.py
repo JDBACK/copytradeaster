@@ -79,9 +79,13 @@ def make_stream(client, factory, on_event, on_reconnect=None, **kwargs):
 
 async def test_events_delivered_to_on_event():
     events: list[StreamEvent] = []
+    connected: list[int] = []
 
     async def collect(event: StreamEvent) -> None:
         events.append(event)
+
+    async def connected_cb() -> None:
+        connected.append(1)
 
     ws = FakeWS(
         [
@@ -91,7 +95,7 @@ async def test_events_delivered_to_on_event():
     )
     factory = FlakyFactory(0, [ws])
     client = FakeClient(["lk1"])
-    stream = make_stream(client, factory, collect)
+    stream = make_stream(client, factory, collect, on_connected=connected_cb)
     stop = asyncio.Event()
     task = asyncio.create_task(stream.run(stop))
     for _ in range(200):
@@ -103,6 +107,7 @@ async def test_events_delivered_to_on_event():
     assert [e.raw["e"] for e in events] == ["ACCOUNT_UPDATE", "MARGIN_CALL"]
     assert factory.urls == ["wss://stream.test/ws/lk1"]
     assert events[0].received_at > 0
+    assert connected == [1]
 
 
 async def test_listen_key_expired_rotates_and_reconnects():

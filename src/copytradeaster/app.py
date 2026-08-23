@@ -8,6 +8,7 @@ import contextlib
 import httpx
 
 from copytradeaster.aster.rate_limits import RateLimits
+from copytradeaster.aster.shadow import ShadowExchange
 from copytradeaster.aster.trading_api import AsterClient
 from copytradeaster.aster.user_stream import UserStream
 from copytradeaster.config import Settings
@@ -33,6 +34,7 @@ log = get_logger(__name__)
 CLOCK_DRIFT_MAX_MS = 2000
 MASTER_RESNAPSHOT_EVERY_SWEEPS = 10  # ~10x reconcile_interval; heals projector drift
 INGEST_QUEUE_MAX = 1000
+STREAM_READY_TIMEOUT_S = 30.0
 
 
 class App:
@@ -54,6 +56,10 @@ class App:
         self.nonces = NonceStore(self.db)
         self.basis = SyncBasisRepo(self.db)
         self.followers: list[FollowerRuntime] = []
+        self.shadow_exchange = ShadowExchange(
+            hedge=cfg.position_mode == "HEDGE",
+            auto_trigger_conditionals=cfg.shadow_auto_trigger_conditionals,
+        )
         self.executor = Executor(
             self._client_for,
             self.commands,
@@ -64,7 +70,12 @@ class App:
         )
         self.master_client = self._make_client()
         self.projector = MasterProjector(
-            self.events, self.trades, self.links, self.settings, self._on_delta
+            self.events,
+            self.trades,
+            self.links,
+            self.settings,
+            self._on_delta,
+            on_critical=self._on_master_critical,
         )
         self.coordinator = Coordinator(
             followers=self.followers,
@@ -79,10 +90,12 @@ class App:
             working_type=cfg.working_type,
             on_notify=notify,
             basis=self.basis,
+            snapshot_symbols=set(cfg.follower_snapshot_symbols) or None,
         )
         self.reconciler = Reconciler(self.coordinator)
         self.stream: UserStream | None = None
         self.stop_event = asyncio.Event()
+        self._stream_ready = asyncio.Event()
         self._ingest_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=INGEST_QUEUE_MAX)
         self._ingest_dropped = 0
         self._ingest_task: asyncio.Task | None = None
@@ -125,13 +138,31 @@ class App:
         # 1-2. storage + accounts/settings
         await self.db.connect()
         await self.db.migrate()
-        await self.credentials.load()
         accounts = await AccountRepo_all(self.db)
+        shadow_rows = [row for row in accounts if str(row["execution_mode"] or "REAL") == "SHADOW"]
+        if shadow_rows:
+            if not cfg.shadow_accounts_enabled:
+                raise RuntimeError("SHADOW accounts found but CT_SHADOW_ACCOUNTS_ENABLED is false")
+            if "testnet" not in cfg.rest_base_url.lower():
+                raise RuntimeError("SHADOW accounts are permitted only with an Aster testnet URL")
+        main_row = next((row for row in accounts if str(row["id"]) == "main"), None)
+        if main_row is not None and str(main_row["execution_mode"] or "REAL") != "REAL":
+            raise RuntimeError("main account must always use execution_mode=REAL")
+        await self.credentials.load()
         for row in accounts:
             if row["role"] == "follower" and int(row["enabled"]):
+                execution_mode = str(row["execution_mode"] or "REAL")
+                if execution_mode == "SHADOW":
+                    self.shadow_exchange.add_account(str(row["id"]))
+                    client = self.shadow_exchange
+                else:
+                    client = self._make_client()
                 self.followers.append(
                     FollowerRuntime(
-                        account_id=str(row["id"]), client=self._make_client(), identity=None
+                        account_id=str(row["id"]),
+                        client=client,
+                        identity=None,
+                        execution_mode=execution_mode,
                     )
                 )
 
@@ -157,6 +188,8 @@ class App:
                 log.warning("master position mode not changed (%s); continuing as-is", exc)
                 await notify(f"WARN master position mode not changed: {exc}")
         for fr in self.followers:
+            if fr.execution_mode == "SHADOW":
+                continue
             try:
                 client = fr.client
                 is_hedge = await client.get_position_mode(fr.account_id)
@@ -179,11 +212,16 @@ class App:
             account_id="main",
             ws_base=cfg.ws_user_base,
             keepalive_min=cfg.listenkey_keepalive_min,
-            on_event=lambda event: self._enqueue(event.raw),
+            on_event=self._on_stream_event,
             on_reconnect=self._on_stream_reconnect,
+            on_connected=self._on_stream_connected,
         )
         stream_task = asyncio.create_task(self.stream.run(self.stop_event))
         self._stream_task = stream_task  # type: ignore[attr-defined]
+        try:
+            await asyncio.wait_for(self._stream_ready.wait(), timeout=STREAM_READY_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise RuntimeError("master user stream did not become ready") from exc
         self._sweep_task = asyncio.create_task(self._periodic_sweep())
         self._ingest_task = asyncio.create_task(self._ingest_loop())
         # 8. READY
@@ -220,6 +258,13 @@ class App:
     async def _consume(self, raw: dict) -> None:
         await self.projector.apply_raw(raw)
 
+    async def _on_stream_event(self, event) -> None:
+        """Async adapter required by UserStream's awaited callback contract."""
+        self._enqueue(event.raw)
+
+    async def _on_stream_connected(self) -> None:
+        self._stream_ready.set()
+
     def _enqueue(self, raw: dict) -> None:
         """Decouple WS ingest from follower execution: the stream loop must
         never wait on dozens of REST calls. Bounded queue drops the oldest
@@ -240,7 +285,33 @@ class App:
                 log.error("ingest processing failed: %s", exc)
 
     async def _on_delta(self, delta) -> None:
+        # A user-data event is a trigger, not an authoritative market quote.
+        # Refresh mark prices for affected symbols before allowing entry,
+        # deviation, or stop-side decisions. If the read fails, fail closed for
+        # this delta; the periodic/reconnect sweep will retry and closes remain
+        # recoverable from the exchange snapshot.
+        try:
+            await self.projector.refresh_mark_prices(
+                self.master_client, "main", delta.changed_symbols
+            )
+        except Exception as exc:  # noqa: BLE001 - safety gate around REST refresh
+            log.error("master mark refresh failed: %s", exc)
+            await self.settings.set_flag("degraded", f"master-mark-refresh:{exc}")
+            await notify(f"WARN master mark refresh failed: {exc}")
+            return
+        for position in delta.state.positions.values():
+            self.shadow_exchange.set_market_price(position.mark_price)
         await self.coordinator.on_master_delta(delta)
+
+    async def _on_master_critical(self, reason: str) -> None:
+        """Authoritative recovery for margin/liquidation/autoclose signals."""
+        try:
+            await self.projector.rebuild_full(self.master_client, "main")
+            await self.reconciler.reconcile(self.projector.state, reason=f"critical:{reason}")
+        except Exception as exc:  # noqa: BLE001 - keep stream alive, retry on sweep
+            log.error("critical master resnapshot failed (%s): %s", reason, exc)
+            await self.settings.set_flag("degraded", f"critical-resnapshot:{reason}:{exc}")
+            await notify(f"CRITICAL master resnapshot failed ({reason}): {exc}")
 
     async def _on_stream_reconnect(self) -> None:
         log.info("master stream reconnected - resnapshotting")
@@ -251,6 +322,7 @@ class App:
         text = f"[{account_id}] {action.kind.value} {action.symbol} ok"
         await notify(text)
         await self.coordinator.on_command_confirmed(account_id, action)
+
     async def _periodic_sweep(self) -> None:
         sweep_count = 0
         while not self.stop_event.is_set():

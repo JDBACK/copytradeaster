@@ -157,9 +157,7 @@ class TestPersistedBasis:
                 return []
 
         await projector2.rebuild_full(MasterSnapshot(), "main")
-        await coordinator2.on_master_delta(
-            MasterDelta(frozenset({"*"}), projector2.state)
-        )
+        await coordinator2.on_master_delta(MasterDelta(frozenset({"*"}), projector2.state))
         await asyncio.sleep(0)
         # scaled_reduce(0.019, ref 1.0, 0.5) = floor(0.0095) = 0.009
         assert follower_qty(fake, "copyc1") == D("0.009")
@@ -174,8 +172,15 @@ class TestPersistedBasis:
         for E in (1200, 1300):
             await projector.apply_raw(
                 order_trade(
-                    E=E, S="SELL", x="TRADE", X="FILLED",
-                    l="0.25", z="0.25", ap="65100", L="65100", q="0.25",
+                    E=E,
+                    S="SELL",
+                    x="TRADE",
+                    X="FILLED",
+                    l="0.25",
+                    z="0.25",
+                    ap="65100",
+                    L="65100",
+                    q="0.25",
                 )
             )
         await asyncio.sleep(0)
@@ -190,17 +195,50 @@ class TestPersistedBasis:
         projector, _, fake, *_ = env
         await open_master_long(projector)
         await projector.apply_raw(stop_new(E=1400, c="m-stop-b", sp="64000", i=202))
-        await projector.apply_raw(order_trade(E=1401, c="m-stop-1000", x="CANCELED",
-                                              X="CANCELED", o="STOP_MARKET",
-                                              ot="STOP_MARKET", sp="64500", i=101))
+        await projector.apply_raw(
+            order_trade(
+                E=1401,
+                c="m-stop-1000",
+                x="CANCELED",
+                X="CANCELED",
+                o="STOP_MARKET",
+                ot="STOP_MARKET",
+                sp="64500",
+                i=101,
+            )
+        )
         await asyncio.sleep(0)
         assert {o.stop_price for o in resting_stops(fake, "copyc1")} == {D("64000")}
         # move back to 64500
         await projector.apply_raw(stop_new(E=1500, c="m-stop-a", sp="64500", i=203))
-        await projector.apply_raw(order_trade(E=1501, c="m-stop-b", x="CANCELED",
-                                              X="CANCELED", o="STOP_MARKET",
-                                              ot="STOP_MARKET", sp="64000", i=202))
+        await projector.apply_raw(
+            order_trade(
+                E=1501,
+                c="m-stop-b",
+                x="CANCELED",
+                X="CANCELED",
+                o="STOP_MARKET",
+                ot="STOP_MARKET",
+                sp="64000",
+                i=202,
+            )
+        )
         await asyncio.sleep(0)
+        assert {o.stop_price for o in resting_stops(fake, "copyc1")} == {D("64500")}
+
+    async def test_same_target_reconciles_after_confirmed_stop_drifts(self, env):
+        """A confirmed stop disappearing from the exchange is a new
+        reconciliation generation even though master target JSON is unchanged."""
+        projector, coordinator, fake, *_ = env
+        await open_master_long(projector)
+        placed_before = len(fake.placed_log)
+        for order in resting_stops(fake, "copyc1"):
+            order.status = "CANCELED"  # external/manual cancellation on exchange
+
+        await coordinator.on_master_delta(MasterDelta(frozenset({"BTCUSDT"}), projector.state))
+        await asyncio.sleep(0)
+
+        assert len(fake.placed_log) > placed_before
         assert {o.stop_price for o in resting_stops(fake, "copyc1")} == {D("64500")}
 
 
@@ -223,8 +261,12 @@ class TestCrashWindows:
         )
         await commands.set_status("k-sub", "SUBMITTED")
         fake.orders["copyc1|ct-sub"] = FakeOrder(
-            symbol="BTCUSDT", side=Side.SELL, type="STOP_MARKET",
-            orig_qty=D("0.01"), client_order_id="ct-sub", status="NEW",
+            symbol="BTCUSDT",
+            side=Side.SELL,
+            type="STOP_MARKET",
+            orig_qty=D("0.01"),
+            client_order_id="ct-sub",
+            status="NEW",
         )
         placed_before = list(fake.placed_log)
         confirmed = await resolve_boot_unknowns(lambda aid: fake, commands, links)
@@ -273,10 +315,12 @@ class TestPauseAndRisk:
             ),
         )
         master = MasterState(available_usdt=D(100000), positions={key: master_pos})
-        actual = AccountState(account_id="copyc1", available_usdt=D("1000"),
-                              positions={}, open_orders=[])
-        policy = RiskPolicy(risk_percent=D("0.01"), max_leverage=20,
-                            max_entry_deviation_pct=D("0.01"))
+        actual = AccountState(
+            account_id="copyc1", available_usdt=D("1000"), positions={}, open_orders=[]
+        )
+        policy = RiskPolicy(
+            risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("0.01")
+        )
         targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
         assert [s.reason for s in skips] == [SkipReason.ENTRY_DEVIATION]
         assert targets == []
@@ -300,21 +344,39 @@ class TestProtectionConvergence:
         projector, _, fake, *_ = env
         await open_master_long(projector)
         await projector.apply_raw(
-            stop_new(E=6000, c="m-tp", sp="70000", S="SELL",
-                     o="TAKE_PROFIT_MARKET", ot="TAKE_PROFIT_MARKET", i=401)
+            stop_new(
+                E=6000,
+                c="m-tp",
+                sp="70000",
+                S="SELL",
+                o="TAKE_PROFIT_MARKET",
+                ot="TAKE_PROFIT_MARKET",
+                i=401,
+            )
         )
         await asyncio.sleep(0)
         tps = [
-            o for k, o in fake.orders.items()
+            o
+            for k, o in fake.orders.items()
             if k.startswith("copyc1|") and o.type == "TAKE_PROFIT_MARKET" and o.status == "NEW"
         ]
         assert tps, "follower TP expected"
-        await projector.apply_raw(order_trade(E=6010, c="m-tp", x="CANCELED",
-                                              X="CANCELED", o="TAKE_PROFIT_MARKET",
-                                              ot="TAKE_PROFIT_MARKET", sp="70000", i=401))
+        await projector.apply_raw(
+            order_trade(
+                E=6010,
+                c="m-tp",
+                x="CANCELED",
+                X="CANCELED",
+                o="TAKE_PROFIT_MARKET",
+                ot="TAKE_PROFIT_MARKET",
+                sp="70000",
+                i=401,
+            )
+        )
         await asyncio.sleep(0)
         tps_after = [
-            o for k, o in fake.orders.items()
+            o
+            for k, o in fake.orders.items()
             if k.startswith("copyc1|") and o.type == "TAKE_PROFIT_MARKET" and o.status == "NEW"
         ]
         assert tps_after == []  # master TP removed -> follower TP canceled
@@ -339,9 +401,14 @@ class TestProtectionConvergence:
         finally:
             FIDS[:] = global_fids
         fake.orders["copyc1|ct-orphan"] = FakeOrder(
-            symbol="BTCUSDT", side=Side.SELL, type="STOP_MARKET",
-            orig_qty=D("0.01"), stop_price=D("64000"),
-            reduce_only=True, client_order_id="ct-orphan", status="NEW",
+            symbol="BTCUSDT",
+            side=Side.SELL,
+            type="STOP_MARKET",
+            orig_qty=D("0.01"),
+            stop_price=D("64000"),
+            reduce_only=True,
+            client_order_id="ct-orphan",
+            status="NEW",
         )
         placed_before = list(fake.placed_log)
         await coordinator.on_master_delta(
@@ -359,14 +426,50 @@ class TestProtectionConvergence:
         projector, _, fake, *_ = env
         await open_master_long(projector)
         key = PositionKey("BTCUSDT", PosSide.BOTH)
-        projector.state.positions[key].mark_price = D("66500")
+        # Feed the authoritative symbol-scoped positionRisk path instead of
+        # mutating the projector mark by hand.
+        fake.positions[("main", "BTCUSDT:BOTH")] = D("1")
+        fake.entry_prices[("main", "BTCUSDT:BOTH")] = D("65000")
+        fake.set_price(D("66500"))
+        await projector.refresh_mark_prices(fake, "main", {"BTCUSDT"})
+        assert projector.state.positions[key].mark_price == D("66500")
         await projector.apply_raw(stop_new(E=7000, c="m-profit", sp="66200", i=501))
-        await projector.apply_raw(order_trade(E=7001, c="m-stop-1000", x="CANCELED",
-                                              X="CANCELED", o="STOP_MARKET",
-                                              ot="STOP_MARKET", sp="64500", i=101))
+        await projector.apply_raw(
+            order_trade(
+                E=7001,
+                c="m-stop-1000",
+                x="CANCELED",
+                X="CANCELED",
+                o="STOP_MARKET",
+                ot="STOP_MARKET",
+                sp="64500",
+                i=101,
+            )
+        )
         await asyncio.sleep(0)
         stops = {o.stop_price for o in resting_stops(fake, "copyc1")}
         assert stops == {D("66200")}, stops
+
+
+class TestMasterCriticalRecovery:
+    async def test_margin_call_resnapshots_and_reconciles_immediately(self, env):
+        projector, coordinator, fake, *_ = env
+        await open_master_long(projector)
+        assert follower_qty(fake, "copyc1") > 0
+        reasons: list[str] = []
+
+        async def on_critical(reason: str) -> None:
+            reasons.append(reason)
+            await projector.rebuild_full(fake, "main")
+            await coordinator.on_master_delta(MasterDelta(frozenset({"*"}), projector.state))
+
+        projector._on_critical = on_critical
+        await projector.apply_raw({"e": "MARGIN_CALL", "E": 8000, "cw": "100", "p": []})
+        await asyncio.sleep(0)
+
+        assert reasons == ["margin_call"]
+        assert projector.state.positions == {}
+        assert follower_qty(fake, "copyc1") == 0
 
 
 class TestFailClosed:

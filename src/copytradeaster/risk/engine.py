@@ -33,6 +33,7 @@ def entry_quantity(
     stop_price: Decimal,
     filters: SymbolFilters,
     fee_buffer_pct: Decimal,
+    leverage: int | None = None,
 ) -> QtyDecision:
     distance = abs(expected_entry - stop_price)
     if distance == 0:
@@ -50,7 +51,8 @@ def entry_quantity(
         qty = floor_to_step(filters.market_max_qty, filters.step_size)
         if qty < filters.min_qty:
             return QtyDecision(None, SkipReason.BELOW_MIN_QTY)
-    if not margin_check(qty, expected_entry, policy.max_leverage, equity_available):
+    effective_leverage = policy.max_leverage if leverage is None else leverage
+    if not margin_check(qty, expected_entry, effective_leverage, equity_available):
         return QtyDecision(None, SkipReason.INSUFFICIENT_MARGIN)
     return QtyDecision(qty, None)
 

@@ -128,7 +128,14 @@ def _level_equal(a: Decimal | None, b: Decimal | None, tick: Decimal) -> bool:
     return (a / tick).to_integral_value() == (b / tick).to_integral_value()
 
 
-def _cancel_action(symbol: str, prot_order_coid: str, priority: int) -> ExecutionAction:
+def _cancel_action(
+    symbol: str,
+    prot_order_coid: str,
+    priority: int,
+    *,
+    depends_on_client_order_id: str | None = None,
+    pos_side: PosSide = PosSide.BOTH,
+) -> ExecutionAction:
     return ExecutionAction(
         kind=ActionKind.CANCEL_ORDER,
         symbol=symbol,
@@ -136,6 +143,8 @@ def _cancel_action(symbol: str, prot_order_coid: str, priority: int) -> Executio
         client_order_id=None,
         replaces_client_order_id=prot_order_coid,
         priority=priority,
+        depends_on_client_order_id=depends_on_client_order_id,
+        position_side=pos_side,
     )
 
 
@@ -181,7 +190,9 @@ def _plan_for_target(
         if actual_pos is not None:
             for prot in (actual_pos.stop, actual_pos.take_profit):
                 if prot is not None:
-                    actions.append(_cancel_action(symbol, prot.client_order_id, priority=1))
+                    actions.append(
+                        _cancel_action(symbol, prot.client_order_id, priority=1, pos_side=pos_side)
+                    )
             if actual_abs > 0:
                 actions.append(
                     _close_action(
@@ -257,7 +268,9 @@ def _plan_for_target(
             # target-state semantics: master removed the level -> follower
             # cancels its own; "continue" here would leak stale protection
             if current is not None:
-                actions.append(_cancel_action(symbol, current.client_order_id, priority=1))
+                actions.append(
+                    _cancel_action(symbol, current.client_order_id, priority=1, pos_side=pos_side)
+                )
             continue
         order_type = target.stop_type if kind == ActionKind.PLACE_STOP else target.tp_type
         current_level = current.stop_price if current is not None else None
@@ -284,19 +297,24 @@ def _plan_for_target(
             working_type=working_type,
             limit_price=limit_price,
         )
-        actions.append(
-            ExecutionAction(
-                kind=kind,
-                symbol=symbol,
-                payload=payload,
-                client_order_id=ids.next(kind, symbol),
-                replaces_client_order_id=None,
-                priority=place_priority,
-            )
+        place_action = ExecutionAction(
+            kind=kind,
+            symbol=symbol,
+            payload=payload,
+            client_order_id=ids.next(kind, symbol),
+            replaces_client_order_id=None,
+            priority=place_priority,
         )
+        actions.append(place_action)
         if current is not None:
             actions.append(
-                _cancel_action(symbol, current.client_order_id, priority=max(place_priority, 2))
+                _cancel_action(
+                    symbol,
+                    current.client_order_id,
+                    priority=max(place_priority, 2),
+                    depends_on_client_order_id=place_action.client_order_id,
+                    pos_side=pos_side,
+                )
             )
     return actions
 

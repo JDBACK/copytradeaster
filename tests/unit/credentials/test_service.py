@@ -106,5 +106,3 @@ async def AccountRepo_upsert(db):
     from copytradeaster.storage.repositories import AccountRepo
 
     await AccountRepo(db).upsert("x", "follower", "x", "0xu")
-
-

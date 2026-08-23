@@ -96,6 +96,20 @@ class TestEntryQuantity:
         d = entry_quantity(policy(max_lev=1, risk="0.5"), D(100), D(65000), D(64500), f, D("0.001"))
         assert d.reason == SkipReason.INSUFFICIENT_MARGIN
 
+    def test_margin_uses_effective_selected_leverage(self):
+        # The coordinator may cap a 20x policy to a 2x master leverage. The
+        # same quantity passes at 20x but must be rejected at the actual 2x.
+        d = entry_quantity(
+            policy(risk="1", max_lev=20),
+            D(1000),
+            D(65000),
+            D(64500),
+            filters(),
+            D("0.001"),
+            leverage=2,
+        )
+        assert d.reason == SkipReason.INSUFFICIENT_MARGIN
+
     def test_fee_buffer_shrinks_qty(self):
         with_buf = entry_quantity(policy(), D(1000), D(65000), D(64500), filters(), D("0.001"))
         without = entry_quantity(policy(), D(1000), D(65000), D(64500), filters(), D(0))

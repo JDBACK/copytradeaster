@@ -2,7 +2,7 @@
 
 Статус: базовая архитектура утверждена 21.08.2026 как целевой ориентир. Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) подтверждаются signed testnet-прогонами до закрепления деталей.
 
-Этот документ фиксирует архитектуру сразу для всех текущих этапов: testnet-движок, Telegram-бот и Aster Code / Builder. Цель — не менять торговое ядро при переходе между этапами.
+Этот документ фиксирует архитектуру сразу для всех текущих этапов: testnet-движок, Telegram-бот и Aster Code / Builder. Цель — не менять торговое ядро при переходе между этапами. Load-gate дополнение проверено 2026-08-23 на testnet.
 
 Исходные условия:
 
@@ -161,6 +161,13 @@ Risk engine должен возвращать целевое состояние/
 
 Для этапов 1–2 достаточно SQLite + WAL. PostgreSQL нужен только когда появится реальная причина разделять процессы или возрастёт нагрузка.
 
+Для load-only проверки масштаба `accounts.execution_mode` может быть `REAL` или
+`SHADOW`. `SHADOW` rows не имеют credentials и направляются в локальный
+`aster/shadow.py`; режим разрешён только явным opt-in на testnet и не является
+production execution path. Финальный hybrid gate: 30 slots (3 REAL + 27
+SHADOW), 100 циклов, 12 302 подтверждённые команды; подробности в
+`HYBRID_LOAD_TEST_REPORT_2026-08.md`.
+
 ### `credentials/`
 
 Шифрование и получение signer credentials — только для пути `onboarding/direct`.
@@ -292,7 +299,13 @@ followers выполняются параллельно
 
 То есть операции разных пользователей могут идти конкурентно, но внутри одного follower используется один mutation lock/queue.
 
-Mutation lock также сериализует подписи: nonce signer-ключа инкрементируется строго последовательно внутри lock.
+Mutation lock сериализует mutation-команды и порядок подписанных запросов одного
+follower. Дополнительно storage-level `Database.write_lock` сериализует все
+короткие SQLite writes и атомарный nonce `INSERT ... RETURNING` на одном
+aiosqlite connection. Это предотвращает interleave `execute/commit` и удержание
+скрытых cursor locks при fan-out; обычные writes работают в explicit autocommit.
+Read/write cursors закрываются сразу после операции, WAL и busy timeout остаются
+включёнными.
 
 Это упрощает nonce, order sequencing и recovery, не создавая заметного bottleneck при 30–100 followers.
 
@@ -503,6 +516,7 @@ copytradeaster/
 │       ├── aster/
 │       │   ├── __init__.py
 │       │   ├── trading_api.py     # account/trading REST
+│       │   ├── shadow.py           # explicit load-only shadow adapter
 │       │   ├── management_api.py  # Agent / Builder management
 │       │   ├── user_stream.py     # listenKey + WebSocket
 │       │   ├── signing.py

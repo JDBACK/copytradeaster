@@ -54,7 +54,6 @@ def _pos_side(raw_ps: str) -> PosSide:
         return PosSide.BOTH
 
 
-
 def _last_fill_price(o: dict) -> Decimal:
     """L = last fill price of THIS trade event; ap is a cumulative order
     average and must not be used for incremental averaging."""
@@ -70,12 +69,14 @@ class MasterProjector:
         links: OrderLinkRepo,
         settings: SettingsRepo,
         on_delta: Callable[[MasterDelta], Awaitable[None]],
+        on_critical: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._events = events
         self._trades = trades
         self._links = links
         self._settings = settings
         self._on_delta = on_delta
+        self._on_critical = on_critical
         self.state = MasterState()
         self._last_event_time: int | None = None
 
@@ -117,6 +118,10 @@ class MasterProjector:
 
         if event_type == "ORDER_TRADE_UPDATE":
             await self._on_order_update(raw["o"], event_id)
+            if _requires_authoritative_rebuild(raw["o"]):
+                await self._request_critical_rebuild(
+                    f"position-changing-order:{raw['o'].get('x', '')}"
+                )
         elif event_type == "ACCOUNT_UPDATE":
             await self._on_account_update(raw.get("a", {}), event_id)
         elif event_type == "ACCOUNT_CONFIG_UPDATE":
@@ -158,12 +163,7 @@ class MasterProjector:
             tp = _pick_protective(same_symbol, "TAKE_PROFIT_MARKET") or _pick_protective(
                 same_symbol, "TAKE_PROFIT"
             )
-            if (
-                p.position_amt == 0
-                and key.pos_side == PosSide.BOTH
-                and stop is None
-                and tp is None
-            ):
+            if p.position_amt == 0 and key.pos_side == PosSide.BOTH and stop is None and tp is None:
                 continue
             if p.position_amt != 0:
                 held_keys.add(key)
@@ -181,6 +181,31 @@ class MasterProjector:
         self.state.event_time = int(time.time() * 1000)
         await self._sync_episodes_from_snapshot(held_keys)
         return self.state
+
+    async def refresh_mark_prices(
+        self, client: AsterClient, account_id: str, symbols: frozenset[str] | set[str]
+    ) -> None:
+        """Refresh mark prices for the symbols about to enter risk decisions.
+
+        The user stream carries position/account changes but not a continuously
+        authoritative mark price. A symbol-scoped `positionRisk` read is cheap
+        compared with a full account rebuild and prevents a profit-locking stop
+        from being judged against an old entry/fill mark.
+        """
+        requested = {symbol for symbol in symbols if symbol and symbol != "*"}
+        refreshed = False
+        for symbol in requested:
+            for dto in await client.position_risk(account_id, symbol):
+                key = PositionKey(symbol=str(dto.symbol), pos_side=dto.position_side)
+                position = self.state.positions.get(key)
+                if position is None:
+                    continue
+                if dto.mark_price > 0:
+                    position.mark_price = dto.mark_price
+                    refreshed = True
+                position.leverage = int(dto.leverage)
+        if refreshed:
+            self.state.event_time = int(time.time() * 1000)
 
     async def _sync_episodes_from_snapshot(self, held_keys: set[PositionKey]) -> None:
         """Close OPEN episodes whose exchange position is gone; open one where
@@ -380,6 +405,11 @@ class MasterProjector:
         log.critical("MARGIN CALL: %s", json.dumps(raw))
         await self._settings.set_flag("degraded", f"margin_call:{raw.get('E', '')}")
         await self._events.mark_processed(event_id)
+        await self._request_critical_rebuild("margin_call")
+
+    async def _request_critical_rebuild(self, reason: str) -> None:
+        if self._on_critical is not None:
+            await self._on_critical(reason)
 
     # --- snapshot refresh ----------------------------------------------------------
 
@@ -437,25 +467,24 @@ def _side_enum(side: str):
         return Side.SELL
 
 
+_KNOWN_EXECUTION_TYPES = {"NEW", "CANCELED", "CALCULATED", "EXPIRED", "TRADE", "AMENDMENT"}
+
+
+def _requires_authoritative_rebuild(order: dict) -> bool:
+    """Identify liquidation/ADL and defensively unknown position-changing x."""
+    execution_type = str(order.get("x", ""))
+    status = str(order.get("X", ""))
+    client_order_id = str(order.get("c", ""))
+    if execution_type == "CALCULATED":
+        return True
+    if status in {"NEW_INSURANCE", "NEW_ADL"}:
+        return True
+    if client_order_id.startswith(("autoclose-", "adl_autoclose")):
+        return True
+    return bool(execution_type) and execution_type not in _KNOWN_EXECUTION_TYPES
+
+
 def _matches_position_side(order_ps, key_pos: PosSide) -> bool:
     if key_pos == PosSide.BOTH:
         return order_ps == PosSide.BOTH
     return order_ps in (key_pos, PosSide.BOTH)
-
-
-def _pick_protective(orders: list, order_type: str) -> ProtectiveOrder | None:
-    """Prefer the newest conditional protective order of `order_type`."""
-    candidates = [o for o in orders if o.type == order_type and (o.reduce_only or o.close_position)]
-    if not candidates:
-        return None
-    latest = max(candidates, key=lambda o: o.update_time)
-    return ProtectiveOrder(
-        client_order_id=str(latest.client_order_id),
-        order_id=int(latest.order_id),
-        type=str(latest.type),
-        side=latest.side,
-        stop_price=latest.stop_price,
-        reduce_only=bool(latest.reduce_only),
-        close_position=bool(latest.close_position),
-        working_type=str(latest.working_type),
-    )

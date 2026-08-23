@@ -179,3 +179,10 @@ async def test_nonce_store_floor_is_wall_clock_seconds(db):
     nonces = NonceStore(db)
     n = await nonces.next_nonce("0xnew")
     assert n >= int(time.time()) * 1_000_000
+
+
+async def test_nonce_store_concurrent_allocations_are_unique(db):
+    nonces = NonceStore(db)
+    allocated = await asyncio.gather(*(nonces.next_nonce("0xconcurrent") for _ in range(32)))
+    assert len(set(allocated)) == len(allocated)
+    assert sorted(allocated) == list(range(min(allocated), max(allocated) + 1))

@@ -64,7 +64,8 @@ class TestDatabaseGuards:
         db = Database(tmp_path / "x.sqlite3")
         await db.connect()
         row = await db.fetchone("PRAGMA busy_timeout")
-        assert list(row)[0] == 5000
+        assert list(row)[0] == 30_000
+        assert db.conn.isolation_level is None
         await db.close()
 
     async def test_close_twice_ok(self, tmp_path: Path):

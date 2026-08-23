@@ -177,8 +177,7 @@ async def _import_wallet(path: Path, wipe: bool = False) -> int:
         if wipe:
             from copytradeaster.storage.repositories import CredentialRepo
 
-            await db.execute("DELETE FROM credentials WHERE account_id=?", (account_id,))
-            await db.conn.commit()
+            await db.execute_write("DELETE FROM credentials WHERE account_id=?", (account_id,))
             del CredentialRepo
         await creds.import_identity(
             account_id=account_id,

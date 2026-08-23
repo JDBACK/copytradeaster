@@ -38,6 +38,14 @@ MAX_ATTEMPTS = 3
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
 
 
+def _is_unknown_error(exc: AsterError) -> bool:
+    """Classify transport/gateway timeout variants as outcome-unknown."""
+    if exc.code in UNKNOWN_CODES or exc.http_status in UNKNOWN_HTTP | {504}:
+        return True
+    message = exc.msg.lower()
+    return exc.code == 0 and ("timeout" in message or "timed out" in message)
+
+
 class CommandResult(NamedTuple):
     command_key: str
     status: str
@@ -106,16 +114,52 @@ class Executor:
 
     async def submit(self, plan: ExecutionPlan) -> list[CommandResult]:
         results: list[CommandResult] = []
+        # Planner client-order ids are stable only within this plan. They let us
+        # express the one safety dependency we need without introducing a DAG:
+        # a replacement cancel is allowed only after its new protection is
+        # CONFIRMED. A FAILED/SUBMITTED dependency blocks the cancel and leaves
+        # the old protection untouched for the next reconciliation pass.
+        completed_by_planner_coid: dict[str, CommandResult] = {}
         lock = self._locks.setdefault(plan.account_id, asyncio.Lock())
         async with lock:
             for action in sorted(plan.actions, key=lambda a: a.priority):
+                if action.depends_on_client_order_id is not None:
+                    dependency = completed_by_planner_coid.get(action.depends_on_client_order_id)
+                    key = command_key_of(plan, action)
+                    if dependency is None:
+                        results.append(
+                            CommandResult(
+                                key,
+                                "BLOCKED",
+                                f"missing dependency {action.depends_on_client_order_id}",
+                            )
+                        )
+                        continue
+                    if dependency.status != "CONFIRMED":
+                        results.append(
+                            CommandResult(
+                                key,
+                                "BLOCKED",
+                                f"dependency status={dependency.status}",
+                            )
+                        )
+                        continue
                 if action.kind == ActionKind.CANCEL_ORDER:
-                    results.append(await self._submit_cancel(plan, action))
+                    result = await self._submit_cancel(plan, action)
                 elif action.kind == ActionKind.SET_LEVERAGE:
-                    results.append(await self._submit_leverage(plan, action))
+                    result = await self._submit_leverage(plan, action)
                 else:
-                    results.append(await self._submit_order(plan, action))
-        return [r for r in results if r is not None]
+                    result = await self._submit_order(plan, action)
+                results.append(result)
+                if action.client_order_id is not None:
+                    completed_by_planner_coid[action.client_order_id] = result
+        return results
+
+    async def wait_until_idle(self, account_id: str) -> None:
+        """Wait until the account mutation sequence currently in progress ends."""
+        lock = self._locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            return
 
     # --- individual command kinds -------------------------------------------------
 
@@ -219,7 +263,19 @@ class Executor:
             try:
                 order = await self._clients(plan.account_id).place_order(plan.account_id, req)
             except AsterError as exc:
-                if exc.code not in UNKNOWN_CODES and exc.http_status not in UNKNOWN_HTTP:
+                if exc.code == -2022 and await self._close_is_already_flat(plan, action):
+                    # A concurrent protective fill can flatten the leg between
+                    # the snapshot and this close.  Aster rejects the stale
+                    # close as ReduceOnly/position-side invalid, but the
+                    # desired state is already satisfied.  Confirm only after
+                    # an authoritative positionRisk read; a non-flat leg
+                    # remains a genuine FAILED command.
+                    message = f"already-flat:-2022:{exc.msg}"
+                    await self._commands.set_status(key, "CONFIRMED", last_error=message)
+                    if self._on_confirmed is not None:
+                        await self._on_confirmed(plan.account_id, action)
+                    return CommandResult(key, "CONFIRMED", message)
+                if not _is_unknown_error(exc):
                     return await self._fail(plan, key, exc)
             except TimeoutError:
                 # built-in timeouts (asyncio); transport timeouts arrive as
@@ -240,8 +296,23 @@ class Executor:
             await self._commands.set_status(key, "SUBMITTED", client_order_id=coid)
             return await self._confirm(plan, key, action, symbol, coid, order)
 
-    # --- status transitions ---------------------------------------------------------
+    async def _close_is_already_flat(self, plan: ExecutionPlan, action: ExecutionAction) -> bool:
+        if action.kind != ActionKind.MARKET_CLOSE:
+            return False
+        try:
+            positions = await self._clients(plan.account_id).position_risk(
+                plan.account_id, symbol=action.symbol
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve the original failure
+            log.warning("flat-state check failed for %s: %s", plan.account_id, exc)
+            return False
+        wanted_side = action.payload.get("positionSide", PosSide.BOTH.value)
+        for position in positions:
+            if position.position_side.value == wanted_side:
+                return position.position_amt == 0
+        return True
 
+    # --- status transitions ---------------------------------------------------------
 
     async def _recover_submitted(
         self,

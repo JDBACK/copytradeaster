@@ -21,16 +21,26 @@ class AccountRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    async def upsert(self, id_: str, role: str, label: str, user_address: str) -> None:
-        await self.db.execute(
+    async def upsert(
+        self,
+        id_: str,
+        role: str,
+        label: str,
+        user_address: str,
+        execution_mode: str = "REAL",
+    ) -> None:
+        if execution_mode not in {"REAL", "SHADOW"}:
+            raise ValueError(f"unsupported execution mode: {execution_mode!r}")
+        await self.db.execute_write(
             """
-            INSERT INTO accounts(id, role, label, user_address) VALUES (?, ?, ?, ?)
+            INSERT INTO accounts(id, role, label, user_address, execution_mode)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-              role=excluded.role, label=excluded.label, user_address=excluded.user_address
+              role=excluded.role, label=excluded.label, user_address=excluded.user_address,
+              execution_mode=excluded.execution_mode
             """,
-            (id_, role, label, user_address),
+            (id_, role, label, user_address, execution_mode),
         )
-        await self.db.conn.commit()
 
     async def get_all(self, role: str | None = None) -> list[Row]:
         if role is None:
@@ -46,7 +56,7 @@ class CredentialRepo:
         self.db = db
 
     async def put_encrypted(self, account_id: str, blob: bytes) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             """
             INSERT INTO credentials(account_id, encrypted, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(account_id) DO UPDATE SET
@@ -54,7 +64,6 @@ class CredentialRepo:
             """,
             (account_id, blob, _now_iso()),
         )
-        await self.db.conn.commit()
 
     async def get(self, account_id: str) -> bytes:
         row = await self.db.fetchone(
@@ -86,7 +95,7 @@ class SettingsRepo:
     async def upsert_policy(
         self, policy: RiskPolicy, account_id: str, risk_base: str = "available_balance"
     ) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             """
             INSERT INTO copy_settings(account_id, risk_percent, max_leverage,
                                       max_entry_deviation_pct, risk_base, enabled,
@@ -108,19 +117,17 @@ class SettingsRepo:
                 int(policy.allow_new_entries),
             ),
         )
-        await self.db.conn.commit()
 
     async def get_flag(self, key: str) -> str | None:
         row = await self.db.fetchone("SELECT value FROM app_state WHERE key=?", (key,))
         return None if row is None else str(row["value"])
 
     async def set_flag(self, key: str, value: str) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             "INSERT INTO app_state(key, value) VALUES (?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
-        await self.db.conn.commit()
 
 
 class MasterEventRepo:
@@ -131,21 +138,19 @@ class MasterEventRepo:
         self, event_type: str, event_time: int, raw_json: str, dedup_key: str
     ) -> int | None:
         """Returns the new row id, or None when dedup_key already exists."""
-        cur = await self.db.execute(
+        rowcount, lastrowid = await self.db.execute_write(
             "INSERT OR IGNORE INTO master_events(event_type, event_time, received_at, raw,"
             " dedup_key) VALUES (?, ?, ?, ?, ?)",
             (event_type, event_time, _now_iso(), raw_json, dedup_key),
         )
-        await self.db.conn.commit()
-        if cur.rowcount == 0:
+        if rowcount == 0:
             return None
-        return int(cur.lastrowid)
+        return int(lastrowid)
 
     async def mark_processed(self, event_id: int) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             "UPDATE master_events SET processed_at=? WHERE id=?", (_now_iso(), event_id)
         )
-        await self.db.conn.commit()
 
 
 class CopyTradeRepo:
@@ -153,20 +158,18 @@ class CopyTradeRepo:
         self.db = db
 
     async def open_trade(self, symbol: str, pos_side: str, master_event_id: int | None) -> int:
-        cur = await self.db.execute(
+        _, lastrowid = await self.db.execute_write(
             "INSERT INTO copy_trades(symbol, pos_side, opened_at, master_event_id)"
             " VALUES (?, ?, ?, ?)",
             (symbol, pos_side, _now_iso(), master_event_id),
         )
-        await self.db.conn.commit()
-        return int(cur.lastrowid)
+        return int(lastrowid)
 
     async def close_trade(self, trade_id: int) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             "UPDATE copy_trades SET closed_at=?, status='CLOSED' WHERE trade_id=?",
             (_now_iso(), trade_id),
         )
-        await self.db.conn.commit()
 
     async def active_trade(self, symbol: str, pos_side: str) -> Row | None:
         return await self.db.fetchone(
@@ -201,12 +204,11 @@ class OrderLinkRepo:
         follower_coid: str,
         master_coid: str | None = None,
     ) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             "INSERT OR IGNORE INTO order_links(trade_id, account_id, kind,"
             " master_client_order_id, follower_client_order_id) VALUES (?, ?, ?, ?, ?)",
             (trade_id, account_id, kind, master_coid, follower_coid),
         )
-        await self.db.conn.commit()
 
     async def by_follower_coid(self, account_id: str, coid: str) -> Row | None:
         return await self.db.fetchone(
@@ -235,7 +237,7 @@ class CommandRepo:
         client_order_id: str | None,
     ) -> None:
         now = _now_iso()
-        await self.db.execute(
+        await self.db.execute_write(
             "INSERT INTO execution_commands(command_key, account_id, trade_id, kind, payload,"
             " priority, status, attempts, client_order_id, created_at, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)",
@@ -251,7 +253,6 @@ class CommandRepo:
                 now,
             ),
         )
-        await self.db.conn.commit()
 
     async def set_status(
         self,
@@ -269,10 +270,9 @@ class CommandRepo:
             sets.append("client_order_id=?")
             params.append(client_order_id)
         params.append(command_key)
-        await self.db.execute(
+        await self.db.execute_write(
             f"UPDATE execution_commands SET {', '.join(sets)} WHERE command_key=?", tuple(params)
         )
-        await self.db.conn.commit()
 
     async def get(self, command_key: str) -> Row | None:
         return await self.db.fetchone(
@@ -304,20 +304,28 @@ class NonceStore:
         self.db = db
 
     async def next_nonce(self, signer_address: str) -> int:
-        cur = await self.db.execute(
-            "SELECT last_nonce FROM nonce_store WHERE signer_address=?", (signer_address,)
-        )
-        row = await cur.fetchone()
-        last = int(row["last_nonce"]) if row is not None else 0
-        candidate = max(last + 1, int(time.time()) * 1_000_000)
-        await self.db.execute(
-            "INSERT INTO nonce_store(signer_address, last_nonce, updated_at) VALUES (?, ?, ?)"
-            " ON CONFLICT(signer_address) DO UPDATE SET"
-            " last_nonce=excluded.last_nonce, updated_at=excluded.updated_at",
-            (signer_address, candidate, _now_iso()),
-        )
-        await self.db.conn.commit()
-        return candidate
+        """Allocate a nonce atomically on the application DB connection."""
+        floor = int(time.time()) * 1_000_000
+        async with self.db.write_lock:
+            cur = await self.db.execute(
+                "INSERT INTO nonce_store(signer_address, last_nonce, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(signer_address) DO UPDATE SET"
+                " last_nonce=CASE WHEN nonce_store.last_nonce + 1 > excluded.last_nonce"
+                " THEN nonce_store.last_nonce + 1 ELSE excluded.last_nonce END,"
+                " updated_at=excluded.updated_at"
+                " RETURNING last_nonce",
+                (signer_address, floor, _now_iso()),
+            )
+            try:
+                row = await cur.fetchone()
+            finally:
+                await cur.close()
+            if self.db.conn is None:
+                raise RuntimeError("Database.connect() must be called first")
+            await self.db.conn.commit()
+        if row is None:
+            raise RuntimeError("nonce allocation returned no row")
+        return int(row[0])
 
 
 class SyncBasisRepo:
@@ -335,9 +343,7 @@ class SyncBasisRepo:
         self.db = db
 
     async def all_for_account(self, account_id: str) -> dict[str, dict]:
-        rows = await self.db.fetchall(
-            "SELECT * FROM sync_basis WHERE account_id=?", (account_id,)
-        )
+        rows = await self.db.fetchall("SELECT * FROM sync_basis WHERE account_id=?", (account_id,))
         return {
             f"{r['symbol']}:{r['pos_side']}": {
                 "master_ref_abs": Decimal(str(r["master_ref_abs"])),
@@ -356,20 +362,19 @@ class SyncBasisRepo:
     async def upsert_ref(
         self, account_id: str, symbol: str, pos_side: str, ref_abs: Decimal
     ) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             "INSERT INTO sync_basis(account_id, symbol, pos_side, master_ref_abs, revision,"
             " updated_at) VALUES (?, ?, ?, ?, 0, ?)"
             " ON CONFLICT(account_id, symbol, pos_side) DO UPDATE SET"
             " master_ref_abs=excluded.master_ref_abs, updated_at=excluded.updated_at",
             (account_id, symbol, pos_side, str(ref_abs), _now_iso()),
         )
-        await self.db.conn.commit()
 
     async def bump_revision(self, account_id: str, symbol: str, pos_side: str, issued: str) -> int:
         """Register `issued` as the current desired state; returns the new revision."""
         row = await self.get(account_id, symbol, pos_side)
         revision = (int(row["revision"]) + 1) if row is not None else 1
-        await self.db.execute(
+        await self.db.execute_write(
             "INSERT INTO sync_basis(account_id, symbol, pos_side, master_ref_abs, revision,"
             " issued_target, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)"
             " ON CONFLICT(account_id, symbol, pos_side) DO UPDATE SET"
@@ -377,12 +382,10 @@ class SyncBasisRepo:
             " updated_at=excluded.updated_at",
             (account_id, symbol, pos_side, revision, issued, _now_iso()),
         )
-        await self.db.conn.commit()
         return revision
 
     async def clear(self, account_id: str, symbol: str, pos_side: str) -> None:
-        await self.db.execute(
+        await self.db.execute_write(
             "DELETE FROM sync_basis WHERE account_id=? AND symbol=? AND pos_side=?",
             (account_id, symbol, pos_side),
         )
-        await self.db.conn.commit()
