@@ -54,7 +54,6 @@ pytestmark = [
 ]
 
 SYMBOL = "BTCUSDT"
-OPEN_QTY = D("0.003")
 
 
 def _snap(value: D, tick: D) -> D:
@@ -235,7 +234,9 @@ def _master_trade(base: int, offset: int, qty: str, price: str, side: str = "BUY
     }
 
 
-def _master_prot(base: int, offset: int, coid: str, otype: str, sp: str, qty: str) -> dict:
+def _master_prot(
+    base: int, offset: int, coid: str, otype: str, sp: str, qty: str, side: str = "SELL"
+) -> dict:
     e = base + offset
     return {
         "e": "ORDER_TRADE_UPDATE",
@@ -244,7 +245,7 @@ def _master_prot(base: int, offset: int, coid: str, otype: str, sp: str, qty: st
         "o": {
             "s": SYMBOL,
             "c": coid,
-            "S": "SELL",
+            "S": side,
             "o": otype,
             "ot": otype,
             "q": qty,
@@ -272,6 +273,7 @@ async def test_one_way_full_engine_signed_cycle(stack):
     """ONE_WAY copy cycle: open/stop/stop-move/partial/TP/flat through the core."""
     client: AsterClient = stack["client"]
     projector: MasterProjector = stack["projector"]
+    coordinator: Coordinator = stack["coordinator"]
     filters: SymbolFilters = stack["filters"][SYMBOL]
     tick, step = filters.tick_size, filters.step_size
     fr_id = "copyc1"
@@ -280,7 +282,19 @@ async def test_one_way_full_engine_signed_cycle(stack):
 
     async def wait_until(predicate, timeout_s: float, what: str, *, rebuilds: int = 1) -> None:
         """Wait for a condition; between attempts resnapshot the master
-        authoritatively via REST (heals a lagging synthetic-event path)."""
+        authoritatively via REST AND drive the follower through the real core.
+        rebuild_full() only refreshes projector.state - unlike the production
+        App this bare harness has no reconcile loop, so without an explicit
+        recompute_follower the coordinator would never see the new snapshot."""
+        fr = coordinator.followers[0]
+
+        async def _drive() -> None:
+            from copytradeaster.master.projector import MasterDelta
+
+            await coordinator.recompute_follower(
+                fr, MasterDelta(frozenset({SYMBOL}), projector.state)
+            )
+
         for attempt in range(rebuilds + 1):
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
@@ -289,6 +303,7 @@ async def test_one_way_full_engine_signed_cycle(stack):
                 await asyncio.sleep(1.0)
             if attempt < rebuilds:
                 await projector.rebuild_full(client, "main")
+                await _drive()
         raise TimeoutError(f"timed out waiting for {what}")
 
     original_master_hedge = await client.get_position_mode("main")
@@ -306,6 +321,21 @@ async def test_one_way_full_engine_signed_cycle(stack):
         assert await _position_qty(client, fr_id) == 0
 
         # --- phase 1: master opens long (real order + projector event) -------
+        # The dust phase (4b) needs the master position strictly above the
+        # follower's own risk-sized entry so the proportional target floors
+        # to zero. Size the entry from the follower's real budget instead of
+        # guessing a constant.
+        follower_budget_probe = await client.balance(fr_id)
+        follower_usdt = next(
+            (b.available_balance for b in follower_budget_probe if b.asset == "USDT"), D("10")
+        )
+        probe_policy = await SettingsRepo(stack["db"]).get_policy(fr_id)
+        assert probe_policy is not None
+        # mirror entry_quantity(): qty = budget*risk% / (distance*(1+fee))
+        est_follower_qty = _snap(
+            follower_usdt * probe_policy.risk_percent / D("500"), step
+        )  # ~stop distance used below
+        open_qty = max(_snap(est_follower_qty * D("20"), step), D("0.005"))
         await _place(
             client,
             "main",
@@ -313,7 +343,7 @@ async def test_one_way_full_engine_signed_cycle(stack):
                 symbol=SYMBOL,
                 side=Side.BUY,
                 type="MARKET",
-                quantity=OPEN_QTY,
+                quantity=open_qty,
                 position_side=PosSide.BOTH,
                 new_order_resp_type="RESULT",
                 new_client_order_id=f"owe2e-open-{base}"[:36],
@@ -429,50 +459,153 @@ async def test_one_way_full_engine_signed_cycle(stack):
         # below the step: the leg must flatten ON PURPOSE and stay flat
         # through repeated reconciles (no accidental re-entry), because the
         # master episode is still open.
-        dust_left = _snap(master_qty * D("0.005"), step)  # 0.3% of entry size
-        if expected_target > 0 and dust_left >= step and dust_left < abs(master_left):
-            await _place(
-                client,
-                "main",
-                PlaceOrderRequest(
-                    symbol=SYMBOL,
-                    side=Side.SELL,
-                    type="MARKET",
-                    quantity=abs(master_left) - dust_left,
-                    reduce_only=True,
-                    position_side=PosSide.BOTH,
-                    new_order_resp_type="RESULT",
-                    new_client_order_id=f"owe2e-dust-{base}"[:36],
-                ),
-            )
-            master_left = await _position_qty(client, "main")
-            await projector.apply_raw(
-                _master_trade(base, 45, str(abs(master_left)), str(entry), side="SELL")
-            )
-
-            async def follower_flat_on_dust() -> bool:
-                return await _position_qty(client, fr_id) == 0
-
-            await wait_until(follower_flat_on_dust, 45, "dust-target intentional flat", rebuilds=1)
-            # repeated reconciles must NOT re-open while the episode is open
-            for _ in range(2):
-                await projector.rebuild_full(client, "main")
-                await asyncio.sleep(1.0)
-                assert await _position_qty(client, fr_id) == 0, (
-                    "intentional flat must survive reconciliation"
-                )
-            assert not await _conditionals(client, fr_id)
-
-        # --- phase 5: master TP -> follower mirrors it -----------------------
-        tp_level = _snap(entry + D("900"), tick)
+        #
+        # Reviewer pass 3: this phase used to be behind a soft `if` that could
+        # silently skip it (0.003 * 0.005 = 0.000015 < stepSize) and it fed the
+        # projector a REMAINING qty as if it were the fill size. Now the dust
+        # scenario is MANDATORY: the master remainder is exactly one step, the
+        # real REST state feeds the projector via rebuild_full, and any guard
+        # violation fails the test.
+        assert expected_target > 0, "phase-3 reduction must leave a non-dust leg"
+        # The smallest legal remainder: the follower's proportional target
+        # floor(qty * step / master_qty) is then provably below one step, so
+        # the engine must flatten the whole leg ON PURPOSE (sticky dust-flat).
+        dust_left = step
+        assert dust_left < abs(master_left) < open_qty, (
+            f"dust scenario impossible: open_qty={open_qty}, master_left={master_left}, step={step}"
+        )
         await _place(
             client,
             "main",
             PlaceOrderRequest(
                 symbol=SYMBOL,
                 side=Side.SELL,
+                type="MARKET",
+                quantity=abs(master_left) - dust_left,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"owe2e-dust-{base}"[:36],
+            ),
+        )
+        # authoritative REST state -> projector (no hand-synthesized fill):
+        # the exchange is the source of truth for what actually executed
+        master_state = await projector.rebuild_full(client, "main")
+        master_left = next(
+            p.qty for k, p in master_state.positions.items() if k.symbol == SYMBOL and p.qty != 0
+        )
+        assert abs(master_left - dust_left) < step, (master_left, dust_left)
+
+        async def follower_flat_on_dust() -> bool:
+            return await _position_qty(client, fr_id) == 0
+
+        await wait_until(follower_flat_on_dust, 45, "dust-target intentional flat", rebuilds=1)
+        # repeated reconciles must NOT re-open while the episode is open
+        for _ in range(2):
+            await projector.rebuild_full(client, "main")
+            await asyncio.sleep(1.0)
+            assert await _position_qty(client, fr_id) == 0, (
+                "intentional flat must survive reconciliation"
+            )
+        assert not await _conditionals(client, fr_id)
+
+        # --- phase 4c: master flips LONG -> SHORT -----------------------------
+        # Reviewer pass 3 regression: the transitional zero of a flip used to
+        # latch zero_target and permanently block the reversed entry. The
+        # engine must close the (already flat) old side, treat the flip as a
+        # NEW master episode, and open the follower SHORT on the next pass.
+        flip_sell = _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="MARKET",
+                quantity=dust_left * 2,  # +dust -> -dust: a real sign flip
+                # A reduce-only order would be capped at the held size and
+                # leave the master flat instead of flipping it; a genuine
+                # sign flip needs a plain (non-reduce) sell past zero.
+                reduce_only=False,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"owe2e-flip-{base}"[:36],
+            ),
+        )
+        try:
+            await flip_sell
+        except AsterError as exc:
+            pytest.fail(f"flip order rejected: {exc}")
+        master_state = await projector.rebuild_full(client, "main")
+        flipped = [
+            p.qty for k, p in master_state.positions.items() if k.symbol == SYMBOL and p.qty != 0
+        ]
+        assert len(flipped) == 1 and flipped[0] < 0, f"master did not actually flip: {flipped}"
+        mark_now = (
+            mpos_now.mark_price
+            if (
+                mpos_now := next(
+                    p
+                    for k, p in master_state.positions.items()
+                    if k.symbol == SYMBOL and p.qty != 0
+                )
+            )
+            else entry
+        )
+
+        # short protection above the market makes the entry copyable
+        short_stop_level = _snap(mark_now + D("400"), tick)
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="STOP_MARKET",
+                quantity=abs(flipped[0]),
+                stop_price=short_stop_level,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                working_type="MARK_PRICE",
+                new_order_resp_type="ACK",
+                new_client_order_id=f"owe2e-ss-{base}"[:36],
+            ),
+        )
+        state = await projector.rebuild_full(client, "main")
+        mpos = next(p for k, p in state.positions.items() if k.symbol == SYMBOL and p.qty != 0)
+        await projector.apply_raw(
+            _master_prot(
+                base, 46, f"m-ss-{base}", "STOP_MARKET", str(short_stop_level), str(abs(mpos.qty))
+            )
+        )
+
+        async def follower_flipped_short() -> bool:
+            return await _position_qty(client, fr_id) < 0
+
+        await wait_until(
+            follower_flipped_short, 60, "follower opens the SHORT after flip", rebuilds=2
+        )
+        short_stop = [o for o in await _conditionals(client, fr_id) if o.type.startswith("STOP")]
+        assert len(short_stop) == 1 and short_stop[0].stop_price == short_stop_level
+
+        # --- phase 5: master TP -> follower mirrors it -----------------------
+        # Direction-aware: after the 4c flip the master is SHORT, so its TP
+        # must be a BUY below the market (a long-side SELL TP above the
+        # market would -2021 immediately-trigger on the exchange).
+        master_short = await _position_qty(client, "main") < 0
+        tp_side = Side.BUY if master_short else Side.SELL
+        tp_level = _snap(
+            (mark_now if master_short else entry) + (D("-900") if master_short else D("900")),
+            tick,
+        )
+        tp_qty = abs(await _position_qty(client, "main"))
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=tp_side,
                 type="TAKE_PROFIT_MARKET",
-                quantity=abs(master_left),
+                quantity=tp_qty,
                 stop_price=tp_level,
                 reduce_only=True,
                 position_side=PosSide.BOTH,
@@ -483,7 +616,13 @@ async def test_one_way_full_engine_signed_cycle(stack):
         )
         await projector.apply_raw(
             _master_prot(
-                base, 5, f"m-tp-{base}", "TAKE_PROFIT_MARKET", str(tp_level), str(abs(master_left))
+                base,
+                5,
+                f"m-tp-{base}",
+                "TAKE_PROFIT_MARKET",
+                str(tp_level),
+                str(tp_qty),
+                side="BUY" if master_short else "SELL",
             )
         )
 
@@ -496,14 +635,15 @@ async def test_one_way_full_engine_signed_cycle(stack):
         await wait_until(follower_tp_placed, 45, "follower TP placement", rebuilds=2)
 
         # --- phase 6: master closes -> follower flattens, no orders remain ---
+        close_side = Side.BUY if master_short else Side.SELL
         await _place(
             client,
             "main",
             PlaceOrderRequest(
                 symbol=SYMBOL,
-                side=Side.SELL,
+                side=close_side,
                 type="MARKET",
-                quantity=abs(master_left),
+                quantity=tp_qty,
                 reduce_only=True,
                 position_side=PosSide.BOTH,
                 new_order_resp_type="RESULT",
@@ -511,7 +651,7 @@ async def test_one_way_full_engine_signed_cycle(stack):
             ),
         )
         await projector.apply_raw(
-            _master_trade(base, 6, str(abs(master_left)), str(entry), side="SELL")
+            _master_trade(base, 6, str(tp_qty), str(entry), side="BUY" if master_short else "SELL")
         )
 
         async def both_flat_clean() -> bool:
