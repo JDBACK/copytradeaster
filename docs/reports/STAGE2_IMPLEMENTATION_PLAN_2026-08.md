@@ -12,9 +12,12 @@
   означает закрытие всего этапа.
 - Stage 2 остаётся **OPEN**: отдельно открыт ручной WP9b — owner acceptance в
   private Telegram chat.
-- Подтверждённый owner flow для WP9b: captcha, выдача доступа, admin approval
-  и direct onboarding/подключение. Остальные ручные проверки перечислены в
-  `docs/DEV_PLAN_SKELETON.md` и остаются открытыми.
+- Подтверждённый owner flow для WP9b: captcha, выдача доступа, admin approval,
+  direct onboarding/подключение, notifications и изменение risk percent.
+  Открыт только resume/copy cycle; полный trading cycle не объявляется
+  проверенным. User destructive/emergency/leverage/deviation checks не входят
+  в acceptance boundary: follower emergency admin-only, leverage automatic,
+  deviation internal.
 - Финальный аудит, review и acceptance выполняет root лично. Они не являются
   задачами субагентов и не подменяют ручную owner acceptance.
 
@@ -1384,3 +1387,25 @@ private Telegram chat; актуальные доказательства и ед
 только в [ENGINE_TEST_STATUS_2026-08.md](../ENGINE_TEST_STATUS_2026-08.md) — это
 единственная точка истины для текущего gate. Полный bounded gate и остаточные
 риски зафиксированы в `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md`.
+
+### 2026-08-24 — Product-boundary correction
+
+Append-only уточнение после сверки с исходной целью малого бота и signed Aster
+testnet evidence:
+
+- follower через Bot/Mini App меняет только `risk_percent`; `max_leverage` и
+  `max_entry_deviation_pct` остаются legacy storage/runtime fields и отвергаются
+  application boundary при forged input;
+- coordinator production path читает signed
+  `GET /fapi/v3/leverageBracket?symbol=...` для каждого account/symbol,
+  typed-нормализует object и фактически встречающийся list, выбирает максимум
+  положительного `initialLeverage` и держит небольшой TTL cache. Исторический
+  ceiling 125x не применяется: testnet вернул `initialLeverage=200`;
+- UI показывает автоматическое плечо по активу, не даёт редактировать leverage
+  или deviation, не публикует follower emergency; `GLOBAL_EMERGENCY` остаётся
+  admin-only. Notifications, собственные pause/resume и account lifecycle —
+  пользовательские возможности;
+- Stage 2 сейчас не меняет `marginType`; isolated enforcement отложен до
+  отдельной реальной проверки Aster testnet. Mock/Fake evidence её не заменяет;
+- владелец вручную подтвердил notifications и изменение risk percent. Полный
+  trading cycle/resume-copy остаётся открытым и не объявляется проверенным.

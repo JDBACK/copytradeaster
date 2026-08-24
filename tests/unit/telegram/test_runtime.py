@@ -726,7 +726,7 @@ async def test_stale_account_callback_on_empty_scope_returns_safe_dashboard() ->
         if button.callback_data is not None
     }
     assert MenuAction.CONNECT in actions
-    assert MenuAction.EMERGENCY not in actions
+    assert "em" not in {action.value for action in actions}
 
 
 @pytest.mark.asyncio
@@ -1625,8 +1625,10 @@ def test_risk_input_is_percent_decimal_and_presets_are_not_float() -> None:
     assert _parse_risk_value("risk", "1").risk_percent == Decimal("0.01")
     assert _parse_risk_value("risk", "0.5").risk_percent == Decimal("0.005")
     assert _parse_risk_value("risk", "1%").risk_percent == Decimal("0.01")
-    assert _parse_risk_value("deviation", "2,5").max_entry_deviation_pct == Decimal("0.025")
-    assert _parse_risk_value("leverage", "3").max_leverage == 3
+    with pytest.raises(ValueError):
+        _parse_risk_value("deviation", "2,5")
+    with pytest.raises(ValueError):
+        _parse_risk_value("leverage", "3")
     with pytest.raises(ValueError):
         _parse_risk_value("risk", "100")
     with pytest.raises(ValueError):
@@ -1903,9 +1905,8 @@ async def test_settings_invalid_risk_text_preset_and_status_application_errors()
             packed_callback(MenuAction.RISK_EDIT, revision=1, key="leverage"),
         ),
     )
-    await dispatcher.feed_raw_update(bot, message_update(4, 10, "101"))
     assert app.updated_risk == []
-    assert any("Значение не прошло проверку" in (call.text or "") for call in api.calls)
+    assert any("Доступно только изменение риска" in (call.text or "") for call in api.calls)
 
     await dispatcher.feed_raw_update(
         bot,

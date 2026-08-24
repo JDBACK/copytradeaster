@@ -19,6 +19,7 @@ from copytradeaster.application.models import (
     DashboardDTO,
     NotificationSettingsDTO,
     PermissionSummary,
+    RiskDTO,
     StatusDTO,
     SystemState,
 )
@@ -28,6 +29,7 @@ from copytradeaster.telegram.menu import (
     MenuCallback,
     MenuView,
     callback_bytes,
+    render_account,
     render_activity,
     render_admin,
     render_admin_followers,
@@ -41,6 +43,7 @@ from copytradeaster.telegram.menu import (
     render_onboarding_error,
     render_onboarding_expired,
     render_onboarding_intro,
+    render_risk,
     render_status,
 )
 
@@ -117,6 +120,37 @@ def test_empty_dashboard_surfaces_notice_as_plain_bounded_text() -> None:
     assert "Включена общая пауза новых входов." in translated.text
     assert "Проверка прав подключения ещё не завершена." in translated.text
     assert "permission_check" not in translated.text
+
+
+def test_follower_ui_exposes_only_risk_and_exchange_managed_leverage() -> None:
+    risk = render_risk(
+        RiskDTO(
+            risk_percent=Decimal("0.01"),
+            max_leverage=20,
+            max_entry_deviation_pct=Decimal("0.02"),
+        )
+    )
+    account = render_account(
+        DashboardDTO(
+            copy_state=CopyState.ACTIVE,
+            account_id="copyc1",
+            account_masked="0x1234…abcd",
+            signer_masked="0xabcd…1234",
+        )
+    )
+    callback_keys = {
+        MenuCallback.unpack(button.callback_data).key
+        for row in risk.markup.inline_keyboard
+        for button in row
+        if button.callback_data is not None
+    }
+
+    assert "Плечо: автоматически, максимум для актива" in risk.text
+    assert "Маржа" not in risk.text
+    assert "Изменить плечо" not in risk.text
+    assert "Изменить отклонение" not in risk.text
+    assert callback_keys.isdisjoint({"leverage", "deviation"})
+    assert "Аварийно" not in account.text
 
 
 def test_confirmation_renderer_keeps_documented_token_within_callback_budget() -> None:
@@ -281,9 +315,11 @@ def test_onboarding_intro_uses_a_user_visible_aster_vocabulary() -> None:
     assert "API wallet address" in view.text
     assert "private key" in view.text
     assert "авторизуйте API wallet подписью обычного кошелька" in view.text
-    assert "включите Perps и чтение" in view.text
+    assert "Perps (canPerpTrade) и чтение" in view.text
     assert "вывод средств выключите" in view.text
     assert "нет открытых позиций и ордеров" in view.text
+    assert "Маржа" not in view.text
+    assert "margin" not in view.text.casefold()
     assert "каждое из трёх сообщений с данными бот удаляет сразу после чтения, до проверки" in (
         view.text.casefold()
     )

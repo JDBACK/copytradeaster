@@ -294,7 +294,7 @@ async def test_thirty_users_have_isolated_menu_fsm_confirmations_and_effects() -
             20_000 + user_id,
             user_id,
             anchors[user_id],
-            MenuCallback(action=MenuAction.EMERGENCY, revision=0).pack(),
+            MenuCallback(action=MenuAction.DISCONNECT, revision=0).pack(),
         )
         for user_id in user_ids
     ]
@@ -307,7 +307,7 @@ async def test_thirty_users_have_isolated_menu_fsm_confirmations_and_effects() -
             anchors[user_id],
             MenuCallback(
                 action=MenuAction.CONFIRM,
-                key=ConfirmationAction.EMERGENCY.value,
+                key=ConfirmationAction.DISCONNECT.value,
                 revision=1,
                 token=f"confirm-{user_id}",
             ).pack(),

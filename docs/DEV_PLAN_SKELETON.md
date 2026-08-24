@@ -33,7 +33,7 @@ pydantic v2            — схемы ордеров/событий/конфиг
 1. Бот подключается к user-data WebSocket мастера (listenKey).
 2. Мастер открыл/закрыл/переставил SL/TP/сократил позицию → бот получает событие (ORDER_TRADE_UPDATE, ACCOUNT_UPDATE, MARGIN_CALL).
 3. Бот пересчитывает целевое состояние по каждому фолловеру: размер депозита + процент риска на стоп → риск-ревард → размер позиции.
-4. Бот выставляет ордера на аккаунтах фолловеров (открытие, закрытие, частичное закрытие, SL/TP, смена плеча).
+4. Бот выставляет ордера на аккаунтах фолловеров (открытие, закрытие, частичное закрытие, SL/TP, автоматический максимум плеча для symbol).
 5. Уведомления о действиях и статусах — в Telegram.
 
 Подробности по API-возможностям — разделы 2–6 ресерча.
@@ -81,7 +81,7 @@ pydantic v2            — схемы ордеров/событий/конфиг
 
 ### Этап 2 — Бот + прямой ввод ключей
 
-- aiogram: приём V3-набора (адрес обычного testnet-кошелька + `API wallet address` + `private key` под ним + права), проверка подключения копика (валидация canPerpTrade / ipWhitelist), настройка риска.
+- aiogram: приём V3-набора (адрес обычного testnet-кошелька + `API wallet address` + `private key` под ним + права), проверка подключения копика (валидация canPerpTrade / ipWhitelist), настройка только процента риска на Stop.
 - Торговое ядро этапа 1 подключается как библиотека; креды пользователя отделены от торговли.
 - Уведомления в Telegram.
 
@@ -106,7 +106,7 @@ Inline-first UX brief и решение по Scenes Wizard:
 - [x] WP4: public follower runtime registry и общие control/emergency services.
 - [x] WP5: aiogram runtime, private-chat authorization, menu и lifecycle.
 - [x] WP6: secure direct-V3 FSM без private key в state/logs.
-- [x] WP7: risk/status/pause/resume/emergency/disconnect flows.
+- [x] WP7: risk/status/pause/resume/disconnect flows; per-account emergency оставлен только внутреннему control-core, global emergency — admin-only.
 - [x] WP8: non-blocking Telegram notifications через SQLite outbox.
 - [x] WP9a: offline, signed testnet, real Bot API/polling и 30/100-user
   automated gates.
@@ -147,6 +147,14 @@ Inline-first UX brief и решение по Scenes Wizard:
   category/code/type. `result` — terminal outcome application call;
   post-commit presentation failure не обещает rollback: durable state при
   необходимости отдельно читается из DB.
+
+- [x] Product-boundary correction: follower меняет только `risk_percent`;
+  leverage автоматически выбирается по signed `leverageBracket` для каждого
+  symbol без локального потолка; master leverage и legacy policy caps не
+  показываются пользователю. Stage 2 пока не меняет `marginType`; isolated
+  enforcement отложен до отдельной реальной проверки Aster testnet. Emergency
+  для follower запрещён на application/UI boundary, global emergency остаётся
+  admin-only.
 #### WP9b — ручная приёмка владельца в private Telegram chat (открыта)
 
 Stage 2 не закрывается автоматически и остаётся `OPEN`, пока этот чек-лист не
@@ -160,17 +168,19 @@ Stage 2 не закрывается автоматически и остаётс
 - [x] admin approval проходит через inline-карточку;
 - [x] direct onboarding/подключение подтверждено владельцем; торговый запуск не
   проверялся;
-- [ ] переключатель notifications в Telegram;
-- [ ] изменение risk policy в Telegram.
+- [x] переключатель notifications в Telegram подтверждён владельцем вручную;
+- [x] изменение risk policy (risk %) в Telegram подтверждено владельцем вручную.
 
 Торговые действия — отдельный блок, пока не подтверждён владельцем:
 
-- [ ] resume/copy cycle: явно проверить resume и один полный цикл копирования;
-- [ ] destructive confirmation: отдельно проверить cancel и confirm.
+- [ ] resume/copy cycle: явно проверить resume и один полный цикл копирования.
 
-До явного решения владельца не выполнять торговые мутации, включая resume,
-копирование, изменение risk policy или destructive actions. Можно продолжать
-только безопасный осмотр UI и доступов; Stage 2 остаётся открытым.
+Пользовательская ручная проверка destructive/emergency/leverage/deviation не
+входит в WP9b: destructive emergency — admin-only, leverage автоматический, а
+deviation не является пользовательской настройкой.
+
+Полный trading cycle по-прежнему не объявлен проверенным; Stage 2 остаётся
+открытым до отдельной проверки resume/copy cycle владельцем.
 
 ### Этап 3 — Builder (Aster Code)
 

@@ -1709,27 +1709,18 @@ class UserApplicationService:
             context, _, _ = await self._owned_account(user_id)
             if not isinstance(values, RiskUpdateInput):
                 raise ValidationError("risk values are invalid")
+            # Leverage and entry-deviation remain legacy storage/runtime
+            # fields for compatibility, but they are no longer follower
+            # controls.  Reject them at the shared Bot/Mini App boundary,
+            # including forged callers that bypass Telegram rendering.
+            if values.max_leverage is not None or values.max_entry_deviation_pct is not None:
+                raise ValidationError("only risk_percent can be changed")
             changes: dict[str, Any] = {}
             if values.risk_percent is not None:
                 value = self._decimal_input(values.risk_percent, "risk_percent")
                 if not Decimal(0) < value <= Decimal(1):
                     raise ValidationError("risk values are invalid")
                 changes["risk_percent"] = value
-            if values.max_leverage is not None:
-                if (
-                    isinstance(values.max_leverage, bool)
-                    or not isinstance(values.max_leverage, int)
-                    or values.max_leverage <= 0
-                ):
-                    raise ValidationError("risk values are invalid")
-                changes["max_leverage"] = values.max_leverage
-            if values.max_entry_deviation_pct is not None:
-                value = self._decimal_input(
-                    values.max_entry_deviation_pct, "max_entry_deviation_pct"
-                )
-                if not Decimal(0) <= value <= Decimal(1):
-                    raise ValidationError("risk values are invalid")
-                changes["max_entry_deviation_pct"] = value
             if not changes:
                 return await self.risk(context.user_id)
             async with self._account_lock(str(context.account_id)):
@@ -1921,6 +1912,12 @@ class UserApplicationService:
                 normalized_action = ConfirmationAction(action)
             except ValueError:
                 raise ValidationError("confirmation action is invalid") from None
+            if normalized_action is ConfirmationAction.EMERGENCY:
+                # Per-follower emergency remains an internal control-core
+                # capability, not a Bot/Mini App user operation.  Reject
+                # before ownership/version lookups so forged calls cannot
+                # reach the destructive workflow.
+                raise AuthorizationError("follower emergency is admin-only")
             if normalized_action in {
                 ConfirmationAction.GLOBAL_PAUSE,
                 ConfirmationAction.GLOBAL_RESUME,
@@ -2085,20 +2082,15 @@ class UserApplicationService:
             if not isinstance(confirmation, Confirmation):
                 raise ConfirmationExpiredError("confirmation is invalid or expired")
             action = ConfirmationAction(confirmation.action)
+            if action is ConfirmationAction.EMERGENCY:
+                # Keep the internal per-account emergency core available to
+                # operators, while making the shared user boundary fail closed
+                # even for a forged Confirmation object/token.
+                raise AuthorizationError("follower emergency is admin-only")
             if action is ConfirmationAction.RESUME:
                 context, _, _ = await self._owned_account(user_id, confirmation.account_id)
                 record = await self._consume_confirmation(user_id, confirmation, expected=action)
                 return await self._resume_account(
-                    context.user_id,
-                    str(context.account_id),
-                    expected_account_version=record.account_version,
-                )
-            if action is ConfirmationAction.EMERGENCY:
-                context, _, _ = await self._owned_account(user_id, confirmation.account_id)
-                record = await self._consume_confirmation(user_id, confirmation, expected=action)
-                if record.account_version is None:
-                    raise ConfirmationExpiredError("confirmation account version is unavailable")
-                return await self._perform_account_emergency(
                     context.user_id,
                     str(context.account_id),
                     expected_account_version=record.account_version,

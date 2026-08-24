@@ -14,6 +14,7 @@ from copytradeaster.application.models import (
     AccessRequestStatus,
     ApplicationProtocol,
     AuthorizationError,
+    Confirmation,
     ConfirmationAction,
     ConfirmationExpiredError,
     CopyState,
@@ -713,14 +714,15 @@ async def test_control_audit_logs_safe_control_round_trips_and_states(environmen
     _, _, _, _, service = environment
     caplog.clear()
     with caplog.at_level("INFO"):
-        await service.update_risk(
-            7,
-            RiskUpdateInput(
-                risk_percent=Decimal("0.02"),
-                max_leverage=5,
-                max_entry_deviation_pct=Decimal("0.03"),
-            ),
-        )
+        with pytest.raises(ValidationError):
+            await service.update_risk(
+                7,
+                RiskUpdateInput(
+                    risk_percent=Decimal("0.02"),
+                    max_leverage=5,
+                    max_entry_deviation_pct=Decimal("0.03"),
+                ),
+            )
         await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.04")))
         await service.set_notifications(7, False)
         await service.set_notifications(7, True)
@@ -734,10 +736,9 @@ async def test_control_audit_logs_safe_control_round_trips_and_states(environmen
         for message in messages
         if "control_audit action=update_risk result=success" in message
     ]
-    assert len(risk_success) == 2
-    assert "changed_fields=risk_percent,max_leverage,max_entry_deviation_pct" in risk_success[0]
-    assert "changed_fields=risk_percent" in risk_success[1]
-    assert all(value not in "\n".join(risk_success) for value in ("0.02", "0.03", "0.04", "5"))
+    assert len(risk_success) == 1
+    assert "changed_fields=risk_percent" in risk_success[0]
+    assert all(value not in "\n".join(risk_success) for value in ("0.04",))
     notification_success = [
         message
         for message in messages
@@ -936,7 +937,14 @@ async def test_control_audit_rejected_is_safe_and_logging_cannot_change_semantic
 
 async def test_confirmation_is_ttl_bound_to_user_action_and_account(environment):
     _, _, _, clock, service = environment
-    confirmation = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    with pytest.raises(AuthorizationError):
+        await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    with pytest.raises(AuthorizationError):
+        await service.confirm_action(
+            7,
+            Confirmation("forged", ConfirmationAction.EMERGENCY, "tg-7"),
+        )
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
     forged = type(confirmation)(
         token=confirmation.token,
         action=ConfirmationAction.DISCONNECT,
@@ -953,21 +961,18 @@ async def test_confirmation_is_ttl_bound_to_user_action_and_account(environment)
 
 async def test_confirmation_is_invalidated_by_credential_replacement(environment):
     _, runtime, _, _, service = environment
-    confirmation = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.DISCONNECT)
     runtime.account_version_value = "credentials-v2"
 
     with pytest.raises(ConfirmationExpiredError, match="account has changed"):
         await service.confirm_action(7, confirmation)
-    assert not runtime.emergency_controller.account_calls
 
 
 async def test_emergency_disconnect_and_admin_controls_are_real_effects(environment):
     db, runtime, _, _, service = environment
-    confirmation = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
-    dashboard = await service.confirm_action(7, confirmation)
-    assert dashboard.copy_state is CopyState.PAUSED
-    assert ("pause", "tg-7") in runtime.actions
-    assert runtime.emergency_controller.account_calls
+    with pytest.raises(AuthorizationError):
+        await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    assert not runtime.emergency_controller.account_calls
     assert await SettingsRepo(db).get_flag("emergency_active") is None
 
     disconnect_confirmation = await service.begin_confirmation(7, ConfirmationAction.DISCONNECT)
@@ -995,9 +1000,8 @@ async def test_missing_destructive_adapter_fails_closed(environment):
     no_effect_runtime.settings = runtime.settings
     no_effect_runtime.emergency_controller = None
     service = UserApplicationService(no_effect_runtime, admin_ids=[100])
-    confirmation = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
-    with pytest.raises(ServiceUnavailableError):
-        await service.confirm_action(7, confirmation)
+    with pytest.raises(AuthorizationError):
+        await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
     assert not any(action[0] == "emergency" for action in no_effect_runtime.actions)
 
 
@@ -1006,7 +1010,7 @@ async def test_confirmation_token_has_presenter_budget_and_is_single_use(environ
 
     confirmations = [
         await service.begin_confirmation(7, action)
-        for action in (ConfirmationAction.RESUME, ConfirmationAction.EMERGENCY)
+        for action in (ConfirmationAction.RESUME, ConfirmationAction.DISCONNECT)
     ]
     assert all(len(item.token.encode("utf-8")) <= 16 for item in confirmations)
     assert all(item.token.isascii() for item in confirmations)
@@ -1435,7 +1439,7 @@ async def test_resume_rejects_account_disabled_or_runtime_removed_during_checks(
 
 async def test_confirmation_shape_owner_action_and_token_errors(environment):
     _, _, _, _, service = environment
-    confirmation = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
     with pytest.raises(ConfirmationExpiredError):
         await service.confirm_action(7, object())  # type: ignore[arg-type]
     malformed = type(confirmation)("", confirmation.action, confirmation.account_id)
@@ -1444,7 +1448,7 @@ async def test_confirmation_shape_owner_action_and_token_errors(environment):
     oversized = type(confirmation)("x" * 17, confirmation.action, confirmation.account_id)
     with pytest.raises(ConfirmationExpiredError):
         await service.confirm_action(7, oversized)
-    wrong_owner = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    wrong_owner = await service.begin_confirmation(7, ConfirmationAction.DISCONNECT)
     with pytest.raises(AuthorizationError):
         await service.confirm_action(8, wrong_owner)
     wrong_scope = type(wrong_owner)(
@@ -1706,17 +1710,19 @@ async def test_permission_summary_missing_pending_and_refresh_validation(environ
 
 async def test_risk_success_updates_each_field_and_invalid_storage_is_typed(environment):
     _, _, _, _, service = environment
-    result = await service.update_risk(
-        7,
-        RiskUpdateInput(
-            risk_percent=Decimal("0.02"),
-            max_leverage=5,
-            max_entry_deviation_pct=Decimal("0.03"),
-        ),
-    )
+    with pytest.raises(ValidationError):
+        await service.update_risk(
+            7,
+            RiskUpdateInput(
+                risk_percent=Decimal("0.02"),
+                max_leverage=5,
+                max_entry_deviation_pct=Decimal("0.03"),
+            ),
+        )
+    result = await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02")))
     assert result.risk_percent == Decimal("0.02")
-    assert result.max_leverage == 5
-    assert result.max_entry_deviation_pct == Decimal("0.03")
+    assert result.max_leverage == 3
+    assert result.max_entry_deviation_pct == Decimal("0.02")
 
     class InvalidSettings:
         async def get_policy(self, account_id: str):
@@ -1773,7 +1779,7 @@ async def test_onboarding_result_validation_and_notification_failures(environmen
 
 async def test_confirm_account_version_unavailable_disconnect_and_emergency_failures(environment):
     db, runtime, _, _, service = environment
-    confirmation = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.DISCONNECT)
 
     async def unavailable_version(account_id: str):
         del account_id
@@ -1784,11 +1790,6 @@ async def test_confirm_account_version_unavailable_disconnect_and_emergency_fail
         await service.confirm_action(7, confirmation)
 
     runtime.account_version = lambda account_id: "credentials-v1"
-    runtime.emergency_controller.success = False
-    emergency = await service.begin_confirmation(7, ConfirmationAction.EMERGENCY)
-    with pytest.raises(ServiceUnavailableError):
-        await service.confirm_action(7, emergency)
-
     runtime.commit_disconnect = lambda account_id: False
     disconnect = await service.begin_confirmation(7, ConfirmationAction.DISCONNECT)
     with pytest.raises(ServiceUnavailableError):

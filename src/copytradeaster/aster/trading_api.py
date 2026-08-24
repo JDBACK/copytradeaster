@@ -12,7 +12,14 @@ from decimal import Decimal
 
 import httpx
 
-from copytradeaster.aster.models import AgentDTO, BalanceDTO, ExchangeInfo, OrderDTO, PositionDTO
+from copytradeaster.aster.models import (
+    AgentDTO,
+    BalanceDTO,
+    ExchangeInfo,
+    LeverageBracketResponse,
+    OrderDTO,
+    PositionDTO,
+)
 from copytradeaster.aster.ports import IdentityProvider, KeyProvider, NonceSource
 from copytradeaster.aster.rate_limits import RateLimits
 from copytradeaster.aster.signing import prepare_signed_request
@@ -96,6 +103,7 @@ def _wrap_transport_error(exc: Exception) -> AsterError:
 
 class AsterClient:
     EXCHANGE_INFO_TTL_S = 3600.0
+    LEVERAGE_BRACKET_TTL_S = 60.0
 
     def __init__(
         self,
@@ -116,6 +124,11 @@ class AsterClient:
         self._dry_run = dry_run
         self._exchange_info: ExchangeInfo | None = None
         self._exchange_info_at = 0.0
+        # A client is normally scoped to one account, but keep account_id in
+        # the key as an explicit guard for test/composition roots that reuse a
+        # client instance.  This is deliberately a small per-symbol cache:
+        # leverage brackets are account-scoped signed reads, not exchangeInfo.
+        self._max_leverage_cache: dict[tuple[str, str], tuple[int, float]] = {}
 
     # --- low-level -----------------------------------------------------------
 
@@ -264,6 +277,73 @@ class AsterClient:
             if dto.agent_address and dto.agent_address.strip().lower() == expected_signer:
                 return dto
         raise AsterError(-2015, "agent not found")
+
+    async def leverage_bracket(self, account_id: str, symbol: str) -> LeverageBracketResponse:
+        """Read and normalize the symbol-specific leverage brackets.
+
+        The documented shape is an object, while the connected Aster testnet
+        currently returns a one-element list for the same symbol query.  Both
+        wire shapes are accepted, but the returned value is always typed and
+        tied to the requested symbol.
+        """
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise AsterError(-1000, "symbol is required for leverage bracket")
+        requested = symbol.strip()
+        body = await self._signed(
+            account_id,
+            "GET",
+            "/fapi/v3/leverageBracket",
+            {"symbol": requested},
+            weight=1,
+        )
+        records: list[dict]
+        if isinstance(body, dict):
+            records = [body]
+        elif isinstance(body, list):
+            if not all(isinstance(item, dict) for item in body):
+                raise AsterError(-1000, "invalid leverage bracket response")
+            records = body
+        else:
+            raise AsterError(-1000, "invalid leverage bracket response")
+        if not records:
+            raise AsterError(-1000, "empty leverage bracket response")
+        try:
+            parsed = [LeverageBracketResponse.model_validate(record) for record in records]
+        except Exception:
+            raise AsterError(-1000, "invalid leverage bracket response") from None
+        for result in parsed:
+            if result.symbol == requested:
+                return result
+        raise AsterError(-1000, "leverage bracket symbol mismatch")
+
+    async def max_leverage(self, account_id: str, symbol: str, *, force: bool = False) -> int:
+        """Return the exchange-advertised maximum leverage for one symbol.
+
+        No local cap or production fallback is applied.  A malformed or empty
+        bracket response fails closed so a coordinator cannot silently trade
+        with an invented leverage value.
+        """
+        requested = symbol.strip() if isinstance(symbol, str) else ""
+        if not requested:
+            raise AsterError(-1000, "symbol is required for leverage bracket")
+        cache_key = (str(account_id), requested)
+        now = time.monotonic()
+        cached = self._max_leverage_cache.get(cache_key)
+        if not force and cached is not None and now - cached[1] <= self.LEVERAGE_BRACKET_TTL_S:
+            return cached[0]
+        response = await self.leverage_bracket(account_id, requested)
+        values = [
+            bracket.initial_leverage
+            for bracket in response.brackets
+            if isinstance(bracket.initial_leverage, int)
+            and not isinstance(bracket.initial_leverage, bool)
+            and bracket.initial_leverage > 0
+        ]
+        if not values:
+            raise AsterError(-1000, "no valid leverage bracket")
+        maximum = max(values)
+        self._max_leverage_cache[cache_key] = (maximum, now)
+        return maximum
 
     async def query_order(
         self,

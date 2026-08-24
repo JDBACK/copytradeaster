@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from pydantic.alias_generators import to_camel
 
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters
@@ -41,6 +41,30 @@ class AgentDTO(_Camel):
     can_spot_trade: bool | None = Field(default=None, alias="canSpotTrade")
     can_perp_trade: bool | None = Field(default=None, alias="canPerpTrade")
     can_withdraw: bool | None = Field(default=None, alias="canWithdraw")
+
+
+class LeverageBracketDTO(_Camel):
+    """One symbol-specific leverage bracket returned by Aster V3.
+
+    Aster testnet currently returns ``initialLeverage`` values above the
+    historical Binance-compatible 125x ceiling (for example 200x).  The
+    adapter therefore validates only that the value is a positive integer and
+    leaves the exchange's actual maximum authoritative.
+    """
+
+    bracket: int | None = None
+    initial_leverage: StrictInt = Field(alias="initialLeverage", gt=0)
+    notional_cap: Decimal | None = Field(default=None, alias="notionalCap")
+    notional_floor: Decimal | None = Field(default=None, alias="notionalFloor")
+    maint_margin_ratio: Decimal | None = Field(default=None, alias="maintMarginRatio")
+    cum: Decimal | None = None
+
+
+class LeverageBracketResponse(_Camel):
+    """Typed response for ``GET /fapi/v3/leverageBracket?symbol=...``."""
+
+    symbol: str
+    brackets: list[LeverageBracketDTO]
 
 
 class PositionDTO(BaseModel):
@@ -136,6 +160,8 @@ __all__ = [
     "AgentDTO",
     "BalanceDTO",
     "ExchangeInfo",
+    "LeverageBracketDTO",
+    "LeverageBracketResponse",
     "OrderDTO",
     "PositionDTO",
     "RateLimitDTO",

@@ -33,6 +33,7 @@ from copytradeaster.application.models import (
     AdminUserPage,
     ApplicationProtocol,
     Confirmation,
+    ConfirmationAction,
     CopyState,
     DashboardDTO,
     NotificationSettingsDTO,
@@ -89,7 +90,6 @@ class MenuAction(StrEnum):
     REPLACE = "cp"
     PAUSE = "pa"
     RESUME = "rs"
-    EMERGENCY = "em"
     DISCONNECT = "dc"
     ADMIN = "ad"
     ADMIN_RECONCILE = "ar"
@@ -471,7 +471,6 @@ def render_dashboard(dto: DashboardDTO, revision: int = 0) -> MenuView:
     account = dto.account_masked or "—"
     positions = "—" if dto.open_positions is None else str(dto.open_positions)
     risk = _percent(dto.risk_percent)
-    leverage = "—" if dto.max_leverage is None else f"{dto.max_leverage}×"
 
     if dto.copy_state is CopyState.EMPTY:
         if dto.is_admin:
@@ -529,7 +528,8 @@ def render_dashboard(dto: DashboardDTO, revision: int = 0) -> MenuView:
             "Aster Copy\n\n"
             f"{heading}\n"
             f"Счёт: {account}\n"
-            f"Риск на стоп: {risk} · плечо до {leverage}\n"
+            f"Риск на стоп: {risk}\n"
+            "Плечо: автоматически по активу\n"
             f"Открытые позиции: {positions}\n\n"
             f"Обновлено в {_when(dto.updated_at)}"
         )
@@ -581,19 +581,11 @@ def render_risk(dto: RiskDTO, revision: int = 0) -> MenuView:
     text = (
         "Риск\n\n"
         f"Риск на стоп: {_percent(dto.risk_percent)}\n"
-        f"Максимальное плечо: {dto.max_leverage}×\n"
-        f"Допустимое отклонение входа: {_percent(dto.max_entry_deviation_pct)}\n\n"
+        "Плечо: автоматически, максимум для актива\n"
         "Размер позиции рассчитывается по фактическому балансу и цене защитной стоп-заявки."
     )
     builder.button(
         text="Изменить риск", callback_data=_cb(MenuAction.RISK_EDIT, revision, key="risk")
-    )
-    builder.button(
-        text="Изменить плечо", callback_data=_cb(MenuAction.RISK_EDIT, revision, key="leverage")
-    )
-    builder.button(
-        text="Изменить отклонение",
-        callback_data=_cb(MenuAction.RISK_EDIT, revision, key="deviation"),
     )
     builder.button(
         text="Быстрый риск: 1%",
@@ -609,7 +601,7 @@ def render_risk(dto: RiskDTO, revision: int = 0) -> MenuView:
     )
     builder.button(text="‹ Назад", callback_data=_cb(MenuAction.BACK, revision))
     builder.button(text="⌂ На главную", callback_data=_cb(MenuAction.HOME, revision))
-    builder.adjust(1, 2, 3, 2)
+    builder.adjust(1, 3, 2)
     return MenuView(Screen.RISK, text, builder.as_markup(), revision)
 
 
@@ -669,7 +661,7 @@ def render_help(revision: int = 0, security: bool = False) -> MenuView:
             "Помощь\n\n"
             "Копирование повторяет состояние счёта-источника. Пауза "
             "останавливает новые входы, но закрытия и защитные действия "
-            "продолжаются. Аварийное закрытие — отдельное действие с подтверждением."
+            "продолжаются. Аварийное закрытие доступно только администратору."
         )
     builder.button(text="‹ Назад", callback_data=_cb(MenuAction.BACK, revision))
     builder.button(text="⌂ На главную", callback_data=_cb(MenuAction.HOME, revision))
@@ -685,9 +677,8 @@ def render_account(dto: DashboardDTO, revision: int = 0) -> MenuView:
         "Учётная запись\n\n"
         f"Счёт Aster: {dto.account_masked or '—'}\n"
         f"Ключ подключения: {dto.signer_masked or '—'}\n"
-        "Изменения учётных данных и аварийные действия требуют отдельного подтверждения."
+        "Изменения учётных данных требуют отдельного подтверждения."
     )
-    builder.button(text="🚨 Аварийно закрыть", callback_data=_cb(MenuAction.EMERGENCY, revision))
     builder.button(
         text="🔐 Заменить учётные данные", callback_data=_cb(MenuAction.REPLACE, revision)
     )
@@ -1170,7 +1161,8 @@ def render_onboarding_intro(revision: int = 0, *, replacement: bool = False) -> 
         f"{heading}\n\n"
         "Перед подключением\n"
         "1. Откройте Aster testnet → Settings → Position mode → Hedge Mode.\n"
-        "2. В настройках API wallet включите Perps и чтение; вывод средств выключите.\n"
+        "2. При создании Agent/API wallet выберите Perps (canPerpTrade) и чтение; "
+        "вывод средств выключите.\n"
         "3. Окончательно авторизуйте API wallet подписью обычного кошелька.\n"
         "4. Проверьте: нет открытых позиций и ордеров.\n\n"
         "Далее бот запросит по одному:\n"
@@ -1189,6 +1181,12 @@ def render_onboarding_intro(revision: int = 0, *, replacement: bool = False) -> 
 
 def render_confirmation(confirmation: Confirmation, revision: int = 0) -> MenuView:
     """Render a generic, non-secret, single-use confirmation prompt."""
+    try:
+        confirmation_action = ConfirmationAction(confirmation.action)
+    except (TypeError, ValueError):
+        confirmation_action = None
+    if confirmation_action is ConfirmationAction.EMERGENCY:
+        return render_error("Аварийное закрытие доступно только администратору.", revision)
     builder = _builder()
     prompts = {
         "resume": (
@@ -1201,12 +1199,6 @@ def render_confirmation(confirmation: Confirmation, revision: int = 0) -> MenuVi
             "Снять глобальную паузу?\n\n"
             "Новые входы снова станут доступны на счетах подписчиков с их настройками риска.",
             "Подтвердить снятие паузы",
-        ),
-        "emergency": (
-            "Аварийно закрыть позиции?\n\n"
-            "Новые входы будут остановлены. Позиции этого счёта будут закрыты, "
-            "выставленные ботом защитные заявки — отменены. Копирование останется на паузе.",
-            "🚨 Подтвердить закрытие",
         ),
         "disconnect": (
             "Отключить счёт Aster?\n\n"

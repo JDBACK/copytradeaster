@@ -5,6 +5,14 @@
 Режим: Operate  
 Поверхность: private Telegram chat; будущий Mini App использует те же use cases
 
+Текущая product boundary (уточнение 2026-08-24): follower меняет только
+`risk_percent`, получает notifications и управляет своим pause/resume/account
+lifecycle. Leverage автоматически выбирается как максимум для symbol и не
+редактируется; entry deviation — внутренний safety gate. Follower emergency
+отсутствует в UI/application boundary, global emergency — admin-only. Stage 2
+пока не меняет `marginType`; isolated enforcement отложен до отдельной реальной
+проверки Aster testnet.
+
 ## 1. Job и аудитория
 
 Фолловер приходит не «общаться с ботом», а быстро ответить на четыре вопроса:
@@ -85,7 +93,7 @@ Slash-команды — только вход/recovery shortcuts:
 | `/cancel` | завершить временный ввод и вернуться на dashboard |
 | `/help` | открыть help screen |
 
-`/connect`, `/status`, `/risk`, `/pause`, `/resume`, `/emergency`,
+`/connect`, `/status`, `/risk`, `/pause`, `/resume`,
 `/disconnect` и `/reconcile` не являются основным UI и не публикуются в
 командном меню.
 
@@ -103,7 +111,8 @@ Aster Copy
 🟢 Всё работает
 Копирование: включено
 Счёт: 0x12…ABCD
-Риск на стоп: 1,0% · плечо до 3×
+Риск на стоп: 1,0%
+Плечо: автоматически по активу
 Открытые позиции: 2
 
 Обновлено в 12:41
@@ -127,7 +136,8 @@ Aster Copy
 Закрытия, сокращения и защита продолжают работать.
 
 Счёт: 0x12…ABCD
-Риск на стоп: 1,0% · плечо до 3×
+Риск на стоп: 1,0%
+Плечо: автоматически по активу
 Открытые позиции: 1
 
 Обновлено в 12:41
@@ -353,7 +363,7 @@ loading state в том же сообщении.
 
 Один toggle; сложные per-event preferences в Stage 2 не нужны.
 
-## 10. Pause, resume и destructive actions
+## 10. Pause, resume и account lifecycle
 
 ### Pause
 
@@ -370,20 +380,12 @@ One-tap idempotent action:
 master уже в позиции, отдельный экран объясняет, что targeted reconcile может
 открыть follower по текущей цене и deviation policy.
 
-### Emergency
+### Emergency boundary
 
-```text
-Аварийно закрыть позиции?
-
-Новые входы будут остановлены.
-Позиции этого счёта будут закрыты, выставленные ботом защитные заявки — отменены.
-Копирование останется на паузе после завершения.
-```
-
-```text
-[ 🚨 Подтвердить закрытие ]
-[ Отмена ]
-```
+Follower emergency не публикуется в Telegram/Mini App и отвергается на
+application boundary, включая forged confirmation. Внутренний per-account
+control-core сохраняется для operator workflows; global emergency доступен
+только admin.
 
 ### Disconnect
 
@@ -544,7 +546,7 @@ Scenes можно пересмотреть, если одновременно п
 - [x] опубликованы только `/start`, `/menu`, `/cancel`, `/help`;
 - [x] каждый screen имеет понятные Back/Home;
 - [x] primary action одна и зависит от состояния;
-- [x] pause и emergency невозможно перепутать по label/copy;
+- [x] пользовательский pause не смешан с admin-only emergency boundary;
 - [x] callback `pack()` проверен на 64/65 UTF-8 bytes и Unicode;
 - [x] malformed/stale/double-click/inaccessible callbacks безопасны;
 - [x] private key отсутствует в FSM/view/callback/outbox/log/reply;
@@ -554,3 +556,20 @@ Scenes можно пересмотреть, если одновременно п
 - [x] Mini App не требует новой реализации ownership/risk/control rules;
 - [x] Scenes отсутствуют из production dependency path и не создаются ради
   меню; решение пересматривается только по критериям §12.
+
+## 16. Product-boundary correction — 2026-08-24
+
+Текущая пользовательская поверхность намеренно ограничена исходной целью
+малого бота:
+
+- follower управляет только риском на Stop (`risk_percent`), notifications,
+  собственными pause/resume и account lifecycle;
+- leverage в risk screen объясняется как «автоматически, максимум для актива»;
+  edit callbacks/parsing для leverage и entry deviation удалены;
+- account screen не содержит follower emergency. Per-account emergency
+  остаётся внутренним control-core, а global emergency — admin-only;
+- onboarding напоминает включить Hedge Mode и при создании Agent/API wallet
+  выбрать Perps/`canPerpTrade`; Stage 2 не меняет `marginType` аккаунта.
+  Isolated enforcement отложен до отдельной реальной проверки Aster testnet;
+- dashboard не обещает фиксированное плечо вроде `20x`. Full trading cycle и
+  resume/copy flow не считаются проверенными только по UI/regression tests.

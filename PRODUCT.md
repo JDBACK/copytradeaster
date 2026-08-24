@@ -9,9 +9,11 @@ web
 ## Users
 
 - Фолловер: подключает выделенный Aster V3 account, задаёт риск, включает или
-  приостанавливает копирование, контролирует состояние и получает уведомления.
+  приостанавливает копирование, управляет жизненным циклом своего account и
+  получает уведомления.
 - Оператор/master trader: следит за общим runtime, управляет глобальной паузой,
-  reconciliation и аварийным закрытием.
+  reconciliation и аварийным закрытием; per-account emergency остаётся
+  внутренним control-core, но не пользовательской операцией.
 
 Первый рабочий масштаб — 10–30 followers, максимум около 100.
 
@@ -24,7 +26,8 @@ followers через проверенное Aster futures trading core. Stage 2 
 
 Успех для пользователя — подключить testnet account без знания внутренней
 архитектуры, сразу понимать, готово ли копирование и какой риск установлен, а
-затем безопасно pause/resume или выполнить подтверждённое аварийное действие.
+затем безопасно pause/resume, управлять своим account lifecycle и получать
+уведомления. Аварийное закрытие доступно только администратору.
 
 ## Positioning
 
@@ -49,9 +52,16 @@ reconciliation восстанавливают правильное состоя�
 - direct V3 credentials: user address, signer address, signer private key и
   проверка Agent permissions;
 - private key хранится только зашифрованно, master wallet key не принимается;
-- risk policy: процент риска, leverage cap и entry deviation;
-- per-account pause/resume, status, notifications и подтверждённые emergency
-  actions;
+- follower controls: только процент денежного риска на защитном Stop;
+- notifications, per-account pause/resume, status и собственный account
+  lifecycle (подключение, замена, отключение);
+- leverage выбирается автоматически для каждого symbol по signed Aster V3
+  `leverageBracket` и устанавливается в максимальное положительное
+  `initialLeverage`, которое вернул exchange; master leverage и legacy policy
+  caps не являются пользовательскими настройками;
+- Stage 2 пока не меняет margin type аккаунта. Isolated enforcement отложен до
+  отдельной реальной проверки Aster testnet; текущий режим не переписывается;
+- emergency actions доступны только администратору на application/UI boundary;
 - Telegram handlers не вызывают trading endpoints напрямую;
 - trading core Stage 1 не переписывается;
 - mainnet, Builder, WebApp wallet signatures и monetization относятся к более

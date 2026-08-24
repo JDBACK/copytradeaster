@@ -9,6 +9,7 @@ import pytest
 
 from copytradeaster.app import App
 from copytradeaster.domain.models import (
+    AccountState,
     ActionKind,
     ExecutionAction,
     PositionKey,
@@ -223,6 +224,100 @@ async def test_fanout_all_followers_receive_plan(env):
     # sizing: budget 1000*0.01=10; distance 500*1.001 -> qty 0.019
     open_params = [p for p in followers[0].client.placed if p["type"] == "MARKET"][0]
     assert open_params["quantity"] == "0.019"
+
+
+async def test_production_recompute_uses_exchange_symbol_maximum(env):
+    coordinator, followers, _, _ = env
+    client = followers[0].client
+    calls: list[tuple[str, str]] = []
+
+    async def max_leverage(account_id: str, symbol: str) -> int:
+        calls.append((account_id, symbol))
+        return 200
+
+    client.max_leverage = max_leverage  # type: ignore[attr-defined,method-assign]
+    await coordinator.on_master_delta(delta_of(master_state(leverage=20)))
+
+    assert calls == [("copyc1", "BTCUSDT")]
+    assert client.leverage_calls == [("BTCUSDT", 200)]
+
+
+async def test_targets_public_seam_uses_client_maximum_when_supplied(env):
+    coordinator, followers, db, _ = env
+    client = followers[0].client
+    calls: list[str] = []
+
+    async def max_leverage(account_id: str, symbol: str) -> int:
+        del account_id
+        calls.append(symbol)
+        return 200
+
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    client.max_leverage = max_leverage  # type: ignore[attr-defined,method-assign]
+    targets, _ = await coordinator.targets_for(
+        "copyc1",
+        master_state(leverage=20),
+        AccountState(
+            account_id="copyc1",
+            available_usdt=D("1000"),
+            positions={},
+            open_orders=[],
+        ),
+        policy,
+        client=client,
+    )
+    assert calls == ["BTCUSDT"]
+    assert targets and targets[0].leverage == 200
+
+
+@pytest.mark.parametrize(
+    ("master_qty", "stop", "expected_qty"),
+    [(-D("1"), D("64500"), D("0")), (D("1"), D("60000"), D("0.001"))],
+)
+async def test_leverage_failure_does_not_block_existing_close_or_reduction(
+    env, master_qty, stop, expected_qty
+):
+    coordinator, followers, db, _ = env
+    client = followers[0].client
+    key = PositionKey("BTCUSDT")
+    calls: list[str] = []
+
+    async def unavailable(account_id: str, symbol: str) -> int:
+        del account_id
+        calls.append(symbol)
+        raise AssertionError("leverage lookup must not run for close/reduction")
+
+    client.max_leverage = unavailable  # type: ignore[attr-defined,method-assign]
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("1000"),
+        positions={
+            key: PositionState(
+                key=key,
+                qty=D("0.1"),
+                entry_price=D("65000"),
+                leverage=7,
+                mark_price=D("65000"),
+                liquidation_price=D("30000"),
+            )
+        },
+        open_orders=[],
+    )
+
+    targets, _ = await coordinator.targets_for(
+        "copyc1",
+        master_state(qty=master_qty, stop=stop),
+        actual,
+        policy,
+        client=client,
+    )
+
+    assert calls == []
+    assert targets and targets[0].qty == expected_qty
+    assert targets[0].leverage == 7
 
 
 async def test_fanout_freshness_is_captured_once_for_slow_followers(env):

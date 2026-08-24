@@ -480,6 +480,7 @@ class Coordinator:
             delta.state,
             actual,
             policy,
+            client=fr.client,
             master_fresh=master_fresh,
         )
         for skip in skips:
@@ -844,6 +845,7 @@ class Coordinator:
         actual: AccountState,
         policy: RiskPolicy,
         *,
+        client: AsterClient | None = None,
         master_fresh: bool | None = None,
     ) -> tuple[list[TargetPosition], list[SkipRecord]]:
         targets: list[TargetPosition] = []
@@ -881,11 +883,6 @@ class Coordinator:
                 continue  # handled by the actual-side loop above
 
             follower_pos = actual.positions.get(key)
-            leverage = (
-                min(master_pos.leverage, policy.max_leverage)
-                if master_pos.leverage > 0
-                else policy.max_leverage
-            )
 
             if follower_pos is None or follower_pos.qty == 0:
                 if not self._stop_usable(master_pos, master_stop):
@@ -930,6 +927,17 @@ class Coordinator:
                 if not entries_allowed:
                     skips.append(await self._skip_record(key, SkipReason.PAUSED))
                     continue
+                # The signed bracket read is deliberately the final entry
+                # precondition.  A missing/invalid maximum must fail closed
+                # for a new entry, but must not block any existing-leg close
+                # or protection convergence.
+                leverage = await self._target_leverage(
+                    account_id,
+                    key.symbol,
+                    master_pos,
+                    policy,
+                    client=client,
+                )
                 decision = entry_quantity(
                     policy,
                     actual.available_usdt,
@@ -990,7 +998,7 @@ class Coordinator:
                         qty=Decimal(0),
                         stop_price=None,
                         tp_price=None,
-                        leverage=leverage,
+                        leverage=follower_pos.leverage,
                         hold_flat_until_episode_end=False,
                     )
                 )
@@ -1053,6 +1061,18 @@ class Coordinator:
             target_stop, target_stop_type = self._target_stop_for_existing(
                 master_pos, master_stop, master_stop_type, follower_pos
             )
+            leverage = follower_pos.leverage
+            if target_abs > current_abs:
+                # Existing-leg reductions, closes and protection updates keep
+                # running if leverageBracket is unavailable.  Only a real
+                # increase needs the exchange maximum.
+                leverage = await self._target_leverage(
+                    account_id,
+                    key.symbol,
+                    master_pos,
+                    policy,
+                    client=client,
+                )
             qty = target_abs if master_qty > 0 else -target_abs
             targets.append(
                 TargetPosition(
@@ -1067,6 +1087,38 @@ class Coordinator:
                 )
             )
         return targets, skips
+
+    async def _target_leverage(
+        self,
+        account_id: str,
+        symbol: str,
+        master_pos: PositionState,
+        policy: RiskPolicy,
+        *,
+        client: AsterClient | None,
+    ) -> int:
+        """Resolve the follower target leverage from its exchange account.
+
+        Production reconciliation always supplies the real ``AsterClient``;
+        its signed symbol-specific bracket read therefore has no silent
+        fallback.  ``targets_for`` remains a small public test seam and may be
+        called without a runtime client, where the legacy policy/master value
+        keeps existing pure sizing tests useful.
+        """
+        if client is not None:
+            resolver = getattr(client, "max_leverage", None)
+            if callable(resolver):
+                value = await resolver(account_id, symbol)
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError("invalid exchange maximum leverage")
+                return value
+            if isinstance(client, AsterClient):
+                raise RuntimeError("AsterClient maximum leverage operation is unavailable")
+        return (
+            min(master_pos.leverage, policy.max_leverage)
+            if master_pos.leverage > 0
+            else policy.max_leverage
+        )
 
     async def _skip_record(self, key: PositionKey, reason: SkipReason) -> SkipRecord:
         """Attach the durable master episode id when one is available."""
@@ -1446,6 +1498,12 @@ class Coordinator:
         return await self._snapshot(fr)
 
     async def targets_for(
-        self, account_id: str, master: MasterState, actual: AccountState, policy: RiskPolicy
+        self,
+        account_id: str,
+        master: MasterState,
+        actual: AccountState,
+        policy: RiskPolicy,
+        *,
+        client: AsterClient | None = None,
     ) -> tuple[list[TargetPosition], list[SkipRecord]]:
-        return await self._targets_for(account_id, master, actual, policy)
+        return await self._targets_for(account_id, master, actual, policy, client=client)

@@ -13,18 +13,19 @@
   application layer реализованы. Остался только ручной owner acceptance в
   private Telegram chat; до него Stage 2 не помечается `CLOSED`.
 - **Ручной WP9b открыт:** владелец подтвердил captcha, выдачу доступа, admin
-  approval и direct onboarding/подключение. Не подтверждены и остаются
-  открытыми Telegram risk change, notifications toggle, resume/copy cycle и
-  cancel/confirm destructive confirmation.
-- Безопасные UI-проверки и торговые действия разделены: до явного решения
-  владельца не выполнять торговые мутации; текущая запись не закрывает Stage 2.
+  approval, direct onboarding/подключение, notifications toggle и изменение
+  risk percent. Остаётся открытым только resume/copy cycle; полный trading
+  cycle не объявлен проверенным.
+- Пользовательские destructive/emergency/leverage/deviation проверки в WP9b не
+  требуются: follower emergency admin-only, leverage автоматический по symbol,
+  deviation не является пользовательской настройкой.
 - Движок работает на futures testnet (`fapi.asterdex-testnet.com`), HEDGE-режим;
   ONE_WAY официально поддержан и покрыт signed E2E через ядро (см. ниже).
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный offline gate после control-audit corrective gate: **615
-  passed / 2 skipped / 17 deselected**, coverage **87.46%** при пороге 87%; ruff
+- Актуальный offline gate после product-boundary correction: **625
+  passed / 2 skipped / 17 deselected**, coverage **87.24%** при пороге 87%; ruff
   check/format и diff-check clean (historical snapshots исключены из formatter,
   сами файлы не менялись).
   Signed testnet gate: **16 passed / 1 skipped**; единственный skip — Builder
@@ -32,6 +33,12 @@
   потому что фактические Agent `ipWhitelist` follower-аккаунтов пока пусты.
 - Независимый signed REST-аудит после полного набора и двухчасового soak:
   `main` и `copyc1`–`copyc3` в HEDGE, позиции 0, открытых ордеров 0.
+- Runtime leverage follower берётся из signed
+  `GET /fapi/v3/leverageBracket?symbol=...`: typed adapter принимает object и
+  фактически возвращаемый testnet list, выбирает максимальный положительный
+  `initialLeverage` без локального ceiling. Stage 2 пока не меняет
+  `marginType`; isolated enforcement отложен до отдельной реальной проверки
+  Aster testnet.
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -525,3 +532,30 @@ owner acceptance.
 Full offline gate: **615 passed / 2 skipped / 17 deselected**, coverage
 **87.46%**; focused `tests/unit/application/test_service.py`: **75 passed**;
 `ruff check`, `ruff format --check` и `git diff --check` — clean.
+
+### Product-boundary and automatic-leverage correction — 2026-08-24
+
+После сверки product boundary и отдельной signed testnet проверки Stage 2
+зафиксированы следующие текущие факты:
+
+- follower application boundary принимает для изменения только `risk_percent`;
+  forged `max_leverage` и `max_entry_deviation_pct` получают `ValidationError`;
+- coordinator production path читает максимум плеча для каждого account/symbol
+  через signed `leverageBracket`, кэширует небольшой TTL и fail-closed при
+  пустом/некорректном ответе; testnet с реальным follower вернул list и
+  `initialLeverage=200`, поэтому исторический cap 125x не применяется;
+- UI не предлагает редактировать leverage/deviation и не предлагает follower
+  emergency; глобальный emergency остаётся admin-only. Dashboard не показывает
+  ложный cap `20x`;
+- owner вручную подтвердил notifications и изменение risk percent. Полный
+  trading cycle и resume/copy flow остаются непроверенными;
+- Stage 2 намеренно не меняет `marginType`. Isolated enforcement отложен до
+  отдельной реальной проверки Aster testnet; evidence mock/fake не заменяет её.
+
+Signed adapter evidence for connected testnet follower: `max_leverage(force=True)`
+вернул BTCUSDT=200, ETHUSDT=200, SOLUSDT=100; `positionRisk` подтвердил
+leverage `[200]`/`[200]`/`[100]`. Во всех трёх проверках margin остался cross,
+nonzero positions=0 и open orders=0.
+
+Focused regression evidence for this correction: **210 passed** across the
+updated Aster endpoint, coordinator, application and Telegram boundary tests.

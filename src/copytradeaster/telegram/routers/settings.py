@@ -114,6 +114,17 @@ def create_settings_router(
         async with _callback_scope(query, callback_data, menu, user_context) as accepted:
             if not accepted:
                 return
+            if callback_data.key != "risk":
+                await _open_callback_view(
+                    menu,
+                    bot,
+                    query,
+                    user_context,
+                    render_error(
+                        "Доступно только изменение риска на стоп.", callback_data.revision + 1
+                    ),
+                )
+                return
             await state.update_data(risk_field=callback_data.key)
             await state.set_state(RiskFlow.value)
             await _open_callback_view(
@@ -312,7 +323,6 @@ def create_settings_router(
             F.action.in_(
                 {
                     MenuAction.RESUME,
-                    MenuAction.EMERGENCY,
                     MenuAction.DISCONNECT,
                     MenuAction.ADMIN_PAUSE,
                     MenuAction.ADMIN_RESUME,
@@ -348,7 +358,6 @@ def create_settings_router(
                     raise ApplicationError("admin access denied")
                 action = {
                     MenuAction.RESUME: ConfirmationAction.RESUME,
-                    MenuAction.EMERGENCY: ConfirmationAction.EMERGENCY,
                     MenuAction.DISCONNECT: ConfirmationAction.DISCONNECT,
                     MenuAction.ADMIN_PAUSE: ConfirmationAction.GLOBAL_PAUSE,
                     MenuAction.ADMIN_RESUME: ConfirmationAction.GLOBAL_RESUME,
@@ -741,12 +750,9 @@ def create_settings_router(
 
 
 def _risk_prompt(field: str, revision: int) -> MenuView:
-    labels = {
-        "risk": "риск на стоп в процентах (например, 1)",
-        "leverage": "максимальное плечо целым числом",
-        "deviation": "допустимое отклонение входа в процентах",
-    }
-    label = labels.get(field, "числовое значение")
+    if field != "risk":
+        return render_error("Доступно только изменение риска на стоп.", revision)
+    label = "риск на стоп в процентах (например, 1)"
     return render_prompt(f"Введите {label}.\nМожно отменить командой /cancel.", revision)
 
 
@@ -755,6 +761,8 @@ def _admin_allowed(context: UserContext, settings: Settings) -> bool:
 
 
 def _parse_risk_value(field: str, raw: str) -> RiskUpdateInput:
+    if field != "risk":
+        raise ValueError("only risk percent can be changed")
     value_text = raw.strip().replace(",", ".").removesuffix("%").strip()
     if not value_text:
         raise ValueError("empty risk value")
@@ -762,18 +770,10 @@ def _parse_risk_value(field: str, raw: str) -> RiskUpdateInput:
         value = Decimal(value_text)
     except InvalidOperation as exc:
         raise ValueError("invalid risk value") from exc
-    if field == "leverage":
-        if value != value.to_integral_value() or not 1 <= value <= 100:
-            raise ValueError("invalid leverage")
-        return RiskUpdateInput(max_leverage=int(value))
     if not value.is_finite() or not 0 < value < 100:
         raise ValueError("percentage must be in (0, 100)")
     fraction = value / Decimal(100)
-    if field == "risk":
-        return RiskUpdateInput(risk_percent=fraction)
-    if field == "deviation":
-        return RiskUpdateInput(max_entry_deviation_pct=fraction)
-    raise ValueError("unknown risk field")
+    return RiskUpdateInput(risk_percent=fraction)
 
 
 async def _send_dashboard_after_message(

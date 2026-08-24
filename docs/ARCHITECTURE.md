@@ -148,6 +148,19 @@ quantity = функция(entry, stop, fees/slippage, exchange limits)
 
 Risk engine должен возвращать целевое состояние/quantity, а не отправлять ордера.
 
+Runtime leverage follower выбирается coordinator-ом автоматически для каждого
+symbol через signed Aster V3 `GET /fapi/v3/leverageBracket?symbol=...`.
+`AsterClient` typed-парсит документированный object и фактически встречающийся
+testnet list, выбирает максимальный положительный `initialLeverage` и держит
+короткий cache на пару account/symbol. Ошибка, пустой ответ или отсутствие
+валидного значения останавливают production recompute fail-closed; master
+leverage и legacy `RiskPolicy.max_leverage` не являются пользовательским
+ограничителем.
+
+Stage 2 пока не меняет `marginType` перед входом. Isolated enforcement отложен
+до отдельной реальной проверки Aster testnet; текущий режим аккаунта сохраняется
+без скрытой подмены.
+
 ### `trading/`
 
 Главное прикладное ядро.
@@ -215,9 +228,15 @@ account. `UserApplicationService` не сворачивает `OnboardingError` 
 
 `UserApplicationService` — единая бизнес-граница для Telegram Bot и будущей
 Mini App: authorization/ownership, dashboard/status, direct credentials, risk,
-pause/resume, confirmations, emergency и admin controls. Concrete
+pause/resume, notifications, account lifecycle и admin controls. Concrete
 `AppStage2RuntimeAdapter` связывает её с готовым Stage 1 core; Telegram handlers
 зависят только от `ApplicationProtocol`.
+
+Follower может менять только `risk_percent`. Leverage caps и entry-deviation
+остаются legacy storage/runtime полями для совместимости, но application
+boundary отвергает их даже при forged Bot/Mini App input. Per-account emergency
+остаётся внутренним control-core; пользовательская confirmation для него
+запрещена, а `GLOBAL_EMERGENCY` доступен только admin.
 
 Telegram UI — один редактируемый inline dashboard с typed `CallbackData` и
 короткими `StatesGroup` только для non-secret input. `Scenes Wizard` изучен, но
@@ -243,8 +262,9 @@ approval бот пытается сразу отправить первое inli
 Onboarding copy использует язык Aster UI: адрес обычного testnet-кошелька из
 верхней панели, `API wallet address` со страницы API Wallet и `private key`,
 показанный под этим адресом. Перед сбором данных UI показывает путь
-`Aster testnet → Settings → Position mode → Hedge Mode`, напоминает включить
-`Perps` и чтение в настройках API wallet, выключить вывод, авторизовать API
+`Aster testnet → Settings → Position mode → Hedge Mode`, при создании
+`Agent/API wallet` выбрать `Perps`/`canPerpTrade` и чтение, выключить вывод,
+авторизовать API
 wallet подписью обычного кошелька и проверить отсутствие позиций/ордеров.
 Каждое из трёх сообщений с данными удаляется сразу после чтения, до проверки;
 Telegram caveat остаётся явно указанным. Переходы шагов создают свежую карточку,
@@ -434,7 +454,7 @@ Strategy Orders не должны быть фундаментом follower execu
 
 Количество продуктовых политик на старте держим минимальным.
 
-Рекомендуемые defaults:
+Рекомендуемые defaults и внутренние safety gates:
 
 - новая follower-позиция требует известного Stop;
 - при слишком большом entry deviation сделка пропускается;
@@ -443,6 +463,10 @@ Strategy Orders не должны быть фундаментом follower execu
 - Stop мастера не двигается искусственно ради сохранения quantity;
 - если мастер расширил Stop — follower position при необходимости сокращается;
 - если Stop стал ближе — автоматически наращивать позицию не нужно.
+
+`entry deviation` остаётся внутренним safety gate legacy runtime и не является
+настройкой follower в Bot/Mini App. Единственный пользовательский risk control —
+`risk_percent`.
 
 ## 12. Recovery при запуске
 
@@ -561,12 +585,14 @@ DEGRADED
 
 `Pause` означает: не открывать и не увеличивать позиции, но не закрывать существующие автоматически.
 
-`Emergency close` — отдельное явное действие, а не побочный эффект pause.
+`Emergency close` — отдельное явное действие admin control-core, а не
+пользовательская операция и не побочный эффект pause.
 
 Stage 2 control publication использует два уровня serialization:
 
-- account mutation lock для risk/resume/replacement/disconnect/emergency;
-- global mutation lock для global pause/resume/emergency и финальной публикации
+- account mutation lock для risk/resume/replacement/disconnect и internal
+  per-account emergency;
+- global mutation lock для global pause/resume/admin emergency и финальной публикации
   account resume.
 
 Global pause сначала персистит `allow_new_entries=false`, закрывает и осушает
