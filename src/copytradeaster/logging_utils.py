@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Iterable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,72 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?P<key>private[_ -]?key|api[_ -]?key|access[_ -]?token|token|"
     r"signature|secret|listen[_ -]?key)\s*[:=]\s*(?P<value>[^\s,;&]+)"
 )
+
+# These values are deliberately closed: a control audit record describes one
+# known application use case, not a caller-provided free-form event/message.
+_CONTROL_AUDIT_ACTIONS = frozenset(
+    {
+        "set_notifications",
+        "update_risk",
+        "pause",
+        "resume",
+        "confirm_action",
+        "confirm_resume",
+        "confirm_emergency",
+        "confirm_disconnect",
+        "confirm_global_pause",
+        "confirm_global_resume",
+        "confirm_global_emergency",
+        "admin_allow_user",
+        "admin_set_user_access",
+        "admin_decide_access",
+        "admin_reconcile",
+        "admin_pause",
+        "admin_resume",
+        "admin_emergency",
+    }
+)
+_CONTROL_AUDIT_RESULTS = frozenset({"attempt", "success", "rejected"})
+_CONTROL_AUDIT_STATES = frozenset(
+    {
+        "enabled",
+        "disabled",
+        "paused",
+        "resumed",
+        "approved",
+        "rejected",
+        "reconciled",
+        "emergency",
+        "disconnected",
+        "global",
+        "account",
+        "all",
+        "unknown",
+    }
+)
+_CONTROL_AUDIT_CATEGORIES = frozenset(
+    {
+        "validation",
+        "authorization",
+        "service_unavailable",
+        "unexpected",
+        "unknown",
+    }
+)
+_CONTROL_AUDIT_CHANGED_FIELDS = frozenset(
+    {
+        "risk_percent",
+        "max_leverage",
+        "max_entry_deviation_pct",
+        "notifications_enabled",
+        "access_enabled",
+        "status",
+        "allow_new_entries",
+        "emergency_active",
+        "account_enabled",
+    }
+)
+_CONTROL_AUDIT_MAX_FIELDS = 8
 
 
 def redact(secret: str) -> str:
@@ -60,6 +127,47 @@ def _safe_fragment(value: Any, fallback: str = "unknown", limit: int = 80) -> st
         return "redacted"
     result = _SAFE_FRAGMENT.sub("_", text)[:limit].strip("_")
     return result or fallback
+
+
+def _control_fixed(value: Any, allowed: frozenset[str], fallback: str = "unknown") -> str:
+    """Return a value only when it is one of the fixed audit classifications."""
+    try:
+        candidate = getattr(value, "value", value)
+        safe = _safe_fragment(candidate, fallback)
+    except Exception:  # pragma: no cover - defensive boundary for logging
+        return fallback
+    return safe if safe in allowed else fallback
+
+
+def _control_identifier(value: Any, fallback: str = "unknown") -> str:
+    """Normalize a bounded/sanitized user or account identifier."""
+    try:
+        return _safe_fragment(value, fallback, limit=64)
+    except Exception:  # pragma: no cover - defensive boundary for logging
+        return fallback
+
+
+def _control_changed_fields(values: Any) -> tuple[str, ...]:
+    """Keep only known field names and never serialize field values."""
+    if values is None:
+        return ()
+    if isinstance(values, (str, bytes)):
+        values = (values,)
+    try:
+        iterator = iter(values)
+    except TypeError:
+        return ()
+    fields: list[str] = []
+    for value in iterator:
+        try:
+            candidate = _safe_fragment(getattr(value, "value", value), "", limit=40)
+        except Exception:  # pragma: no cover - defensive boundary for logging
+            continue
+        if candidate in _CONTROL_AUDIT_CHANGED_FIELDS and candidate not in fields:
+            fields.append(candidate)
+        if len(fields) >= _CONTROL_AUDIT_MAX_FIELDS:
+            break
+    return tuple(fields)
 
 
 def _redact_handler_message(message: str) -> str:
@@ -256,11 +364,66 @@ def log_onboarding_audit(
         logger.info(message)
 
 
+def log_control_audit(
+    logger: logging.Logger,
+    *,
+    action: Any,
+    result: Any,
+    user_id: Any,
+    account_id: Any = None,
+    target_user_id: Any = None,
+    changed_fields: Iterable[Any] | None = None,
+    state: Any = None,
+    category: Any = None,
+    code: Any = None,
+    exception_type: Any = None,
+) -> None:
+    """Write one bounded, transport-neutral audit event for a control action.
+
+    The helper accepts classifications and bounded/sanitized identifiers only.  It has no
+    message/exception/credential arguments, and a logger failure is swallowed
+    so observability can never change the application result.
+    """
+    try:
+        safe_action = _control_fixed(action, _CONTROL_AUDIT_ACTIONS)
+        safe_result = _control_fixed(result, _CONTROL_AUDIT_RESULTS)
+        fields = [
+            f"control_audit action={safe_action}",
+            f"result={safe_result}",
+            f"user_id={_control_identifier(user_id)}",
+            f"account_id={_control_identifier(account_id)}",
+        ]
+        if target_user_id is not None:
+            fields.append(f"target_user_id={_control_identifier(target_user_id)}")
+        safe_fields = _control_changed_fields(changed_fields)
+        if safe_fields:
+            fields.append(f"changed_fields={','.join(safe_fields)}")
+        if state is not None:
+            fields.append(f"state={_control_fixed(state, _CONTROL_AUDIT_STATES)}")
+        if category is not None:
+            fields.append(f"category={_control_fixed(category, _CONTROL_AUDIT_CATEGORIES)}")
+        if code is not None:
+            value = getattr(code, "value", code)
+            fields.append(f"code={_control_identifier(value)}")
+        if exception_type is not None:
+            fields.append(f"exception_type={_control_identifier(exception_type)}")
+        message = " ".join(fields)
+        if safe_result == "rejected":
+            logger.warning(message)
+        else:
+            logger.info(message)
+    except Exception:
+        # Logging is diagnostic only.  In particular, a custom handler or
+        # malformed value must not add a new failure path to application code.
+        return
+
+
 __all__ = [
     "DEFAULT_LOG_BACKUP_COUNT",
     "DEFAULT_LOG_MAX_BYTES",
     "DEFAULT_LOG_PATH",
     "get_logger",
+    "log_control_audit",
     "log_onboarding_audit",
     "redact",
     "setup_logging",

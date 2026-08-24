@@ -18,6 +18,7 @@ from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from typing import Any, Protocol
 
 from copytradeaster.application.models import (
@@ -52,7 +53,7 @@ from copytradeaster.application.models import (
     UserRole,
     ValidationError,
 )
-from copytradeaster.logging_utils import get_logger, log_onboarding_audit
+from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
 from copytradeaster.onboarding.errors import OnboardingError
 from copytradeaster.onboarding.models import (
     DirectOnboardingRequest,
@@ -280,6 +281,143 @@ def _require_successful_control(result: Any) -> Any:
     if result is False or getattr(result, "success", True) is False:
         raise ServiceUnavailableError("control operation was not completed")
     return result
+
+
+def _control_audit_boundary(action: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorate a public control boundary with safe attempt/terminal events."""
+
+    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(method)
+        async def wrapped(self: Any, user_id: Any, *args: Any, **kwargs: Any) -> Any:
+            audit_action = action
+            if action == "confirm_action":
+                confirmation = kwargs.get("confirmation")
+                if confirmation is None and args:
+                    confirmation = args[0]
+                try:
+                    raw_action = getattr(confirmation, "action", None)
+                except Exception:  # pragma: no cover - malformed caller object
+                    raw_action = None
+                audit_action = self._confirmation_audit_action(raw_action)
+            account_id = self._audit_account_id(user_id)
+            target_user_id: int | None = None
+            if action in {"admin_allow_user", "admin_set_user_access"}:
+                raw_target = kwargs.get("target_user_id")
+                if raw_target is None and args:
+                    raw_target = args[0]
+                target_user_id = self._numeric_id(raw_target)
+            self._control_attempt(audit_action, user_id, account_id, target_user_id)
+            try:
+                result = await method(self, user_id, *args, **kwargs)
+            except Exception as exc:
+                self._control_rejected(
+                    action=audit_action,
+                    user_id=user_id,
+                    account_id=account_id,
+                    exc=exc,
+                    target_user_id=target_user_id,
+                )
+                raise
+
+            changed_fields: tuple[str, ...] = ()
+            state: str | None = None
+            if action == "set_notifications":
+                changed_fields = ("notifications_enabled",)
+                enabled = getattr(result, "enabled", None)
+                state = "enabled" if enabled is True else "disabled" if enabled is False else None
+            elif action == "update_risk":
+                values = kwargs.get("values")
+                if values is None and args:
+                    values = args[0]
+                if isinstance(values, RiskUpdateInput):
+                    changed_fields = tuple(
+                        field
+                        for field in (
+                            "risk_percent",
+                            "max_leverage",
+                            "max_entry_deviation_pct",
+                        )
+                        if getattr(values, field) is not None
+                    )
+            elif action == "pause":
+                changed_fields = ("allow_new_entries",)
+                state = "paused"
+            elif action == "resume":
+                changed_fields = ("allow_new_entries",)
+                state = "resumed"
+            elif action == "admin_allow_user":
+                changed_fields = ("access_enabled",)
+                state = "enabled"
+            elif action == "admin_set_user_access":
+                enabled = kwargs.get("enabled")
+                if enabled is None and len(args) > 1:
+                    enabled = args[1]
+                if isinstance(enabled, bool):
+                    changed_fields = ("access_enabled",)
+                    state = "enabled" if enabled else "disabled"
+            elif action == "admin_decide_access":
+                # A request id is an operation identifier, never a user
+                # identifier.  Only the safe DTO returned after persistence
+                # may provide the target user for a successful decision.
+                if isinstance(result, AccessRequestDTO):
+                    target_user_id = self._numeric_id(result.user_id)
+                    if result.status is AccessRequestStatus.APPROVED:
+                        state = "approved"
+                        if result.decision_changed is True:
+                            changed_fields = ("status", "access_enabled")
+                    elif result.status is AccessRequestStatus.REJECTED:
+                        state = "rejected"
+                        if result.decision_changed is True:
+                            changed_fields = ("status",)
+            elif action == "admin_reconcile":
+                raw_account_id = kwargs.get("account_id")
+                if raw_account_id is None and args:
+                    raw_account_id = args[0]
+                state = "account" if raw_account_id is not None else "all"
+            elif action == "admin_pause":
+                changed_fields = ("allow_new_entries",)
+                state = "paused"
+            elif action == "admin_resume":
+                changed_fields = ("allow_new_entries",)
+                state = "resumed"
+            elif action == "admin_emergency":
+                changed_fields = ("allow_new_entries", "emergency_active")
+                state = "emergency"
+            elif audit_action in {
+                "confirm_resume",
+                "confirm_emergency",
+                "confirm_disconnect",
+                "confirm_global_pause",
+                "confirm_global_resume",
+                "confirm_global_emergency",
+            }:
+                state = {
+                    "confirm_resume": "resumed",
+                    "confirm_emergency": "emergency",
+                    "confirm_disconnect": "disconnected",
+                    "confirm_global_pause": "paused",
+                    "confirm_global_resume": "resumed",
+                    "confirm_global_emergency": "emergency",
+                }[audit_action]
+                changed_fields = (
+                    ("account_enabled",)
+                    if audit_action == "confirm_disconnect"
+                    else ("allow_new_entries",)
+                )
+            self._control_success(
+                result,
+                action=audit_action,
+                user_id=user_id,
+                account_id=account_id,
+                target_user_id=target_user_id,
+                changed_fields=changed_fields,
+                state=state,
+            )
+            return result
+
+        return wrapped
+
+    return decorator
 
 
 class UserApplicationService:
@@ -1098,6 +1236,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("notification settings are unavailable") from None
 
+    @_control_audit_boundary("set_notifications")
     async def set_notifications(self, user_id: int, enabled: bool) -> NotificationSettingsDTO:
         try:
             if isinstance(enabled, bool) is False:
@@ -1128,7 +1267,7 @@ class UserApplicationService:
 
     @staticmethod
     def _audit_account_id(user_id: Any) -> str:
-        """Derive only the stable opaque account id for an audit event."""
+        """Derive only a stable sanitized account id for an audit event."""
         if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
             return "unknown"
         try:
@@ -1176,6 +1315,113 @@ class UserApplicationService:
             code=code,
             exception_type=exception_type,
         )
+
+    @staticmethod
+    def _control_audit(
+        *,
+        action: str,
+        result: str,
+        user_id: Any,
+        account_id: Any = None,
+        target_user_id: Any = None,
+        changed_fields: Iterable[Any] | None = None,
+        state: Any = None,
+        category: Any = None,
+        code: Any = None,
+        exception_type: Any = None,
+    ) -> None:
+        """Best-effort audit seam for state-changing application actions."""
+        try:
+            log_control_audit(
+                log,
+                action=action,
+                result=result,
+                user_id=user_id,
+                account_id=account_id,
+                target_user_id=target_user_id,
+                changed_fields=changed_fields,
+                state=state,
+                category=category,
+                code=code,
+                exception_type=exception_type,
+            )
+        except Exception:
+            # A diagnostic sink is never allowed to change a control result.
+            return
+
+    @staticmethod
+    def _control_attempt(
+        action: str,
+        user_id: Any,
+        account_id: Any,
+        target_user_id: Any = None,
+    ) -> None:
+        UserApplicationService._control_audit(
+            action=action,
+            result="attempt",
+            user_id=user_id,
+            account_id=account_id,
+            target_user_id=target_user_id,
+        )
+
+    @staticmethod
+    def _control_success(
+        value: Any,
+        *,
+        action: str,
+        user_id: Any,
+        account_id: Any,
+        target_user_id: Any = None,
+        changed_fields: Iterable[Any] | None = None,
+        state: Any = None,
+    ) -> Any:
+        UserApplicationService._control_audit(
+            action=action,
+            result="success",
+            user_id=user_id,
+            account_id=account_id,
+            target_user_id=target_user_id,
+            changed_fields=changed_fields,
+            state=state,
+        )
+        return value
+
+    @staticmethod
+    def _control_rejected(
+        *,
+        action: str,
+        user_id: Any,
+        account_id: Any,
+        exc: BaseException,
+        target_user_id: Any = None,
+    ) -> None:
+        category, code, exception_type = UserApplicationService._audit_failure(exc)
+        UserApplicationService._control_audit(
+            action=action,
+            result="rejected",
+            user_id=user_id,
+            account_id=account_id,
+            target_user_id=target_user_id,
+            category=category,
+            code=code,
+            exception_type=exception_type,
+        )
+
+    @staticmethod
+    def _confirmation_audit_action(value: Any) -> str:
+        """Map confirmation actions to fixed audit labels without token data."""
+        try:
+            action = ConfirmationAction(value)
+        except (TypeError, ValueError):
+            return "confirm_action"
+        return {
+            ConfirmationAction.RESUME: "confirm_resume",
+            ConfirmationAction.EMERGENCY: "confirm_emergency",
+            ConfirmationAction.DISCONNECT: "confirm_disconnect",
+            ConfirmationAction.GLOBAL_PAUSE: "confirm_global_pause",
+            ConfirmationAction.GLOBAL_RESUME: "confirm_global_resume",
+            ConfirmationAction.GLOBAL_EMERGENCY: "confirm_global_emergency",
+        }.get(action, "confirm_action")
 
     async def _onboard(self, request: DirectOnboardingRequest, *, replace: bool) -> Any:
         service = self._onboarding
@@ -1457,6 +1703,7 @@ class UserApplicationService:
         except Exception:
             raise ValidationError("risk values are invalid") from None
 
+    @_control_audit_boundary("update_risk")
     async def update_risk(self, user_id: int, values: RiskUpdateInput) -> RiskDTO:
         try:
             context, _, _ = await self._owned_account(user_id)
@@ -1495,6 +1742,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("risk update is unavailable") from None
 
+    @_control_audit_boundary("pause")
     async def pause(self, user_id: int) -> DashboardDTO:
         try:
             await self._ensure_testnet()
@@ -1640,6 +1888,7 @@ class UserApplicationService:
                 raise
         return await self.dashboard(context.user_id)
 
+    @_control_audit_boundary("resume")
     async def resume(self, user_id: int, confirmation: Confirmation | None = None) -> DashboardDTO:
         try:
             context, _, _ = await self._owned_account(user_id)
@@ -1830,6 +2079,7 @@ class UserApplicationService:
             await self._call_required(lifecycle, "unpublish_after_commit")
         return await self.dashboard(context.user_id)
 
+    @_control_audit_boundary("confirm_action")
     async def confirm_action(self, user_id: int, confirmation: Confirmation) -> DashboardDTO:
         try:
             if not isinstance(confirmation, Confirmation):
@@ -2020,6 +2270,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("admin user list is unavailable") from None
 
+    @_control_audit_boundary("admin_allow_user")
     async def admin_allow_user(self, user_id: int, target_user_id: int) -> AdminUserPage:
         try:
             await self._context(user_id, admin=True)
@@ -2041,6 +2292,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("Telegram user access could not be granted") from None
 
+    @_control_audit_boundary("admin_set_user_access")
     async def admin_set_user_access(
         self,
         user_id: int,
@@ -2088,6 +2340,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("access request list is unavailable") from None
 
+    @_control_audit_boundary("admin_decide_access")
     async def admin_decide_access(
         self,
         user_id: int,
@@ -2161,6 +2414,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("admin follower list is unavailable") from None
 
+    @_control_audit_boundary("admin_reconcile")
     async def admin_reconcile(
         self, user_id: int, account_id: str | None = None
     ) -> AdminDashboardDTO:
@@ -2187,6 +2441,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("admin reconcile is unavailable") from None
 
+    @_control_audit_boundary("admin_pause")
     async def admin_pause(
         self, user_id: int, confirmation: Confirmation | None = None
     ) -> AdminDashboardDTO:
@@ -2204,6 +2459,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("admin pause is unavailable") from None
 
+    @_control_audit_boundary("admin_resume")
     async def admin_resume(
         self, user_id: int, confirmation: Confirmation | None = None
     ) -> AdminDashboardDTO:
@@ -2221,6 +2477,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("admin resume is unavailable") from None
 
+    @_control_audit_boundary("admin_emergency")
     async def admin_emergency(
         self, user_id: int, confirmation: Confirmation | None = None
     ) -> AdminDashboardDTO:

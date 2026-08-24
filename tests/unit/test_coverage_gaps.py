@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 from copytradeaster.config import Settings
-from copytradeaster.logging_utils import log_onboarding_audit, redact, setup_logging
+from copytradeaster.logging_utils import (
+    log_control_audit,
+    log_onboarding_audit,
+    redact,
+    setup_logging,
+)
 from copytradeaster.storage.database import Database
 
 
@@ -130,6 +135,69 @@ class TestLoggingUtils:
             for record in caplog.records
         )
         setup_logging("WARNING", log_path=None)
+
+    def test_control_audit_is_bounded_fixed_and_address_safe(self, caplog):
+        logger = logging.getLogger("copytradeaster.control-audit-test")
+        address = "0x" + "a" * 40
+        oversized_code = "safe-code-" + "x" * 500
+        with caplog.at_level(logging.INFO):
+            log_control_audit(
+                logger,
+                action="update_risk",
+                result="attempt",
+                user_id=7,
+                account_id=address,
+                changed_fields=(
+                    "risk_percent",
+                    "risk_percent",
+                    "private_key_should_be_ignored",
+                ),
+                state="x" * 500,
+                category="unexpected",
+                code=oversized_code,
+                exception_type="RuntimeError",
+            )
+            log_control_audit(
+                logger,
+                action="update_risk",
+                result="rejected",
+                user_id=7,
+                account_id="tg-7",
+                category="unexpected",
+                exception_type="RuntimeError",
+            )
+
+        records = [record for record in caplog.records if "control_audit" in record.getMessage()]
+        assert len(records) == 2
+        attempt, rejected = records
+        assert attempt.levelno == logging.INFO
+        assert rejected.levelno == logging.WARNING
+        message = attempt.getMessage()
+        assert "control_audit action=update_risk result=attempt user_id=7" in message
+        assert "account_id=redacted" in message
+        assert "changed_fields=risk_percent" in message
+        assert "private_key_should_be_ignored" not in message
+        assert address not in message
+        assert oversized_code not in message
+        assert len(message) < 500
+
+    def test_control_audit_logging_failure_is_best_effort(self, monkeypatch):
+        class BrokenLogger:
+            def info(self, message):
+                del message
+                raise RuntimeError("logger failed")
+
+            warning = info
+
+        log_control_audit(
+            BrokenLogger(),
+            action="pause",
+            result="success",
+            user_id=7,
+            account_id="tg-7",
+            state="paused",
+        )
+        assert True
 
 
 class TestConfig:

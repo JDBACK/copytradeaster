@@ -23,8 +23,8 @@
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный offline gate после onboarding chat UX corrective gate: **610
-  passed / 2 skipped / 17 deselected**, coverage **87.20%** при пороге 87%; ruff
+- Актуальный offline gate после control-audit corrective gate: **615
+  passed / 2 skipped / 17 deselected**, coverage **87.46%** при пороге 87%; ruff
   check/format и diff-check clean (historical snapshots исключены из formatter,
   сами файлы не менялись).
   Signed testnet gate: **16 passed / 1 skipped**; единственный skip — Builder
@@ -457,7 +457,8 @@ Acceptance evidence:
   `CT_LOG_BACKUP_COUNT`, повторный setup не дублирует managed handlers и не
   конфликтует с pytest/caplog handlers;
 - `connect`/`replace` пишут `attempt`, `success`, `recovered`, `rejected` с
-  opaque user/account IDs и typed `code`/safe unexpected category; rejected
+  bounded/sanitized user/account identifiers и typed `code`/safe unexpected
+  category; rejected
   имеет WARNING, остальные lifecycle events INFO;
 - logging calls не получают wallet/API-wallet addresses, private key, token,
   signature, signed URL/query или raw exchange/exception payload; handler
@@ -499,3 +500,28 @@ Acceptance evidence: focused Telegram/onboarding/renderers — **136 passed**;
 offline gate — **610 passed / 2 skipped / 17 deselected**, coverage **87.20%**;
 `ruff check`, `ruff format --check` и `git diff --check` — clean. Живой процесс,
 `.env`, `.botkey`, рабочая SQLite и торговое состояние не изменялись.
+
+### Control audit boundary corrective implementation — 2026-08-24
+
+Для доказуемости пользовательских state-changing действий добавлен bounded
+`control_audit` слой: `attempt`/`success`/`rejected` с INFO/WARNING levels,
+safe identifiers, whitelist state/category и changed field names. На public
+application boundary покрыты notifications, risk, pause/resume, подтверждения
+RESUME/EMERGENCY/DISCONNECT, admin access allow/set/decide, reconcile и
+подтверждённые global pause/resume/emergency operations. Admin decision пишет
+target только из безопасного returned `AccessRequestDTO`; APPROVED сообщает
+`changed_fields=status,access_enabled`, REJECTED — только `status`, а duplicate
+idempotent decision сохраняет state без `changed_fields`. Reconcile сообщает
+`state=account`/`state=all` по наличию входного account ID и не пишет target ID
+или address; request ID, confirmation tokens, risk values и raw exception
+payloads не логируются. Logging failure defensive и не меняет бизнес-результат.
+
+`result` в audit означает terminal outcome application call, а не доставку
+Telegram-презентации. Если post-commit presentation failure произошёл после
+изменения durable state, состояние отдельно читается из DB; rollback этим
+контрактом не обещается. WP9b и общий Stage 2 по-прежнему открыты до ручной
+owner acceptance.
+
+Full offline gate: **615 passed / 2 skipped / 17 deselected**, coverage
+**87.46%**; focused `tests/unit/application/test_service.py`: **75 passed**;
+`ruff check`, `ruff format --check` и `git diff --check` — clean.

@@ -135,6 +135,18 @@ Inline-first UX brief и решение по Scenes Wizard:
   URLs; owner-only `0600` для текущего и rollover-файлов; попытка/отказ не
   утверждают `paused`, а success/recovered подтверждают `paused=true`; секреты,
   адреса и raw exchange payloads не являются logging arguments.
+- [x] Control audit boundary для пользовательских state-changing действий:
+  bounded `control_audit` attempt/success/rejected для notifications, risk,
+  pause/resume, RESUME/EMERGENCY/DISCONNECT confirmations и admin
+  access/reconcile/global controls; risk success перечисляет только имена
+  изменённых полей, notification success различает enabled/disabled, admin
+  decisions используют только target из безопасного returned DTO: APPROVED
+  меняет `status,access_enabled`, REJECTED — только `status`, duplicate decision
+  сохраняет state без `changed_fields`; reconcile различает `account`/`all` и
+  не пишет target account ID/address. Rejected сохраняет только safe
+  category/code/type. `result` — terminal outcome application call;
+  post-commit presentation failure не обещает rollback: durable state при
+  необходимости отдельно читается из DB.
 #### WP9b — ручная приёмка владельца в private Telegram chat (открыта)
 
 Stage 2 не закрывается автоматически и остаётся `OPEN`, пока этот чек-лист не

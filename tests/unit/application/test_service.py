@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import copytradeaster.application.service as service_module
 from copytradeaster.application.models import (
     AccessRequestStatus,
     ApplicationProtocol,
@@ -706,6 +707,231 @@ async def test_decimal_validation_and_pause_resume_confirmation(environment):
     assert ("reconcile_account", "tg-7") in runtime.actions
     with pytest.raises(ConfirmationExpiredError):
         await service.confirm_action(7, confirmation)
+
+
+async def test_control_audit_logs_safe_control_round_trips_and_states(environment, caplog):
+    _, _, _, _, service = environment
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        await service.update_risk(
+            7,
+            RiskUpdateInput(
+                risk_percent=Decimal("0.02"),
+                max_leverage=5,
+                max_entry_deviation_pct=Decimal("0.03"),
+            ),
+        )
+        await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.04")))
+        await service.set_notifications(7, False)
+        await service.set_notifications(7, True)
+        await service.pause(7)
+        confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+        await service.confirm_action(7, confirmation)
+
+    messages = [record.getMessage() for record in caplog.records]
+    risk_success = [
+        message
+        for message in messages
+        if "control_audit action=update_risk result=success" in message
+    ]
+    assert len(risk_success) == 2
+    assert "changed_fields=risk_percent,max_leverage,max_entry_deviation_pct" in risk_success[0]
+    assert "changed_fields=risk_percent" in risk_success[1]
+    assert all(value not in "\n".join(risk_success) for value in ("0.02", "0.03", "0.04", "5"))
+    notification_success = [
+        message
+        for message in messages
+        if "control_audit action=set_notifications result=success" in message
+    ]
+    assert any("state=disabled" in message for message in notification_success)
+    assert any("state=enabled" in message for message in notification_success)
+    assert any(
+        "control_audit action=pause result=success" in message and "state=paused" in message
+        for message in messages
+    )
+    assert any(
+        "control_audit action=confirm_resume result=success" in message
+        and "state=resumed" in message
+        for message in messages
+    )
+
+
+async def test_admin_control_audit_logs_terminal_state_and_safe_targets(environment, caplog):
+    db, _, _, _, service = environment
+    admin_id = next(iter(service._admin_ids))
+    target_user_id = max(service._admin_ids) + 1000
+    approved_user_id = target_user_id + 1
+    rejected_user_id = target_user_id + 2
+    account_id = str((await AccountRepo(db).get_all(role="follower"))[0]["id"])
+
+    approved_request = await service.submit_access_request(
+        approved_user_id,
+        approved_user_id * 10,
+        username=None,
+        display_name=None,
+    )
+    rejected_request = await service.submit_access_request(
+        rejected_user_id,
+        rejected_user_id * 10,
+        username=None,
+        display_name=None,
+    )
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        await service.admin_allow_user(admin_id, target_user_id)
+        await service.admin_set_user_access(admin_id, target_user_id, False)
+        await service.admin_set_user_access(admin_id, target_user_id, True)
+        await service.admin_decide_access(admin_id, approved_request.request_id, approve=True)
+        await service.admin_decide_access(admin_id, approved_request.request_id, approve=False)
+        await service.admin_decide_access(admin_id, rejected_request.request_id, approve=False)
+        await service.admin_reconcile(admin_id, account_id)
+        await service.admin_reconcile(admin_id)
+
+        pause = await service.begin_confirmation(admin_id, ConfirmationAction.GLOBAL_PAUSE)
+        await service.admin_pause(admin_id, pause)
+        resume = await service.begin_confirmation(admin_id, ConfirmationAction.GLOBAL_RESUME)
+        await service.admin_resume(admin_id, resume)
+        emergency = await service.begin_confirmation(
+            admin_id,
+            ConfirmationAction.GLOBAL_EMERGENCY,
+        )
+        await service.admin_emergency(admin_id, emergency)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "control_audit action=admin_allow_user result=success" in message
+        and f"target_user_id={target_user_id}" in message
+        and "changed_fields=access_enabled" in message
+        and "state=enabled" in message
+        for message in messages
+    )
+    set_success = [
+        message
+        for message in messages
+        if "control_audit action=admin_set_user_access result=success" in message
+    ]
+    assert any(
+        f"target_user_id={target_user_id}" in message and "state=disabled" in message
+        for message in set_success
+    )
+    assert any(
+        f"target_user_id={target_user_id}" in message and "state=enabled" in message
+        for message in set_success
+    )
+    decision_success = [
+        message
+        for message in messages
+        if "control_audit action=admin_decide_access result=success" in message
+    ]
+    approved_success = [
+        message for message in decision_success if f"target_user_id={approved_user_id}" in message
+    ]
+    rejected_success = [
+        message for message in decision_success if f"target_user_id={rejected_user_id}" in message
+    ]
+    assert len(approved_success) == 2
+    assert any(
+        "state=approved" in message and "changed_fields=status,access_enabled" in message
+        for message in approved_success
+    )
+    assert any(
+        "state=approved" in message and "changed_fields=" not in message
+        for message in approved_success
+    )
+    assert len(rejected_success) == 1
+    assert "changed_fields=status state=rejected" in rejected_success[0]
+    decide_attempts = [
+        message
+        for message in messages
+        if "control_audit action=admin_decide_access result=attempt" in message
+    ]
+    assert len(decide_attempts) == 3
+    assert all("target_user_id=" not in message for message in decide_attempts)
+    assert all(
+        f"target_user_id={request_id}" not in message
+        for message in decide_attempts
+        for request_id in (approved_request.request_id, rejected_request.request_id)
+    )
+    reconcile_success = [
+        message
+        for message in messages
+        if "control_audit action=admin_reconcile result=success" in message
+    ]
+    assert len(reconcile_success) == 2
+    assert any("state=account" in message for message in reconcile_success)
+    assert any("state=all" in message for message in reconcile_success)
+    account_address = (await AccountRepo(db).get(account_id))["user_address"]
+    assert all(
+        account_id not in message and account_address not in message and "0x" not in message
+        for message in reconcile_success
+    )
+    assert any(
+        "control_audit action=admin_pause result=success" in message
+        and "changed_fields=allow_new_entries" in message
+        and "state=paused" in message
+        for message in messages
+    )
+    assert any(
+        "control_audit action=admin_resume result=success" in message
+        and "changed_fields=allow_new_entries" in message
+        and "state=resumed" in message
+        for message in messages
+    )
+    assert any(
+        "control_audit action=admin_emergency result=success" in message
+        and "changed_fields=allow_new_entries,emergency_active" in message
+        and "state=emergency" in message
+        for message in messages
+    )
+
+    caplog.clear()
+    with caplog.at_level("WARNING"), pytest.raises(ValidationError):
+        await service.admin_set_user_access(admin_id, target_user_id, "opaque token")  # type: ignore[arg-type]
+    rejected = [
+        record.getMessage()
+        for record in caplog.records
+        if "control_audit action=admin_set_user_access result=rejected" in record.getMessage()
+    ]
+    assert rejected
+    assert any("category=validation code=invalid_input" in message for message in rejected)
+    assert all("opaque token" not in message for message in rejected)
+
+
+async def test_control_audit_rejected_is_safe_and_logging_cannot_change_semantics(
+    environment, caplog, monkeypatch
+):
+    _, _, _, _, service = environment
+    payload = "raw exchange payload private_key=never-log"
+
+    async def fail_patch(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError(payload)
+
+    monkeypatch.setattr(service._settings, "patch_policy", fail_patch)
+    with caplog.at_level("INFO"), pytest.raises(ServiceUnavailableError):
+        await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02")))
+
+    rejected = [
+        record.getMessage()
+        for record in caplog.records
+        if "control_audit action=update_risk result=rejected" in record.getMessage()
+    ]
+    assert rejected
+    assert any(
+        "category=service_unavailable code=service_unavailable" in message for message in rejected
+    )
+    assert payload not in "\n".join(rejected)
+
+    def broken_audit(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("audit sink failure")
+
+    monkeypatch.setattr(service_module, "log_control_audit", broken_audit)
+    result = await service.set_notifications(7, False)
+    assert result.enabled is False
+    with pytest.raises(ValidationError):
+        await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("1.1")))
 
 
 async def test_confirmation_is_ttl_bound_to_user_action_and_account(environment):
