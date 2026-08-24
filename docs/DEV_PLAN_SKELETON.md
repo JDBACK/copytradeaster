@@ -1,6 +1,10 @@
 # Каркас плана разработки копитрейд-бота на AsterDex
 
-Статус: предварительный каркас (21.08.2026), видение — три этапа (раздел 4). Полный фактологический бэкграунд — в [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
+Статус: Stage 1 закрыт; автоматическая реализация и проверка Stage 2 завершены
+24.08.2026, onboarding UX/typed-error corrective gate добавлен; остался ручной
+Telegram acceptance владельца. Видение — три этапа
+(раздел 4). Полный фактологический бэкграунд — в
+[ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
 
 ## 1. Стек
 
@@ -77,9 +81,84 @@ pydantic v2            — схемы ордеров/событий/конфиг
 
 ### Этап 2 — Бот + прямой ввод ключей
 
-- aiogram: приём V3-набора (user + signer + private key + права), проверка подключения копика (валидация canPerpTrade / ipWhitelist), настройка риска.
+- aiogram: приём V3-набора (адрес обычного testnet-кошелька + `API wallet address` + `private key` под ним + права), проверка подключения копика (валидация canPerpTrade / ipWhitelist), настройка риска.
 - Торговое ядро этапа 1 подключается как библиотека; креды пользователя отделены от торговли.
 - Уведомления в Telegram.
+
+Текущий полный план:
+[STAGE2_IMPLEMENTATION_PLAN_2026-08.md](reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md).
+Фактологическая площадка по stable aiogram 3.30.0:
+[STAGE2_AIOGRAM_RESEARCH_2026-08.md](reports/STAGE2_AIOGRAM_RESEARCH_2026-08.md).
+Inline-first UX brief и решение по Scenes Wizard:
+[STAGE2_TELEGRAM_UX_BRIEF_2026-08.md](reports/STAGE2_TELEGRAM_UX_BRIEF_2026-08.md).
+
+- [x] Создать рабочую ветку `codex/stage-2-telegram` от accepted `main`.
+- [x] Изучить фактические границы `App`/CLI/credentials/storage/notifications и
+  trading core.
+- [x] Сверить актуальный aiogram через Context7 и официальные источники.
+- [x] Зафиксировать minimal one-process architecture и Stage 2 acceptance plan.
+- [x] Спроектировать inline-first menu, общий Bot/Mini App application layer и
+  принять решение не использовать experimental Scenes в Stage 2.
+- [x] WP0: dependency/config/documented boundaries.
+- [x] WP1: Telegram ownership, notification outbox и atomic credential storage.
+- [x] WP2: signed `GET /fapi/v3/agent` + permission/expiry/ipWhitelist preflight.
+- [x] WP3: aiogram-independent direct onboarding service.
+- [x] WP4: public follower runtime registry и общие control/emergency services.
+- [x] WP5: aiogram runtime, private-chat authorization, menu и lifecycle.
+- [x] WP6: secure direct-V3 FSM без private key в state/logs.
+- [x] WP7: risk/status/pause/resume/emergency/disconnect flows.
+- [x] WP8: non-blocking Telegram notifications через SQLite outbox.
+- [x] WP9a: offline, signed testnet, real Bot API/polling и 30/100-user
+  automated gates.
+- [x] Owner correction: один Telegram ID совмещает admin capability и owner;
+  inline-админка содержит users/followers, выдачу/отзыв доступа и targeted
+  reconcile.
+- [x] Автоматический первичный доступ: `/start` → inline captcha → durable
+  заявка → прямая карточка configured admin → idempotent approve/reject;
+  approval сразу пытается открыть первое меню подключения, а админка содержит
+  резервный список заявок. Ручной ID оставлен только для recovery.
+- [x] Owner feedback corrective gate: onboarding copy использует названия и
+  prerequisites из Aster UI (обычный testnet wallet, `API wallet address`,
+  `private key`, авторизация подписью, permissions, пустой счёт, Hedge), а
+  typed `OnboardingErrorCode` проходит application boundary без raw exchange
+  payloads.
+- [x] Typed onboarding failures: Telegram показывает причину и remediation,
+  удаляет secret-message, даёт `🔄 Попробовать снова`/`⌂ На главную`, а retry
+  сохраняет connect/replacement branch; preflight failure не достигает commit.
+- [x] Onboarding chat UX correction: все три входных сообщения удаляются до
+  проверки; шаги переходят на свежие карточки с edit-fallback без дубликатов,
+  истёкший ввод заменяет stale-card recovery-экраном, а stale anchor не
+  сохраняется в FSM между удалением и отправкой.
+- [x] Операционный audit logging: persistent rotating file по умолчанию
+  `data/logs/copytradeaster.log` + console, idempotent handlers, safe
+  connect/replace lifecycle events и suppression `httpx`/`httpcore` request
+  URLs; owner-only `0600` для текущего и rollover-файлов; попытка/отказ не
+  утверждают `paused`, а success/recovered подтверждают `paused=true`; секреты,
+  адреса и raw exchange payloads не являются logging arguments.
+#### WP9b — ручная приёмка владельца в private Telegram chat (открыта)
+
+Stage 2 не закрывается автоматически и остаётся `OPEN`, пока этот чек-лист не
+завершён владельцем. Галочки ниже фиксируют только реально подтверждённые
+владельцем действия; автоматические тесты ими не заменяются.
+
+Безопасные проверки интерфейса и доступа (без торговых ордеров):
+
+- [x] captcha проходит в private chat;
+- [x] заявка на доступ создаётся и доступ выдаётся пользователю;
+- [x] admin approval проходит через inline-карточку;
+- [x] direct onboarding/подключение подтверждено владельцем; торговый запуск не
+  проверялся;
+- [ ] переключатель notifications в Telegram;
+- [ ] изменение risk policy в Telegram.
+
+Торговые действия — отдельный блок, пока не подтверждён владельцем:
+
+- [ ] resume/copy cycle: явно проверить resume и один полный цикл копирования;
+- [ ] destructive confirmation: отдельно проверить cancel и confirm.
+
+До явного решения владельца не выполнять торговые мутации, включая resume,
+копирование, изменение risk policy или destructive actions. Можно продолжать
+только безопасный осмотр UI и доступов; Stage 2 остаётся открытым.
 
 ### Этап 3 — Builder (Aster Code)
 

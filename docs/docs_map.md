@@ -1,16 +1,23 @@
 # Карта документации
 
 Что где лежит, что из этого живое, а что история, и что читать в каком порядке.
-Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-08-23.
+Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-08-24.
 
 ## Быстрый старт (что читать в новом сеансе)
 
 1. `AGENTS.md` (корень) — правила работы с репо и структура папок.
-2. `docs/ENGINE_TEST_STATUS_2026-08.md` — текущее состояние движка: счётчики suite,
-   список исправленных багов #1–21, кампании и актуальный acceptance verdict.
-3. `docs/DEV_PLAN_SKELETON.md` — roadmap этапов и чеклисты; что уже сделано, что дальше.
-4. `docs/ARCHITECTURE.md` — архитектура ядра (нужна при работе с кодом).
-5. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
+2. `PRODUCT.md` (корень) — durable product truth: пользователи, задачи,
+   Telegram/Mini App boundaries и принципы интерфейса.
+3. `docs/ENGINE_TEST_STATUS_2026-08.md` — текущее состояние движка: счётчики suite,
+   список исправленных багов #1–23, кампании и актуальный acceptance verdict.
+4. `docs/DEV_PLAN_SKELETON.md` — roadmap этапов и чеклисты; что уже сделано, что дальше.
+5. `docs/ARCHITECTURE.md` — архитектура ядра (нужна при работе с кодом).
+6. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исполненный полный
+  план Telegram/direct-V3 этапа: scope, архитектура, work packages, acceptance
+  и добавленный журнал реализации 24.08.2026.
+7. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
+   guest captcha, durable access request, env-admin approval и regression gate.
+8. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
    corrective gate после независимого аудита: план, полный журнал и evidence.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.
@@ -19,9 +26,10 @@
 
 | Файл | Что это | Когда читать/менять |
 |---|---|---|
+| `PRODUCT.md` (корень) | Пользователи, purpose, позиционирование, operating context и durable product principles | Читать перед проектированием пользовательских поверхностей; менять только при изменении product truth |
 | `docs/ARCHITECTURE.md` | Архитектура системы: стили, модули, planner/reconciliation, journal, конкурентность, recovery, этапы | Читать перед работой с кодом. **Не перемещать**: докстринги `src/copytradeaster/` ссылаются на её секции по номерам (`ARCHITECTURE.md §6/§7/§12`). Менять при изменении дизайна |
-| `docs/DEV_PLAN_SKELETON.md` | Видение трёх этапов + чеклисты выполненных работ по Stage 1 | Читать для понимания «что дальше». Обновлять по факту выполнения пунктов |
-| `docs/ENGINE_TEST_STATUS_2026-08.md` | **Единая точка истины** о текущем состоянии: актуальные счётчики suite, таблица багов #1–21, разделы тестовых кампаний | Обновлять после каждого значимого изменения кода/тестов. Не дублировать его счётчики в других файлах |
+| `docs/DEV_PLAN_SKELETON.md` | Видение трёх этапов + актуальные Stage 1/2 чеклисты | Читать для понимания «что дальше». Обновлять по факту выполнения пунктов |
+| `docs/ENGINE_TEST_STATUS_2026-08.md` | **Единая точка истины** о текущем состоянии: актуальные счётчики suite, таблица багов #1–23, разделы тестовых кампаний | Обновлять после каждого значимого изменения кода/тестов. Не дублировать его счётчики в других файлах |
 | `docs/ASTER_API_RESEARCH_2026-08.md` | Фактологический справочник по Aster V3 API: подписи, ордера, WS, лимиты, режимы позиций | Читать при работе с `src/copytradeaster/aster/` или новыми API-вызовами |
 
 ## docs/reports/ — отчёты кампаний и corrective-планы
@@ -40,6 +48,13 @@ corrective-план завершён и содержит фактический 
 | `FINAL_REVIEW_GATE_JOURNAL_2026-08.md` | Сага финальных гейтов: проходы 1–3, dust-fix, flip-фикс, post-fix rerun 20260823T075504Z |
 | `REPORTS_FACTUAL_COMPARISON_2026-08.md` | Сверка фактологии параллельных исследований AsterDEX (19.08.2026) |
 | `STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` | Выполненный corrective-план Stage 1: protection quantity, emergency, boot recovery, signed/load/soak evidence и итоговый verdict (2026-08-23) |
+| `STAGE2_AIOGRAM_RESEARCH_2026-08.md` | Актуальный stable aiogram 3.30.0: Context7/официальные источники, API, lifecycle, security и test strategy (2026-08-23) |
+| `STAGE2_IMPLEMENTATION_PLAN_2026-08.md` | Implementation plan Stage 2: direct V3 onboarding, Telegram control/notifications, work packages, acceptance matrix и append-only журнал исполнения 24.08.2026 |
+| `STAGE2_TELEGRAM_UX_BRIEF_2026-08.md` | Inline-first UX brief: dashboard, screen map, copy, callbacks, Bot/Mini App boundary и обязательный Scenes verdict (2026-08-23) |
+| `STAGE2_ACCESS_APPROVAL_2026-08.md` | Access onboarding hardening: inline captcha, durable request, env-admin decision, fallback admin screen и regression evidence (2026-08-24) |
+| `STAGE2_ONBOARDING_UX_TYPED_ERRORS_2026-08.md` | Owner feedback corrective gate: Aster UI vocabulary, typed direct-onboarding errors, actionable Telegram retry и secret/FSM invariants (2026-08-24) |
+| `STAGE2_ONBOARDING_CHAT_UX_2026-08.md` | Фактологический follow-up по чистым onboarding-карточкам, expiry recovery, Aster prerequisites и live-safe facts (2026-08-24) |
+| `STAGE2_SAFE_LOGGING_AUDIT_2026-08.md` | Persistent rotating logging, onboarding audit classification, secret-safety и типы static/offline gate (2026-08-24); актуальные counters только в `ENGINE_TEST_STATUS_2026-08.md` |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 
