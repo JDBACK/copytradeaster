@@ -45,6 +45,7 @@ from copytradeaster.storage.repositories import (
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor
+from copytradeaster.trading.leverage import LeverageManager
 
 pytestmark = [
     pytest.mark.testnet,
@@ -116,6 +117,15 @@ async def stack():
         fee_buffer_pct=D("0.001"),
         working_type="MARK_PRICE",
         basis=SyncBasisRepo(db),
+        # Production parity: the engine reads leverage from the RAM
+        # control-plane, never from a per-client TTL cache.
+        leverage=LeverageManager(
+            client_for=lambda _aid: client,
+            symbols=[SYMBOL],
+            accounts=lambda: [],
+            catalog_account="main",
+            pacing_s=0.0,
+        ),
     )
     projector = MasterProjector(
         MasterEventRepo(db),
@@ -124,10 +134,14 @@ async def stack():
         SettingsRepo(db),
         coordinator.on_master_delta,
     )
-
     info = await client.exchange_info(force=True)
     filters_cache.update(info.tradable_filters())
     settings_repo = SettingsRepo(db)
+    # Seed the candidate catalog and confirm leverage for the follower up
+    # front, exactly like App.start + onboarding preparation do in production.
+    await coordinator._leverage.refresh_catalog()  # noqa: SLF001
+    await coordinator._leverage.prepare_account("copyc1", [SYMBOL])  # noqa: SLF001
+
     # The emergency signed scenario intentionally leaves the shared operator
     # state paused.  This independent engine scenario must opt back into
     # entries explicitly instead of depending on test execution order.

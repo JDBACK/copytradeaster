@@ -31,10 +31,13 @@ def coid_factory(kind, symbol, seq):
     return f"ct-{kind.value.lower()}-{symbol}-{seq}"
 
 
-def account(positions=None) -> AccountState:
+def account(positions=None, symbol_leverages=None) -> AccountState:
     plist = list(positions or [])
     return AccountState(
-        account_id="copyc1", available_usdt=D(1000), positions={p.key: p for p in plist}
+        account_id="copyc1",
+        available_usdt=D(1000),
+        positions={p.key: p for p in plist},
+        symbol_leverages=dict(symbol_leverages or {}),
     )
 
 
@@ -328,6 +331,39 @@ class TestLeverageRule:
     def test_zero_target_leverage_emits_nothing(self):
         t = TargetPosition(KEY, D("0.05"), D(64500), None, 0)
         assert all(a.kind != ActionKind.SET_LEVERAGE for a in plan(account(), [t]).actions)
+
+    def test_preconfigured_flat_symbol_skips_set_leverage(self):
+        """positionRisk keeps reporting the exchange-persisted leverage for
+        flat symbols; when it already matches the target, a brand-new entry
+        must NOT pay a redundant SET_LEVERAGE."""
+        p = plan(account(symbol_leverages={"BTCUSDT": 20}), [TARGET_LONG])
+        kinds = [a.kind for a in p.actions]
+        assert ActionKind.SET_LEVERAGE not in kinds
+        assert ActionKind.MARKET_OPEN in kinds
+
+    def test_flat_symbol_wrong_leverage_still_sets(self):
+        actual = account(symbol_leverages={"BTCUSDT": 10})
+        actions = plan(actual, [TARGET_LONG]).actions
+        assert actions[0].kind == ActionKind.SET_LEVERAGE
+        assert actions[0].payload["leverage"] == "20"
+
+    def test_set_leverage_wires_dependency_ids_to_entry_and_protection(self):
+        actual = account(symbol_leverages={"BTCUSDT": 10})
+        actions = plan(actual, [TARGET_LONG]).actions
+        by_kind = {a.kind: a for a in actions}
+        set_action = by_kind[ActionKind.SET_LEVERAGE]
+        assert set_action.action_id == "leverage:BTCUSDT"
+        assert set_action.depends_on_action_id is None
+        assert by_kind[ActionKind.MARKET_OPEN].depends_on_action_id == "leverage:BTCUSDT"
+        assert by_kind[ActionKind.PLACE_STOP].depends_on_action_id == "leverage:BTCUSDT"
+
+    def test_close_targets_never_carry_dependency(self):
+        st = pos(KEY, "0.05", lev=20)
+        close = TargetPosition(KEY, D("0"), None, None, 20)
+        p = plan(account([st]), [close])
+        assert all(
+            a.kind != ActionKind.SET_LEVERAGE and a.depends_on_action_id is None for a in p.actions
+        )
 
 
 class TestHedgeMode:

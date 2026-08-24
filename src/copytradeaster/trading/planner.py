@@ -218,6 +218,7 @@ def _plan_for_target(
     filters: SymbolFilters,
     ids: _SeqIds,
     working_type: str,
+    prerequisite_action_id: str | None = None,
 ) -> list[ExecutionAction]:
     actions: list[ExecutionAction] = []
     symbol = target.key.symbol
@@ -289,6 +290,7 @@ def _plan_for_target(
                 client_order_id=ids.next(ActionKind.MARKET_OPEN, symbol),
                 replaces_client_order_id=None,
                 priority=1,
+                depends_on_action_id=prerequisite_action_id,
             )
         )
         opened_or_closed = True
@@ -361,6 +363,7 @@ def _plan_for_target(
             client_order_id=ids.next(kind, symbol),
             replaces_client_order_id=None,
             priority=place_priority,
+            depends_on_action_id=prerequisite_action_id,
         )
         actions.append(place_action)
         if current is not None:
@@ -410,10 +413,19 @@ def build_plan(
             continue
         actual_pos = actual.positions.get(tp.key)
         # --- rule 1: leverage ---------------------------------------------------
-        if tp.leverage > 0 and (actual_pos is None or actual_pos.leverage != tp.leverage):
-            # also for brand-new legs: a ONE_WAY WS-created position starts with
-            # projected leverage 0/unknown - the entry must land on the target
-            # leverage, not on whatever the account happens to have
+        # Known configured leverage, in confidence order: the authoritative
+        # per-symbol positionRisk map first (flat symbols included), then the
+        # leg's own row. Absent everywhere means UNKNOWN - fail closed with a
+        # SET even for brand-new legs (a ONE_WAY WS-created position starts
+        # with projected leverage 0).
+        known_leverage = actual.symbol_leverages.get(tp.key.symbol)
+        if known_leverage is None and actual_pos is not None and actual_pos.leverage > 0:
+            known_leverage = actual_pos.leverage
+        prerequisite_action_id: str | None = None
+        if tp.leverage > 0 and known_leverage != tp.leverage:
+            # Intra-plan dependency: the entry and its protection must not run
+            # when this transition FAILED. Closes/reductions never reference it.
+            prerequisite_action_id = f"leverage:{tp.key.symbol}"
             actions.append(
                 ExecutionAction(
                     kind=ActionKind.SET_LEVERAGE,
@@ -422,9 +434,19 @@ def build_plan(
                     client_order_id=None,
                     replaces_client_order_id=None,
                     priority=0,
+                    action_id=prerequisite_action_id,
                 )
             )
-        actions.extend(_plan_for_target(actual_pos, tp, filters, ids, working_type))
+        actions.extend(
+            _plan_for_target(
+                actual_pos,
+                tp,
+                filters,
+                ids,
+                working_type,
+                prerequisite_action_id=prerequisite_action_id,
+            )
+        )
     actions.sort(key=lambda a: a.priority)
     return ExecutionPlan(account_id=target.account_id, trade_id=None, actions=actions)
 

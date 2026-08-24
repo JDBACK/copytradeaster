@@ -43,6 +43,10 @@ class SkipReason(StrEnum):
     STALE_MASTER = "STALE_MASTER"
     OWN_PROTECTIVE_FILLED = "OWN_PROTECTIVE_FILLED"
     INTENTIONAL_FLAT = "INTENTIONAL_FLAT"  # dust target=0 inside an open episode
+    # account-confirmed leverage for this symbol is missing or belongs to an
+    # older candidate-catalog generation: new exposure is skipped (fail-closed)
+    # while closes/reductions/protection keep running
+    LEVERAGE_NOT_READY = "LEVERAGE_NOT_READY"
 
 
 class _DecimalStrict:
@@ -120,6 +124,11 @@ class AccountState(_DecimalStrict):
     available_usdt: Decimal
     positions: dict[PositionKey, PositionState]
     open_orders: list[dict] = field(default_factory=list)
+    # Exchange-configured leverage per symbol as reported by the authoritative
+    # positionRisk read (flat symbols included). Recorded only when every row
+    # of the symbol agrees; an absent entry means "unknown", never "unset".
+    # Appended LAST so historical positional constructions keep their meaning.
+    symbol_leverages: dict[str, int] = field(default_factory=dict)
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("available_usdt",)
 
@@ -183,6 +192,11 @@ class ExecutionAction:
     # For protection replacement, CANCEL_ORDER must not run unless the new
     # PLACE_STOP/PLACE_TP was confirmed by the exchange.
     depends_on_client_order_id: str | None = None
+    # Planner-only stable ids for intra-plan prerequisites that are not
+    # orders: a FAILED/missing prerequisite blocks the dependent action while
+    # risk-reducing actions (closes, cancels) carry no dependency.
+    action_id: str | None = None
+    depends_on_action_id: str | None = None
     # CANCEL_ORDER payloads intentionally contain only the exchange cancel
     # parameters; retain the leg here for trade/revision attribution.
     position_side: PosSide = PosSide.BOTH

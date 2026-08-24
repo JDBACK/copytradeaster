@@ -832,3 +832,156 @@ async def test_limit_flavor_stop_mirrored(env):
     await coordinator.on_master_delta(delta_of(state))
     stops = [p for p in fr.client.placed if p["type"] in ("STOP_MARKET", "STOP")]
     assert stops and stops[-1]["type"] == "STOP"
+
+
+class _StubBasis:
+    """Minimal sync_basis seam returning one persisted master magnitude."""
+
+    def __init__(self, prev):
+        self._prev = prev
+
+    async def get(self, account_id, symbol, pos_side):
+        if self._prev is None:
+            return None
+        return {"master_ref_abs": str(self._prev)}
+
+
+def _coordinator_with_manager(fr, db, manager, notifications):
+    executor = Executor(
+        lambda aid: fr.client,
+        CommandRepo(db),
+        OrderLinkRepo(db),
+        {},
+        settings=SettingsRepo(db),
+    )
+
+    async def notify(text):
+        notifications.append(text)
+
+    return Coordinator(
+        [fr],
+        SettingsRepo(db),
+        executor,
+        CopyTradeRepo(db),
+        OrderLinkRepo(db),
+        filters_provider,
+        SettingsRepo(db),
+        ["BTCUSDT", "ETHUSDT"],
+        D("0.001"),
+        "MARK_PRICE",
+        on_notify=notify,
+        leverage=manager,
+    )
+
+
+async def test_snapshot_preserves_flat_symbol_leverage(tmp_path):
+    """positionRisk reports the exchange-persisted leverage for flat symbols;
+    dropping that row made 'no position' look like 'leverage unknown'."""
+    db = Database(tmp_path / "flat.sqlite3")
+    await db.connect()
+    await db.migrate()
+    fr = FollowerRuntime(account_id="copyc1", client=FakeClient(), identity=None)
+    fr.client.positions = {PositionKey("BTCUSDT"): {"qty": D(0), "leverage": "100"}}
+    try:
+        coordinator = Coordinator(
+            [fr],
+            SettingsRepo(db),
+            Executor(lambda aid: fr.client, CommandRepo(db), OrderLinkRepo(db), {}),
+            CopyTradeRepo(db),
+            OrderLinkRepo(db),
+            filters_provider,
+            SettingsRepo(db),
+            ["BTCUSDT"],
+            D("0.001"),
+            "MARK_PRICE",
+        )
+        snap = await coordinator.snapshot_follower(fr)
+        assert snap.symbol_leverages == {"BTCUSDT": 100}
+        assert snap.positions == {}
+    finally:
+        await db.close()
+
+
+@pytest.fixture
+async def managed_env(tmp_path):
+    from copytradeaster.storage.repositories import AccountRepo
+    from copytradeaster.trading.leverage import LeverageManager
+    from tests.unit.trading.test_leverage_manager import FakeLevClient
+
+    db = Database(tmp_path / "managed.sqlite3")
+    await db.connect()
+    await db.migrate()
+    fr = FollowerRuntime(account_id="copyc1", client=FakeClient(), identity=None)
+    await AccountRepo(db).upsert("copyc1", "follower", "copyc1", "0xu")
+    await SettingsRepo(db).upsert_policy(
+        RiskPolicy(risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("0.01")),
+        "copyc1",
+    )
+    lev_clients = {"main": FakeLevClient(), "copyc1": FakeLevClient()}
+    manager = LeverageManager(
+        client_for=lambda account_id: lev_clients[account_id],
+        symbols=["BTCUSDT"],
+        accounts=lambda: [],
+        pacing_s=0.0,
+    )
+    notifications: list[str] = []
+    coordinator = _coordinator_with_manager(fr, db, manager, notifications)
+    yield coordinator, manager, lev_clients, fr, db, notifications
+    await db.close()
+
+
+async def test_entry_skipped_when_leverage_not_ready(managed_env):
+    coordinator, manager, lev_clients, fr, db, notifications = managed_env
+    await coordinator.on_master_delta(delta_of(master_state(leverage=20)))
+
+    # No candidate yet -> fail closed with a typed skip, never an order.
+    assert fr.client.placed == []
+    assert any("не подготовлено" in text for text in notifications)
+    # The miss enqueued a bounded background preparation instead.
+    assert ("copyc1", "BTCUSDT") in manager._pending  # noqa: SLF001
+
+
+async def test_ready_manager_sizes_entry_without_network_reads(managed_env):
+    coordinator, manager, lev_clients, fr, db, notifications = managed_env
+    await manager.refresh_catalog()
+    manager.observe("copyc1", {"BTCUSDT": 200})
+    assert manager.is_ready("copyc1", "BTCUSDT")
+
+    await coordinator.on_master_delta(delta_of(master_state(leverage=20)))
+
+    kinds = [p["type"] for p in fr.client.placed]
+    assert "MARKET" in kinds
+    assert fr.client.leverage_calls == [("BTCUSDT", 200)]
+    # Hot path stayed on RAM reads: no follower bracket GET, no extra POSTs.
+    assert lev_clients["copyc1"].bracket_calls == []
+    assert lev_clients["copyc1"].set_calls == []
+
+
+async def test_increase_clamped_while_not_ready_keeps_reductions(managed_env):
+    coordinator, manager, lev_clients, fr, db, notifications = managed_env
+    await manager.refresh_catalog()
+    manager.observe("copyc1", {"BTCUSDT": 200})
+    assert manager.is_ready("copyc1", "BTCUSDT")
+    # A catalog downshift opens a new generation; the observed confirmation
+    # belongs to the old one -> not ready for NEW exposure.
+    lev_clients["main"] = lev_clients.pop("copyc1")
+    lev_clients["main"].account_max = 100
+    await manager.refresh_catalog()
+    assert not manager.is_ready("copyc1", "BTCUSDT")
+
+    fr.client.positions = {PositionKey("BTCUSDT"): {"qty": D("0.001"), "stop": D(64500)}}
+    import time as _time
+
+    coordinator._basis = _StubBasis(D("1"))  # type: ignore[attr-defined]
+
+    master = master_state(qty=D("2"), stop=D(64500))
+    master.event_time = int(_time.time() * 1000)
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    actual = await coordinator.snapshot_follower(fr)
+
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    # Growth blocked: target stays at the CURRENT size instead of growing to
+    # the risk cap; the leg is NOT skipped and preparation got enqueued.
+    assert skips == []
+    assert targets and targets[0].qty == D("0.001")
+    assert ("copyc1", "BTCUSDT") in manager._pending  # noqa: SLF001

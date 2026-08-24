@@ -35,6 +35,7 @@ from copytradeaster.storage.repositories import (
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
+from copytradeaster.trading.leverage import LeverageManager
 from copytradeaster.trading.reconciler import Reconciler
 from copytradeaster.trading.registry import FollowerRegistry
 
@@ -207,6 +208,14 @@ class App:
             self._on_delta,
             on_critical=self._on_master_critical,
         )
+        # Leverage control-plane is composed BEFORE the coordinator: the
+        # coordinator reads confirmed values from it on the trading hot path.
+        self.leverage = LeverageManager(
+            client_for=self._client_for,
+            symbols=tuple(cfg.symbol_whitelist),
+            accounts=self._real_follower_ids,
+            catalog_account="main",
+        )
         self.coordinator = Coordinator(
             followers=self.follower_registry,
             settings=self.settings,
@@ -221,6 +230,7 @@ class App:
             notifier=self.notifier,
             basis=self.basis,
             snapshot_symbols=set(cfg.follower_snapshot_symbols) or None,
+            leverage=self.leverage,
         )
         self.reconciler = Reconciler(self.coordinator)
         self.stream: UserStream | None = None
@@ -232,6 +242,7 @@ class App:
         self._sweep_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._stream_task: asyncio.Task | None = None
+        self._leverage_task: asyncio.Task | None = None
         self._filters_cache: dict = {}
         self._ready = False
         self._stream_connect_count = 0
@@ -252,6 +263,12 @@ class App:
             nonces=self.nonces,
             dry_run=self.cfg.dry_run,
         )
+
+    def _real_follower_ids(self) -> list[str]:
+        """Accounts eligible for leverage provisioning (REAL execution only)."""
+        return [
+            fr.account_id for fr in self.follower_registry.snapshot() if fr.execution_mode == "REAL"
+        ]
 
     def _client_for(self, account_id: str) -> AsterClient:
         """Fail closed: an unknown account must NEVER route to the master."""
@@ -421,6 +438,15 @@ class App:
         )
         await self.reconciler.reconcile(self.projector.state, reason="startup")
 
+        # 6b. leverage control-plane: seed the candidate catalog once so the
+        # first post-READY delta can trade immediately, then keep the worker
+        # running as a managed task (SWR refresh + bounded preparations).
+        try:
+            await self.leverage.refresh_catalog()
+        except Exception as exc:  # noqa: BLE001 - worker retries; entries stay gated
+            log.warning("initial leverage catalog refresh failed: %s", _error_category(exc))
+        self._leverage_task = asyncio.create_task(self.leverage.run(self.stop_event))
+
         # 7. streams + periodic sweep
         self.stream = UserStream(
             client=self.master_client,
@@ -475,6 +501,13 @@ class App:
         log.info("stopping...")
         self._ready = False
         stop_event = getattr(self, "stop_event", None)
+        task_names = (
+            "_sweep_task",
+            "_ingest_task",
+            "_heartbeat_task",
+            "_stream_task",
+            "_leverage_task",
+        )
         if stop_event is not None:
             stop_event.set()
         coordinator = getattr(self, "coordinator", None)

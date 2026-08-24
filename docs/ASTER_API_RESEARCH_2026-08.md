@@ -223,6 +223,15 @@ Signed `GET /fapi/v3/leverageBracket?symbol=...` на подключённом f
 увеличения; сбой endpoint не блокирует закрытие, сокращение и защиту. Сам Stage 2
 `marginType` не меняет.
 
+### Follow-up: leverage как control-plane — 2026-08-25
+
+Механика потребления изменилась (баги #25–26, `trading/leverage.py`): bracket
+GET больше не выполняется на hot path сделки. Кандидатный каталог по symbol
+обновляется фоново; account-specific значение подтверждается `POST /fapi/v3/leverage`
+(reject → follower-specific bracket GET → POST максимума аккаунта), а рестарт
+восстанавливает его из authoritative `positionRisk`. Факты API выше
+(формы ответа, максимумы 200/200/100, принятие POST) остаются в силе.
+
 ### Стопы, тейки и их перестановка
 
 Обычный `PUT /fapi/v3/order` умеет менять только `LIMIT` и требует одновременно новые `quantity` и `price`. Он не является универсальным amend для STOP/TP.

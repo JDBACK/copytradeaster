@@ -40,6 +40,7 @@ from copytradeaster.onboarding.models import (
 )
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import AccountRepo, SettingsRepo, TelegramUserRepo
+from copytradeaster.trading.leverage import LeverageError
 from tests.unit.aster.conftest import KEY, SIGNER, USER
 
 NEW_KEY = "0x" + "55" * 32
@@ -543,3 +544,87 @@ async def test_emergency_state_and_composition_are_concrete(database):
     assert isinstance(composition, Stage2Composition)
     assert composition.application is not None
     assert composition.runtime.ready is True
+
+
+class _FakeLeverageManager:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    async def prepare_account(self, account_id, symbols):
+        from copytradeaster.trading.leverage import PrepareReport
+
+        self.calls.append((account_id, tuple(symbols)))
+        if self.fail:
+            return PrepareReport(confirmed={}, failed={"BTCUSDT": "aster:-4028"})
+        return PrepareReport(confirmed={s: 200 for s in symbols}, failed={})
+
+
+async def test_resume_prepares_leverage_and_opens_admission_only_on_success(database):
+    credentials = SqliteCredentials(database, bytes.fromhex("11" * 32))
+    app = _App(database, _settings(), credentials)
+    app.follower_registry.runtimes["tg-7"] = SimpleNamespace(
+        account_id="tg-7", execution_mode="REAL"
+    )
+    manager = _FakeLeverageManager()
+    app.leverage = manager
+    adapter = AppStage2RuntimeAdapter(app)
+
+    await adapter.resume_account("tg-7")
+
+    assert manager.calls == [("tg-7", tuple(app.cfg.symbol_whitelist))]
+    # Admission reopened only AFTER leverage was confirmed.
+    assert app.coordinator.events == ["open"]
+
+
+async def test_resume_failure_keeps_admission_closed_for_paused_rollback(database):
+    credentials = SqliteCredentials(database, bytes.fromhex("11" * 32))
+    app = _App(database, _settings(), credentials)
+    app.follower_registry.runtimes["tg-7"] = SimpleNamespace(
+        account_id="tg-7", execution_mode="REAL"
+    )
+    app.leverage = _FakeLeverageManager(fail=True)
+    adapter = AppStage2RuntimeAdapter(app)
+
+    with pytest.raises(LeverageError, match="aster:-4028"):
+        await adapter.resume_account("tg-7")
+
+    # The application service rolls allow_new_entries back on this raise;
+    # the runtime boundary must not have reopened admission either.
+    assert app.coordinator.events == []
+
+
+async def test_shadow_runtime_resume_skips_leverage_preparation(database):
+    credentials = SqliteCredentials(database, bytes.fromhex("11" * 32))
+    app = _App(database, _settings(), credentials)
+    app.follower_registry.runtimes["tg-shadow"] = SimpleNamespace(
+        account_id="tg-shadow", execution_mode="SHADOW"
+    )
+    manager = _FakeLeverageManager()
+    app.leverage = manager
+    adapter = AppStage2RuntimeAdapter(app)
+
+    await adapter.resume_account("tg-shadow")
+    assert manager.calls == []
+    assert app.coordinator.events == ["open"]
+
+
+async def test_onboarding_activation_failure_surfaces_as_typed_error(database):
+    credentials = SqliteCredentials(database, bytes.fromhex("11" * 32))
+    app = _App(database, _settings(), credentials)
+    users = TelegramUserRepo(database)
+    await users.upsert(7, 700, role="USER")
+    store = SqliteOnboardingStore(database, credentials, users)
+    adapter = DirectOnboardingAdapter(app, store)
+    manager = _FakeLeverageManager(fail=True)
+    app.leverage = manager
+
+    with pytest.raises(LeverageError, match="BTCUSDT"):
+        await adapter._activate("tg-7")
+    assert manager.calls == [("tg-7", tuple(app.cfg.symbol_whitelist))]
+    # The follower WAS published (durable row stays paused; retryable), and a
+    # second attempt must not re-register but must re-attempt preparation.
+    first_calls = len(manager.calls)
+    with pytest.raises(LeverageError):
+        await adapter._activate("tg-7")
+    assert len(manager.calls) == first_calls + 1

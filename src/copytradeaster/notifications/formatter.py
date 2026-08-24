@@ -161,6 +161,12 @@ def format_skip_reason(
     if reason_enum == SkipReason.INTENTIONAL_FLAT:
         return f"ℹ️ Фиксация позиции {symbol}{side_suffix}."
 
+    if reason_enum == SkipReason.LEVERAGE_NOT_READY:
+        return (
+            f"⏳ Пропуск сделки {symbol}{side_suffix}\n"
+            "Причина: плечо для этого символа ещё не подготовлено на бирже."
+        )
+
     safe_reason = str(reason.value if hasattr(reason, "value") else reason)
     return f"⚠️ Пропуск {symbol}{side_suffix}: {safe_reason}."
 

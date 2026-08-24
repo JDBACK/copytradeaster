@@ -349,19 +349,82 @@ async def test_idempotent_resubmit_skips_confirmed(env):
     assert first[0].command_key == second[0].command_key
 
 
-async def test_leverage_command(env):
-    executor, client, commands, links, _ = env
-    action = ExecutionAction(
+def leverage_action(action_id="leverage:BTCUSDT", lev="20"):
+    return ExecutionAction(
         kind=ActionKind.SET_LEVERAGE,
         symbol="BTCUSDT",
-        payload={"symbol": "BTCUSDT", "leverage": "20"},
+        payload={"symbol": "BTCUSDT", "leverage": lev},
         client_order_id=None,
         replaces_client_order_id=None,
         priority=0,
+        action_id=action_id,
     )
-    results = await executor.submit(plan_of(action))
+
+
+def with_dependency(action, action_id):
+    return dataclasses.replace(action, depends_on_action_id=action_id)
+
+
+async def test_leverage_command(env):
+    executor, client, commands, links, _ = env
+    results = await executor.submit(plan_of(leverage_action()))
     assert results[0].status == "CONFIRMED"
     assert client.leverage_calls == [("BTCUSDT", 20)]
+
+
+async def test_failed_set_leverage_blocks_dependent_open_and_protection(env):
+    """P0 invariant: a FAILED leverage prerequisite must NEVER let risk-
+    increasing actions run (previously MARKET_OPEN fired regardless)."""
+    executor, client, commands, links, _ = env
+
+    async def failing_set(account_id, symbol, leverage):
+        raise AsterError(-4028, "invalid leverage")
+
+    client.set_leverage = failing_set  # type: ignore[method-assign]
+    plan = plan_of(
+        leverage_action(),
+        with_dependency(open_action(), "leverage:BTCUSDT"),
+        with_dependency(stop_action(), "leverage:BTCUSDT"),
+    )
+
+    results = await executor.submit(plan)
+
+    assert [r.status for r in results] == ["FAILED", "BLOCKED", "BLOCKED"]
+    assert client.placed == []
+    # BLOCKED is not journaled: the next reconciliation retries the transition
+    assert await commands.get(results[1].command_key) is None
+    assert await commands.get(results[2].command_key) is None
+
+
+async def test_failed_set_leverage_does_not_block_close_or_cancel(env):
+    """Leverage never owns the right to block risk reduction."""
+    executor, client, commands, links, _ = env
+
+    async def failing_set(account_id, symbol, leverage):
+        raise AsterError(-4028, "invalid leverage")
+
+    client.set_leverage = failing_set  # type: ignore[method-assign]
+    plan = plan_of(leverage_action(), close_action())
+
+    results = await executor.submit(plan)
+
+    assert [r.status for r in results] == ["FAILED", "CONFIRMED"]
+    assert len(client.placed) == 1
+
+
+async def test_confirmed_set_leverage_releases_dependent_actions(env):
+    executor, client, commands, links, _ = env
+    plan = plan_of(
+        leverage_action(),
+        with_dependency(open_action(), "leverage:BTCUSDT"),
+        with_dependency(stop_action(), "leverage:BTCUSDT"),
+    )
+
+    results = await executor.submit(plan)
+
+    assert [r.status for r in results] == ["CONFIRMED", "CONFIRMED", "SUBMITTED"]
+    assert client.leverage_calls == [("BTCUSDT", 20)]
+    assert len(client.placed) == 2
 
 
 async def test_concurrent_submits_serialized(env):

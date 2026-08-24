@@ -25,21 +25,29 @@
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный offline gate после внедрения чистого форматирования торговых
-  уведомлений (`formatter.py`): **632 passed / 2 skipped / 17 deselected**,
-  coverage **87.15%** при пороге 87%; ruff check/format и diff-check clean
-  (historical snapshots исключены из formatter, сами файлы не менялись).
-  Signed testnet gate: **16 passed / 1 skipped**; единственный skip — Builder
-  Stage 3. Полный Stage 2 signed-run выполнен с явным testnet-only override,
-  потому что фактические Agent `ipWhitelist` follower-аккаунтов пока пусты.
+- Актуальный offline gate после внедрения leverage control-plane (баги #25–26,
+  `trading/leverage.py`): **656 passed / 2 skipped / 17 deselected**, coverage
+  **87.23%** при пороге 87%; ruff check/format clean. Signed testnet gate
+  после изменений плеча (2026-08-25, `CT_TESTNET=1`): **16 passed / 1 skipped**
+  (skip — Builder Stage 3). E2E ONE_WAY прошёл полный цикл через новый
+  leverage-путь: fixture подтвердил candidate BTCUSDT=200 подписанным bracket
+  GET + `POST /leverage` на copyc1, вход исполнился без холодного SET; первый
+  прогон упал на транзитном `-1007 transport timeout` в polling-хелпере фазы 5
+  (флак тестнета, ретрай не предусмотрен харнессом) — повторный прогон чистый
+  за 178s.
 - Независимый signed REST-аудит после полного набора и двухчасового soak:
   `main` и `copyc1`–`copyc3` в HEDGE, позиции 0, открытых ордеров 0.
-- Runtime leverage follower берётся из signed
-  `GET /fapi/v3/leverageBracket?symbol=...`: typed adapter принимает object и
-  фактически возвращаемый testnet list, выбирает максимальный положительный
-  `initialLeverage` без локального ceiling. Stage 2 пока не меняет
-  `marginType`; isolated enforcement отложен до отдельной реальной проверки
-  Aster testnet.
+- Runtime leverage follower — RAM control-plane (`LeverageManager`,
+  `trading/leverage.py`): глобальный кандидатный каталог по symbol
+  stale-while-revalidate + account-specific подтверждённое плечо,
+  подтверждаемое `POST /fapi/v3/leverage` (reject → account bracket GET →
+  POST максимума аккаунта). Подготовка — на onboarding/resume/boot-recovery и
+  в bounded background worker; hot path сделки читает только RAM. Рестарт
+  восстанавливает состояние из authoritative positionRisk
+  (`AccountState.symbol_leverages`, flat symbols включительно). Смена
+  максимума биржей инвалидирует готовность нового входа до переподготовки;
+  закрытие/сокращение/защита не зависят от плеча. Stage 2 по-прежнему не
+  меняет `marginType`; isolated enforcement отложен.
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -69,6 +77,9 @@
 | 22 | **Direct onboarding скрывал причину preflight failure** | application service схлопывал `OnboardingError` в generic `ValidationError`, Telegram терял replacement context и показывал только restart copy | typed `OnboardingApplicationError.code`, enum-based Telegram remediation/error screen, revision-safe connect/replace retry и сохранённые secret/FSM invariants |
 | 23 | **Onboarding-карточки наслаивались после повторного ввода** | старый prompt сохранялся рядом с новым, expiry отправлял отдельный ответ, а удалённый anchor оставался в FSM до replacement send | все три input-сообщения удаляются до проверки; valid step transitions используют fresh cards с edit-fallback без дублей; expiry заменяет текущую карточку recovery-экраном; retired anchor инвалидируется и удаляется из FSM до send |
 | 24 | **Сырые системные логи в Telegram-уведомлениях** | движок слал внутренние имена RPC-команд (`MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `NO_STOP`) напрямую в пользовательский чат | выделен модуль `notifications/formatter.py` (`format_confirmed_action`, `format_skip_reason`); уведомления форматируются в чистые трейдерские карточки (🟢 Открыта позиция, 🛡 Защитный стоп, 🎯 Тейк-профит, 🔴 Закрыта позиция, 🗑 Снят ордер, ⏳ Ожидание стопа), технический шум убран |
+| 25 | **FAILED `SET_LEVERAGE` не блокировал `MARKET_OPEN`** | priority в плане — только порядок, а не зависимость: исполнитель продолжал план после FAILED prerequisite и отправлял вход с неподтверждённым плечом (fail-closed для плеча фактически отсутствовал) | generic dependency-модель плана: `ExecutionAction.action_id` / `depends_on_action_id`; planner связывает SET_LEVERAGE → вход/защиту, executor блокирует (`BLOCKED`) зависимые действия при FAILED/UNKNOWN prerequisite; закрытия/отмены зависимости не получают |
+| 26 | **Движок терял известное плечо flat-symbol** | `_snapshot()` выбрасывал строки positionRisk с `positionAmt==0`, а planner трактовал «нет позиции» как «плечо неизвестно» — каждая новая сделка платила холодный `SET_LEVERAGE` (+TTL bracket GET) даже при годами стоящих на бирже 200x | `AccountState.symbol_leverages` из всех строк positionRisk (включая flat; неоднозначные per-side значения → unknown/fail-closed); planner сравнивает known vs target и эмитит SET только при расхождении; hot path сделки — ноль leverage REST-запросов |
+
 ## Известные ограничения (осознанные решения этапа 1)
 
 1. **ACCOUNT_UPDATE информационный**: позицию мутирует только TRADE-дельта;

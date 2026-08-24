@@ -221,24 +221,30 @@ class Executor:
         self, plan: ExecutionPlan, *, client: AsterClient | None = None
     ) -> list[CommandResult]:
         results: list[CommandResult] = []
-        # Planner client-order ids are stable only within this plan. They let us
-        # express the one safety dependency we need without introducing a DAG:
-        # a replacement cancel is allowed only after its new protection is
-        # CONFIRMED. A FAILED/SUBMITTED dependency blocks the cancel and leaves
-        # the old protection untouched for the next reconciliation pass.
+        # Planner client-order ids are stable only within this plan. Together
+        # with planner action ids they express the safety dependencies we need
+        # without introducing a DAG:
+        #   * a replacement cancel runs only after its new protection is
+        #     CONFIRMED (depends_on_client_order_id);
+        #   * an entry/protection runs only after its SET_LEVERAGE prerequisite
+        #     is CONFIRMED (depends_on_action_id). A FAILED/UNKNOWN prerequisite
+        #     blocks the dependent risk-INCREASING action; closes, reductions
+        #     and cancels carry no leverage dependency and always run.
         completed_by_planner_coid: dict[str, CommandResult] = {}
+        completed_by_action_id: dict[str, CommandResult] = {}
         for action in sorted(plan.actions, key=lambda a: a.priority):
+            dependency: CommandResult | None = None
+            missing = ""
             if action.depends_on_client_order_id is not None:
                 dependency = completed_by_planner_coid.get(action.depends_on_client_order_id)
+                missing = f"missing dependency {action.depends_on_client_order_id}"
+            if dependency is None and action.depends_on_action_id is not None:
+                dependency = completed_by_action_id.get(action.depends_on_action_id)
+                missing = f"missing dependency {action.depends_on_action_id}"
+            if missing:
                 key = command_key_of(plan, action)
                 if dependency is None:
-                    results.append(
-                        CommandResult(
-                            key,
-                            "BLOCKED",
-                            f"missing dependency {action.depends_on_client_order_id}",
-                        )
-                    )
+                    results.append(CommandResult(key, "BLOCKED", missing))
                     continue
                 if dependency.status != "CONFIRMED":
                     results.append(
@@ -258,6 +264,8 @@ class Executor:
             results.append(result)
             if action.client_order_id is not None:
                 completed_by_planner_coid[action.client_order_id] = result
+            if action.action_id is not None:
+                completed_by_action_id[action.action_id] = result
         return results
 
     async def wait_until_idle(self, account_id: str) -> None:

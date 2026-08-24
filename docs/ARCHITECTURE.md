@@ -148,15 +148,27 @@ quantity = функция(entry, stop, fees/slippage, exchange limits)
 
 Risk engine должен возвращать целевое состояние/quantity, а не отправлять ордера.
 
-Runtime leverage follower выбирается coordinator-ом автоматически для каждого
-symbol через signed Aster V3 `GET /fapi/v3/leverageBracket?symbol=...`.
-`AsterClient` typed-парсит документированный object и фактически встречающийся
-testnet list, выбирает максимальный положительный `initialLeverage` и держит
-короткий cache на пару account/symbol. Ошибка, пустой ответ или отсутствие
-валидного значения fail-closed блокируют только новый вход или реальное
-увеличение. Закрытие, сокращение и convergence защитных ордеров продолжаются с
-leverage существующей позиции и не зависят от `leverageBracket`. Master leverage
-и legacy `RiskPolicy.max_leverage` не являются пользовательским ограничителем.
+Runtime leverage follower — это control-plane, а не вычисление на hot path.
+`trading/leverage.py` (`LeverageManager`) держит в RAM два разделённых
+состояния: глобальный *кандидатный* максимум по symbol (signed
+`GET /fapi/v3/leverageBracket`, обновление stale-while-revalidate фоновым
+worker-ом, никогда из торгового пути) и account-specific *подтверждённое*
+плечо `(account_id, symbol)`. Подтверждение — `POST /fapi/v3/leverage`
+(успех = биржа приняла уровень для этого аккаунта; reject → fallback на
+account-specific bracket GET + POST меньшего максимума). Источник правды при
+рестарте — authoritative `positionRisk`: coordinator собирает leverage всех
+строк (включая flat symbol) в `AccountState.symbol_leverages` и через
+`observe()` восстанавливает RAM-модель без единой записи. SQLite для плеча не
+используется. Готовность (`is_ready`) привязана к поколению каталога: смена
+максимума инвалидирует старые подтверждения, новый вход ждёт переподготовки;
+закрытие, сокращение и защита никогда не зависят от готовности. Настройка
+происходит в естественных точках: onboarding/resume (application adapter,
+аккаунт остаётся paused при неудаче), boot recovery и bounded background
+worker (`Semaphore(2)` + pacing, приоритет trading traffic в общем limiter).
+Планировщик эмитит `SET_LEVERAGE` только при расхождении known/confirmed
+значения с таргетом и связывает его generic-зависимостью `action_id →
+depends_on_action_id` с входом и защитой: FAILED prerequisite блокирует
+риск-увеличивающие действия плана, но никогда — закрытие/отмены.
 
 Stage 2 пока не меняет `marginType` перед входом. Isolated enforcement отложен
 до отдельной реальной проверки Aster testnet; текущий режим аккаунта сохраняется
@@ -165,11 +177,12 @@ Stage 2 пока не меняет `marginType` перед входом. Isolate
 ### `trading/`
 
 Главное прикладное ядро.
-
 - `coordinator` — запускает пересчёт для затронутых followers;
 - `planner` — сравнивает actual state с target state и строит минимальный набор действий;
 - `executor` — выполняет подготовленные действия через Aster;
-- `reconciler` — повторно сверяет фактическое состояние и исправляет расхождения.
+- `reconciler` — повторно сверяет фактическое состояние и исправляет расхождения;
+- `leverage` — RAM control-plane плеча: кандидатный каталог + account-confirmed
+  состояние, фоновая сверка и preparation (см. §4 `risk/`).
 
 ### `storage/`
 

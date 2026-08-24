@@ -65,6 +65,7 @@ from copytradeaster.storage.repositories import (
     SyncBasisRepo,
 )
 from copytradeaster.trading.executor import Executor, command_key_of
+from copytradeaster.trading.leverage import LeverageManager
 from copytradeaster.trading.planner import build_plan
 from copytradeaster.trading.registry import FollowerRegistry
 
@@ -193,6 +194,7 @@ class Coordinator:
         basis: SyncBasisRepo | None = None,
         snapshot_symbols: set[str] | None = None,
         notifier: Notifier | NotificationCallback | None = None,
+        leverage: LeverageManager | None = None,
     ) -> None:
         self._registry = (
             followers if isinstance(followers, FollowerRegistry) else FollowerRegistry(followers)
@@ -229,6 +231,10 @@ class Coordinator:
         self._generation_admission_open = True
         self._active_generations = 0
         self._notification_keys_seen: set[str] = set()
+        # Control-plane for follower leverage (candidate catalog + confirmed
+        # per-account state). None keeps the legacy test seam where the target
+        # leverage resolves from the client/policy without a control plane.
+        self._leverage = leverage
         self._notification_key_order: deque[str] = deque()
 
     @staticmethod
@@ -628,10 +634,16 @@ class Coordinator:
             self._coid_factory(),
             working_type=self._working_type,
         )
+        # Keep only protection/cancel actions. A protection here belongs to an
+        # ALREADY-CONFIRMED entry whose leverage the exchange accepted, so any
+        # intra-plan leverage prerequisite is dropped: a dangling reference
+        # would wrongly BLOCK safety-critical post-fill protection.
         protection_plan = dc_replace(
             protection_plan,
             actions=[
-                action
+                dc_replace(action, depends_on_action_id=None)
+                if action.depends_on_action_id is not None
+                else action
                 for action in protection_plan.actions
                 if action.kind
                 in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP, ActionKind.CANCEL_ORDER)
@@ -786,7 +798,15 @@ class Coordinator:
         orders_by_symbol: dict[str, list] = {}
         for o in orders:
             orders_by_symbol.setdefault(o.symbol, []).append(o)
+        leverages_by_symbol: dict[str, set[int]] = {}
         for p in await fr.client.position_risk(fr.account_id):
+            leverage = int(p.leverage)
+            if leverage > 0:
+                # Leverage is exchange-persisted per symbol and present on
+                # every positionRisk row, INCLUDING flat legs. Dropping the
+                # row used to make "no position" look like "leverage unknown"
+                # and forced a redundant cold-path SET before every entry.
+                leverages_by_symbol.setdefault(p.symbol, set()).add(leverage)
             key = PositionKey(symbol=p.symbol, pos_side=p.position_side)
             leg_orders = [
                 o
@@ -801,7 +821,7 @@ class Coordinator:
                 key=key,
                 qty=p.position_amt,
                 entry_price=p.entry_price,
-                leverage=int(p.leverage),
+                leverage=leverage,
                 mark_price=p.mark_price,
                 liquidation_price=p.liquidation_price,
                 stop=stop,
@@ -835,10 +855,20 @@ class Coordinator:
                 extra_stops=extra_stops,
                 extra_tps=extra_tps,
             )
+        # Only an UNAMBIGUOUS per-symbol value counts as knowledge; disagreeing
+        # rows (isolated per-side leverage) stay unknown and fail closed.
+        symbol_leverages = {
+            symbol: next(iter(values))
+            for symbol, values in leverages_by_symbol.items()
+            if len(values) == 1
+        }
+        if self._leverage is not None and symbol_leverages:
+            self._leverage.observe(fr.account_id, symbol_leverages)
         return AccountState(
             account_id=fr.account_id,
             available_usdt=available,
             positions=positions,
+            symbol_leverages=symbol_leverages,
             open_orders=[o.model_dump() for o in orders],
         )
 
@@ -931,17 +961,26 @@ class Coordinator:
                 if not entries_allowed:
                     skips.append(await self._skip_record(key, SkipReason.PAUSED))
                     continue
-                # The signed bracket read is deliberately the final entry
-                # precondition.  A missing/invalid maximum must fail closed
-                # for a new entry, but must not block any existing-leg close
-                # or protection convergence.
-                leverage = await self._target_leverage(
-                    account_id,
-                    key.symbol,
-                    master_pos,
-                    policy,
-                    client=client,
-                )
+                # Leverage readiness is the final entry precondition: the
+                # control plane must hold a confirmed value for THIS account
+                # and generation before any new exposure. Not-ready skips the
+                # entry (never blocks closes/reductions/protection) and
+                # enqueues a bounded background preparation.
+                if self._leverage is not None:
+                    if not self._leverage.is_ready(account_id, key.symbol):
+                        self._leverage.request_prepare(account_id, key.symbol)
+                        skips.append(await self._skip_record(key, SkipReason.LEVERAGE_NOT_READY))
+                        continue
+                    leverage = self._leverage.confirmed(account_id, key.symbol)
+                else:
+                    # Legacy test seam without a composed control plane.
+                    leverage = await self._target_leverage(
+                        account_id,
+                        key.symbol,
+                        master_pos,
+                        policy,
+                        client=client,
+                    )
                 decision = entry_quantity(
                     policy,
                     actual.available_usdt,
@@ -1053,6 +1092,15 @@ class Coordinator:
                 )
             if not entries_allowed and target_abs > current_abs:
                 target_abs = current_abs  # pause: increases blocked
+            if (
+                self._leverage is not None
+                and target_abs > current_abs
+                and not self._leverage.is_ready(account_id, key.symbol)
+            ):
+                # Not-ready control plane blocks only the risk-INCREASING part;
+                # reductions, closes and protection updates keep flowing.
+                self._leverage.request_prepare(account_id, key.symbol)
+                target_abs = current_abs
             # post-fill protection: never hold more than the real risk cap from
             # the ACTUAL follower entry and the effective stop distance
             if effective_stop is not None and cap < current_abs and master_fresh:
@@ -1067,16 +1115,24 @@ class Coordinator:
             )
             leverage = follower_pos.leverage
             if target_abs > current_abs:
-                # Existing-leg reductions, closes and protection updates keep
-                # running if leverageBracket is unavailable.  Only a real
-                # increase needs the exchange maximum.
-                leverage = await self._target_leverage(
-                    account_id,
-                    key.symbol,
-                    master_pos,
-                    policy,
-                    client=client,
-                )
+                if self._leverage is not None:
+                    # Ready (clamped above otherwise): size against the
+                    # account-confirmed value instead of a network read.
+                    confirmed = self._leverage.confirmed(account_id, key.symbol)
+                    if confirmed is not None:
+                        leverage = confirmed
+                else:
+                    # Legacy test seam without a composed control plane.
+                    # Existing-leg reductions, closes and protection updates
+                    # keep running if the bracket read is unavailable; only a
+                    # real increase needs the exchange maximum.
+                    leverage = await self._target_leverage(
+                        account_id,
+                        key.symbol,
+                        master_pos,
+                        policy,
+                        client=client,
+                    )
             qty = target_abs if master_qty > 0 else -target_abs
             targets.append(
                 TargetPosition(
@@ -1101,13 +1157,13 @@ class Coordinator:
         *,
         client: AsterClient | None,
     ) -> int:
-        """Resolve the follower target leverage from its exchange account.
+        """Legacy/test-seam leverage resolution (NO control plane composed).
 
-        Production reconciliation always supplies the real ``AsterClient``;
-        its signed symbol-specific bracket read therefore has no silent
-        fallback.  ``targets_for`` remains a small public test seam and may be
-        called without a runtime client, where the legacy policy/master value
-        keeps existing pure sizing tests useful.
+        Production reconciliation uses ``LeverageManager`` RAM reads and never
+        enters this method. ``targets_for`` remains a small public test seam
+        and may be called without a runtime client, where the policy/master
+        value keeps existing pure sizing tests useful; a client exposing
+        ``max_leverage`` keeps the historical exchange-resolution tests valid.
         """
         if client is not None:
             resolver = getattr(client, "max_leverage", None)

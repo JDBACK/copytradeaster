@@ -27,6 +27,7 @@ from copytradeaster.aster.models import AgentDTO
 from copytradeaster.aster.trading_api import AsterClient
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.domain.models import AccountState
+from copytradeaster.logging_utils import get_logger
 from copytradeaster.onboarding.direct import DirectOnboardingService, validate_agent_permissions
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import (
@@ -47,6 +48,32 @@ from copytradeaster.storage.repositories import (
     AgentValidation,
     TelegramUserRepo,
 )
+from copytradeaster.trading.leverage import LeverageError
+
+log = get_logger(__name__)
+
+
+async def _prepare_follower_leverage(app: App, account_id: str) -> None:
+    """Provision leverage for a published follower before entries are allowed.
+
+    Runs in the adapter seam - never inside the transport-neutral onboarding
+    service. REAL accounts only; SHADOW runtimes have no exchange leverage.
+    A partial failure raises LeverageError with safe categories only: the
+    onboarding service maps it to ACTIVATION_FAILED (the durable row stays
+    paused), and resume rolls the entry gate back to paused.
+    """
+    manager = getattr(app, "leverage", None)
+    if manager is None:
+        return
+    runtime = app.follower_registry.get(account_id)
+    if runtime is None or getattr(runtime, "execution_mode", "REAL") != "REAL":
+        return
+    report = await manager.prepare_account(account_id, tuple(app.cfg.symbol_whitelist))
+    if report.failed:
+        details = ", ".join(
+            f"{symbol}:{category}" for symbol, category in sorted(report.failed.items())
+        )
+        raise LeverageError(f"leverage prepare failed: {details}")
 
 
 class SqliteOnboardingStore(OnboardingStore):
@@ -218,9 +245,9 @@ class DirectOnboardingAdapter(OnboardingPort):
     async def _activate(self, account_id: str) -> None:
         if self._app.follower_registry.get(account_id) is None:
             await self._app.register_follower(account_id)
-
-    async def preflight(self, request: DirectOnboardingRequest) -> DirectPreflightResult:
-        return await self._service.preflight(request)
+        # The account is committed paused; leverage must be confirmed per
+        # symbol BEFORE the user is allowed to resume entries.
+        await _prepare_follower_leverage(self._app, account_id)
 
     async def onboard(self, request: DirectOnboardingRequest) -> DirectOnboardingResult:
         return await self._service.onboard(request)
@@ -343,6 +370,12 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         ):
             return False
         await self.app.register_follower(account_id)
+        try:
+            # Best-effort here: the account is published paused either way and
+            # the background worker retries any symbol left not-ready.
+            await _prepare_follower_leverage(self.app, account_id)
+        except LeverageError as exc:
+            log.warning("leverage prepare deferred for %s: %s", account_id, exc)
         return True
 
     async def cached_snapshot(self, account_id: str) -> AccountState | None:
@@ -372,7 +405,11 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         await self.app.reconcile_follower(account_id, reason="account_pause")
 
     async def resume_account(self, account_id: str) -> None:
-        del account_id
+        # Resume is the natural re-verification point: leverage must be
+        # confirmed for every whitelisted symbol BEFORE generation admission
+        # reopens. A failure propagates so the application service rolls the
+        # durable entry gate back to paused (fail-closed).
+        await _prepare_follower_leverage(self.app, account_id)
         await self.app.coordinator.open_generation_admission()
 
     async def reconcile_account(self, account_id: str) -> None:

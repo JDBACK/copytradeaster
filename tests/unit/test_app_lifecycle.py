@@ -118,6 +118,7 @@ async def test_stop_is_concurrent_safe_and_closes_resources_once(tmp_path):
     assert app._ingest_task is None
     assert app._heartbeat_task is None
     assert app._stream_task is None
+    assert app._leverage_task is None
 
 
 @pytest.mark.asyncio
@@ -269,3 +270,22 @@ async def test_app_confirmation_isolated_notifier_failure_still_starts_postfill(
     await app._on_confirmed("copyc1", action, "abc123")
 
     assert app.coordinator.confirmed == [("copyc1", action)]
+
+
+def test_app_composes_leverage_control_plane(tmp_path):
+    """The coordinator must read leverage from the shared RAM control-plane,
+    never from per-client TTL caches on the trading path."""
+    from copytradeaster.trading.leverage import LeverageManager
+
+    app = App(
+        Settings(
+            encryption_key="ab" * 32,
+            db_path=tmp_path / "lev.sqlite3",
+            log_path=tmp_path / "logs" / "lev.log",
+        )
+    )
+    assert isinstance(app.leverage, LeverageManager)
+    assert app.coordinator._leverage is app.leverage  # noqa: SLF001
+    assert app.leverage._symbols == tuple(  # noqa: SLF001
+        dict.fromkeys(s.strip().upper() for s in app.cfg.symbol_whitelist)
+    )
