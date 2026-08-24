@@ -1436,10 +1436,18 @@ testnet evidence:
 - актуальный runtime поднят на `b238407`, READY, без in-flight commands, при
   сохранённых global emergency и pause.
 
-Функциональная часть Stage 2 готова для контролируемого testnet. Формальное
-закрытие требует только одного owner-authorized live copy cycle с финальным
-flat/no bot orders и возвратом паузы. Полный разбор без дублирования suite
-counters находится в
-[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md);
-актуальные counters — только в
-[ENGINE_TEST_STATUS_2026-08.md](../ENGINE_TEST_STATUS_2026-08.md).
+## 25. Закрытие Stage 2 и рефакторинг уведомлений — 2026-08-24
+
+Ручной приёмочный цикл WP9b успешно выполнен на Aster Testnet:
+
+1. Владелец подтвердил снятие паузы (`resume`) в Telegram.
+2. Выполнен полный цикл копирования BTCUSDT LONG: вход 0.002 BTC мастера со стопом,
+   авто-выбор плеча 200x, расчет риска, открытие 0.038 BTC фолловера со стопом,
+   закрытие мастером, снятие стопа и полное закрытие фолловера во flat (0 позиций,
+   0 ордеров на всех счетах).
+3. Проведён рефакторинг шаблонов уведомлений (`src/copytradeaster/notifications/formatter.py`):
+   сырые RPC-логи (`MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `NO_STOP`) заменены
+   на трейдерские карточки с форматированием объёмов и уровней цен.
+4. Все 632 офлайн-теста и проверки качества кода проходят чисто (coverage 87.15%).
+
+**Stage 2 официально CLOSED.**

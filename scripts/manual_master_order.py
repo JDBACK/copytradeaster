@@ -56,7 +56,6 @@ async def make_client() -> tuple[AsterClient, Database]:
         RateLimits(cfg.weight_limit_per_min, cfg.orders_limit_per_min, cfg.orders_limit_per_10s),
         creds,
         creds,
-        creds,
         NonceStore(db),
     )
     return client, db

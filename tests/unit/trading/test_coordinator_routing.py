@@ -617,7 +617,7 @@ async def test_whitelist_symbols_only(env):
 async def test_no_stop_skip_notification(env):
     coordinator, followers, db, notifications = env
     await coordinator.on_master_delta(delta_of(master_state(stop=None)))
-    assert any("NO_STOP" in n for n in notifications)
+    assert any("защитного стопа" in n for n in notifications)
     assert all(len(fr.client.placed) == 0 for fr in followers)
 
 
@@ -643,7 +643,7 @@ async def test_structured_skip_event_has_explicit_account_and_safe_text(env):
     assert all(event.account_id in {f.account_id for f in followers} for event in events)
     assert all(event.kind == "copy.skip" for event in events)
     assert all(event.severity == NotificationSeverity.INFO for event in events)
-    assert all("NO_STOP" in event.text for event in events)
+    assert all("защитного стопа" in event.text for event in events)
     assert all("[" not in event.text and "]" not in event.text for event in events)
 
 
@@ -723,7 +723,7 @@ async def test_stale_master_blocks_new_entry(env):
     state.event_time = int(_time.time() * 1000) - 60_000  # far beyond 5s window
     await coordinator.on_master_delta(delta_of(state))
     assert all(len(fr.client.placed) == 0 for fr in followers)
-    assert any("STALE_MASTER" in n for n in notifications)
+    assert any("сигнал мастера устарел" in n for n in notifications)
 
 
 async def test_stale_master_blocks_growth(env):

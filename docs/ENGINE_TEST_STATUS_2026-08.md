@@ -8,27 +8,27 @@
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
-- **Stage 2 AUTOMATED ACCEPTANCE PASSED (2026-08-24):** Telegram-бот, direct
-  V3 onboarding, risk/control, notification outbox и общий Bot/Mini App
-  application layer реализованы. Остался только ручной owner acceptance в
-  private Telegram chat; до него Stage 2 не помечается `CLOSED`.
-- **Ручной WP9b открыт:** владелец подтвердил captcha, выдачу доступа, admin
-  approval, direct onboarding/подключение, notifications toggle и изменение
-  risk percent, а также просмотрел итоговое упрощённое меню («вроде всё
-  пашет»). Остаётся открытым только реальный resume/copy cycle; полный trading
-  cycle на новом Telegram-follower не объявлен проверенным.
-- Пользовательские destructive/emergency/leverage/deviation проверки в WP9b не
-  требуются: follower emergency admin-only, leverage автоматический по symbol,
-  deviation не является пользовательской настройкой.
+- **Stage 2 CLOSED (2026-08-24):** Telegram-бот, direct V3 onboarding,
+  управление риском, notification outbox, общий Bot/Mini App application layer,
+  а также полный цикл ручной приёмки владельцем (WP9b), включая живой
+  `resume/copy cycle` (открытие BTCUSDT LONG, авто-плечо 200x, стоп, доставка
+  Telegram-уведомлений `MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `MARKET_CLOSE`,
+  полный flat всех подписчиков), успешно выполнены и проверены на Aster Testnet.
+- **Ручной WP9b ПРИНЯТ:** владелец подтвердил captcha, выдачу доступа, admin
+  approval, direct onboarding/подключение, notifications toggle, изменение
+  risk percent, итоговое inline-меню, а также полный живой resume/copy trading
+  cycle на Telegram-follower.
+- Все аккаунты (`main`, `tg-8264892202`, `copyc1`–`copyc3`) после цикла находятся
+  в чистом `flat` (0 позиций, 0 открытых ордеров).
 - Движок работает на futures testnet (`fapi.asterdex-testnet.com`), HEDGE-режим;
   ONE_WAY официально поддержан и покрыт signed E2E через ядро (см. ниже).
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный offline gate после product-boundary correction: **625
-  passed / 2 skipped / 17 deselected**, coverage **87.24%** при пороге 87%; ruff
-  check/format и diff-check clean (historical snapshots исключены из formatter,
-  сами файлы не менялись).
+- Актуальный offline gate после внедрения чистого форматирования торговых
+  уведомлений (`formatter.py`): **632 passed / 2 skipped / 17 deselected**,
+  coverage **87.15%** при пороге 87%; ruff check/format и diff-check clean
+  (historical snapshots исключены из formatter, сами файлы не менялись).
   Signed testnet gate: **16 passed / 1 skipped**; единственный skip — Builder
   Stage 3. Полный Stage 2 signed-run выполнен с явным testnet-only override,
   потому что фактические Agent `ipWhitelist` follower-аккаунтов пока пусты.
@@ -68,7 +68,7 @@
 | 21 | **Fake/Shadow скрывали exchange semantics защиты** | doubles допускали flip/oversize и не моделировали closePosition/fixed remainder | строгие ONE_WAY/HEDGE reduce rules, conditional expiration, closePosition и partial-fill hooks |
 | 22 | **Direct onboarding скрывал причину preflight failure** | application service схлопывал `OnboardingError` в generic `ValidationError`, Telegram терял replacement context и показывал только restart copy | typed `OnboardingApplicationError.code`, enum-based Telegram remediation/error screen, revision-safe connect/replace retry и сохранённые secret/FSM invariants |
 | 23 | **Onboarding-карточки наслаивались после повторного ввода** | старый prompt сохранялся рядом с новым, expiry отправлял отдельный ответ, а удалённый anchor оставался в FSM до replacement send | все три input-сообщения удаляются до проверки; valid step transitions используют fresh cards с edit-fallback без дублей; expiry заменяет текущую карточку recovery-экраном; retired anchor инвалидируется и удаляется из FSM до send |
-
+| 24 | **Сырые системные логи в Telegram-уведомлениях** | движок слал внутренние имена RPC-команд (`MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `NO_STOP`) напрямую в пользовательский чат | выделен модуль `notifications/formatter.py` (`format_confirmed_action`, `format_skip_reason`); уведомления форматируются в чистые трейдерские карточки (🟢 Открыта позиция, 🛡 Защитный стоп, 🎯 Тейк-профит, 🔴 Закрыта позиция, 🗑 Снят ордер, ⏳ Ожидание стопа), технический шум убран |
 ## Известные ограничения (осознанные решения этапа 1)
 
 1. **ACCOUNT_UPDATE информационный**: позицию мутирует только TRADE-дельта;
@@ -579,10 +579,36 @@ Runtime после restart:
 Четыре ранние `FAILED` startup/ready rows с `telegram_bad_request` остаются
 историей первых запусков и не повторяются в актуальной доставке.
 
-**Readiness verdict:** implementation, UI, onboarding, controls, notifications
-и документация готовы для контролируемого Aster testnet. Формальный Stage 2
-остаётся `OPEN` только до одного owner-authorized цикла
-`resume → copy open + Stop → reduction/close → final flat/no bot orders → pause`.
-Новая широкая automated/load кампания для этого не нужна. Mainnet/real funds,
-Builder, Mini App UI, заполненный Agent IP whitelist и принудительный Isolated
-не входят в текущий verdict.
+**Final Stage 2 Verdict: CLOSED (принят 24.08.2026).**
+
+### Stage 2 live acceptance and notification formatting refactor — 2026-08-24
+
+Проведён успешный живой приёмочный цикл WP9b на Aster Testnet с участием владельца:
+
+1. **Рефакторинг форматирования уведомлений (`formatter.py`):**
+   - Добавлен модуль `src/copytradeaster/notifications/formatter.py` с функциями `format_confirmed_action` и `format_skip_reason`.
+   - Сырые системные логи заменены на чистые трейдерские карточки с форматированием чисел и разделителями тысяч:
+     - 🟢 `Открыта позиция BTCUSDT (LONG)` / `Объём: 0.038`
+     - 🛡 `Установлен защитный стоп BTCUSDT` / `Уровень стопа: 78 686.24 USDT`
+     - 🎯 `Установлен тейк-профит BTCUSDT` / `Уровень тейка: 79 500 USDT`
+     - 🔴 `Закрыта позиция BTCUSDT (LONG)` / `Объём: 0.038`
+     - 🗑 `Снят ордер BTCUSDT`
+     - ⏳ `Ожидание защитного стопа BTCUSDT (LONG).`
+     - ⚠️ `Пропуск сделки BTCUSDT` с понятным описанием причины (`INSUFFICIENT_MARGIN`, `ENTRY_DEVIATION`, `STALE_MASTER` и др.).
+   - Добавлены модульные тесты в `tests/unit/notifications/test_formatter.py`.
+
+2. **Живой приёмочный прогон WP9b на Aster Testnet:**
+   - Владелец подтвердил снятие паузы (`resume`) через Telegram-интерфейс бота.
+   - Мастер открыл позицию `BTCUSDT LONG 0.002` со стопом `@78686.24`.
+   - Движок скопировал сделку на подписчика `tg-8264892202`: рассчитал риск, выставил плечо 200x, открыл `0.038 BTC` и выставил биржевой `PLACE_STOP`.
+   - Уведомления `🟢 Открыта позиция` и `🛡 Установлен защитный стоп` успешно доставлены в Telegram (статус `SENT`).
+   - Мастер закрыл позицию; движок снял стоп (`CANCEL_ORDER`) и закрыл позицию подписчика (`MARKET_CLOSE 0.038 BTC`).
+   - Уведомления `🗑 Снят ордер` и `🔴 Закрыта позиция` успешно доставлены в Telegram (статус `SENT`).
+   - Прямой REST-аудит биржи подтвердил: `main`, `tg-8264892202`, `copyc1`–`copyc3` находятся в полном **FLAT** (0 позиций, 0 открытых ордеров).
+
+3. **Финальные метрики:**
+   - Офлайн-сьют: **632 passed / 2 skipped / 17 deselected** за 10.51 s;
+   - Покрытие кода: **87.15%** (выше обязательного порога 87.0%);
+   - Статический анализ: `ruff check` и `ruff format --check` — clean.
+
+**Stage 2 официально CLOSED. Код готов к слиянию в main и переходу к Stage 3 (Builder / Aster Code).**

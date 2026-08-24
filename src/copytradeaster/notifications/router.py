@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from copytradeaster.domain.models import ActionKind, ExecutionAction
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.notifications.console import ConsoleNotifier
+from copytradeaster.notifications.formatter import format_confirmed_action
 from copytradeaster.notifications.models import (
     NotificationEvent,
     NotificationSeverity,
@@ -138,15 +141,48 @@ class NotificationRouter:
             if await self._outbox.has_event(event_key):
                 continue
             account_id = str(row["account_id"])
-            safe_kind = _safe_fragment(row["kind"], "command")
-            safe_account = _safe_fragment(account_id, "account")
+            payload: dict[str, Any] = {}
+            raw_payload = (
+                row.get("payload") if isinstance(row, dict) else getattr(row, "payload", None)
+            )
+            if raw_payload:
+                try:
+                    payload = (
+                        json.loads(raw_payload)
+                        if isinstance(raw_payload, str)
+                        else dict(raw_payload)
+                    )
+                except Exception:
+                    payload = {}
+            symbol = str(payload.get("symbol") or "symbol")
+            try:
+                kind = ActionKind(str(row["kind"]))
+            except Exception:
+                kind = ActionKind.MARKET_OPEN
+            coid = (
+                row.get("client_order_id")
+                if isinstance(row, dict)
+                else getattr(row, "client_order_id", None)
+            )
+            raw_prio = (
+                row.get("priority", 1) if isinstance(row, dict) else getattr(row, "priority", 1)
+            )
+            action = ExecutionAction(
+                kind=kind,
+                symbol=symbol,
+                payload=payload,
+                client_order_id=coid,
+                replaces_client_order_id=None,
+                priority=int(raw_prio),
+            )
+            text = format_confirmed_action(action, account_id=account_id)
             await self.emit(
                 NotificationEvent(
                     event_key=event_key,
                     account_id=account_id,
                     kind="execution.confirmed",
                     severity=NotificationSeverity.INFO,
-                    text=f"Команда {safe_kind} подтверждена для аккаунта {safe_account}.",
+                    text=text,
                     created_at=_safe_created_at(row["updated_at"] or row["created_at"]),
                 )
             )

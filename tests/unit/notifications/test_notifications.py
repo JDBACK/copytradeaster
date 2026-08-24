@@ -477,7 +477,7 @@ async def test_confirmed_command_recovery_is_safe_and_idempotent(db):
     )
     assert "private_key" not in row["text"]
     assert "raw exchange error" not in row["text"]
-    assert "MARKET_OPEN" in row["text"]
+    assert "Открыта позиция" in row["text"]
 
 
 async def test_router_enqueue_does_not_call_bot_sender(db):

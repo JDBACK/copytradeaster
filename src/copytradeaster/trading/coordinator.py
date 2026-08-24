@@ -45,6 +45,7 @@ from copytradeaster.domain.models import (
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.master.projector import MasterDelta, MasterState
+from copytradeaster.notifications.formatter import format_skip_reason
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
 from copytradeaster.notifications.protocol import (
     NotificationCallback,
@@ -495,11 +496,14 @@ class Coordinator:
             safe_reason = _safe_fragment(skip.reason.value)
             safe_pos_side = _safe_fragment(skip.pos_side.value)
             episode = self._skip_episode_token(skip, delta.state)
+            skip_text = format_skip_reason(
+                skip.symbol,
+                skip.reason,
+                skip.pos_side,
+                account_id=fr.account_id,
+            )
             await self._notify(
-                (
-                    f"Follower {safe_account}: пропуск {safe_symbol} "
-                    f"({safe_reason}, {safe_pos_side})."
-                ),
+                skip_text,
                 event_key=(
                     f"skip:{safe_account}:{safe_symbol}:{safe_pos_side}:{safe_reason}:{episode}"
                 ),

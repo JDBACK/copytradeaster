@@ -20,6 +20,7 @@ from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.logging_utils import DEFAULT_LOG_PATH, get_logger, setup_logging
 from copytradeaster.master.projector import MasterProjector
 from copytradeaster.notifications.console import ConsoleNotifier
+from copytradeaster.notifications.formatter import format_confirmed_action
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
 from copytradeaster.notifications.protocol import NotificationCallback, Notifier, as_notifier
 from copytradeaster.storage.database import Database
@@ -648,12 +649,13 @@ class App:
             if command_key is not None
             else f"command:unknown:{safe_account}:{safe_kind}:{safe_symbol}"
         )
+        formatted_text = format_confirmed_action(action, account_id=account_id)
         await self._emit_notification(
             event_key=event_key,
             kind="execution.confirmed",
             severity=NotificationSeverity.INFO,
             account_id=account_id,
-            text=f"Команда {safe_kind} для {safe_symbol} подтверждена.",
+            text=formatted_text,
         )
         try:
             await self.coordinator.on_command_confirmed(account_id, action)

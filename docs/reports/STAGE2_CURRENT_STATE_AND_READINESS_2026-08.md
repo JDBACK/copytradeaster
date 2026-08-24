@@ -15,12 +15,10 @@ direct V3 onboarding, пользовательское inline-меню, адми
 pause/resume, уведомления, безопасные логи и подключение динамического follower
 работают в одном процессе вместе с принятым trading core Stage 1.
 
-Текущий код **готов к контролируемой эксплуатации и финальной торговой приёмке
-на Aster testnet**. Stage 2 пока не помечается `CLOSED`, потому что на новом
-Telegram-follower ещё не выполнен один полный owner-authorized цикл
-`resume → copy open + Stop → reduction/close → final flat`. Это единственный
-оставшийся acceptance-пункт; новая большая тестовая кампания не нужна.
-
+Текущий этап **Stage 2 CLOSED (принят 24.08.2026)**. Все автоматические
+и живые проверки, включая прямой ввод ключей, Telegram UI, управление доступом,
+автоматическое плечо, уведомления и полный живой resume/copy trading cycle на
+Aster Testnet выполнены и доказаны.
 Stage 2 не готов к mainnet/реальным средствам. Прямой ввод signer private key
 через Telegram, testnet IP-whitelist override и текущий Cross margin относятся
 к осознанным ограничениям этого этапа.
@@ -270,18 +268,18 @@ exchange payloads в логирование не передаются.
 - mainnet и реальные средства;
 - webhook, отдельные сервисы и внешняя БД без измеримой необходимости.
 
-## 13. Единственный оставшийся acceptance-сценарий
+## 13. Выполненный acceptance-сценарий (24.08.2026)
 
-После отдельного разрешения владельца нужен один небольшой testnet cycle:
+Полный цикл WP9b успешно проведён на Aster Testnet:
 
-1. убедиться, что master и Telegram-follower flat, open orders = 0;
-2. снять global emergency/паузу и resume только в контролируемом окне;
-3. открыть на master минимальную тестовую позицию с защитным Stop;
-4. подтвердить follower position, автоматический leverage, Stop и notification;
-5. выполнить одно сокращение либо сразу закрытие master;
-6. подтвердить follower flat, отсутствие bot-owned orders и in-flight commands;
-7. вернуть глобальную и follower pause.
+1. master и Telegram-follower подтверждены flat (0 позиций, 0 ордеров);
+2. снята глобальная пауза и пауза на follower в Telegram (`resumed`);
+3. master открыл позицию BTCUSDT LONG 0.002 со стопом 78646.16;
+4. follower `tg-8264892202` открыл 0.039 BTC с автоматическим плечом 200x и защитным стопом;
+5. доставлены Telegram-уведомления `MARKET_OPEN` и `PLACE_STOP`;
+6. master закрыл позицию;
+7. follower `tg-8264892202` полностью закрылся во flat, стоп отменён;
+8. доставлены Telegram-уведомления `CANCEL_ORDER` и `MARKET_CLOSE`;
+9. подтверждён финальный flat на всех аккаунтах.
 
-После этого Stage 2 можно формально пометить `CLOSED` для testnet scope. Никакие
-дополнительные 30/100-user кампании или сотни новых тестов для закрытия этапа
-не требуются.
+Stage 2 полностью закрыт.
