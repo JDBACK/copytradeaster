@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+Private Telegram bot (current); Telegram Mini App/web (future).
 
 ## Users
 
@@ -80,6 +80,8 @@ reconciliation восстанавливают правильное состоя�
 
 ## Evidence on Hand
 
+- актуальный scope и readiness verdict Stage 2:
+  `docs/reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`;
 - принятое торговое ядро и актуальные тестовые доказательства:
   `docs/ENGINE_TEST_STATUS_2026-08.md`;
 - архитектурные инварианты: `docs/ARCHITECTURE.md`;

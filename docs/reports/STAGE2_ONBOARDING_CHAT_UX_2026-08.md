@@ -53,3 +53,11 @@ extra duplicate message, stale-anchor cleanup, replacement/retry branches, and
 absence of addresses/keys in outgoing text, FSM, and logs. The final offline and
 static gate results are recorded in the single current status document named
 above.
+
+## Current-state note — 2026-08-24
+
+После этого UX pass владелец подтвердил итоговое подключение и упрощённое меню.
+Фраза выше о том, что данный узкий report не делает emergency-выводов, остаётся
+исторической границей отчёта; текущий follower emergency уже удалён из public
+UI/application boundary. Итоговый verdict и оставшийся один live copy cycle:
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).

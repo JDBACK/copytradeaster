@@ -153,9 +153,10 @@ symbol через signed Aster V3 `GET /fapi/v3/leverageBracket?symbol=...`.
 `AsterClient` typed-парсит документированный object и фактически встречающийся
 testnet list, выбирает максимальный положительный `initialLeverage` и держит
 короткий cache на пару account/symbol. Ошибка, пустой ответ или отсутствие
-валидного значения останавливают production recompute fail-closed; master
-leverage и legacy `RiskPolicy.max_leverage` не являются пользовательским
-ограничителем.
+валидного значения fail-closed блокируют только новый вход или реальное
+увеличение. Закрытие, сокращение и convergence защитных ордеров продолжаются с
+leverage существующей позиции и не зависят от `leverageBracket`. Master leverage
+и legacy `RiskPolicy.max_leverage` не являются пользовательским ограничителем.
 
 Stage 2 пока не меняет `marginType` перед входом. Isolated enforcement отложен
 до отдельной реальной проверки Aster testnet; текущий режим аккаунта сохраняется
@@ -654,6 +655,13 @@ application
 Один asyncio process, long polling, SQLite WAL; Redis/webhook и отдельный
 backend не нужны масштабу 10–30 (максимум около 100) пользователей. Bot и
 будущая Mini App переиспользуют application service. Trading core не меняется.
+
+Фактический контур включает captcha + durable access approval, direct V3
+onboarding с typed errors, inline dashboard/status/risk/notifications/account,
+admin controls, follower pause/resume, автоматический symbol leverage и
+notification outbox. Пользователь меняет только риск на Stop; follower
+emergency запрещён, а `marginType` этап не меняет. Актуальный readiness verdict:
+`reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`.
 
 ### Этап 3 — Aster Code / Builder
 

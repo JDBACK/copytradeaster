@@ -194,7 +194,7 @@ Mainnet V3 reference содержит `bind/create/list/update/subAccountTransfe
 | Stop Loss | `STOP`, `STOP_MARKET` | `stopPrice`, `workingType`, `priceProtect`; может закрывать заданное количество или всю позицию условным `closePosition=true`. |
 | Take Profit | `TAKE_PROFIT`, `TAKE_PROFIT_MARKET` | Те же базовые механизмы. |
 | Trailing stop | `TRAILING_STOP_MARKET` | `activationPrice` и `callbackRate` 0.1–5%. |
-| Плечо | `POST /fapi/v3/leverage` | Запрос 1–125; фактический максимум зависит от символа и notional bracket. |
+| Плечо | `POST /fapi/v3/leverage` | Текст reference указывает 1–125, но live testnet 24.08.2026 принял 200x для BTCUSDT/ETHUSDT; фактический максимум задаёт symbol-specific `leverageBracket`, а не локальный cap. |
 | Cross/Isolated | `POST /fapi/v3/marginType` | Поддерживается. |
 | Изменение isolated margin | `POST /fapi/v3/positionMargin` | Добавить или уменьшить маржу позиции. |
 | One-way/Hedge | `POST /fapi/v3/positionSide/dual` | Режим меняется для аккаунта. |
@@ -204,6 +204,24 @@ Mainnet V3 reference содержит `bind/create/list/update/subAccountTransfe
 | Sub-accounts | `createSubAccount`, `getSubAccountList`, `updateSubAccount`, `subAccountTransfer` | Отдельные assets/positions/V3 keys и внутреннее управление средствами. |
 | Биржевые ограничения | `GET /fapi/v3/exchangeInfo` | Tick size, step size, min/max qty, min notional, типы ордеров, лимиты. |
 | Лимиты плеча | `GET /fapi/v3/leverageBracket` | Проверка допустимого notional на выбранном плече. |
+
+### Live testnet correction: leverage brackets — 2026-08-24
+
+Signed `GET /fapi/v3/leverageBracket?symbol=...` на подключённом follower
+показал расхождение с текстом reference:
+
+- даже при переданном `symbol` testnet вернул list с одним symbol object, а не
+  документированный одиночный object;
+- максимальный положительный `initialLeverage`: BTCUSDT = 200, ETHUSDT = 200,
+  SOLUSDT = 100;
+- signed `POST /fapi/v3/leverage` на flat/paused account принял эти значения,
+  а последующий `positionRisk` подтвердил их;
+- позиции и open orders оставались нулевыми, `marginType` остался `cross`.
+
+Следствие для Stage 2: adapter принимает обе формы ответа и не применяет
+устаревший локальный ceiling 125x. Leverage читается только для нового входа или
+увеличения; сбой endpoint не блокирует закрытие, сокращение и защиту. Сам Stage 2
+`marginType` не меняет.
 
 ### Стопы, тейки и их перестановка
 

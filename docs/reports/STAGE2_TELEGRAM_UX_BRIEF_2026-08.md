@@ -573,3 +573,6 @@ Scenes можно пересмотреть, если одновременно п
   Isolated enforcement отложен до отдельной реальной проверки Aster testnet;
 - dashboard не обещает фиксированное плечо вроде `20x`. Full trading cycle и
   resume/copy flow не считаются проверенными только по UI/regression tests.
+
+Текущий фактический UI/readiness verdict после owner-проверки ведётся в
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).

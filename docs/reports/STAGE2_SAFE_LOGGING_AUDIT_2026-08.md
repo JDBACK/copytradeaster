@@ -81,3 +81,11 @@ REJECTED — только `changed_fields=status`, а duplicate idempotent decis
 Post-commit presentation failure не откатывает durable state: актуальное
 состояние при необходимости отдельно читается из DB. WP9b и общий Stage 2
 остаются открытыми до ручной owner приёмки.
+
+## Current product-boundary note — 2026-08-24
+
+Упоминания follower `EMERGENCY` выше фиксируют исторический audit scope того
+прохода. В текущем продукте follower emergency удалён из UI/router и отвергается
+application boundary; global emergency остаётся admin-only. Notifications/risk
+и итоговый UI после этого подтверждены владельцем. Текущий readiness verdict:
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).

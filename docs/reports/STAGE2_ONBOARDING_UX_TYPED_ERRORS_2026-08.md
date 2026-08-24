@@ -37,3 +37,10 @@ coverage и static evidence записаны в живом
 boundary ранее потерял classification. Наиболее вероятные классы для повторной
 проверки — незавершённая authorization API wallet, mismatch пары API wallet
 address/private key или permission/signed-read prerequisite.
+
+## Current-state note — 2026-08-24
+
+Последующая owner-проверка завершилась успешным direct onboarding; typed error
+и retry flow считаются принятыми для testnet scope. Актуальная общая готовность
+и оставшийся live trading acceptance описаны в
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).

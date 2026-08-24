@@ -1,9 +1,13 @@
 # План разработки Stage 2: Telegram + direct V3 onboarding
 
-Дата подготовки: 2026-08-23  
-Статус: **реализация и автоматический gate выполнены 2026-08-24; Stage 2 не CLOSED, открыт ручной WP9b**  
-Ветка: `codex/stage-2-telegram`, baseline `03e3060` (`main`)  
-Область: один master, 10–30 followers на первом запуске, максимум 100  
+Дата подготовки: 2026-08-23
+
+Статус: **реализация и UI-приёмка выполнены 2026-08-24; формальный Stage 2 OPEN только до одного live resume/copy cycle**
+
+Ветка: `codex/stage-2-telegram`, baseline `03e3060` (`main`)
+
+Область: один master, 10–30 followers на первом запуске, максимум 100
+
 Среда acceptance: только Aster futures testnet
 
 ## 0. Текущий execution status — 2026-08-24
@@ -20,10 +24,13 @@
   deviation internal.
 - Финальный аудит, review и acceptance выполняет root лично. Они не являются
   задачами субагентов и не подменяют ручную owner acceptance.
+- Актуальный фактический scope, архитектура и readiness verdict вынесены в
+  [STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).
 
-Раздел 14 ниже сохранён как исходный плановый baseline: его чек-листы `[ ]`
-не являются текущей картой выполненных работ и не переписываются задним числом.
-Текущая карта исполнения — этот раздел и отдельный WP9b-чек-лист в
+Разделы 1–22 ниже сохранены как исходный плановый baseline: старый scope,
+acceptance matrix и чек-листы `[ ]` отражают ход проектирования и не являются
+текущей product truth. Они не переписываются задним числом. Текущая карта —
+этот status, раздел 24, итоговый readiness report и WP9b в
 `docs/DEV_PLAN_SKELETON.md`.
 
 ## 1. Цель и итоговое архитектурное решение
@@ -1409,3 +1416,30 @@ testnet evidence:
   отдельной реальной проверки Aster testnet. Mock/Fake evidence её не заменяет;
 - владелец вручную подтвердил notifications и изменение risk percent. Полный
   trading cycle/resume-copy остаётся открытым и не объявляется проверенным.
+
+## 24. Финальный текущий срез — 2026-08-24
+
+После owner feedback и root acceptance первоначальный план реализован с более
+узкой пользовательской границей:
+
+- follower меняет только риск на Stop, notifications и собственные
+  pause/resume/account lifecycle;
+- leverage автоматически берётся из signed symbol-specific
+  `leverageBracket`; реальный testnet подтвердил 200x для BTCUSDT/ETHUSDT и
+  100x для SOLUSDT. Ошибка чтения блокирует только новый вход/увеличение, но не
+  закрытие, сокращение или защиту;
+- follower emergency удалён из UI/router и запрещён application boundary;
+  global emergency остаётся admin-only;
+- `marginType` не меняется, текущий Cross сохранён; Isolated отложен;
+- captcha/access approval, direct onboarding, typed errors, чистые Step 1/2/3,
+  notifications, risk и итоговое меню вручную подтверждены владельцем;
+- актуальный runtime поднят на `b238407`, READY, без in-flight commands, при
+  сохранённых global emergency и pause.
+
+Функциональная часть Stage 2 готова для контролируемого testnet. Формальное
+закрытие требует только одного owner-authorized live copy cycle с финальным
+flat/no bot orders и возвратом паузы. Полный разбор без дублирования suite
+counters находится в
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md);
+актуальные counters — только в
+[ENGINE_TEST_STATUS_2026-08.md](../ENGINE_TEST_STATUS_2026-08.md).

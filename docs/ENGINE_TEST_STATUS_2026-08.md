@@ -14,8 +14,9 @@
   private Telegram chat; до него Stage 2 не помечается `CLOSED`.
 - **Ручной WP9b открыт:** владелец подтвердил captcha, выдачу доступа, admin
   approval, direct onboarding/подключение, notifications toggle и изменение
-  risk percent. Остаётся открытым только resume/copy cycle; полный trading
-  cycle не объявлен проверенным.
+  risk percent, а также просмотрел итоговое упрощённое меню («вроде всё
+  пашет»). Остаётся открытым только реальный resume/copy cycle; полный trading
+  cycle на новом Telegram-follower не объявлен проверенным.
 - Пользовательские destructive/emergency/leverage/deviation проверки в WP9b не
   требуются: follower emergency admin-only, leverage автоматический по symbol,
   deviation не является пользовательской настройкой.
@@ -559,3 +560,29 @@ nonzero positions=0 и open orders=0.
 
 Focused regression evidence for this correction: **210 passed** across the
 updated Aster endpoint, coordinator, application and Telegram boundary tests.
+
+### Final Stage 2 state/readiness snapshot — 2026-08-24
+
+Текущий кодовый срез: `b238407` в `codex/stage-2-telegram`. Root повторно
+проверил product boundary, architecture diff, real signed leverage behavior и
+запущенный runtime. Фактический итог подробно записан в
+`reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`.
+
+Runtime после restart:
+
+- `ready=true`, `degraded_active=false`;
+- `allow_new_entries=false`, `emergency_active=true`;
+- Telegram-follower enabled, `risk_percent=0.01`, per-account entries paused;
+- in-flight execution commands = 0;
+- последние `engine.startup`/`engine.ready` outbox events имеют `SENT`.
+
+Четыре ранние `FAILED` startup/ready rows с `telegram_bad_request` остаются
+историей первых запусков и не повторяются в актуальной доставке.
+
+**Readiness verdict:** implementation, UI, onboarding, controls, notifications
+и документация готовы для контролируемого Aster testnet. Формальный Stage 2
+остаётся `OPEN` только до одного owner-authorized цикла
+`resume → copy open + Stop → reduction/close → final flat/no bot orders → pause`.
+Новая широкая automated/load кампания для этого не нужна. Mainnet/real funds,
+Builder, Mini App UI, заполненный Agent IP whitelist и принудительный Isolated
+не входят в текущий verdict.

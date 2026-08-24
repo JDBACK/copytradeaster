@@ -81,6 +81,11 @@ pydantic v2            — схемы ордеров/событий/конфиг
 
 ### Этап 2 — Бот + прямой ввод ключей
 
+**Текущий verdict:** функциональная реализация и пользовательский UI готовы для
+контролируемого testnet. Формальный статус остаётся `OPEN` только до одного
+owner-authorized resume/copy cycle; подробный фактический срез:
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).
+
 - aiogram: приём V3-набора (адрес обычного testnet-кошелька + `API wallet address` + `private key` под ним + права), проверка подключения копика (валидация canPerpTrade / ipWhitelist), настройка только процента риска на Stop.
 - Торговое ядро этапа 1 подключается как библиотека; креды пользователя отделены от торговли.
 - Уведомления в Telegram.
@@ -137,7 +142,7 @@ Inline-first UX brief и решение по Scenes Wizard:
   адреса и raw exchange payloads не являются logging arguments.
 - [x] Control audit boundary для пользовательских state-changing действий:
   bounded `control_audit` attempt/success/rejected для notifications, risk,
-  pause/resume, RESUME/EMERGENCY/DISCONNECT confirmations и admin
+  pause/resume, RESUME/DISCONNECT confirmations и admin
   access/reconcile/global controls; risk success перечисляет только имена
   изменённых полей, notification success различает enabled/disabled, admin
   decisions используют только target из безопасного returned DTO: APPROVED
@@ -170,6 +175,8 @@ Stage 2 не закрывается автоматически и остаётс
   проверялся;
 - [x] переключатель notifications в Telegram подтверждён владельцем вручную;
 - [x] изменение risk policy (risk %) в Telegram подтверждено владельцем вручную.
+- [x] итоговое упрощённое inline-меню без follower leverage/deviation/emergency
+  просмотрено владельцем; текущая оценка владельца: «вроде всё пашет».
 
 Торговые действия — отдельный блок, пока не подтверждён владельцем:
 
@@ -180,7 +187,9 @@ Stage 2 не закрывается автоматически и остаётс
 deviation не является пользовательской настройкой.
 
 Полный trading cycle по-прежнему не объявлен проверенным; Stage 2 остаётся
-открытым до отдельной проверки resume/copy cycle владельцем.
+открытым до отдельной проверки resume/copy cycle владельцем. Для закрытия нужен
+ровно один небольшой цикл, описанный в итоговом readiness report; новая широкая
+тестовая кампания не требуется.
 
 ### Этап 3 — Builder (Aster Code)
 

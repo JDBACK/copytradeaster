@@ -78,3 +78,10 @@ unknown private /start
 
 Автоматическая access-approval часть Stage 2 закрыта regression gate-ом. Общий
 Stage 2 остаётся открытым до ручной owner acceptance flow в Telegram.
+
+## Current-state note — 2026-08-24
+
+После этой кампании owner вручную подтвердил approval, direct onboarding,
+notifications, risk и итоговый inline UI. Текущий Stage 2 открыт уже не из-за
+access flow, а только до одного live resume/copy cycle. Актуальный verdict:
+[STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).
