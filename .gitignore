@@ -1,5 +1,6 @@
 .firecrawl/
 .env
+.botkey
 __pycache__/
 .venv/
 *.pyc

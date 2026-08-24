@@ -23,6 +23,26 @@ class BalanceDTO(_Camel):
     max_withdraw_amount: Decimal
 
 
+class AgentDTO(_Camel):
+    """Aster V3 Agent permission record.
+
+    The Agent endpoint is a USER_DATA endpoint and its response is a list.  A
+    few fields are deliberately nullable here: an omitted/null critical field
+    is a valid wire response but must be rejected by the onboarding validator
+    (fail closed), rather than silently receiving a permissive default.
+    """
+
+    agent_address: str | None = Field(default=None, alias="agentAddress")
+    agent_name: str | None = Field(default=None, alias="agentName")
+    source: str | None = None
+    expired: int | None = None
+    ip_whitelist: str | list[str] | None = Field(default=None, alias="ipWhitelist")
+    can_read: bool | None = Field(default=None, alias="canRead")
+    can_spot_trade: bool | None = Field(default=None, alias="canSpotTrade")
+    can_perp_trade: bool | None = Field(default=None, alias="canPerpTrade")
+    can_withdraw: bool | None = Field(default=None, alias="canWithdraw")
+
+
 class PositionDTO(BaseModel):
     symbol: str
     position_amt: Decimal = Field(alias="positionAmt")
@@ -113,6 +133,7 @@ class ExchangeInfo(BaseModel):
 
 
 __all__ = [
+    "AgentDTO",
     "BalanceDTO",
     "ExchangeInfo",
     "OrderDTO",

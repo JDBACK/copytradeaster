@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+
+class MigrationConflictError(RuntimeError):
+    """Fail closed with an actionable diagnostic for unsafe legacy data."""
+
 
 MIGRATIONS: list[str] = [
     """
@@ -90,7 +97,82 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE execution_commands ADD COLUMN operation_id TEXT
     """,
+    """
+    CREATE TABLE telegram_users(
+      telegram_user_id INTEGER PRIMARY KEY,
+      chat_id INTEGER NOT NULL UNIQUE,
+      account_id TEXT UNIQUE REFERENCES accounts(id),
+      role TEXT NOT NULL CHECK(role IN ('USER','ADMIN')),
+      notifications_enabled INTEGER NOT NULL DEFAULT 1,
+      blocked_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE agent_validations(
+      account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+      signer_address TEXT NOT NULL,
+      can_read INTEGER NOT NULL,
+      can_perp_trade INTEGER NOT NULL,
+      can_withdraw INTEGER NOT NULL,
+      expired_ms INTEGER NOT NULL,
+      ip_whitelist TEXT NOT NULL,
+      status TEXT NOT NULL,
+      checked_at TEXT NOT NULL,
+      last_error_code TEXT
+    )
+    """,
+    """
+    CREATE TABLE notification_outbox(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_key TEXT NOT NULL,
+      telegram_user_id INTEGER NOT NULL REFERENCES telegram_users(telegram_user_id),
+      chat_id INTEGER NOT NULL,
+      account_id TEXT REFERENCES accounts(id),
+      kind TEXT NOT NULL,
+      severity TEXT NOT NULL CHECK(severity IN ('INFO','WARN','CRITICAL')),
+      text TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('PENDING','SENDING','SENT','FAILED')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      lease_until TEXT,
+      claimed_by TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      sent_at TEXT,
+      UNIQUE(event_key, telegram_user_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_notification_outbox_status_available"
+    " ON notification_outbox(status, available_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_user_address_lower"
+    " ON accounts(lower(user_address))",
+    "ALTER TABLE telegram_users ADD COLUMN access_enabled INTEGER NOT NULL DEFAULT 1",
+    """
+    CREATE TABLE telegram_access_requests(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id INTEGER NOT NULL,
+      chat_id INTEGER NOT NULL,
+      username TEXT,
+      display_name TEXT,
+      status TEXT NOT NULL CHECK(status IN ('PENDING','APPROVED','REJECTED')),
+      requested_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by INTEGER
+    )
+    """,
+    "CREATE UNIQUE INDEX idx_telegram_access_requests_pending_user"
+    " ON telegram_access_requests(telegram_user_id) WHERE status='PENDING'",
+    "CREATE INDEX idx_telegram_access_requests_status_id ON telegram_access_requests(status, id)",
 ]
+
+CASEFOLD_ADDRESS_INDEX_VERSION = next(
+    version
+    for version, statement in enumerate(MIGRATIONS)
+    if "idx_accounts_user_address_lower" in statement
+)
 
 
 class Database:
@@ -131,6 +213,8 @@ class Database:
         for version in range(last_version + 1, len(MIGRATIONS)):
             await self.conn.execute("BEGIN")
             try:
+                if version == CASEFOLD_ADDRESS_INDEX_VERSION:
+                    await self._assert_casefold_addresses_unique()
                 await self.conn.execute(MIGRATIONS[version])
                 await self.conn.execute(
                     "INSERT INTO schema_migrations(version) VALUES (?)", (version,)
@@ -141,6 +225,27 @@ class Database:
                 await self.conn.rollback()
                 raise
         return applied
+
+    async def _assert_casefold_addresses_unique(self) -> None:
+        """Explain legacy case-only duplicates before SQLite's opaque failure."""
+        if self.conn is None:
+            raise RuntimeError("Database.connect() must be called first")
+        cursor = await self.conn.execute(
+            "SELECT group_concat(id, ',') AS account_ids "
+            "FROM accounts GROUP BY lower(user_address) HAVING COUNT(*) > 1 "
+            "ORDER BY lower(user_address) LIMIT 10"
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            await cursor.close()
+        if not rows:
+            return
+        conflicts = "; ".join(str(row["account_ids"]) for row in rows)
+        raise MigrationConflictError(
+            "case-insensitive duplicate Aster user addresses in accounts: "
+            f"{conflicts}. Disable and resolve the duplicate account rows before restart"
+        )
 
     async def close(self) -> None:
         if self.conn is not None:
@@ -171,6 +276,34 @@ class Database:
                 raise RuntimeError("Database.connect() must be called first")
             await self.conn.commit()
         return rowcount, lastrowid
+
+    @asynccontextmanager
+    async def transaction(self, *, immediate: bool = True) -> AsyncIterator[aiosqlite.Connection]:
+        """Run a short explicit transaction under the process-wide write lock.
+
+        The atomic Stage 2 credential/ownership write deliberately uses this
+        primitive with direct statements on the yielded connection.  It must
+        not call :meth:`execute_write` from inside the context: that helper
+        takes the same lock and commits each statement independently.
+        """
+        if self.conn is None:
+            raise RuntimeError("Database.connect() must be called first")
+
+        async with self.write_lock:
+            conn = self.conn
+            begin_cursor = await conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            await begin_cursor.close()
+            try:
+                yield conn
+            except BaseException:
+                await conn.rollback()
+                raise
+            else:
+                try:
+                    await conn.commit()
+                except BaseException:
+                    await conn.rollback()
+                    raise
 
     async def fetchone(self, sql: str, params: tuple = ()) -> object | None:
         cur = await self.execute(sql, params)

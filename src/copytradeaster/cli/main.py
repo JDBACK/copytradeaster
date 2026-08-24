@@ -1,4 +1,4 @@
-"""CLI: init-db, import-wallet, approve-builder, run, status, reconcile,
+"""CLI: init-db, import-wallet, approve-builder, run-bot, status, reconcile,
 pause/resume, emergency-close-all."""
 
 from __future__ import annotations
@@ -6,22 +6,49 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
-import uuid
 from pathlib import Path
 
+from copytradeaster.application.control import (
+    EmergencyController,
+    EmergencyReport,
+)
+from copytradeaster.application.control import build_close_plan as _build_close_plan
 from copytradeaster.config import Settings
 from copytradeaster.logging_utils import redact
-from copytradeaster.storage.repositories import NonceStore, SettingsRepo
+from copytradeaster.storage.repositories import NonceStore, SettingsRepo, TelegramUserRepo
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="copytradeaster", description="AsterDex copy-trade engine (stage 1)"
+        prog="copytradeaster",
+        description="AsterDex V3 copy-trade bot: core engine and Telegram runtime (testnet)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-db", help="create/migrate the SQLite database")
+
+    p_telegram_user = sub.add_parser(
+        "telegram-user", help="bootstrap the closed Telegram user allowlist"
+    )
+    telegram_user_sub = p_telegram_user.add_subparsers(dest="telegram_user_action", required=True)
+    p_telegram_add = telegram_user_sub.add_parser(
+        "add", help="add a USER by numeric Telegram user ID"
+    )
+    p_telegram_add.add_argument("user_id", help="positive numeric Telegram user ID")
+    p_telegram_add.add_argument(
+        "--chat-id",
+        default=None,
+        help="private chat ID (defaults to the Telegram user ID)",
+    )
+    telegram_user_sub.add_parser("list", help="list safe Telegram allowlist fields")
+    for action, help_text in (
+        ("block", "block Telegram notifications for one user"),
+        ("unblock", "restore Telegram notifications for one user"),
+    ):
+        p_action = telegram_user_sub.add_parser(action, help=help_text)
+        p_action.add_argument("user_id", help="positive numeric Telegram user ID")
 
     p_import = sub.add_parser("import-wallet", help="import wallet.txt blocks")
     p_import.add_argument("file", type=Path)
@@ -31,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_approve.add_argument("--accounts", default="all", help="all or comma-separated IDs")
     p_approve.add_argument("--max-fee-rate", default=None)
 
-    sub.add_parser("run", help="run the engine until Ctrl+C")
+    sub.add_parser("run", help="run the core engine until Ctrl+C")
+    sub.add_parser("run-bot", help="run the Stage 2 Telegram runtime until Ctrl+C")
     sub.add_parser("status", help="show engine status")
     p_reconcile = sub.add_parser("reconcile", help="force reconciliation sweep")
     p_reconcile.add_argument("--account", default=None)
@@ -59,12 +87,25 @@ def main() -> int:
 async def _dispatch(args) -> int:
     if args.command == "init-db":
         return await _init_db()
+    if args.command == "telegram-user":
+        if args.telegram_user_action == "add":
+            return await _telegram_user_add(args.user_id, args.chat_id)
+        if args.telegram_user_action == "list":
+            return await _telegram_user_list()
+        if args.telegram_user_action == "block":
+            return await _telegram_user_set_blocked(args.user_id, blocked=True)
+        if args.telegram_user_action == "unblock":
+            return await _telegram_user_set_blocked(args.user_id, blocked=False)
+        print("error: unknown telegram-user action", file=sys.stderr)
+        return 2
     if args.command == "import-wallet":
         return await _import_wallet(args.file, wipe=args.wipe)
     if args.command == "approve-builder":
         return await _approve_builder(args.accounts, args.max_fee_rate)
     if args.command == "run":
         return await _run()
+    if args.command == "run-bot":
+        return await _run_bot()
     if args.command == "status":
         return await _status()
     if args.command == "reconcile":
@@ -109,6 +150,155 @@ async def _init_db() -> int:
     await db.close()
     print(f"database ready at {cfg.db_path} (migrations applied: {applied})")
     return 0
+
+
+# --- Telegram allowlist bootstrap ------------------------------------------------------
+
+
+def _positive_telegram_id(value: object, field: str) -> int:
+    """Normalize a CLI Telegram ID without accepting bools or lossy integers."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a positive integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text or not text.isdecimal():
+            raise ValueError(f"{field} must be a positive integer")
+        parsed = int(text)
+    else:
+        raise ValueError(f"{field} must be a positive integer")
+    if parsed <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return parsed
+
+
+async def _telegram_db():
+    from copytradeaster.storage.database import Database
+
+    cfg = _load_settings()
+    db = Database(cfg.db_path)
+    await db.connect()
+    await db.migrate()
+    return db
+
+
+async def _telegram_user_add(user_id: object, chat_id: object | None = None) -> int:
+    try:
+        telegram_user_id = _positive_telegram_id(user_id, "user_id")
+        requested_chat_id = None if chat_id is None else _positive_telegram_id(chat_id, "chat_id")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    db = await _telegram_db()
+    try:
+        users = TelegramUserRepo(db)
+        current = await users.get(telegram_user_id)
+        if current is None:
+            effective_chat_id = telegram_user_id if requested_chat_id is None else requested_chat_id
+            await users.upsert(
+                telegram_user_id,
+                effective_chat_id,
+                role="USER",
+            )
+            print(f"added telegram user {telegram_user_id} chat_id={effective_chat_id} role=USER")
+            return 0
+
+        # Re-adding an existing identity is deliberately a no-op on ownership,
+        # role, and notification state.  An explicit --chat-id may repair a
+        # changed private chat destination; omission preserves the stored one.
+        effective_chat_id = (
+            int(current["chat_id"]) if requested_chat_id is None else requested_chat_id
+        )
+        notifications_enabled = _telegram_bool_value(
+            current["notifications_enabled"], "notifications"
+        )
+        await users.upsert(
+            telegram_user_id,
+            effective_chat_id,
+            role=str(current["role"]),
+            account_id=current["account_id"],
+            notifications_enabled=notifications_enabled,
+            blocked_at=current["blocked_at"],
+        )
+        print(
+            f"already present telegram user {telegram_user_id} "
+            f"chat_id={effective_chat_id} role={current['role']} "
+            f"account={current['account_id'] or '-'}"
+        )
+        return 0
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        print(f"error: cannot add telegram user {telegram_user_id}: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        await db.close()
+
+
+async def _telegram_user_list() -> int:
+    db = await _telegram_db()
+    try:
+        rows = await db.fetchall(
+            "SELECT telegram_user_id, chat_id, role, account_id, "
+            "notifications_enabled, blocked_at, access_enabled FROM telegram_users "
+            "ORDER BY telegram_user_id"
+        )
+        for row in rows:
+            notifications = _telegram_bool_word(row["notifications_enabled"], "notifications")
+            blocked = "yes" if row["blocked_at"] is not None else "no"
+            print(
+                f"user_id={row['telegram_user_id']} chat_id={row['chat_id']} "
+                f"role={row['role']} account={row['account_id'] or '-'} "
+                f"access={'on' if row['access_enabled'] else 'off'} "
+                f"notifications={notifications} blocked={blocked}"
+            )
+        print(f"telegram users: {len(rows)}")
+        return 0
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        await db.close()
+
+
+def _telegram_bool_word(value: object, field: str) -> str:
+    return "on" if _telegram_bool_value(value, field) else "off"
+
+
+def _telegram_bool_value(value: object, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str) and value in {"0", "1"}:
+        return value == "1"
+    raise ValueError(f"{field} must be stored as 0 or 1")
+
+
+async def _telegram_user_set_blocked(user_id: object, *, blocked: bool) -> int:
+    if not isinstance(blocked, bool):
+        print("error: blocked must be a boolean", file=sys.stderr)
+        return 2
+    try:
+        telegram_user_id = _positive_telegram_id(user_id, "user_id")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    db = await _telegram_db()
+    try:
+        users = TelegramUserRepo(db)
+        current = await users.get(telegram_user_id)
+        if current is None:
+            print(f"error: telegram user {telegram_user_id} not found", file=sys.stderr)
+            return 2
+        currently_blocked = current["blocked_at"] is not None
+        if currently_blocked != blocked:
+            await users.set_notifications_enabled(telegram_user_id, not blocked)
+        print(f"{'blocked' if blocked else 'unblocked'} telegram user {telegram_user_id}")
+        return 0
+    finally:
+        await db.close()
 
 
 # --- wallet.txt parser ------------------------------------------------------------
@@ -272,6 +462,15 @@ async def _run() -> int:
     return 0
 
 
+async def _run_bot() -> int:
+    """Run the bounded Stage 2 process; Bot API access starts inside polling."""
+    from copytradeaster.application.engine import build_stage2_process
+
+    process = build_stage2_process(_load_settings())
+    await process.run()
+    return 0
+
+
 async def _status() -> int:
     from copytradeaster.storage.database import Database
 
@@ -323,9 +522,11 @@ async def _reconcile(account: str | None) -> int:
         await app.db.connect()
         await app.db.migrate()
         await app.credentials.load()
-        accounts = await app.db.fetchall("SELECT id FROM accounts WHERE role='follower'")
+        accounts = await app.db.fetchall(
+            "SELECT * FROM accounts WHERE role='follower' AND enabled=1 ORDER BY id"
+        )
         for row in accounts:
-            app.followers.append(_follower_runtime(app, str(row["id"])))
+            await app.follower_registry.publish_new(app.runtime_for_row(row))
         exchange = await app.master_client.exchange_info(force=True)
         app._filters_cache = exchange.tradable_filters()
         await app.projector.rebuild_full(app.master_client, "main")
@@ -334,18 +535,8 @@ async def _reconcile(account: str | None) -> int:
         for aid, created in report.per_account.items():
             print(f"{aid}: commands created: {created}")
     finally:
-        from copytradeaster.storage.database import Database
-
-        await app.http.aclose()
-        await app.db.close()
-        del Database
+        await app.stop()
     return 0
-
-
-def _follower_runtime(app, account_id: str):
-    from copytradeaster.trading.coordinator import FollowerRuntime
-
-    return FollowerRuntime(account_id=account_id, client=app._make_client(), identity=None)
 
 
 async def _set_pause(paused: bool) -> int:
@@ -368,177 +559,69 @@ async def _set_pause(paused: bool) -> int:
 
 async def _emergency_close_all() -> int:
     from copytradeaster.app import App
-    from copytradeaster.domain.models import (
-        TargetPosition,
-    )
 
     app = App(_load_settings())
-    operation_id = uuid.uuid4().hex
-    failures: list[str] = []
     try:
         await app.db.connect()
         await app.db.migrate()
-        # Fail closed before any exchange snapshot or close. A concurrently
-        # running Coordinator reads both flags before issuing entries.
-        await app.settings.set_flag("emergency_active", "true")
-        await app.settings.set_flag("allow_new_entries", "false")
-        await app.settings.set_flag("emergency_operation_id", operation_id)
         await app.credentials.load()
         accounts = await app.db.fetchall(
-            "SELECT id FROM accounts WHERE role='follower' AND enabled=1 ORDER BY id"
+            "SELECT * FROM accounts WHERE role='follower' AND enabled=1 ORDER BY id"
         )
         for row in accounts:
-            app.followers.append(_follower_runtime(app, str(row["id"])))
+            await app.follower_registry.publish_new(app.runtime_for_row(row))
         exchange = await app.master_client.exchange_info(force=True)
         app._filters_cache = exchange.tradable_filters()
-        stable_flat = 0
-        for pass_index in range(1, 6):
-            pass_failures: list[str] = []
-            all_flat = True
-            for fr in app.followers:
-                try:
-                    actual = await app.coordinator._snapshot(fr)
-                    targets = [
-                        TargetPosition(
-                            key=key,
-                            qty=0,
-                            stop_price=None,
-                            tp_price=None,
-                            leverage=pos.leverage,
-                        )
-                        for key, pos in actual.positions.items()
-                    ]
-                    plan = build_close_plan(
-                        fr.account_id,
-                        actual,
-                        targets,
-                        operation_id=operation_id,
-                        revision=pass_index,
-                    )
-                    if plan.actions:
-                        results = await app.executor.submit(plan)
-                        statuses = [r.status for r in results]
-                        print(f"[{fr.account_id}] pass={pass_index}: {statuses}")
-                        if any(status != "CONFIRMED" for status in statuses):
-                            pass_failures.append(f"{fr.account_id}:commands={statuses}")
-                    verified = await app.coordinator._snapshot(fr)
-                    if not _emergency_state_flat(verified):
-                        all_flat = False
-                        pass_failures.append(f"{fr.account_id}:not-flat")
-                except Exception as exc:  # noqa: BLE001 - continue every follower
-                    all_flat = False
-                    pass_failures.append(f"{fr.account_id}:{exc}")
-                    print(f"[{fr.account_id}] FAILED: {exc}", file=sys.stderr)
-            failures.extend(pass_failures)
-            if all_flat and not pass_failures:
-                stable_flat += 1
-                if stable_flat >= 2:
-                    break
-            else:
-                stable_flat = 0
-            await asyncio.sleep(0.25)
-        if stable_flat < 2:
-            await app.settings.set_flag(
-                "emergency_last_result", f"FAILED:{operation_id}:{';'.join(failures[-20:])}"
-            )
-            return 1
-        await app.settings.set_flag("emergency_last_result", f"CONFIRMED:{operation_id}")
-        print(f"emergency operation {operation_id}: flat verified twice; entries remain paused")
-    finally:
-        await app.http.aclose()
-        await app.db.close()
-    return 0
-
-
-def build_close_plan(
-    account_id, actual, targets, *, operation_id: str | None = None, revision: int = 0
-):
-    """Emergency plan: cancel protections then close full remainder."""
-    from copytradeaster.domain.models import (
-        ActionKind,
-        ExecutionAction,
-        ExecutionPlan,
-        PosSide,
-    )
-
-    actions = []
-    seq = 0
-    for tp in targets:
-        pos = actual.positions.get(tp.key)
-        if pos is None:
-            continue
-        for prot in (pos.stop, pos.take_profit, *pos.extra_stops, *pos.extra_tps):
-            if prot is not None:
-                actions.append(
-                    ExecutionAction(
-                        kind=ActionKind.CANCEL_ORDER,
-                        symbol=tp.key.symbol,
-                        payload={
-                            "symbol": tp.key.symbol,
-                            "origClientOrderId": prot.client_order_id,
-                        },
-                        client_order_id=None,
-                        replaces_client_order_id=prot.client_order_id,
-                        priority=1,
-                        revision=revision,
-                        position_side=tp.key.pos_side,
-                    )
-                )
-        if pos.qty == 0:
-            continue
-        hedge = tp.key.pos_side != PosSide.BOTH
-        qty = abs(pos.qty)
-        side = "SELL" if pos.qty > 0 else "BUY"
-        if hedge:
-            side = "SELL" if tp.key.pos_side == PosSide.LONG else "BUY"
-        payload = {
-            "symbol": tp.key.symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": format(qty, "f"),
-            "newOrderRespType": "RESULT",
-        }
-        if hedge:
-            payload["positionSide"] = tp.key.pos_side.value
-        else:
-            payload["reduceOnly"] = "true"
-        seq += 1
-        actions.append(
-            ExecutionAction(
-                kind=ActionKind.MARKET_CLOSE,
-                symbol=tp.key.symbol,
-                payload=payload,
-                client_order_id=f"ct-emergency-{tp.key.symbol}-{seq}",
-                replaces_client_order_id=None,
-                priority=2,
-                revision=revision,
-                position_side=tp.key.pos_side,
-            )
+        state = _CliEmergencyState(app.settings)
+        controller = EmergencyController(
+            lifecycle_factory=app.follower_lifecycle,
+            executor=app.executor,
+            state=state,
         )
-    actions.sort(key=lambda a: a.priority)
-    return ExecutionPlan(
-        account_id=account_id,
-        trade_id=None,
-        actions=actions,
-        operation_id=operation_id,
-    )
+        report = await controller.emergency_global(
+            follower.account_id for follower in app.followers
+        )
+        _print_emergency_report(report)
+        return 0 if report.success else 1
+    finally:
+        await app.stop()
 
 
-def _emergency_state_flat(actual) -> bool:
-    for position in actual.positions.values():
-        if position.qty != 0:
-            return False
-        if any(
-            protection is not None
-            for protection in (
-                position.stop,
-                position.take_profit,
-                *position.extra_stops,
-                *position.extra_tps,
-            )
-        ):
-            return False
-    return True
+def build_close_plan(*args, **kwargs):
+    """Compatibility export; implementation lives in application.control."""
+    return _build_close_plan(*args, **kwargs)
+
+
+class _CliEmergencyState:
+    def __init__(self, settings: SettingsRepo) -> None:
+        self._settings = settings
+
+    async def pause_account(self, account_id: str) -> None:
+        await self._settings.set_allow_new_entries(account_id, False)
+
+    async def begin_global(self, operation_id: str) -> None:
+        await self._settings.set_flag("emergency_active", "true")
+        await self._settings.set_flag("allow_new_entries", "false")
+        await self._settings.set_flag("emergency_operation_id", operation_id)
+
+    async def record_result(self, report: EmergencyReport) -> None:
+        status = "CONFIRMED" if report.success else "FAILED"
+        await self._settings.set_flag("emergency_last_result", f"{status}:{report.operation_id}")
+
+
+def _print_emergency_report(report: EmergencyReport) -> None:
+    for account in report.accounts:
+        status = "flat" if account.success else f"failed:{account.failure.value}"
+        print(
+            f"[{account.account_id}] emergency {status}; "
+            f"passes={account.passes} flat_proofs={account.flat_proofs}"
+        )
+    if report.success:
+        print(
+            f"emergency operation {report.operation_id}: flat verified twice; entries remain paused"
+        )
+    else:
+        print(f"emergency operation {report.operation_id}: FAILED; entries remain paused")
 
 
 if __name__ == "__main__":

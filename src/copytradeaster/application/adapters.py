@@ -1,0 +1,571 @@
+"""Concrete Stage 2 adapters over the existing application composition.
+
+The transport-neutral application service owns policy and authorization.  This
+module is the narrow composition seam that gives it real SQLite, Aster V3 and
+Coordinator operations without teaching the service about ``App`` internals.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from copytradeaster.app import App
+from copytradeaster.application.control import EmergencyController, EmergencyReport
+from copytradeaster.application.service import (
+    OnboardingPort,
+    Stage2AccountLifecycle,
+    Stage2RuntimeAdapter,
+    UserApplicationService,
+)
+from copytradeaster.aster.models import AgentDTO
+from copytradeaster.aster.trading_api import AsterClient
+from copytradeaster.credentials.service import SqliteCredentials
+from copytradeaster.domain.models import AccountState
+from copytradeaster.onboarding.direct import DirectOnboardingService, validate_agent_permissions
+from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
+from copytradeaster.onboarding.models import (
+    DirectOnboardingConfig,
+    DirectOnboardingRequest,
+    DirectOnboardingResult,
+    DirectPreflightResult,
+    OnboardingCommit,
+    stable_account_id,
+)
+from copytradeaster.onboarding.providers import (
+    EphemeralIdentityProvider,
+    EphemeralKeyProvider,
+    OnboardingStore,
+)
+from copytradeaster.storage.database import Database
+from copytradeaster.storage.repositories import (
+    AgentValidation,
+    TelegramUserRepo,
+)
+
+
+class SqliteOnboardingStore(OnboardingStore):
+    """Persist direct onboarding through the encrypted credentials boundary."""
+
+    def __init__(
+        self,
+        db: Database,
+        credentials: SqliteCredentials,
+        users: TelegramUserRepo | None = None,
+        *,
+        permission_override: bool = False,
+    ) -> None:
+        self._db = db
+        self._credentials = credentials
+        self._users = users or TelegramUserRepo(db)
+        self._permission_override = permission_override
+
+    @property
+    def permission_override(self) -> bool:
+        return self._permission_override
+
+    async def find_identity_conflict(self, telegram_user_id: int, user_address: str) -> str | None:
+        owner = await self._users.get(telegram_user_id)
+        if owner is None or str(owner["role"]) not in {"USER", "ADMIN"}:
+            return "owner"
+        expected_account_id = stable_account_id(telegram_user_id)
+        if owner["account_id"] is not None:
+            if str(owner["account_id"]) != expected_account_id:
+                return "owner"
+            account = await self._db.fetchone(
+                "SELECT enabled FROM accounts WHERE id=?", (owner["account_id"],)
+            )
+            if account is not None and int(account["enabled"]):
+                return "owner"
+
+        row = await self._db.fetchone(
+            "SELECT id, role, enabled FROM accounts WHERE lower(user_address)=lower(?)",
+            (user_address,),
+        )
+        if row is None:
+            return None
+        if str(row["role"]) == "master":
+            return "master"
+        if int(row["enabled"]):
+            return "address"
+        # A disabled account is reconnectable only when the pre-allowlisted
+        # owner and stable account ID prove that this is the same slot.
+        linked_owner = await self._users.by_account(str(row["id"]))
+        if (
+            str(row["id"]) == expected_account_id
+            and linked_owner is not None
+            and int(linked_owner["telegram_user_id"]) == int(telegram_user_id)
+            and str(linked_owner["role"]) in {"USER", "ADMIN"}
+        ):
+            return None
+        return "address"
+
+    async def owner_for(self, telegram_user_id: int) -> Any | None:
+        """Return the pre-allowlisted row used by onboarding/replacement."""
+        return await self._users.get(telegram_user_id)
+
+    def validation_record(self, payload: OnboardingCommit | Any) -> AgentValidation:
+        validation = payload.validation
+        checked_at = datetime.fromtimestamp(
+            validation.checked_at_ms / 1000,
+            tz=UTC,
+        ).isoformat()
+        return AgentValidation(
+            signer_address=validation.signer_address,
+            can_read=validation.can_read,
+            can_perp_trade=validation.can_perp_trade,
+            can_withdraw=validation.can_withdraw,
+            expired_ms=validation.expired_ms,
+            ip_whitelist=validation.ip_whitelist,
+            status="VALID_OVERRIDE" if self._permission_override else "VALID",
+            checked_at=checked_at,
+        )
+
+    async def replace_identity(
+        self,
+        *,
+        account_id: str,
+        user_address: str,
+        signer_private_key: str,
+        telegram_user_id: int,
+        validation: Any,
+    ) -> None:
+        owner = await self.owner_for(telegram_user_id)
+        if (
+            owner is None
+            or str(owner["role"]) not in {"USER", "ADMIN"}
+            or str(owner["account_id"]) != account_id
+        ):
+            raise ValueError("Telegram user must own the follower account")
+        await self._credentials.replace_identity(
+            account_id=account_id,
+            user=user_address,
+            signer_private_key_hex=signer_private_key,
+            role="follower",
+            label=account_id,
+            validation=self.validation_record(validation),
+            owner_telegram_user_id=telegram_user_id,
+            owner_chat_id=int(owner["chat_id"]),
+        )
+
+    async def commit_onboarding(self, payload: OnboardingCommit) -> None:
+        owner = await self._users.get(payload.telegram_user_id)
+        if owner is None or str(owner["role"]) not in {"USER", "ADMIN"}:
+            raise ValueError("Telegram user must be pre-allowlisted")
+        if owner["account_id"] not in (None, payload.account_id):
+            raise ValueError("Telegram user owns another account")
+        if payload.account_id != stable_account_id(payload.telegram_user_id):
+            raise ValueError("account ID is not the stable Telegram account ID")
+        validation = self.validation_record(payload)
+        await self._credentials.commit_onboarding(
+            account_id=payload.account_id,
+            user=payload.user_address,
+            signer_private_key_hex=payload.signer_private_key,
+            role="follower",
+            label=payload.label,
+            owner_telegram_user_id=payload.telegram_user_id,
+            owner_chat_id=int(owner["chat_id"]),
+            validation=validation,
+        )
+
+
+class DirectOnboardingAdapter(OnboardingPort):
+    """Aster V3 signed preflight/commit adapter for direct Telegram onboarding."""
+
+    def __init__(self, app: App, store: SqliteOnboardingStore) -> None:
+        self._app = app
+        self._store = store
+        override = bool(app.cfg.testnet_ip_whitelist_override and app.cfg.is_testnet)
+        master_user_address = None
+        if "main" in app.credentials.account_ids(role="master"):
+            master_user_address = app.credentials.identity("main").user
+        config = DirectOnboardingConfig(
+            base_url=app.cfg.rest_base_url,
+            trading_chain_id=714,
+            expected_egress_ips=tuple(app.cfg.aster_egress_ips),
+            require_agent_ip_whitelist=app.cfg.require_agent_ip_whitelist and not override,
+            expiry_safety_margin_ms=5 * 60 * 1000,
+            expected_position_mode=app.cfg.position_mode,
+            master_user_address=master_user_address,
+        )
+        self._service = DirectOnboardingService(
+            self._client_factory,
+            store,
+            config=config,
+            activation=self._activate,
+        )
+
+    def _client_factory(
+        self,
+        identities: EphemeralIdentityProvider,
+        keys: EphemeralKeyProvider,
+    ) -> AsterClient:
+        return AsterClient(
+            http=self._app.http,
+            base_url=self._app.cfg.rest_base_url,
+            limiter=self._app.limiter,
+            identities=identities,
+            keys=keys,
+            nonces=self._app.nonces,
+            dry_run=self._app.cfg.dry_run,
+        )
+
+    async def _activate(self, account_id: str) -> None:
+        if self._app.follower_registry.get(account_id) is None:
+            await self._app.register_follower(account_id)
+
+    async def preflight(self, request: DirectOnboardingRequest) -> DirectPreflightResult:
+        return await self._service.preflight(request)
+
+    async def onboard(self, request: DirectOnboardingRequest) -> DirectOnboardingResult:
+        return await self._service.onboard(request)
+
+    async def replace(
+        self, request: DirectOnboardingRequest, *, preflight: Any
+    ) -> DirectOnboardingResult:
+        if not isinstance(request, DirectOnboardingRequest) or not isinstance(
+            preflight, DirectPreflightResult
+        ):
+            raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
+        try:
+            account_id = stable_account_id(request.telegram_user_id)
+        except ValueError:
+            raise OnboardingError(OnboardingErrorCode.INVALID_INPUT) from None
+        if request.declared_signer_address.casefold() != (
+            preflight.validation.signer_address.casefold()
+        ):
+            raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
+        if not preflight.read_bundle.is_flat or preflight.read_bundle.open_orders:
+            raise OnboardingError(OnboardingErrorCode.ACCOUNT_NOT_FLAT)
+        row = await self._app.db.fetchone(
+            "SELECT id, role, user_address, enabled FROM accounts WHERE id=?",
+            (account_id,),
+        )
+        owner = await self._store.owner_for(request.telegram_user_id)
+        if (
+            row is None
+            or str(row["role"]) != "follower"
+            or not int(row["enabled"])
+            or str(row["user_address"]).casefold() != request.user_address.casefold()
+            or owner is None
+            or str(owner["role"]) not in {"USER", "ADMIN"}
+            or str(owner["account_id"]) != account_id
+        ):
+            raise OnboardingError(OnboardingErrorCode.USER_ADDRESS_CONFLICT)
+        try:
+            await self._store.replace_identity(
+                account_id=account_id,
+                user_address=str(row["user_address"]),
+                signer_private_key=request.signer_private_key,
+                telegram_user_id=request.telegram_user_id,
+                validation=preflight,
+            )
+        except OnboardingError:
+            raise
+        except Exception:
+            raise OnboardingError(OnboardingErrorCode.COMMIT_FAILED) from None
+        return DirectOnboardingResult(
+            account_id=account_id,
+            masked_user_address=preflight.masked_user_address,
+            masked_signer_address=preflight.masked_signer_address,
+            position_mode=preflight.position_mode,
+            balance_assets=tuple(balance.asset for balance in preflight.read_bundle.balances),
+            position_count=sum(
+                position.position_amt != Decimal(0) for position in preflight.read_bundle.positions
+            ),
+            available_usdt=preflight.available_usdt,
+            paused=True,
+        )
+
+
+class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
+    """Concrete Stage 2 runtime port backed by one composed :class:`App`."""
+
+    def __init__(self, app: App) -> None:
+        self.app = app
+        self.db = app.db
+        self.cfg = app.cfg
+        self.credentials = app.credentials
+        self._snapshot_cache: dict[str, AccountState] = {}
+
+    @property
+    def testnet(self) -> bool:
+        return self.cfg.is_testnet
+
+    @property
+    def ready(self) -> bool:
+        return self.app.ready
+
+    async def is_account_registered(self, account_id: str) -> bool:
+        return self.app.follower_registry.get(account_id) is not None
+
+    async def account_version(self, account_id: str) -> str | None:
+        row = await self.db.fetchone(
+            "SELECT c.updated_at, a.signer_address, ac.enabled "
+            "FROM credentials c "
+            "JOIN accounts ac ON ac.id=c.account_id "
+            "LEFT JOIN agent_validations a ON a.account_id=c.account_id "
+            "WHERE c.account_id=?",
+            (account_id,),
+        )
+        if row is None:
+            return None
+        return f"{row['updated_at']}:{row['signer_address'] or '-'}:{int(row['enabled'])}"
+
+    async def recover_account_runtime(
+        self,
+        account_id: str,
+        user_address: str,
+        signer_address: str,
+    ) -> bool:
+        if self.app.follower_registry.get(account_id) is not None:
+            return False
+        row = await self.db.fetchone(
+            "SELECT role, enabled, execution_mode FROM accounts WHERE id=?",
+            (account_id,),
+        )
+        policy = await self.app.settings.get_policy(account_id)
+        identity = self.credentials.identity(account_id)
+        if (
+            row is None
+            or str(row["role"]) != "follower"
+            or not int(row["enabled"])
+            or str(row["execution_mode"] or "REAL") != "REAL"
+            or policy is None
+            or policy.allow_new_entries
+            or identity.user.casefold() != user_address.strip().casefold()
+            or identity.signer.casefold() != signer_address.strip().casefold()
+        ):
+            return False
+        await self.app.register_follower(account_id)
+        return True
+
+    async def cached_snapshot(self, account_id: str) -> AccountState | None:
+        return self._snapshot_cache.get(account_id)
+
+    async def refresh_snapshot(self, account_id: str) -> AccountState:
+        snapshot = await self.app.snapshot_follower(account_id)
+        self._snapshot_cache[account_id] = snapshot
+        return snapshot
+
+    async def read_activity(self, account_id: str, limit: int, offset: int) -> list[Any]:
+        if limit <= 0 or offset < 0:
+            raise ValueError("activity bounds are invalid")
+        return await self.db.fetchall(
+            "SELECT command_key, kind, status, created_at, updated_at "
+            "FROM execution_commands WHERE account_id=? "
+            "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
+            (account_id, int(limit), int(offset)),
+        )
+
+    async def pause_account(self, account_id: str) -> None:
+        await self.app.coordinator.close_generation_admission()
+        # Closing drains the current generation.  Reopen before the targeted
+        # reconcile so reduction actions can be admitted while the durable
+        # account policy remains paused and therefore cannot create entries.
+        await self.app.coordinator.open_generation_admission()
+        await self.app.reconcile_follower(account_id, reason="account_pause")
+
+    async def resume_account(self, account_id: str) -> None:
+        del account_id
+        await self.app.coordinator.open_generation_admission()
+
+    async def reconcile_account(self, account_id: str) -> None:
+        await self.app.reconcile_follower(account_id, reason="application")
+
+    async def reconcile_all(self) -> None:
+        await self.app.reconciler.reconcile(self.app.projector.state, reason="application")
+
+    async def pause_entries(self, timeout_s: float = 5.0) -> None:
+        await self.app.pause_entries(timeout_s=timeout_s)
+
+    async def resume_entries(self) -> None:
+        await self.app.resume_entries()
+
+    async def reopen_entries_while_paused(self) -> None:
+        await self.app.reopen_entries_while_paused()
+
+    def _permission_config(self, *, require_whitelist: bool) -> DirectOnboardingConfig:
+        return DirectOnboardingConfig(
+            base_url=self.cfg.rest_base_url,
+            trading_chain_id=714,
+            expected_egress_ips=tuple(self.cfg.aster_egress_ips),
+            require_agent_ip_whitelist=require_whitelist,
+            expiry_safety_margin_ms=5 * 60 * 1000,
+            expected_position_mode=self.cfg.position_mode,
+        )
+
+    async def refresh_agent_permission(self, account_id: str) -> AgentValidation:
+        runtime = self.app.follower_registry.get(account_id)
+        if runtime is None:
+            raise KeyError(f"follower runtime {account_id!r} not found")
+        identity = self.credentials.identity(account_id)
+        agent: AgentDTO = await runtime.client.agent(account_id)
+        checked_at_ms = int(time.time() * 1000)
+        status = "VALID"
+        try:
+            snapshot = validate_agent_permissions(
+                agent,
+                identity.signer,
+                self._permission_config(require_whitelist=self.cfg.require_agent_ip_whitelist),
+                checked_at_ms=checked_at_ms,
+            )
+        except OnboardingError as exc:
+            if exc.code is not OnboardingErrorCode.AGENT_IP_WHITELIST:
+                raise
+            if not await self.permission_override_allowed(account_id):
+                raise
+            snapshot = validate_agent_permissions(
+                agent,
+                identity.signer,
+                self._permission_config(require_whitelist=False),
+                checked_at_ms=checked_at_ms,
+            )
+            status = "VALID_OVERRIDE"
+        return AgentValidation(
+            signer_address=snapshot.signer_address,
+            can_read=snapshot.can_read,
+            can_perp_trade=snapshot.can_perp_trade,
+            can_withdraw=snapshot.can_withdraw,
+            expired_ms=snapshot.expired_ms,
+            ip_whitelist=snapshot.ip_whitelist,
+            status=status,
+            checked_at=datetime.fromtimestamp(checked_at_ms / 1000, tz=UTC).isoformat(),
+        )
+
+    async def permission_override_allowed(self, account_id: str) -> bool:
+        return bool(
+            self.cfg.testnet_ip_whitelist_override
+            and self.cfg.is_testnet
+            and await self.is_account_registered(account_id)
+        )
+
+    async def validate_resume_safety(self, account_id: str, snapshot: AccountState) -> None:
+        if not isinstance(snapshot, AccountState) or snapshot.account_id != account_id:
+            raise ValueError("resume snapshot is invalid")
+        for order in snapshot.open_orders:
+            if not str(order["client_order_id"]).startswith("ct"):
+                raise RuntimeError("manual open order blocks resume")
+
+        basis_rows = await self.db.fetchall(
+            "SELECT symbol, pos_side, issued_target FROM sync_basis WHERE account_id=?",
+            (account_id,),
+        )
+        issued: dict[tuple[str, str], Decimal] = {}
+        for row in basis_rows:
+            raw_target = row["issued_target"]
+            if raw_target is None:
+                continue
+            try:
+                target = json.loads(str(raw_target))
+                if not isinstance(target, dict) or "qty" not in target:
+                    raise ValueError("issued target is not an object with qty")
+                quantity = Decimal(str(target["qty"]))
+                if not quantity.is_finite():
+                    raise ValueError("issued target quantity is not finite")
+                issued[(str(row["symbol"]), str(row["pos_side"]))] = quantity
+            except (InvalidOperation, TypeError, ValueError, json.JSONDecodeError):
+                raise RuntimeError("sync basis issued target is invalid") from None
+        for key, position in snapshot.positions.items():
+            if position.qty == 0:
+                continue
+            target = issued.get((key.symbol, key.pos_side.value))
+            if target is None:
+                raise RuntimeError("manual position blocks resume")
+            if key.pos_side.value == "BOTH":
+                if target == 0 or position.qty * target < 0 or abs(position.qty) > abs(target):
+                    raise RuntimeError("position exceeds issued target")
+            elif target < 0 or position.qty < 0 or position.qty > target:
+                raise RuntimeError("position exceeds issued target")
+
+    def follower_lifecycle(
+        self, account_id: str
+    ) -> AbstractAsyncContextManager[Stage2AccountLifecycle]:
+        return self.app.follower_lifecycle(account_id)
+
+    async def commit_disconnect(self, account_id: str) -> None:
+        if not await self.credentials.remove_identity(account_id):
+            raise KeyError(f"account {account_id!r} is not registered")
+        self._snapshot_cache.pop(account_id, None)
+
+    async def build_replacement_runtime(
+        self, account_id: str, request: DirectOnboardingRequest, preflight: Any
+    ) -> Any:
+        del request, preflight
+        return self.app.new_real_follower_runtime(account_id)
+
+    async def master_has_open_positions(self) -> bool:
+        return any(position.qty != 0 for position in self.app.projector.state.positions.values())
+
+
+class AppEmergencyStateAdapter:
+    """Persist emergency pause state through the existing settings repository."""
+
+    def __init__(self, app: App) -> None:
+        self._settings = app.settings
+
+    async def pause_account(self, account_id: str) -> None:
+        await self._settings.patch_policy(account_id, allow_new_entries=False)
+
+    async def begin_global(self, operation_id: str) -> None:
+        await self._settings.set_flag("emergency_active", "true")
+        await self._settings.set_flag("allow_new_entries", "false")
+        await self._settings.set_flag("emergency_operation_id", operation_id)
+
+    async def record_result(self, report: EmergencyReport) -> None:
+        status = "CONFIRMED" if report.success else "FAILED"
+        await self._settings.set_flag("emergency_last_result", f"{status}:{report.operation_id}")
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2Composition:
+    """Concrete service/adapters assembled around one already-created App."""
+
+    runtime: AppStage2RuntimeAdapter
+    onboarding: DirectOnboardingAdapter
+    emergency_state: AppEmergencyStateAdapter
+    emergency: EmergencyController
+    application: UserApplicationService
+
+
+def build_stage2_composition(
+    app: App,
+    *,
+    admin_ids: list[int] | str | None = None,
+) -> Stage2Composition:
+    """Build Stage 2 use cases without changing App startup or CLI wiring."""
+    runtime = AppStage2RuntimeAdapter(app)
+    store = SqliteOnboardingStore(
+        app.db,
+        app.credentials,
+        permission_override=bool(app.cfg.testnet_ip_whitelist_override and app.cfg.is_testnet),
+    )
+    onboarding = DirectOnboardingAdapter(app, store)
+    emergency_state = AppEmergencyStateAdapter(app)
+    emergency = EmergencyController(
+        lifecycle_factory=app.follower_lifecycle,
+        executor=app.executor,
+        state=emergency_state,
+    )
+    application = UserApplicationService(
+        runtime,
+        admin_ids=app.cfg.telegram_admin_ids if admin_ids is None else admin_ids,
+        onboarding=onboarding,
+        emergency_controller=emergency,
+    )
+    return Stage2Composition(runtime, onboarding, emergency_state, emergency, application)
+
+
+__all__ = [
+    "AppEmergencyStateAdapter",
+    "AppStage2RuntimeAdapter",
+    "DirectOnboardingAdapter",
+    "SqliteOnboardingStore",
+    "Stage2Composition",
+    "build_stage2_composition",
+]

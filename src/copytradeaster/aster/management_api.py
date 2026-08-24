@@ -65,7 +65,14 @@ class ManagementClient:
             body = resp.json()
         except ValueError as exc:
             raise ManagementError(resp.status_code, resp.text[:200]) from exc
-        log.info("%s -> %s", path, body)
+        # Registration responses may contain exchange payloads and addresses;
+        # only retain the action/status trace in application logs.
+        log.info(
+            "management request completed path=%s account_id=%s status=%s",
+            path,
+            account_id,
+            resp.status_code,
+        )
         return body
 
     async def approve_agent(

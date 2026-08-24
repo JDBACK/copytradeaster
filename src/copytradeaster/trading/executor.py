@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -39,6 +41,13 @@ BOOT_QUERY_ATTEMPTS = 3
 BOOT_QUERY_BACKOFF_S = 0.05
 
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+
+
+def _safe_error_category(exc: BaseException) -> str:
+    """Persist only a stable code/category; full details stay in local logs."""
+    if isinstance(exc, AsterError):
+        return f"aster:{exc.code}"
+    return type(exc).__name__
 
 
 def _is_unknown_error(exc: AsterError) -> bool:
@@ -121,7 +130,7 @@ class Executor:
         links: OrderLinkRepo,
         locks: dict[str, asyncio.Lock],
         settings: SettingsRepo | None = None,
-        on_confirmed: Callable[[str, ExecutionAction], Awaitable[None]] | None = None,
+        on_confirmed: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._clients = clients
         self._commands = commands
@@ -129,8 +138,88 @@ class Executor:
         self._locks = locks
         self._settings = settings
         self._on_confirmed = on_confirmed
+        self._mutation_owners: dict[str, asyncio.Task] = {}
+        self._confirmed_callback_accepts_key = self._callback_accepts_command_key(on_confirmed)
 
-    async def submit(self, plan: ExecutionPlan) -> list[CommandResult]:
+    @staticmethod
+    def _callback_accepts_command_key(
+        callback: Callable[..., Awaitable[None]] | None,
+    ) -> bool:
+        """Detect the narrowly extended callback shape without breaking Stage 1.
+
+        Existing embedders use ``(account_id, action)``.  The application
+        integration uses ``(account_id, action, command_key)`` so its event
+        key is the durable journal identity.  Signature inspection avoids
+        catching a callback's own ``TypeError`` and retrying side effects.
+        """
+        if callback is None:
+            return False
+        try:
+            signature = inspect.signature(callback)
+        except (TypeError, ValueError):
+            return True
+        positional = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(
+            parameter.kind == inspect.Parameter.VAR_POSITIONAL
+            for parameter in signature.parameters.values()
+        )
+        return has_varargs or len(positional) >= 3
+
+    async def _notify_confirmed(
+        self, account_id: str, action: ExecutionAction, command_key: str
+    ) -> None:
+        """Invoke confirmation observers after journaling, never altering result."""
+        if self._on_confirmed is None:
+            return
+        try:
+            if self._confirmed_callback_accepts_key:
+                await self._on_confirmed(account_id, action, command_key)
+            else:
+                await self._on_confirmed(account_id, action)
+        except Exception:  # noqa: BLE001 - observer/notification isolation
+            log.exception(
+                "confirmed callback failed (account_id=%s command_key=%s)",
+                account_id,
+                command_key,
+            )
+
+    async def submit(
+        self, plan: ExecutionPlan, *, client: AsterClient | None = None
+    ) -> list[CommandResult]:
+        """Execute one plan under the account mutation lock.
+
+        Coordinators pass the client captured with their immutable generation
+        snapshot.  Direct callers may omit it and retain the registry callback
+        routing used by Stage 1 and boot recovery.
+        """
+        async with self._mutation_guard(plan.account_id):
+            return await self._submit_locked(plan, client=client)
+
+    async def submit_under_mutation_lock(
+        self, plan: ExecutionPlan, *, client: AsterClient | None = None
+    ) -> list[CommandResult]:
+        """Submit using a mutation lock already held by the current task.
+
+        ``App.follower_lifecycle()`` owns the account lock while an emergency
+        workflow snapshots, submits, verifies, and commits lifecycle state.
+        Re-acquiring that non-reentrant lock here would deadlock, so this seam
+        checks ownership and reuses the exact submit internals.
+        """
+        owner = self._mutation_owners.get(plan.account_id)
+        if owner is not asyncio.current_task():
+            raise RuntimeError(
+                "submit_under_mutation_lock requires the current task to hold mutation_context"
+            )
+        return await self._submit_locked(plan, client=client)
+
+    async def _submit_locked(
+        self, plan: ExecutionPlan, *, client: AsterClient | None = None
+    ) -> list[CommandResult]:
         results: list[CommandResult] = []
         # Planner client-order ids are stable only within this plan. They let us
         # express the one safety dependency we need without introducing a DAG:
@@ -138,39 +227,37 @@ class Executor:
         # CONFIRMED. A FAILED/SUBMITTED dependency blocks the cancel and leaves
         # the old protection untouched for the next reconciliation pass.
         completed_by_planner_coid: dict[str, CommandResult] = {}
-        lock = self._locks.setdefault(plan.account_id, asyncio.Lock())
-        async with lock:
-            for action in sorted(plan.actions, key=lambda a: a.priority):
-                if action.depends_on_client_order_id is not None:
-                    dependency = completed_by_planner_coid.get(action.depends_on_client_order_id)
-                    key = command_key_of(plan, action)
-                    if dependency is None:
-                        results.append(
-                            CommandResult(
-                                key,
-                                "BLOCKED",
-                                f"missing dependency {action.depends_on_client_order_id}",
-                            )
+        for action in sorted(plan.actions, key=lambda a: a.priority):
+            if action.depends_on_client_order_id is not None:
+                dependency = completed_by_planner_coid.get(action.depends_on_client_order_id)
+                key = command_key_of(plan, action)
+                if dependency is None:
+                    results.append(
+                        CommandResult(
+                            key,
+                            "BLOCKED",
+                            f"missing dependency {action.depends_on_client_order_id}",
                         )
-                        continue
-                    if dependency.status != "CONFIRMED":
-                        results.append(
-                            CommandResult(
-                                key,
-                                "BLOCKED",
-                                f"dependency status={dependency.status}",
-                            )
+                    )
+                    continue
+                if dependency.status != "CONFIRMED":
+                    results.append(
+                        CommandResult(
+                            key,
+                            "BLOCKED",
+                            f"dependency status={dependency.status}",
                         )
-                        continue
-                if action.kind == ActionKind.CANCEL_ORDER:
-                    result = await self._submit_cancel(plan, action)
-                elif action.kind == ActionKind.SET_LEVERAGE:
-                    result = await self._submit_leverage(plan, action)
-                else:
-                    result = await self._submit_order(plan, action)
-                results.append(result)
-                if action.client_order_id is not None:
-                    completed_by_planner_coid[action.client_order_id] = result
+                    )
+                    continue
+            if action.kind == ActionKind.CANCEL_ORDER:
+                result = await self._submit_cancel(plan, action, client=client)
+            elif action.kind == ActionKind.SET_LEVERAGE:
+                result = await self._submit_leverage(plan, action, client=client)
+            else:
+                result = await self._submit_order(plan, action, client=client)
+            results.append(result)
+            if action.client_order_id is not None:
+                completed_by_planner_coid[action.client_order_id] = result
         return results
 
     async def wait_until_idle(self, account_id: str) -> None:
@@ -179,10 +266,35 @@ class Executor:
         async with lock:
             return
 
+    @asynccontextmanager
+    async def mutation_context(self, account_id: str):
+        """Hold the executor's public per-account mutation barrier."""
+        async with self._mutation_guard(account_id):
+            yield
+
+    @asynccontextmanager
+    async def _mutation_guard(self, account_id: str):
+        lock = self._locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            task = asyncio.current_task()
+            previous = self._mutation_owners.get(account_id)
+            self._mutation_owners[account_id] = task
+            try:
+                yield
+            finally:
+                if previous is None:
+                    self._mutation_owners.pop(account_id, None)
+                else:
+                    self._mutation_owners[account_id] = previous
+
     # --- individual command kinds -------------------------------------------------
 
     async def _submit_leverage(
-        self, plan: ExecutionPlan, action: ExecutionAction
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        *,
+        client: AsterClient | None = None,
     ) -> CommandResult | None:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
@@ -207,16 +319,21 @@ class Executor:
             await self._commands.set_status(key, "PENDING")
         await self._commands.set_status(key, "SENDING")
         try:
-            await self._clients(plan.account_id).set_leverage(
+            await self._client_for(plan, client).set_leverage(
                 plan.account_id, action.payload["symbol"], int(action.payload["leverage"])
             )
         except AsterError as exc:
             return await self._fail(plan, key, exc)
         await self._commands.set_status(key, "CONFIRMED")
+        await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
 
     async def _submit_cancel(
-        self, plan: ExecutionPlan, action: ExecutionAction
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        *,
+        client: AsterClient | None = None,
     ) -> CommandResult | None:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
@@ -245,18 +362,27 @@ class Executor:
         symbol = action.payload["symbol"]
         coid = action.payload["origClientOrderId"]
         try:
-            await self._clients(plan.account_id).cancel_order(
+            await self._client_for(plan, client).cancel_order(
                 plan.account_id, symbol, orig_client_order_id=coid
             )
         except AsterError as exc:
             if exc.code == -2011:  # already canceled/unknown -> treat as done
-                await self._commands.set_status(key, "CONFIRMED", last_error=f"-2011:{exc.msg}")
-                return CommandResult(key, "CONFIRMED", f"-2011:{exc.msg}")
+                safe_error = f"-2011:{_safe_error_category(exc)}"
+                await self._commands.set_status(key, "CONFIRMED", last_error=safe_error)
+                await self._notify_confirmed(plan.account_id, action, key)
+                return CommandResult(key, "CONFIRMED", safe_error)
             return await self._fail(plan, key, exc)
         await self._commands.set_status(key, "CONFIRMED")
+        await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
 
-    async def _submit_order(self, plan: ExecutionPlan, action: ExecutionAction) -> CommandResult:
+    async def _submit_order(
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        *,
+        client: AsterClient | None = None,
+    ) -> CommandResult:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
         if existing is not None:
@@ -269,7 +395,9 @@ class Executor:
                 # A previous attempt answered SUBMITTED but was never confirmed
                 # in openOrders. That is NOT terminal success: verify on the
                 # exchange before deciding to skip or re-send.
-                recovered = await self._recover_submitted(plan, action, key, existing)
+                recovered = await self._recover_submitted(
+                    plan, action, key, existing, client=client
+                )
                 if recovered is not None:
                     return recovered
 
@@ -300,19 +428,20 @@ class Executor:
             )
             order = None
             try:
-                order = await self._clients(plan.account_id).place_order(plan.account_id, req)
+                order = await self._client_for(plan, client).place_order(plan.account_id, req)
             except AsterError as exc:
-                if exc.code == -2022 and await self._close_is_already_flat(plan, action):
+                if exc.code == -2022 and await self._close_is_already_flat(
+                    plan, action, client=client
+                ):
                     # A concurrent protective fill can flatten the leg between
                     # the snapshot and this close.  Aster rejects the stale
                     # close as ReduceOnly/position-side invalid, but the
                     # desired state is already satisfied.  Confirm only after
                     # an authoritative positionRisk read; a non-flat leg
                     # remains a genuine FAILED command.
-                    message = f"already-flat:-2022:{exc.msg}"
+                    message = f"already-flat:-2022:{_safe_error_category(exc)}"
                     await self._commands.set_status(key, "CONFIRMED", last_error=message)
-                    if self._on_confirmed is not None:
-                        await self._on_confirmed(plan.account_id, action)
+                    await self._notify_confirmed(plan.account_id, action, key)
                     return CommandResult(key, "CONFIRMED", message)
                 if not _is_unknown_error(exc):
                     return await self._fail(plan, key, exc)
@@ -322,7 +451,9 @@ class Executor:
                 pass
             if order is None:
                 # outcome unknown: check the exchange BEFORE any retry
-                resolved = await self._resolve_unknown(plan, action, key, symbol, coid)
+                resolved = await self._resolve_unknown(
+                    plan, action, key, symbol, coid, client=client
+                )
                 if resolved is not None:
                     return resolved
                 if attempt >= MAX_ATTEMPTS:
@@ -333,13 +464,19 @@ class Executor:
                 continue
 
             await self._commands.set_status(key, "SUBMITTED", client_order_id=coid)
-            return await self._confirm(plan, key, action, symbol, coid, order)
+            return await self._confirm(plan, key, action, symbol, coid, order, client=client)
 
-    async def _close_is_already_flat(self, plan: ExecutionPlan, action: ExecutionAction) -> bool:
+    async def _close_is_already_flat(
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        *,
+        client: AsterClient | None = None,
+    ) -> bool:
         if action.kind != ActionKind.MARKET_CLOSE:
             return False
         try:
-            positions = await self._clients(plan.account_id).position_risk(
+            positions = await self._client_for(plan, client).position_risk(
                 plan.account_id, symbol=action.symbol
             )
         except Exception as exc:  # noqa: BLE001 - preserve the original failure
@@ -359,6 +496,8 @@ class Executor:
         action: ExecutionAction,
         key: str,
         existing,
+        *,
+        client: AsterClient | None = None,
     ) -> CommandResult | None:
         """Resolve a previously SUBMITTED command via the exchange.
 
@@ -370,12 +509,16 @@ class Executor:
             return None
         symbol = action.payload["symbol"]
         try:
-            order = await self._clients(plan.account_id).query_order(
+            order = await self._client_for(plan, client).query_order(
                 plan.account_id, symbol, orig_client_order_id=str(coid)
             )
         except AsterError as exc:
             log.warning("submitted-recovery query failed for %s: %s", key, exc)
-            return CommandResult(key, "SUBMITTED", f"resolution query failed:{exc}")
+            return CommandResult(
+                key,
+                "SUBMITTED",
+                f"resolution query failed:{_safe_error_category(exc)}",
+            )
         if order is None:
             await self._commands.set_status(key, "FAILED", last_error="submitted:not-found")
             return None
@@ -386,42 +529,54 @@ class Executor:
             last_error=f"recovered-submitted:{order.status}",
         )
         await self._record_link(plan, action, str(coid))
-        if self._on_confirmed is not None and order.status in ("FILLED", "CANCELED", "EXPIRED"):
-            await self._on_confirmed(plan.account_id, action)
+        await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
 
     async def _confirm(
-        self, plan: ExecutionPlan, key: str, action: ExecutionAction, symbol: str, coid: str, order
+        self,
+        plan: ExecutionPlan,
+        key: str,
+        action: ExecutionAction,
+        symbol: str,
+        coid: str,
+        order,
+        *,
+        client: AsterClient | None = None,
     ) -> CommandResult:
         conditional = action.kind in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP)
         if not conditional:
             # MARKET RESULT response carries final fill data
             await self._commands.set_status(key, "CONFIRMED", client_order_id=coid)
             await self._record_link(plan, action, coid)
-            if self._on_confirmed is not None:
-                await self._on_confirmed(plan.account_id, action)
+            await self._notify_confirmed(plan.account_id, action, key)
             return CommandResult(key, "CONFIRMED", None)
 
         # conditional orders: verify via open_orders presence
-        open_orders = await self._clients(plan.account_id).open_orders(
+        open_orders = await self._client_for(plan, client).open_orders(
             plan.account_id, symbol=symbol
         )
         if any(o.client_order_id == coid for o in open_orders):
             await self._commands.set_status(key, "CONFIRMED", client_order_id=coid)
             await self._record_link(plan, action, coid)
-            if self._on_confirmed is not None:
-                await self._on_confirmed(plan.account_id, action)
+            await self._notify_confirmed(plan.account_id, action, key)
             return CommandResult(key, "CONFIRMED", None)
         await self._commands.set_status(key, "SUBMITTED", last_error="not seen in openOrders")
         await self._record_link(plan, action, coid)
         return CommandResult(key, "SUBMITTED", None)
 
     async def _resolve_unknown(
-        self, plan: ExecutionPlan, action: ExecutionAction, key: str, symbol: str, coid: str
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        key: str,
+        symbol: str,
+        coid: str,
+        *,
+        client: AsterClient | None = None,
     ) -> CommandResult | None:
         """query_order BEFORE retry: found -> CONFIRMED (+link); missing -> caller retries."""
         try:
-            order = await self._clients(plan.account_id).query_order(
+            order = await self._client_for(plan, client).query_order(
                 plan.account_id, symbol, orig_client_order_id=coid
             )
         except AsterError as exc:
@@ -435,12 +590,16 @@ class Executor:
                 last_error=f"resolved-unknown:{order.status}",
             )
             await self._record_link(plan, action, coid)
+            await self._notify_confirmed(plan.account_id, action, key)
             log.info("UNKNOWN resolved as %s for %s (%s)", order.status, key, coid)
             return CommandResult(key, "CONFIRMED", None)
         return None
 
+    def _client_for(self, plan: ExecutionPlan, client: AsterClient | None) -> AsterClient:
+        return client if client is not None else self._clients(plan.account_id)
+
     async def _fail(self, plan: ExecutionPlan, key: str, exc: AsterError) -> CommandResult:
-        error = f"{exc.code}:{exc.msg}"
+        error = f"{exc.code}:{_safe_error_category(exc)}"
         await self._commands.set_status(key, "FAILED", last_error=error)
         if self._settings is not None:
             await self._settings.set_flag("degraded", f"{plan.account_id}:{key}:{error}")
@@ -512,10 +671,11 @@ async def resolve_boot_unknowns(
                     await asyncio.sleep(BOOT_QUERY_BACKOFF_S * (attempt + 1))
         if not query_succeeded:
             unresolved_query_error += 1
+            safe_error = _safe_error_category(last_error) if last_error is not None else "unknown"
             await commands.set_status(
                 key,
                 str(row["status"]),
-                last_error=f"boot-query-unresolved:{last_error}",
+                last_error=f"boot-query-unresolved:{safe_error}",
             )
             continue
         if order is not None:

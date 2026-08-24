@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from copytradeaster.cli.main import (
+    _dispatch,
     _init_db,
     _load_settings,
     _set_pause,
@@ -23,7 +24,7 @@ from copytradeaster.domain.models import (
     TargetPosition,
 )
 from copytradeaster.storage.database import Database
-from copytradeaster.storage.repositories import SettingsRepo
+from copytradeaster.storage.repositories import AccountRepo, SettingsRepo, TelegramUserRepo
 
 WALLET = """\
 main test
@@ -203,3 +204,133 @@ async def test_import_wallet_end_to_end(env, capsys):
     # idempotent re-import
     rc2 = await _import_wallet(wallet)
     assert rc2 == 0
+
+
+def test_parser_telegram_user_commands() -> None:
+    parser = build_parser()
+
+    add = parser.parse_args(["telegram-user", "add", "123", "--chat-id", "456"])
+    assert add.command == "telegram-user"
+    assert add.telegram_user_action == "add"
+    assert add.user_id == "123"
+    assert add.chat_id == "456"
+
+    listing = parser.parse_args(["telegram-user", "list"])
+    assert listing.telegram_user_action == "list"
+    block = parser.parse_args(["telegram-user", "block", "123"])
+    unblock = parser.parse_args(["telegram-user", "unblock", "123"])
+    assert block.user_id == unblock.user_id == "123"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "chat_id"),
+    [("0", None), ("-1", None), ("not-an-int", None), ("123", "0"), ("123", "no")],
+)
+async def test_telegram_user_add_rejects_invalid_ids(env, user_id, chat_id, capsys):
+    rc = await _dispatch(
+        build_parser().parse_args(
+            [
+                "telegram-user",
+                "add",
+                user_id,
+                *([] if chat_id is None else ["--chat-id", chat_id]),
+            ]
+        )
+    )
+    assert rc == 2
+    assert "positive integer" in capsys.readouterr().err
+
+
+async def test_telegram_user_rejects_invalid_boolean_and_unknown_block_target(env, capsys):
+    from copytradeaster.cli.main import _telegram_user_set_blocked
+
+    assert await _telegram_user_set_blocked("123", blocked="false") == 2  # type: ignore[arg-type]
+    assert "boolean" in capsys.readouterr().err
+    assert await _telegram_user_set_blocked("123", blocked=True) == 2
+    assert "not found" in capsys.readouterr().err
+
+
+async def test_telegram_user_add_defaults_chat_and_is_idempotent(env, capsys):
+    add = build_parser().parse_args(["telegram-user", "add", "123"])
+    assert await _dispatch(add) == 0
+    first_output = capsys.readouterr().out
+    assert "added telegram user 123" in first_output
+
+    db = Database(env[1])
+    await db.connect()
+    first = await TelegramUserRepo(db).get(123)
+    await db.close()
+    assert first is not None
+    assert (first["chat_id"], first["role"], first["account_id"]) == (123, "USER", None)
+
+    assert await _dispatch(add) == 0
+    second_output = capsys.readouterr().out
+    assert "already present telegram user 123" in second_output
+    db = Database(env[1])
+    await db.connect()
+    second = await TelegramUserRepo(db).get(123)
+    await db.close()
+    assert second is not None
+    assert dict(second)["created_at"] == dict(first)["created_at"]
+    assert (second["chat_id"], second["role"], second["account_id"]) == (123, "USER", None)
+
+
+async def test_telegram_user_add_preserves_existing_role_and_account(env, capsys):
+    await _init_db()
+    db = Database(env[1])
+    await db.connect()
+    accounts = AccountRepo(db)
+    await accounts.upsert("copyc1", "follower", "copyc1", "0x" + "aa" * 20)
+    users = TelegramUserRepo(db)
+    await users.upsert(700, 7_700, role="ADMIN")
+    await users.upsert(701, 7_701, account_id="copyc1")
+    await users.set_notifications_enabled(701, False)
+    before = await users.get(701)
+    await db.close()
+
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "add", "700"])) == 0
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "add", "701"])) == 0
+    capsys.readouterr()
+
+    db = Database(env[1])
+    await db.connect()
+    refreshed_users = TelegramUserRepo(db)
+    after_admin = await refreshed_users.get(700)
+    after_user = await refreshed_users.get(701)
+    await db.close()
+    assert before is not None and after_user is not None and after_admin is not None
+    assert after_admin["role"] == "ADMIN"
+    assert after_user["account_id"] == "copyc1"
+    assert after_user["chat_id"] == 7_701
+    assert after_user["notifications_enabled"] == before["notifications_enabled"] == 0
+    assert after_user["blocked_at"] == before["blocked_at"]
+
+
+async def test_telegram_user_list_is_safe_and_block_unblock_is_idempotent(env, capsys):
+    await _init_db()
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "add", "900"])) == 0
+    capsys.readouterr()
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "block", "900"])) == 0
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "block", "900"])) == 0
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "list"])) == 0
+    output = capsys.readouterr().out
+    assert "user_id=900" in output
+    assert "chat_id=900" in output
+    assert "role=USER" in output
+    assert "account=-" in output
+    assert "access=on" in output
+    assert "notifications=off" in output
+    assert "blocked=yes" in output
+    assert "private-key-value" not in output
+    assert "0xsecret" not in output
+
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "unblock", "900"])) == 0
+    assert await _dispatch(build_parser().parse_args(["telegram-user", "unblock", "900"])) == 0
+    capsys.readouterr()
+    db = Database(env[1])
+    await db.connect()
+    row = await TelegramUserRepo(db).get(900)
+    await db.close()
+    assert row is not None
+    assert row["notifications_enabled"] == 1
+    assert row["blocked_at"] is None

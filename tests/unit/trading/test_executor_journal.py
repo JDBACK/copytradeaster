@@ -170,6 +170,48 @@ async def test_happy_path_market_confirmed(env):
     assert link_rows is not None
 
 
+async def test_confirmed_callback_receives_durable_command_key(env):
+    _executor, client, commands, links, settings = env
+    seen: list[tuple[str, str, str]] = []
+
+    async def on_confirmed(account_id, action, command_key):
+        seen.append((account_id, action.kind.value, command_key))
+
+    executor = Executor(
+        lambda _account_id: client,
+        commands,
+        links,
+        {},
+        settings=settings,
+        on_confirmed=on_confirmed,
+    )
+    result = await executor.submit(plan_of(open_action(coid="ct-confirmed-key")))
+
+    assert result[0].status == "CONFIRMED"
+    assert seen == [("copyc1", "MARKET_OPEN", result[0].command_key)]
+
+
+async def test_confirmed_callback_failure_does_not_change_confirmed_result(env):
+    _executor, client, commands, links, settings = env
+
+    async def broken_callback(account_id, action, command_key):
+        del account_id, action, command_key
+        raise RuntimeError("notification sink unavailable")
+
+    executor = Executor(
+        lambda _account_id: client,
+        commands,
+        links,
+        {},
+        settings=settings,
+        on_confirmed=broken_callback,
+    )
+    result = await executor.submit(plan_of(open_action(coid="ct-confirmed-isolated")))
+
+    assert result[0].status == "CONFIRMED"
+    assert (await commands.get(result[0].command_key))["status"] == "CONFIRMED"
+
+
 async def test_503_unknown_then_query_found_confirmed_without_resend(env):
     executor, client, commands, links, _ = env
     client.place_error = AsterError(-1000, "Unknown", http_status=503)
@@ -368,6 +410,21 @@ async def test_existing_sending_is_never_resubmitted(env):
     result = await executor.submit(plan)
     assert result[0].status == "SENDING"
     assert client.placed == []
+
+
+async def test_submit_under_mutation_lock_reuses_executor_internals_without_deadlock(env):
+    executor, client, commands, links, _ = env
+    del commands, links
+    plan = plan_of(open_action(coid="ct-under-lock"))
+
+    with pytest.raises(RuntimeError, match="requires the current task"):
+        await executor.submit_under_mutation_lock(plan, client=client)
+
+    async with executor.mutation_context(plan.account_id):
+        result = await executor.submit_under_mutation_lock(plan, client=client)
+
+    assert result[0].status == "CONFIRMED"
+    assert len(client.placed) == 1
 
 
 async def test_boot_query_error_remains_unresolved_after_bounded_retries(env):

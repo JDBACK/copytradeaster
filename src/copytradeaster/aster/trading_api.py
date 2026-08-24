@@ -12,12 +12,12 @@ from decimal import Decimal
 
 import httpx
 
-from copytradeaster.aster.models import BalanceDTO, ExchangeInfo, OrderDTO, PositionDTO
+from copytradeaster.aster.models import AgentDTO, BalanceDTO, ExchangeInfo, OrderDTO, PositionDTO
 from copytradeaster.aster.ports import IdentityProvider, KeyProvider, NonceSource
 from copytradeaster.aster.rate_limits import RateLimits
 from copytradeaster.aster.signing import prepare_signed_request
 from copytradeaster.domain.models import PosSide, Side
-from copytradeaster.logging_utils import get_logger, redact
+from copytradeaster.logging_utils import get_logger
 
 log = get_logger(__name__)
 
@@ -166,11 +166,17 @@ class AsterClient:
         identity = self._identities.identity(account_id)
         key = self._keys.private_key(account_id)
         nonce = await self._nonces.next_nonce(identity.signer)
-        qs, full = prepare_signed_request(params, identity, key, nonce)
+        _, full = prepare_signed_request(params, identity, key, nonce)
         url = self._base_url + path + "?" + full
         if self._dry_run and method != "GET":
-            masked = url.split("&signature=")[0] + "&signature=" + redact("0x" + "0" * 32)
-            log.info("DRY-RUN %s %s", method, masked)
+            # The signed URL contains user/signer/nonce/signature query
+            # material.  Keep the action trace, never the URL or parameters.
+            log.info(
+                "DRY-RUN signed request method=%s path=%s account_id=%s",
+                method,
+                path,
+                account_id,
+            )
             return {}
         try:
             resp = await self._http.request(method, url, content=b"")
@@ -181,7 +187,9 @@ class AsterClient:
         body = _safe_json(resp)
         if isinstance(body, dict) and isinstance(body.get("code"), int) and body["code"] < 0:
             raise self._parse_error(resp.status_code, body)
-        log.debug("%s %s?%s&signature=%s", method, path, qs, redact("s" * 64))
+        # Do not log ``qs``/``full``: even without the final signature the
+        # signed query carries wallet identity and nonce fields.
+        log.debug("signed request method=%s path=%s account_id=%s", method, path, account_id)
         return body
 
     # --- public (unsigned) ----------------------------------------------------
@@ -219,6 +227,44 @@ class AsterClient:
         body = await self._signed(account_id, "GET", "/fapi/v3/openOrders", params, weight=weight)
         return [OrderDTO.model_validate(x) for x in body]
 
+    async def agent(self, account_id: str) -> AgentDTO:
+        """Return the Agent record belonging to the configured signer.
+
+        ``GET /fapi/v3/agent`` is a signed USER_DATA request and returns a
+        collection in the documented API.  Some deployments wrap that
+        collection in ``data``/``agents`` while a single-record response is
+        also seen in compatibility responses; accept those wire shapes but
+        expose one typed record to callers.  A record for another signer is
+        never returned.
+        """
+        body = await self._signed(account_id, "GET", "/fapi/v3/agent", {}, weight=5)
+        if isinstance(body, list):
+            records = body
+        elif isinstance(body, dict):
+            nested = body.get("data")
+            if nested is None:
+                nested = body.get("agents", body.get("agent"))
+            if isinstance(nested, list):
+                records = nested
+            elif isinstance(nested, dict):
+                records = [nested]
+            else:
+                records = [body]
+        else:
+            raise AsterError(-1000, "invalid agent response")
+
+        expected_signer = self._identities.identity(account_id).signer.lower()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            try:
+                dto = AgentDTO.model_validate(record)
+            except Exception:
+                raise AsterError(-1000, "invalid agent response") from None
+            if dto.agent_address and dto.agent_address.strip().lower() == expected_signer:
+                return dto
+        raise AsterError(-2015, "agent not found")
+
     async def query_order(
         self,
         account_id: str,
@@ -244,7 +290,13 @@ class AsterClient:
 
     async def place_order(self, account_id: str, req: PlaceOrderRequest) -> OrderDTO:
         if self._dry_run:
-            log.info("DRY-RUN place_order %s", req.to_params())
+            log.info(
+                "DRY-RUN place_order account_id=%s symbol=%s side=%s type=%s",
+                account_id,
+                req.symbol,
+                req.side.value,
+                req.type,
+            )
             return OrderDTO(
                 orderId=0,
                 clientOrderId=req.new_client_order_id,

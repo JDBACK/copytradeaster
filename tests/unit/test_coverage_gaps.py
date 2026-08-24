@@ -3,12 +3,14 @@ logging utils, config validation, database guards, stream robustness)."""
 
 import asyncio
 import logging
+import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
 from copytradeaster.config import Settings
-from copytradeaster.logging_utils import redact, setup_logging
+from copytradeaster.logging_utils import log_onboarding_audit, redact, setup_logging
 from copytradeaster.storage.database import Database
 
 
@@ -21,11 +23,113 @@ class TestLoggingUtils:
         assert redact("deadbeef00") == "de***ef00"[:2] + "***" + "deadbeef00"[-4:]
         assert redact("") == ""
 
-    def test_setup_logging(self):
-        setup_logging("INFO")
+    def test_setup_logging(self, tmp_path: Path):
+        path = tmp_path / "logs" / "copytradeaster.log"
+        setup_logging("INFO", log_path=path, max_bytes=128, backup_count=2)
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert logging.getLogger("httpcore").level == logging.WARNING
         root = logging.getLogger()
+        managed = [
+            handler
+            for handler in root.handlers
+            if isinstance(handler, RotatingFileHandler)
+            and Path(handler.baseFilename) == path.resolve()
+        ]
+        assert len(managed) == 1
+        setup_logging("INFO", log_path=path, max_bytes=128, backup_count=2)
+        managed_again = [
+            handler
+            for handler in root.handlers
+            if isinstance(handler, RotatingFileHandler)
+            and Path(handler.baseFilename) == path.resolve()
+        ]
+        assert managed_again == managed
+        logging.getLogger("copytradeaster.test").info("persistent event")
+        for handler in managed:
+            handler.flush()
+        assert path.exists()
+        assert "persistent event" in path.read_text(encoding="utf-8")
+        if os.name == "posix":
+            assert path.stat().st_mode & 0o777 == 0o600
         root.setLevel(logging.WARNING)  # restore for other tests
+        setup_logging("WARNING", log_path=None)
         assert True
+
+    def test_setup_logging_rotation_and_secret_safe_file(self, tmp_path: Path):
+        path = tmp_path / "logs" / "copytradeaster.log"
+        setup_logging("INFO", log_path=path, max_bytes=100, backup_count=1)
+        logger = logging.getLogger("copytradeaster.secret-test")
+        for index in range(5):
+            logger.info(
+                "signed URL https://fapi.asterdex-testnet.com/fapi/v3/order?"
+                "signature=signature-secret-%s&apiKey=api-secret-%s private_key=private-secret-%s",
+                index,
+                index,
+                index,
+            )
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, RotatingFileHandler):
+                handler.flush()
+        files = sorted(path.parent.glob("copytradeaster.log*"))
+        assert path.exists()
+        assert len(files) >= 2
+        if os.name == "posix":
+            assert all(item.stat().st_mode & 0o777 == 0o600 for item in files)
+        text = "\n".join(item.read_text(encoding="utf-8") for item in files)
+        assert "signature-secret" not in text
+        assert "api-secret" not in text
+        assert "private-secret" not in text
+        setup_logging("WARNING", log_path=None)
+
+    def test_handler_filter_accepts_formatted_records_and_audit_levels(
+        self, tmp_path: Path, caplog
+    ):
+        path = tmp_path / "logs" / "copytradeaster.log"
+        setup_logging("INFO", log_path=path, max_bytes=4096, backup_count=1)
+        logger = logging.getLogger("copytradeaster.audit-test")
+        with caplog.at_level(logging.INFO):
+            logger.info("third-party event=%s", "plain")
+            logger.info("wallet=%s private_key=%s", "0x" + "a" * 40, "0x" + "b" * 64)
+            log_onboarding_audit(
+                logger,
+                event="attempt",
+                mode="connect",
+                user_id=7,
+                account_id="tg-7",
+                result="started",
+                paused=None,
+            )
+            log_onboarding_audit(
+                logger,
+                event="rejected",
+                mode="connect",
+                user_id=7,
+                account_id="tg-7",
+                result="rejected",
+                paused=None,
+                category="unexpected",
+                exception_type="RuntimeError",
+            )
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, RotatingFileHandler):
+                handler.flush()
+        text = path.read_text(encoding="utf-8")
+        assert "third-party event=plain" in text
+        assert "0x" + "a" * 40 not in text
+        assert "0x" + "b" * 64 not in text
+        assert any(
+            record.levelno == logging.INFO
+            and "event=attempt" in record.getMessage()
+            and "paused=unknown" in record.getMessage()
+            for record in caplog.records
+        )
+        assert any(
+            record.levelno == logging.WARNING
+            and "event=rejected" in record.getMessage()
+            and "paused=unknown" in record.getMessage()
+            for record in caplog.records
+        )
+        setup_logging("WARNING", log_path=None)
 
 
 class TestConfig:
@@ -42,6 +146,21 @@ class TestConfig:
         monkeypatch.setenv("CT_FEE_BUFFER_PCT", "0.002")
         s = Settings()
         assert str(s.fee_buffer_pct) == "0.002"
+
+    def test_log_level_is_normalized_and_validated(self):
+        assert Settings(encryption_key="ab" * 32, log_level="warning").log_level == "WARNING"
+        with pytest.raises(ValueError, match="CT_LOG_LEVEL"):
+            Settings(encryption_key="ab" * 32, log_level="TRACE")
+
+    def test_redacted_dump_contains_no_secret_values(self):
+        settings = Settings(
+            _env_file=None,
+            encryption_key="ab" * 32,
+            telegram_bot_token="123456:secret-token",
+        )
+        dumped = repr(settings.redacted_dump())
+        assert "ab" * 32 not in dumped
+        assert "secret-token" not in dumped
 
     def test_extra_env_ignored(self, monkeypatch):
         monkeypatch.setenv("CT_ENCRYPTION_KEY", "ab" * 32)
@@ -76,6 +195,7 @@ class TestConfig:
                 encryption_key="ab" * 32,
                 rest_base_url="https://fapi.asterdex.com",
                 ws_user_base="wss://fstream.asterdex.com/ws",
+                testnet_ip_whitelist_override=False,
             )
 
 

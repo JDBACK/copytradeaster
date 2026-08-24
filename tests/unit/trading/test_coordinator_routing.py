@@ -7,7 +7,10 @@ from decimal import Decimal as D
 
 import pytest
 
+from copytradeaster.app import App
 from copytradeaster.domain.models import (
+    ActionKind,
+    ExecutionAction,
     PositionKey,
     PositionState,
     ProtectiveOrder,
@@ -16,6 +19,7 @@ from copytradeaster.domain.models import (
     SymbolFilters,
 )
 from copytradeaster.master.projector import MasterDelta, MasterState
+from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
     CommandRepo,
@@ -25,6 +29,7 @@ from copytradeaster.storage.repositories import (
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor
+from copytradeaster.trading.registry import FollowerRegistry
 
 
 class FakeClient:
@@ -177,8 +182,12 @@ async def env(tmp_path):
     trades = CopyTradeRepo(db)
     links = OrderLinkRepo(db)
     settings = SettingsRepo(db)
+    registry = FollowerRegistry(followers)
+    routing_app = App.__new__(App)
+    routing_app.follower_registry = registry
+    routing_app.master_client = FakeClient()
     executor = Executor(
-        lambda aid: next(f.client for f in followers if f.account_id == aid),
+        routing_app._client_for,
         commands,
         links,
         {},
@@ -190,7 +199,7 @@ async def env(tmp_path):
         notifications.append(text)
 
     coordinator = Coordinator(
-        followers=followers,
+        followers=registry,
         settings=settings,
         executor=executor,
         trades=trades,
@@ -235,6 +244,176 @@ async def test_fanout_freshness_is_captured_once_for_slow_followers(env):
     assert all(len(follower.client.placed) >= 2 for follower in followers)
 
 
+async def test_hot_add_during_fanout_is_visible_only_to_next_generation(env):
+    coordinator, followers, db, _ = env
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    first_balance = followers[0].client.balance
+
+    async def blocking_balance(account_id):
+        entered.set()
+        await release.wait()
+        return await first_balance(account_id)
+
+    followers[0].client.balance = blocking_balance  # type: ignore[method-assign]
+    new_runtime = FollowerRuntime("copyc5", FakeClient(), None)
+    from copytradeaster.storage.repositories import AccountRepo
+
+    await AccountRepo(db).upsert("copyc5", "follower", "copyc5", "0xcopyc5")
+    await SettingsRepo(db).upsert_policy(
+        RiskPolicy("0.01", 20, "0.01", allow_new_entries=False),
+        "copyc5",
+    )
+
+    current_generation = asyncio.create_task(coordinator.on_master_delta(delta_of(master_state())))
+    await entered.wait()
+    await coordinator.registry.publish_new(new_runtime)
+    release.set()
+    await current_generation
+
+    assert new_runtime.client.placed == []
+    await coordinator.on_master_delta(delta_of(master_state()))
+    # The new runtime participates without entering because onboarding keeps
+    # it paused.  Enabling it proves the following generation routes correctly.
+    await SettingsRepo(db).patch_policy("copyc5", allow_new_entries=True)
+    await coordinator.on_master_delta(delta_of(master_state()))
+    assert len(new_runtime.client.placed) >= 2
+
+
+async def test_replacement_during_generation_keeps_old_client_for_old_plan(env):
+    coordinator, followers, db, _ = env
+    del db
+    old_runtime = coordinator.registry.get("copyc1")
+    assert old_runtime is not None
+    old_client = old_runtime.client
+    new_client = FakeClient()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_place = old_client.place_order
+
+    async def blocking_place(account_id, request):
+        entered.set()
+        await release.wait()
+        return await original_place(account_id, request)
+
+    old_client.place_order = blocking_place  # type: ignore[method-assign]
+    coordinator._executor._on_confirmed = None
+    generation = asyncio.create_task(coordinator.on_master_delta(delta_of(master_state())))
+    await entered.wait()
+    replacement = FollowerRuntime("copyc1", new_client, None)
+    await coordinator.registry.publish_replacement(replacement, expected=old_runtime)
+    release.set()
+    await generation
+
+    assert old_client.placed
+    assert new_client.placed == []
+
+
+async def test_pause_barrier_waits_for_active_generation_and_closes_admission(env):
+    coordinator, followers, db, _ = env
+    del db
+    first = followers[0].client
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_balance = first.balance
+
+    async def blocking_balance(account_id):
+        entered.set()
+        await release.wait()
+        return await original_balance(account_id)
+
+    first.balance = blocking_balance  # type: ignore[method-assign]
+    coordinator._executor._on_confirmed = None
+    generation = asyncio.create_task(coordinator.on_master_delta(delta_of(master_state())))
+    await entered.wait()
+    pause = asyncio.create_task(coordinator.pause_barrier(timeout_s=1))
+    await asyncio.sleep(0)
+    assert not pause.done()
+    release.set()
+    await generation
+    await pause
+
+    before = [len(follower.client.placed) for follower in followers]
+    await coordinator.on_master_delta(delta_of(master_state()))
+    assert [len(follower.client.placed) for follower in followers] == before
+    await coordinator.resume_after_pause()
+
+
+async def test_postfill_drain_rejects_a_late_confirmation(env):
+    coordinator, followers, db, _ = env
+    del db, followers
+    coordinator._last_master_state = master_state()
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_CLOSE,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT"},
+        client_order_id="late",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+
+    async def late_confirmation():
+        await asyncio.sleep(0)
+        await coordinator.on_command_confirmed("copyc1", action)
+
+    late = asyncio.create_task(late_confirmation())
+    await coordinator.drain_postfill_tasks(timeout_s=0.1)
+    await late
+    assert coordinator._postfill_tasks == set()
+
+
+def lifecycle_app(coordinator, db):
+    app = App.__new__(App)
+    app.follower_registry = coordinator.registry
+    app.executor = coordinator._executor
+    app.coordinator = coordinator
+    app.commands = CommandRepo(db)
+    return app
+
+
+async def test_safe_remove_rejects_nonflat_follower(env):
+    coordinator, followers, db, _ = env
+    app = lifecycle_app(coordinator, db)
+    followers[0].client.positions[PositionKey("BTCUSDT")] = {"qty": D("0.1")}
+
+    with pytest.raises(RuntimeError, match="not flat"):
+        await app.unregister_follower("copyc1")
+    assert coordinator.registry.get("copyc1") is not None
+
+
+async def test_safe_remove_rejects_open_orders(env):
+    coordinator, followers, db, _ = env
+    app = lifecycle_app(coordinator, db)
+    followers[0].client.positions[PositionKey("BTCUSDT")] = {
+        "qty": D(0),
+        "stop": D(64000),
+    }
+
+    with pytest.raises(RuntimeError, match="open orders"):
+        await app.unregister_follower("copyc1")
+    assert coordinator.registry.get("copyc1") is not None
+
+
+async def test_safe_remove_rejects_inflight_command(env):
+    coordinator, _, db, _ = env
+    app = lifecycle_app(coordinator, db)
+    commands = CommandRepo(db)
+    await commands.insert(
+        "inflight-remove",
+        "copyc1",
+        None,
+        "MARKET_OPEN",
+        "{}",
+        1,
+        "ct-inflight-remove",
+    )
+    await commands.set_status("inflight-remove", "SENDING")
+
+    with pytest.raises(RuntimeError, match="in-flight"):
+        await app.unregister_follower("copyc1")
+    assert coordinator.registry.get("copyc1") is not None
+
+
 async def test_one_follower_failure_isolated(env):
     coordinator, followers, db, notifications = env
 
@@ -261,8 +440,30 @@ async def test_three_consecutive_errors_set_degraded(env):
     assert flag is not None and "copyc4" in flag
 
 
+async def test_recompute_error_notifications_are_thresholded_and_reopen_after_recovery(env):
+    coordinator, followers, _db, notifications = env
+
+    def boom(account_id):
+        raise RuntimeError("boom")
+
+    followers[3].client.balance = boom  # type: ignore[method-assign]
+    state = delta_of(master_state())
+    for _ in range(5):
+        await coordinator.on_master_delta(state)
+
+    assert len([n for n in notifications if "Сверка follower copyc4" in n]) == 2
+
+    healthy_client = FakeClient()
+    followers[3].client.balance = healthy_client.balance  # type: ignore[method-assign]
+    await coordinator.on_master_delta(state)
+    followers[3].client.balance = boom  # type: ignore[method-assign]
+    await coordinator.on_master_delta(state)
+
+    assert len([n for n in notifications if "Сверка follower copyc4" in n]) == 3
+
+
 async def test_pause_blocks_open_but_not_close(env):
-    coordinator, followers, db, _ = env
+    coordinator, followers, db, notifications = env
     settings_repo = SettingsRepo(db)
     policy = RiskPolicy(
         risk_percent=D("0.01"),
@@ -275,6 +476,7 @@ async def test_pause_blocks_open_but_not_close(env):
     # no positions anywhere -> flat target; nothing should be placed at all
     await coordinator.on_master_delta(delta_of(master_state()))
     assert all(len(fr.client.placed) == 0 for fr in followers)
+    assert notifications == []
 
     # follower has an open position, master closed -> close must go through pause
     followers[0].client.positions[PositionKey("BTCUSDT")] = {
@@ -322,6 +524,75 @@ async def test_no_stop_skip_notification(env):
     await coordinator.on_master_delta(delta_of(master_state(stop=None)))
     assert any("NO_STOP" in n for n in notifications)
     assert all(len(fr.client.placed) == 0 for fr in followers)
+
+
+async def test_structured_skip_event_has_explicit_account_and_safe_text(env):
+    coordinator, followers, _db, _legacy_notifications = env
+    events: list[NotificationEvent] = []
+
+    class Collector:
+        async def emit(self, event: NotificationEvent) -> None:
+            events.append(event)
+
+    coordinator._on_notify = None
+    coordinator._notifier = Collector()
+    state = master_state(stop=None)
+    state.event_time = 101
+    await coordinator.on_master_delta(delta_of(state))
+    first_count = len(events)
+    state.event_time = 202
+    await coordinator.on_master_delta(delta_of(state))
+
+    assert events
+    assert len(events) == first_count
+    assert all(event.account_id in {f.account_id for f in followers} for event in events)
+    assert all(event.kind == "copy.skip" for event in events)
+    assert all(event.severity == NotificationSeverity.INFO for event in events)
+    assert all("NO_STOP" in event.text for event in events)
+    assert all("[" not in event.text and "]" not in event.text for event in events)
+
+
+async def test_actionable_skip_notifies_again_for_a_new_master_episode(env):
+    coordinator, followers, db, _legacy_notifications = env
+    events: list[NotificationEvent] = []
+
+    class Collector:
+        async def emit(self, event: NotificationEvent) -> None:
+            events.append(event)
+
+    coordinator._on_notify = None
+    coordinator._notifier = Collector()
+    trades = CopyTradeRepo(db)
+    state = master_state(stop=None)
+    first_trade = await trades.open_trade("BTCUSDT", "BOTH", None)
+    await coordinator.on_master_delta(delta_of(state))
+    await coordinator.on_master_delta(delta_of(state))
+    assert len(events) == len(followers)
+
+    await trades.close_trade(first_trade)
+    second_trade = await trades.open_trade("BTCUSDT", "BOTH", None)
+    await coordinator.on_master_delta(delta_of(state))
+
+    assert second_trade != first_trade
+    assert len(events) == 2 * len(followers)
+    assert {event.event_key for event in events[: len(followers)]}.isdisjoint(
+        {event.event_key for event in events[len(followers) :]}
+    )
+
+
+async def test_structured_notifier_failure_does_not_block_fanout(env):
+    coordinator, followers, _db, _legacy_notifications = env
+
+    class BrokenNotifier:
+        async def emit(self, event):
+            del event
+            raise RuntimeError("notification enqueue unavailable")
+
+    coordinator._on_notify = None
+    coordinator._notifier = BrokenNotifier()
+    await coordinator.on_master_delta(delta_of(master_state()))
+
+    assert all(len(follower.client.placed) >= 2 for follower in followers)
 
 
 async def test_self_stop_blocks_reentry_until_new_episode(env):
@@ -427,7 +698,7 @@ async def test_own_tp_fill_blocks_reentry(env):
     )
     await coordinator.on_master_delta(delta_of(master_state()))
     assert len(fr.client.placed) == 0
-    assert any("OWN_PROTECTIVE_FILLED" in n for n in notifications)
+    assert not any("OWN_PROTECTIVE_FILLED" in n for n in notifications)
 
 
 async def test_limit_flavor_stop_mirrored(env):

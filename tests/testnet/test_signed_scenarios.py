@@ -36,8 +36,10 @@ QTY_RED = D("0.001")
 
 
 @pytest.fixture(scope="module")
-def settings() -> Settings:
-    return Settings()
+def settings(tmp_path_factory) -> Settings:
+    return Settings(
+        log_path=tmp_path_factory.mktemp("signed-logs") / "copytradeaster.log",
+    )
 
 
 @pytest.fixture
@@ -88,6 +90,25 @@ async def test_account_reads_both_roles(clients, creds):
         assert isinstance(positions, list)
         orders = await clients["main"].open_orders(account_id)
         assert isinstance(orders, list)
+
+
+async def test_follower_agent_permissions_signed_v3(clients, creds, settings):
+    """Prove the Stage 2 USER_DATA Agent endpoint with persisted follower keys."""
+    follower_ids = creds.account_ids("follower")
+    if not follower_ids:
+        pytest.skip("no follower credentials imported")
+    client = clients["main"]
+    for account_id in follower_ids:
+        agent = await client.agent(account_id)
+        identity = creds.identity(account_id)
+        assert agent.agent_address is not None
+        assert agent.agent_address.casefold() == identity.signer.casefold()
+        assert agent.can_read is True
+        assert agent.can_perp_trade is True
+        assert agent.can_withdraw is False
+        assert agent.expired is not None and agent.expired > int(time.time() * 1000)
+        if settings.require_agent_ip_whitelist and not settings.testnet_ip_whitelist_override:
+            assert agent.ip_whitelist
 
 
 async def test_listen_key_lifecycle(clients, creds):
@@ -513,7 +534,7 @@ async def test_boot_recovery_real_found_and_not_found(clients, db):
         await _flatten_main(client)
 
 
-async def test_real_app_ws_ready_reconnect_and_cleanup(clients, creds):
+async def test_real_app_ws_ready_reconnect_and_cleanup(clients, creds, settings):
     """REAL-06: actual App reaches READY after WS-gated resnapshot, receives a
     real master order event, reconnects after listenKey close, and stops with
     ready=false without duplicating follower protection."""
@@ -532,7 +553,7 @@ async def test_real_app_ws_ready_reconnect_and_cleanup(clients, creds):
     await _emergency_close_all()
     await _set_pause(False)
     await _flatten_main(client)
-    app = App(Settings())
+    app = App(settings)
     started = False
 
     async def wait_for(predicate, timeout: float, what: str) -> None:
@@ -681,7 +702,7 @@ async def test_real_app_ws_ready_reconnect_and_cleanup(clients, creds):
         with contextlib.suppress(Exception):
             await _emergency_close_all()
 
-    audit = Database(Settings().db_path)
+    audit = Database(settings.db_path)
     await audit.connect()
     try:
         assert await SettingsRepo(audit).get_flag("ready") == "false"
