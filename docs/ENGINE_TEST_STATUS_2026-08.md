@@ -25,6 +25,13 @@
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
+- **Leverage control-plane ПРИНЯТ (2026-08-25, внешний acceptance `69fa148`):**
+  баги #25/#26 и весь leverage-этап закрыты цепочкой
+  `86a51ec → 6f01917 → 54279d8 → 69fa148`: P0 dependency gating, flat-leverage,
+  hot path без leverage REST, unknown-outcome без blind retry, crash recovery
+  SET через authoritative positionRisk, ambiguous → fail-closed, boot-порядок
+  catalog→reconcile, lifecycle worker'а. Дословные ревью:
+  `docs/reviews/review_leverage_control_plane.md`; счётчики гейтов выше.
 - Актуальный offline gate после внедрения leverage control-plane (баги #25–26,
   `trading/leverage.py`): **656 passed / 2 skipped / 17 deselected**, coverage
   **87.23%** при пороге 87%; ruff check/format clean. Signed testnet gate

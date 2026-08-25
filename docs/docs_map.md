@@ -71,7 +71,7 @@ corrective-план завершён и содержит фактический 
 | `review_stage1_new.md` | Второе ревью: 6 блокеров (protective convergence, nonce, leverage…) | все закрыты в follow-up |
 | `review_stage1_final.md` | Третий проход: dust zero-target edge case | закрыт (миграция #12) |
 | `review_stage1_acceptance.md` | Финальное принятие: flip-регрессия + честное dust-evidence | **Stage 1 принят**, 0 blockers, две P2-заметки |
-
+| `review_leverage_control_plane.md` | Три прохода ревью leverage control-plane: 4 находки → остаточный P1 (ambiguous ≠ FAILED) → финальный acceptance `69fa148` (2026-08-25) |
 Это исторический verdict того прохода. Актуальный corrective acceptance после
 нового независимого аудита описан в
 `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md`.
