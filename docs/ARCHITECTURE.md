@@ -295,15 +295,18 @@ screen с remediation, `🔄 Попробовать снова` и `⌂ На г�
 
 ```text
 PositionKey
+ProtectiveOrder
 PositionState
 AccountState
 RiskPolicy
+TargetPosition
 TargetState
 ExecutionAction
 ExecutionPlan
 TradingIdentity
+SymbolFilters
+QtyDecision
 ```
-
 Отдельно полезна внутренняя сущность `CopyTrade` / `trade_id`, чтобы отличать два последовательных торговых эпизода по одному символу после `close → reopen`.
 
 Для Hedge mode `PositionKey` обязательно различает LONG и SHORT.
@@ -341,6 +344,11 @@ Stop и **ровно один** bot-owned TP. Дубликатные услов�
 `extra_stops/extra_tps`, и planner отменяет их отдельными независимыми
 `CANCEL_ORDER` (priority 1) — в том числе на flat-ноге.
 
+Инвариант блокировки зависимых действий при смене плеча (правило 1 planner, баг #25):
+`SET_LEVERAGE` получает `action_id`, а последующие `MARKET_OPEN` и защитные ордера —
+`depends_on_action_id`. При FAILED/UNKNOWN статусе `SET_LEVERAGE` исполнитель переводит
+зависимые действия в `BLOCKED` (fail-closed), при этом закрытия (`MARKET_CLOSE`) и
+отмены ордеров никогда не зависят от плеча и исполняются безусловно.
 Семантика нулевого таргета (добавлено 2026-08-23, третий проход ревью):
 
 ```text
@@ -579,10 +587,11 @@ notification_outbox
 - `agent_validations` — последняя безопасная signed Agent snapshot;
 - `notification_outbox` — recipient-specific delivery journal без secrets.
 
-(В реализации также есть `sync_basis` — per-follower sizing reference с
+(В реализации также есть `app_state` — персистентные runtime флаги: `ready`,
+`ready_heartbeat_s`, `ready_runtime_uuid`, `allow_new_entries`, `emergency_active`,
+`degraded_error`; `sync_basis` — per-follower sizing reference с
 `zero_target`-маркером намеренного dust-flat и `issued_target` для
 идемпотентности ревизий; `nonce_store` — атомарная выдача nonces.)
-
 Подробная схема появляется только по мере реализации конкретного этапа.
 
 ## 14. Ошибки и safety state
