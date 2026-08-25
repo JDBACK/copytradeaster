@@ -740,7 +740,9 @@ copytradeaster/
 │       │   ├── coordinator.py     # master delta -> targets per follower
 │       │   ├── planner.py         # actual vs target -> minimal plan
 │       │   ├── executor.py        # durable command execution + retry/recovery
-│       │   └── reconciler.py      # periodic full sweep
+│       │   ├── reconciler.py      # periodic full sweep
+│       │   ├── leverage.py        # LeverageManager: RAM candidate catalog + confirmed state
+│       │   └── registry.py        # FollowerRegistry: dynamic follower runtime
 │       │
 │       ├── storage/                # SQLite: миграции + репозитории
 │       │   ├── database.py        # aiosqlite, WAL, write_lock, MIGRATIONS
@@ -752,24 +754,32 @@ copytradeaster/
 │       │
 │       ├── notifications/
 │       │   ├── console.py         # локальный structured sink
+│       │   ├── formatter.py       # trader cards formatting (format_confirmed_action, format_skip_reason)
+│       │   ├── models.py          # NotificationEvent, NotificationRecipient, NotificationFilter
+│       │   ├── protocol.py        # NotificationRouter protocol
 │       │   ├── router.py          # owner/admin routing → durable outbox
 │       │   └── worker.py          # bounded Telegram delivery/retry
 │       │
 │       ├── onboarding/
-│       │   └── direct.py          # signed V3 preflight, testnet-only
+│       │   ├── direct.py          # signed V3 preflight, testnet-only
+│       │   ├── errors.py          # typed OnboardingErrorCode / OnboardingError
+│       │   ├── models.py          # DirectOnboardingRequest / EphemeralKeyProvider / AgentValidation
+│       │   └── providers.py       # DirectKeyProvider
 │       │
 │       ├── application/
 │       │   ├── service.py         # shared Bot/Mini App use cases
 │       │   ├── adapters.py        # concrete App/SQLite/Aster boundaries
 │       │   ├── control.py         # common emergency workflow
-│       │   └── engine.py          # Stage 2 process lifecycle
+│       │   ├── engine.py          # Stage 2 process lifecycle
+│       │   └── models.py          # transport-neutral Stage 2 DTO/errors
 │       │
 │       ├── telegram/
 │       │   ├── runtime.py         # aiogram dispatcher/polling lifecycle
 │       │   ├── menu.py            # inline presenters/typed callbacks
 │       │   ├── flow.py            # non-secret onboarding FSM
-│       │   └── routers/            # navigation/settings/admin handlers
-│       │
+│       │   ├── access.py          # captcha challenges and access request store
+│       │   ├── middleware.py      # authorization and activity tracker middleware
+│       │   └── routers/           # navigation/settings/admin handlers (common, settings, access)
 │       └── cli/
 │           └── main.py            # run/run-bot/import/admin commands
 │

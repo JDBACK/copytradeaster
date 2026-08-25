@@ -8,7 +8,7 @@ Telegram (включая resume/copy cycle на реальном тестнет�
 
 ```text
 Python 3.12
-aiogram 3.x            — Telegram-бот (онбординг, команды, уведомления)
+aiogram 3.30.0          — Telegram-бот (онбординг, команды, уведомления)
 httpx (async)          — REST к fapi.asterdex.com / fapi.asterdex-testnet.com
 websockets             — user-data stream мастера + market stream
 eth-account            — EIP-712 подписи (ApproveAgent/ApproveBuilder, ордера)
@@ -181,6 +181,30 @@ Inline-first UX brief и решение по Scenes Wizard:
   и выставление защитного стопа, доставка Telegram-уведомлений `MARKET_OPEN` и
   `PLACE_STOP`, закрытие мастером, полное закрытие фолловера во flat, отмена
   стопа и доставка уведомлений `CANCEL_ORDER` и `MARKET_CLOSE`.
+
+### Leverage control-plane и финальная приёмка (2026-08-25)
+
+Внешний acceptance `69fa148` (ревью `docs/reviews/review_leverage_control_plane.md`):
+
+- [x] **P0 (#25) Dependency gating:** `ExecutionAction.action_id` и
+  `depends_on_action_id` связывают `SET_LEVERAGE` с входом `MARKET_OPEN` и
+  защитными ордерами; неуспешный SET блокирует зависимые действия (`BLOCKED`),
+  но никогда не закрытия и отмены.
+- [x] **P1 (#26) Flat leverage:** `AccountState.symbol_leverages` собирает плечи
+  всех строк `positionRisk` (включая flat-символы); planner эмитит SET только
+  при расхождении, hot path сделки свободен от REST-запросов плеча.
+- [x] **`LeverageManager` (`trading/leverage.py`):** RAM control-plane с
+  глобальным каталогом кандидатов (stale-while-revalidate) и
+  account-confirmed состояниями, singleflight-подготовкой, fallback на
+  подписанный bracket GET при отклонении биржей и фоновым worker'ом.
+- [x] **UNKNOWN & Boot recovery:** `POST /leverage` unknown outcomes
+  (`-1000/-1006/-1007`, 503/504) проверяются через `positionRisk` до fallback;
+  boot recovery для `SET_LEVERAGE` без coid восстанавливает исход через
+  `positionRisk` (ambiguous/unreadable → fail-closed in-flight).
+- [x] **Signed live coverage & offline gate:** 4 signed live теста
+  `tests/testnet/test_leverage_control_plane_live.py` (отклонение -4028,
+  unready block, execution block, downshift); полный offline gate:
+  **666 passed / 2 skipped / 21 deselected**, coverage **87.29%** (87%).
 
 Stage 2 полностью закрыт для testnet scope.
 ### Этап 3 — Builder (Aster Code)

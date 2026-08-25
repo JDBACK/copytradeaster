@@ -2,14 +2,14 @@
 
 ## Overview
 
-AsterDex (V3 API) copy-trade bot: mirrors a master trader's positions on follower accounts. Stage 1 (trading core, testnet) is implemented in Python under `src/copytradeaster/`.
+AsterDex (V3 API) copy-trade bot: mirrors a master trader's positions on follower accounts. Stage 1 (trading core) and Stage 2 (Telegram control plane, direct V3 onboarding, notification outbox, automatic leverage control-plane, testnet) are implemented in Python under `src/copytradeaster/`.
 
 ## Project Structure & Module Organization
 
 - `docs/` - living documentation. Start with `docs/docs_map.md` - it explains what every document is and when to read it.
   - `docs/ARCHITECTURE.md` - architecture; source code docstrings reference its sections by number.
   - `docs/DEV_PLAN_SKELETON.md` - stage roadmap and checklists.
-  - `docs/ENGINE_TEST_STATUS_2026-08.md` - THE single source of truth for current engine status: suite counters, fixed bugs #1-16, test campaigns. Update it after every meaningful change; do not duplicate its counters elsewhere.
+  - `docs/ENGINE_TEST_STATUS_2026-08.md` - THE single source of truth for current engine status: suite counters, fixed bugs #1-26, test campaigns. Update it after every meaningful change; do not duplicate its counters elsewhere.
   - `docs/ASTER_API_RESEARCH_2026-08.md` - Aster V3 API reference facts.
   - `docs/reports/` - per-campaign historical reports and run journals (factual snapshots; do not rewrite them retroactively).
   - `docs/reviews/` - verbatim external code-review texts (never edit or rephrase them).
@@ -17,7 +17,7 @@ AsterDex (V3 API) copy-trade bot: mirrors a master trader's positions on followe
   - New reports go to `docs/reports/`, named `TOPIC_YYYY-MM.md`, with research dates logged inside.
 - `.firecrawl/` - Firecrawl scrape cache. Ignored by git; never commit.
 - `wallet.txt` - local key assembly: main account + copy accounts (currently testnet). Local-only, git-ignored.
-- `src/copytradeaster/` - the package: `aster/` (REST client, signing), `master/` (projector of the master stream), `trading/` (coordinator/planner/executor/reconciler), `risk/`, `storage/` (SQLite repos + migrations), `credentials/`, `notifications/`, `cli/`, entry points `app.py` / `__main__.py`.
+  - `src/copytradeaster/` - the package: `aster/` (REST client, signing), `master/` (projector of the master stream), `trading/` (coordinator/planner/executor/reconciler/leverage/registry), `risk/`, `storage/` (SQLite repos + migrations), `credentials/`, `notifications/`, `onboarding/`, `application/`, `telegram/`, `cli/`, entry points `app.py` / `__main__.py`.
 - `tests/` - pytest suites: `unit/`, `integration/` (FakeAster e2e), `testnet/` (signed, marker-gated by `CT_TESTNET=1`), `replay/`.
 - `scripts/` - operational scripts (`hybrid_load_test.py` etc.).
 - `data/` - SQLite databases and load-run artifacts.

@@ -282,4 +282,23 @@ exchange payloads в логирование не передаются.
 8. доставлены Telegram-уведомления `CANCEL_ORDER` и `MARKET_CLOSE`;
 9. подтверждён финальный flat на всех аккаунтах.
 
+## 14. Leverage control-plane и внешняя приёмка (2026-08-25)
+
+Внешний acceptance `69fa148` (ревью `docs/reviews/review_leverage_control_plane.md`):
+
+1. **Dependency gating (P0, #25):** `ExecutionAction.action_id / depends_on_action_id`
+   связывает `SET_LEVERAGE` с рисковыми действиями (вход `MARKET_OPEN`, защитный стоп).
+   При отказе или неизвестном исходе `SET_LEVERAGE` зависимые действия блокируются
+   со статусом `BLOCKED`, закрытия (`MARKET_CLOSE`) и отмены ордеров исполняются.
+2. **Flat leverage (P1, #26):** `AccountState.symbol_leverages` сохраняет плечи всех
+   символов из авторитетного `positionRisk` (включая flat-символы); hot path сделки
+   не делает REST-запросов плеча.
+3. **`LeverageManager` (`trading/leverage.py`):** RAM control-plane с каталогом
+   кандидатов (stale-while-revalidate), account-confirmed плечом, singleflight
+   подготовкой и фоновым worker'ом.
+4. **UNKNOWN & Boot recovery:** UNKNOWN-исходы `POST /leverage` проверяются через
+   `positionRisk` до fallback; boot recovery для `SET_LEVERAGE` без coid
+   восстанавливает исход через `positionRisk` (ambiguous/unreadable → fail-closed).
+5. **Финальные метрики:** offline gate **666 passed / 2 skipped / 21 deselected**,
+   coverage **87.29%** (87%), static analysis clean, signed live gate **20 passed / 1 skipped**.
 Stage 2 полностью закрыт.

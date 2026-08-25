@@ -32,9 +32,9 @@
   SET через authoritative positionRisk, ambiguous → fail-closed, boot-порядок
   catalog→reconcile, lifecycle worker'а. Дословные ревью:
   `docs/reviews/review_leverage_control_plane.md`; счётчики гейтов выше.
-- Актуальный offline gate после внедрения leverage control-plane (баги #25–26,
-  `trading/leverage.py`): **656 passed / 2 skipped / 17 deselected**, coverage
-  **87.23%** при пороге 87%; ruff check/format clean. Signed testnet gate
+- Актуальный offline gate после внедрения leverage control-plane и финального acceptance (баги #25–26,
+  `trading/leverage.py`, `69fa148`): **666 passed / 2 skipped / 21 deselected**, coverage
+  **87.29%** при пороге 87%; ruff check/format clean. Signed testnet gate
   после изменений плеча (2026-08-25, `CT_TESTNET=1`): **16 passed / 1 skipped**
   (skip — Builder Stage 3). E2E ONE_WAY прошёл полный цикл через новый
   leverage-путь: fixture подтвердил candidate BTCUSDT=200 подписанным bracket

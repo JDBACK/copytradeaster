@@ -1450,4 +1450,22 @@ testnet evidence:
    на трейдерские карточки с форматированием объёмов и уровней цен.
 4. Все 632 офлайн-теста и проверки качества кода проходят чисто (coverage 87.15%).
 
-**Stage 2 официально CLOSED.**
+## 26. Leverage control-plane и внешняя приёмка — 2026-08-25
+
+Цепочкой `86a51ec → 6f01917 → 54279d8 → 69fa148` закрыты баги #25 и #26, а также внешнее код-ревью в 3 прохода (`docs/reviews/review_leverage_control_plane.md`):
+
+1. **Dependency gating (P0, #25):** `ExecutionAction.action_id / depends_on_action_id`
+   в planner/executor связывает `SET_LEVERAGE` со входом и защитой; отказ SET блокирует
+   зависимые действия (`BLOCKED`), закрытия и отмены ордеров исполняются.
+2. **Flat leverage (P1, #26):** `AccountState.symbol_leverages` сохраняет плечи всех
+   символов из авторитетного `positionRisk` (включая flat-символы); hot path сделки
+   не делает REST-запросов плеча.
+3. **`LeverageManager` (`trading/leverage.py`):** RAM control-plane с каталогом кандидатов,
+   account-confirmed плечом, singleflight-подготовкой и фоновым worker'ом.
+4. **UNKNOWN & Boot recovery:** UNKNOWN-исходы `POST /leverage` проверяются через
+   `positionRisk` до fallback; boot recovery для `SET_LEVERAGE` разрешает исход через
+   `positionRisk` (ambiguous/unreadable → fail-closed in-flight).
+5. **Итоговый gate:** offline gate **666 passed / 2 skipped / 21 deselected**,
+   coverage **87.29%** (87%), static analysis clean, signed live gate **20 passed / 1 skipped**.
+
+Внешний вердикт: **Stage 2 и leverage control-plane полностью приняты (CLOSED).**
