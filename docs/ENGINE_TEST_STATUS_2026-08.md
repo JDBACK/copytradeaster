@@ -35,6 +35,26 @@
   прогон упал на транзитном `-1007 transport timeout` в polling-хелпере фазы 5
   (флак тестнета, ретрай не предусмотрен харнессом) — повторный прогон чистый
   за 178s.
+- Ревью-гейт leverage control-plane (2026-08-25, независимый review `6f01917`):
+  закрыты четыре находки. (1) `_prepare_locked`: unknown-outcome POST
+  (`-1000/-1006/-1007`, 503/504 и любые не-биржевые ошибки) больше не
+  триггерит слепой fallback — сначала авторитетный positionRisk: совпало с
+  target → confirm без записей; доказуемо не применено → безопасный
+  account-maximum fallback; чтение не удалось → fail closed. (2) Boot
+  recovery для journaled SET_LEVERAGE без coid: исход разрешается через
+  positionRisk — совпадение → CONFIRMED, расхождение → FAILED (reconcile
+  переподготовит), нечитаемо → остаётся in-flight fail-closed. (3)
+  Account-specific readiness после fallback: проверено воспроизведением —
+  observe() УЖЕ сохраняет подтверждение той же revision (early-continue);
+  несогласие с ревью зафиксировано, контракт заморожен регрессионными
+  тестами (global=200/follower=100 → prepare → observe(100) → still ready;
+  бамп ревизии инвалидирует). (4) Lifecycle: убран дубль task_names,
+  выбрасывавший `_leverage_task`; shutdown-test с живым worker'ом
+  доказывает остановку до закрытия HTTP/DB; initial refresh_catalog()
+  переставлен ДО startup reconciliation (ARCHITECTURE §12 обновлён), чтобы
+  рестарт-реконструкция из positionRisk валидировалась против живой
+  генерации без лишних POST. Offline gate: **665 passed / 2 skipped**,
+  coverage 87%; signed gate: **20 passed / 1 skipped** за 579s.
 - Live-дополнение (2026-08-25, `tests/testnet/test_leverage_control_plane_live.py`,
   `CT_TESTNET=1`, 4 passed): закрыты лайв-дыры, недоказуемые офлайн-фейками —
   (1) завышенный candidate отвергается биржей (-4028) и fallback подтверждает

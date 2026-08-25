@@ -97,6 +97,7 @@ class FakeClient:
         self.open_orders_result: list = []
         self.query_results: dict[str, object | None] = {}
         self.positions_result: list = []
+        self.risk_error: AsterError | None = None
         self.place_error: AsterError | None = None
         self.place_timeout = False
         self.query_error: AsterError | None = None
@@ -122,6 +123,8 @@ class FakeClient:
         return self.open_orders_result
 
     async def position_risk(self, account_id, symbol=None):
+        if self.risk_error is not None:
+            raise self.risk_error
         return self.positions_result
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
@@ -531,4 +534,72 @@ async def test_boot_authoritative_not_found_marks_failed(env):
     await commands.set_status(key, "UNKNOWN")
     report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
     assert report.failed_not_found == 1 and report.unresolved == 0
+    assert (await commands.get(key))["status"] == "FAILED"
+
+
+class SimplePosition:
+    def __init__(self, leverage: int, symbol: str = "BTCUSDT"):
+        self.leverage = leverage
+        self.symbol = symbol
+
+
+async def _seed_sending_set_command(commands: CommandRepo) -> str:
+    action = leverage_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        None,
+    )
+    await commands.set_status(key, "SENDING")
+    return key
+
+
+async def test_boot_resolves_sending_set_leverage_when_exchange_matches_target(env):
+    """Crash window SENDING SET (no coid): positionRisk proves the write."""
+    _executor, client, commands, links, _ = env
+    key = await _seed_sending_set_command(commands)
+    client.positions_result = [SimplePosition(20)]
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.confirmed == 1 and report.unresolved_query_error == 0
+    row = await commands.get(key)
+    assert row["status"] == "CONFIRMED"
+    assert str(row["last_error"]).startswith("boot-resolved:leverage=")
+
+
+async def test_boot_marks_sending_set_leverage_failed_on_authoritative_mismatch(env):
+    """A readable different value proves the write never applied; reconcile
+    re-provisions from FAILED - never a blind second write at boot."""
+    _executor, client, commands, links, _ = env
+    key = await _seed_sending_set_command(commands)
+    client.positions_result = [SimplePosition(5)]
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.failed_not_found == 1
+    row = await commands.get(key)
+    assert row["status"] == "FAILED"
+    assert str(row["last_error"]).startswith("boot-resolved:leverage-mismatch:")
+
+
+async def test_boot_unreadable_leverage_stays_fail_closed(env):
+    _executor, client, commands, links, _ = env
+    await _seed_sending_set_command(commands)
+    client.risk_error = AsterError(-1006, "transport unavailable")
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.unresolved_query_error == 1
+    assert len(await commands.in_flight()) == 1
+    assert client.leverage_calls == []
+
+
+async def test_boot_conflicting_position_rows_keep_set_unresolved(env):
+    """Inconsistent LONG/SHORT leverages are not an authoritative answer."""
+    _executor, client, commands, links, _ = env
+    key = await _seed_sending_set_command(commands)
+    client.positions_result = [SimplePosition(20), SimplePosition(5)]
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.failed_not_found == 1
     assert (await commands.get(key))["status"] == "FAILED"

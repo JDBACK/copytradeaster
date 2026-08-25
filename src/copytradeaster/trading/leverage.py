@@ -47,10 +47,27 @@ class LeverageError(RuntimeError):
     """Safe control-plane failure; details stay in local logs."""
 
 
+UNKNOWN_EXCHANGE_CODES = {-1000, -1006, -1007}
+UNKNOWN_HTTP_STATUSES = {503, 504}
+
+
 def _error_category(exc: BaseException) -> str:
     if isinstance(exc, AsterError):
         return f"aster:{exc.code}" if exc.code else "aster"
     return type(exc).__name__
+
+
+def _is_unknown_outcome(exc: BaseException) -> bool:
+    """True when a leverage write may or may not have reached the exchange.
+
+    AsterClient maps transport failures to -1006/-1007-style errors and
+    gateways answer -1000 with 503/504; only a deterministic exchange
+    rejection (any other code) classifies the outcome from the error alone.
+    Any non-exchange failure leaves the outcome unknown by definition.
+    """
+    if isinstance(exc, AsterError):
+        return exc.code in UNKNOWN_EXCHANGE_CODES or exc.http_status in UNKNOWN_HTTP_STATUSES
+    return True
 
 
 def _max_initial_leverage(response: Any) -> int:
@@ -287,34 +304,50 @@ class LeverageManager:
         except Exception as exc:  # noqa: BLE001 - classified below
             first_category = _error_category(exc)
             self.invalidate(account_id, symbol)
-            try:
-                response = await self._paced_bracket(client, account_id, symbol)
-                fallback = _max_initial_leverage(response)
-                await self._paced_set_leverage(client, account_id, symbol, fallback)
-            except Exception as fallback_exc:  # noqa: BLE001 - fail closed
-                category = _error_category(fallback_exc)
+            if not _is_unknown_outcome(exc):
+                # Deterministic rejection: the write provably did not apply,
+                # so the account-specific bracket fallback is safe.
+                return await self._prepare_at_account_maximum(
+                    client, account_id, symbol, candidate.revision, first_category
+                )
+            # Outcome-unknown write: read authoritative state BEFORE any
+            # further write. A blind second POST could push an account past
+            # its bracket when the first POST actually landed.
+            observed = await self._observed_leverage(client, account_id, symbol)
+            if observed is None:
                 log.warning(
-                    "leverage prepare failed for %s/%s (%s, fallback %s)",
+                    "leverage outcome unknown and read failed for %s/%s (%s); failing closed",
                     account_id,
                     symbol,
                     first_category,
-                    category,
                 )
-                raise LeverageError(f"{symbol}: {category}") from fallback_exc
-            self._confirmed[(account_id, symbol)] = ConfirmedLeverage(
-                leverage=fallback,
-                confirmed_at=time.monotonic(),
-                catalog_revision=candidate.revision,
-                sequence=self._next_seq(),
-            )
+                raise LeverageError(f"{symbol}: outcome-unknown read failed") from exc
+            if observed == candidate.leverage:
+                self._confirmed[(account_id, symbol)] = ConfirmedLeverage(
+                    leverage=candidate.leverage,
+                    confirmed_at=time.monotonic(),
+                    catalog_revision=candidate.revision,
+                    sequence=self._next_seq(),
+                )
+                log.info(
+                    "leverage prepared (unknown outcome confirmed by read) %s/%s=%s",
+                    account_id,
+                    symbol,
+                    candidate.leverage,
+                )
+                return candidate.leverage
+            # Authoritatively not applied: proceed exactly like a rejection.
             log.info(
-                "leverage prepared at account maximum %s/%s=%s (candidate %s)",
+                "leverage outcome unknown but read shows %s (target %s) for %s/%s; "
+                "treating as rejected",
+                observed,
+                candidate.leverage,
                 account_id,
                 symbol,
-                fallback,
-                candidate.leverage,
             )
-            return fallback
+            return await self._prepare_at_account_maximum(
+                client, account_id, symbol, candidate.revision, first_category
+            )
         self._confirmed[(account_id, symbol)] = ConfirmedLeverage(
             leverage=candidate.leverage,
             confirmed_at=time.monotonic(),
@@ -322,6 +355,65 @@ class LeverageManager:
             sequence=self._next_seq(),
         )
         return candidate.leverage
+
+    async def _prepare_at_account_maximum(
+        self,
+        client: Any,
+        account_id: str,
+        symbol: str,
+        revision: int,
+        first_category: str,
+    ) -> int:
+        try:
+            response = await self._paced_bracket(client, account_id, symbol)
+            fallback = _max_initial_leverage(response)
+            await self._paced_set_leverage(client, account_id, symbol, fallback)
+        except Exception as fallback_exc:  # noqa: BLE001 - fail closed
+            category = _error_category(fallback_exc)
+            log.warning(
+                "leverage prepare failed for %s/%s (%s, fallback %s)",
+                account_id,
+                symbol,
+                first_category,
+                category,
+            )
+            raise LeverageError(f"{symbol}: {category}") from fallback_exc
+        self._confirmed[(account_id, symbol)] = ConfirmedLeverage(
+            leverage=fallback,
+            confirmed_at=time.monotonic(),
+            catalog_revision=revision,
+            sequence=self._next_seq(),
+        )
+        log.info(
+            "leverage prepared at account maximum %s/%s=%s",
+            account_id,
+            symbol,
+            fallback,
+        )
+        return fallback
+
+    async def _observed_leverage(self, client: Any, account_id: str, symbol: str) -> int | None:
+        """Authoritative configured leverage from positionRisk; None if unreadable."""
+        try:
+            async with self._sem:
+                rows = await client.position_risk(account_id, symbol)
+        except Exception as exc:  # noqa: BLE001 - unreadable means fail closed
+            log.warning(
+                "positionRisk read failed during leverage recovery for %s/%s: %s",
+                account_id,
+                symbol,
+                _error_category(exc),
+            )
+            return None
+        values: set[int] = set()
+        for row in rows:
+            try:
+                value = int(row.leverage)
+            except (TypeError, ValueError, AttributeError):
+                return None
+            if value > 0:
+                values.add(value)
+        return values.pop() if len(values) == 1 else None
 
     async def prepare_account(self, account_id: str, symbols: Collection[str]) -> PrepareReport:
         """Prepare every requested symbol under the shared bounded semaphore."""

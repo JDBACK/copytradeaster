@@ -497,6 +497,8 @@ follower snapshots
  ↓
 resolve UNKNOWN commands
  ↓
+seed leverage candidate catalog (fail-closed if unavailable)
+ ↓
 reconciliation
  ↓
 READY

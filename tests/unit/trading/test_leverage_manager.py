@@ -4,8 +4,11 @@ All network surface is faked; no HTTP."""
 
 import asyncio
 
+import pytest
+
 from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.trading.leverage import (
+    LeverageError,
     LeverageManager,
     PrepareReport,
 )
@@ -14,9 +17,20 @@ from copytradeaster.trading.leverage import (
 class FakeLevClient:
     """AsterClient duck-type covering only the leverage control-plane calls."""
 
-    def __init__(self, *, account_max: int = 200, reject_first_post: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        account_max: int = 200,
+        reject_first_post: bool = False,
+        timeout_first_post: bool = False,
+        risk_leverages: list[int] | None = None,
+        risk_error: bool = False,
+    ) -> None:
         self.account_max = account_max
         self.reject_first_post = reject_first_post
+        self.timeout_first_post = timeout_first_post
+        self.risk_leverages = risk_leverages
+        self.risk_error = risk_error
         self.bracket_calls: list[tuple[str, str]] = []
         self.set_calls: list[tuple[str, str, int]] = []
         self._posts = 0
@@ -25,7 +39,20 @@ class FakeLevClient:
         self._posts += 1
         if self.reject_first_post and self._posts == 1:
             raise AsterError(-4028, "invalid leverage")
+        if self.timeout_first_post and self._posts == 1:
+            raise TimeoutError()
         self.set_calls.append((account_id, symbol, leverage))
+
+    async def position_risk(self, account_id: str, symbol: str | None = None):
+        from types import SimpleNamespace
+
+        if self.risk_error:
+            raise AsterError(-1000, "Unknown", http_status=503)
+        leverages = self.risk_leverages if self.risk_leverages is not None else [self.account_max]
+        return [
+            SimpleNamespace(symbol=symbol or "BTCUSDT", position_amt=0, leverage=lev)
+            for lev in leverages
+        ]
 
     async def leverage_bracket(self, account_id: str, symbol: str):
         from copytradeaster.aster.models import LeverageBracketResponse
@@ -212,3 +239,72 @@ async def test_worker_processes_pending_and_stops_cleanly():
         stop_event.set()
         await asyncio.wait_for(worker, timeout=5)
     assert worker.done() and not worker.cancelled()
+
+
+async def test_observe_preserves_account_specific_fallback_confirmation():
+    """Global candidate 200 but this follower's bracket max is 100: the
+    fallback confirm must survive subsequent authoritative observes for the
+    same catalog generation, and die exactly when the generation changes."""
+    clients = {
+        "main": FakeLevClient(),
+        "copyc1": FakeLevClient(account_max=100, reject_first_post=True),
+    }
+    manager = make_manager(clients)
+    await manager.refresh_catalog(["BTCUSDT"])
+    prepared = await manager.prepare_symbol("copyc1", "BTCUSDT")
+    assert (prepared, manager.is_ready("copyc1", "BTCUSDT")) == (100, True)
+
+    # The next coordinator snapshot folds authoritative positionRisk (100).
+    manager.observe("copyc1", {"BTCUSDT": 100})
+    assert manager.is_ready("copyc1", "BTCUSDT")
+    assert manager.confirmed("copyc1", "BTCUSDT") == 100
+
+    # A catalog revision invalidates the account-specific confirmation.
+    clients["main"].account_max = 50
+    await manager.refresh_catalog(["BTCUSDT"])
+    assert not manager.is_ready("copyc1", "BTCUSDT")
+
+
+async def test_unknown_outcome_confirmed_by_read_without_further_writes():
+    """A lost POST response whose target verifiably landed: confirm from the
+    authoritative read - no bracket GET, no blind second POST."""
+    clients = {"main": FakeLevClient(), "copyc1": FakeLevClient(timeout_first_post=True)}
+    manager = make_manager(clients)
+    await manager.refresh_catalog(["BTCUSDT"])
+    leverage = await manager.prepare_symbol("copyc1", "BTCUSDT")
+    assert leverage == 200 and manager.is_ready("copyc1", "BTCUSDT")
+    assert len(clients["copyc1"].set_calls) == 0  # the timed-out attempt only
+    assert clients["copyc1"].bracket_calls == []
+
+
+async def test_unknown_outcome_not_applied_falls_back_after_read():
+    """The read proves a different configured level, so the write did not
+    land: the account-maximum fallback proceeds exactly like a rejection."""
+    clients = {
+        "main": FakeLevClient(),
+        "copyc1": FakeLevClient(
+            account_max=100,
+            timeout_first_post=True,
+            risk_leverages=[100],  # pre-existing state on the exchange
+        ),
+    }
+    manager = make_manager(clients)
+    await manager.refresh_catalog(["BTCUSDT"])
+    leverage = await manager.prepare_symbol("copyc1", "BTCUSDT")
+    assert leverage == 100 and manager.is_ready("copyc1", "BTCUSDT")
+    assert clients["copyc1"].set_calls == [("copyc1", "BTCUSDT", 100)]
+
+
+async def test_unknown_outcome_with_unreadable_state_fails_closed():
+    """No readable truth -> no further writes; boot/worker simply retries."""
+    clients = {
+        "main": FakeLevClient(),
+        "copyc1": FakeLevClient(timeout_first_post=True, risk_error=True),
+    }
+    manager = make_manager(clients)
+    await manager.refresh_catalog(["BTCUSDT"])
+    with pytest.raises(LeverageError, match="outcome-unknown read failed"):
+        await manager.prepare_symbol("copyc1", "BTCUSDT")
+    assert clients["copyc1"].set_calls == []  # never a blind second write
+    assert clients["copyc1"].bracket_calls == []
+    assert not manager.is_ready("copyc1", "BTCUSDT")

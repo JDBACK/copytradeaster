@@ -429,7 +429,17 @@ class App:
         self._filters_cache = exchange_info.tradable_filters()
         await self.projector.rebuild_full(self.master_client, "main")
 
-        # 6. startup reconciliation
+        # 6. leverage control-plane: seed the candidate catalog BEFORE follower
+        # reconciliation so restart reconstruction from positionRisk validates
+        # against the live generation instead of stamping revision -1 and
+        # re-posting leverage. A failed probe keeps entries fail-closed; the
+        # worker retries below.
+        try:
+            await self.leverage.refresh_catalog()
+        except Exception as exc:  # noqa: BLE001 - worker retries; entries stay gated
+            log.warning("initial leverage catalog refresh failed: %s", _error_category(exc))
+
+        # 6b. startup reconciliation
         await self._emit_notification(
             event_key=f"app:{self._notification_token}:startup-reconciliation",
             kind="engine.startup",
@@ -437,14 +447,6 @@ class App:
             text="Запущена стартовая сверка позиций.",
         )
         await self.reconciler.reconcile(self.projector.state, reason="startup")
-
-        # 6b. leverage control-plane: seed the candidate catalog once so the
-        # first post-READY delta can trade immediately, then keep the worker
-        # running as a managed task (SWR refresh + bounded preparations).
-        try:
-            await self.leverage.refresh_catalog()
-        except Exception as exc:  # noqa: BLE001 - worker retries; entries stay gated
-            log.warning("initial leverage catalog refresh failed: %s", _error_category(exc))
         self._leverage_task = asyncio.create_task(self.leverage.run(self.stop_event))
 
         # 7. streams + periodic sweep
@@ -517,7 +519,6 @@ class App:
             with contextlib.suppress(Exception):
                 await coordinator.close_postfill_admission()
 
-        task_names = ("_sweep_task", "_ingest_task", "_heartbeat_task", "_stream_task")
         tasks = []
         for name in task_names:
             task = getattr(self, name, None)

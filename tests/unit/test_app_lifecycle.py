@@ -122,6 +122,45 @@ async def test_stop_is_concurrent_safe_and_closes_resources_once(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_stop_stops_live_leverage_worker_before_closing_resources(tmp_path):
+    """The leverage worker is a managed task: a live one must be stopped and
+    awaited BEFORE the shared HTTP/DB resources close (review finding: the
+    second task_names assignment used to drop it)."""
+    app = App(
+        Settings(
+            encryption_key="ab" * 32,
+            db_path=tmp_path / "app.sqlite3",
+            log_path=tmp_path / "logs" / "app.log",
+        )
+    )
+    order: list[str] = []
+
+    async def worker():
+        try:
+            await app.stop_event.wait()
+        finally:
+            order.append("leverage-stopped")
+
+    app._leverage_task = asyncio.create_task(worker())
+
+    async def close_http():
+        order.append("http-closed")
+
+    async def close_db():
+        order.append("db-closed")
+
+    app.http.aclose = close_http
+    app.db.close = close_db
+    app._ready = True
+
+    await app.stop()
+
+    assert app._leverage_task is None
+    assert "leverage-stopped" in order
+    assert order.index("leverage-stopped") < order.index("db-closed")
+
+
+@pytest.mark.asyncio
 async def test_reopen_paused_admission_never_enables_durable_entry_gate(tmp_path):
     app = App(
         Settings(

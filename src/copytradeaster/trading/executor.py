@@ -19,7 +19,7 @@ import json
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
 from copytradeaster.domain.models import (
@@ -652,6 +652,15 @@ async def resolve_boot_unknowns(
         account_id = str(row["account_id"])
         coid = row["client_order_id"]
         payload = json.loads(str(row["payload"]))
+        if not coid and str(row["kind"]) == ActionKind.SET_LEVERAGE.value:
+            outcome = await _resolve_set_leverage_boot(clients, commands, row)
+            if outcome == "confirmed":
+                confirmed += 1
+            elif outcome == "not_applied":
+                failed_not_found += 1
+            else:
+                unresolved_query_error += 1
+            continue
         if not coid:
             await commands.set_status(key, "UNKNOWN", last_error="boot: no coid to resolve")
             unresolved_without_coid += 1
@@ -707,6 +716,63 @@ async def resolve_boot_unknowns(
         unresolved_query_error=unresolved_query_error,
         unresolved_without_coid=unresolved_without_coid,
     )
+
+
+async def _resolve_set_leverage_boot(
+    clients: Callable[[str], AsterClient],
+    commands: CommandRepo,
+    row: Any,
+) -> str:
+    """Resolve a crash-window SET_LEVERAGE (no clientOrderId) via positionRisk.
+
+    A lost leverage write leaves no order to query, so the authoritative read
+    is the symbol's configured leverage: matching the journaled target proves
+    the write landed (CONFIRMED); any other readable value proves it did not
+    (FAILED - reconciliation re-provisions); an unreadable answer keeps the
+    command in flight so boot stays fail-closed.
+    """
+    key = str(row["command_key"])
+    account_id = str(row["account_id"])
+    try:
+        payload = json.loads(str(row["payload"]))
+        symbol = str(payload["symbol"])
+        target = int(payload["leverage"])
+    except (KeyError, TypeError, ValueError) as exc:
+        await commands.set_status(key, "UNKNOWN", last_error=f"boot: malformed payload:{exc}")
+        return "unresolved"
+    last_error: AsterError | None = None
+    for attempt in range(BOOT_QUERY_ATTEMPTS):
+        try:
+            rows = await clients(account_id).position_risk(account_id, symbol)
+            values = {int(r.leverage) for r in rows if r.symbol == symbol and int(r.leverage) > 0}
+            observed: int | None = values.pop() if len(values) == 1 else None
+            break
+        except AsterError as exc:
+            last_error = exc
+            log.warning(
+                "boot resolve leverage read failed for %s (%d/%d): %s",
+                key,
+                attempt + 1,
+                BOOT_QUERY_ATTEMPTS,
+                exc,
+            )
+            if attempt + 1 < BOOT_QUERY_ATTEMPTS:
+                await asyncio.sleep(BOOT_QUERY_BACKOFF_S * (attempt + 1))
+    else:
+        safe_error = _safe_error_category(last_error) if last_error is not None else "unknown"
+        await commands.set_status(
+            key,
+            str(row["status"]),
+            last_error=f"boot-query-unresolved:{safe_error}",
+        )
+        return "unresolved"
+    if observed == target:
+        await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:leverage={observed}")
+        return "confirmed"
+    await commands.set_status(
+        key, "FAILED", last_error=f"boot-resolved:leverage-mismatch:{observed}"
+    )
+    return "not_applied"
 
 
 def _with_coid(req: PlaceOrderRequest, coid: str) -> PlaceOrderRequest:
