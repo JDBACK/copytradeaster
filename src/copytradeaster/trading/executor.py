@@ -766,6 +766,17 @@ async def _resolve_set_leverage_boot(
             last_error=f"boot-query-unresolved:{safe_error}",
         )
         return "unresolved"
+    if observed is None:
+        # Empty or conflicting rows are not an authoritative answer: the
+        # outcome is unknown, not disproven - keep the command in flight so
+        # boot stays fail-closed instead of marking a maybe-applied write
+        # as terminal FAILED.
+        await commands.set_status(
+            key,
+            str(row["status"]),
+            last_error="boot-query-unresolved:ambiguous-leverage",
+        )
+        return "unresolved"
     if observed == target:
         await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:leverage={observed}")
         return "confirmed"

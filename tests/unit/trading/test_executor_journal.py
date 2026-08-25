@@ -585,6 +585,30 @@ async def test_boot_marks_sending_set_leverage_failed_on_authoritative_mismatch(
     assert str(row["last_error"]).startswith("boot-resolved:leverage-mismatch:")
 
 
+async def test_boot_conflicting_position_rows_keep_set_unresolved(env):
+    """Inconsistent LONG/SHORT leverages are NOT an authoritative mismatch:
+    the outcome stays unknown -> in-flight, boot fail-closed."""
+    _executor, client, commands, links, _ = env
+    key = await _seed_sending_set_command(commands)
+    client.positions_result = [SimplePosition(20), SimplePosition(5)]
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.unresolved_query_error == 1
+    assert len(await commands.in_flight()) == 1
+    row = await commands.get(key)
+    assert row["status"] == "SENDING"
+    assert str(row["last_error"]).startswith("boot-query-unresolved:ambiguous-leverage")
+
+
+async def test_boot_empty_position_rows_keep_set_unresolved(env):
+    _executor, client, commands, links, _ = env
+    key = await _seed_sending_set_command(commands)
+    client.positions_result = []
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.unresolved_query_error == 1
+    assert len(await commands.in_flight()) == 1
+    assert (await commands.get(key))["status"] == "SENDING"
+
+
 async def test_boot_unreadable_leverage_stays_fail_closed(env):
     _executor, client, commands, links, _ = env
     await _seed_sending_set_command(commands)
@@ -593,13 +617,3 @@ async def test_boot_unreadable_leverage_stays_fail_closed(env):
     assert report.unresolved_query_error == 1
     assert len(await commands.in_flight()) == 1
     assert client.leverage_calls == []
-
-
-async def test_boot_conflicting_position_rows_keep_set_unresolved(env):
-    """Inconsistent LONG/SHORT leverages are not an authoritative answer."""
-    _executor, client, commands, links, _ = env
-    key = await _seed_sending_set_command(commands)
-    client.positions_result = [SimplePosition(20), SimplePosition(5)]
-    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
-    assert report.failed_not_found == 1
-    assert (await commands.get(key))["status"] == "FAILED"
