@@ -84,6 +84,9 @@ class _RecordingStore:
         self.commits.append(commit)
         await self._inner.commit_onboarding(commit)
 
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
 
 def _load_wallet_section(name: str) -> tuple[str, str]:
     """(main_evm_address, main_evm_private_key) из секции wallet.txt.
@@ -386,28 +389,66 @@ async def test_builder_order_with_fee_rate_round_trip(flowctx, http):
 
 
 async def test_exchange_rejects_fee_rate_above_approved_cap(flowctx, http):
-    """feeRate выше одобренного maxFeeRate должен отклоняться биржей."""
+    """feeRate выше одобренного maxFeeRate должен отклоняться биржей с конкретной ошибкой."""
     commit = flowctx["commit"]
     settings = flowctx["settings"]
+    limiter = flowctx["limiter"]
     signer_identity = _signer_identity(commit)
     signer_key = commit.signer_private_key
     builder_address = flowctx["builder_address"]
     nonce_store = NonceStore(flowctx["db"])
-    await flowctx["limiter"].acquire_request(1)
+
+    # 1. Query mode
+    await limiter.acquire_request(1)
     nonce = await nonce_store.next_nonce(signer_identity.signer)
-    _, full = prepare_signed_request(
-        {
-            "symbol": SYMBOL,
-            "side": "BUY",
-            "type": "MARKET",
-            "quantity": str(QTY),
-            "builder": builder_address,
-            "feeRate": "0.5",  # 50%: far above the approved 0.0001 cap
-        },
-        signer_identity,
-        signer_key,
-        nonce,
-    )
+    _, full = prepare_signed_request({}, signer_identity, signer_key, nonce)
+    dual_resp = await http.get(settings.rest_base_url + "/fapi/v3/positionSide/dual?" + full)
+    dual_data = dual_resp.json()
+    hedge = bool(dual_data.get("dualSidePosition"))
+
+    # 2. Pre-order positions & open orders baseline
+    await limiter.acquire_request(5)
+    nonce = await nonce_store.next_nonce(signer_identity.signer)
+    _, full = prepare_signed_request({"symbol": SYMBOL}, signer_identity, signer_key, nonce)
+    pos_before = (await http.get(settings.rest_base_url + "/fapi/v3/positionRisk?" + full)).json()
+    amounts_before = [D(str(p.get("positionAmt", "0"))) for p in pos_before] or [D(0)]
+    assert all(a == 0 for a in amounts_before), f"account should be flat before test: {pos_before}"
+
+    # 3. Order shape identical to valid order, but feeRate=0.0005 (above approved 0.0001)
+    order_params: dict[str, str] = {
+        "symbol": SYMBOL,
+        "side": "BUY",
+        "type": "MARKET",
+        "quantity": str(QTY),
+        "builder": builder_address,
+        "feeRate": "0.0005",
+    }
+    if hedge:
+        order_params["positionSide"] = "LONG"
+
+    await limiter.acquire_request(1)
+    await limiter.acquire_order("e2e")
+    nonce = await nonce_store.next_nonce(signer_identity.signer)
+    _, full = prepare_signed_request(order_params, signer_identity, signer_key, nonce)
     resp = await http.post(settings.rest_base_url + "/fapi/v3/order?" + full, content=b"")
     body = resp.json()
-    assert resp.status_code >= 400 or int(body.get("code", 0)) < 0, body
+
+    # 4. Exchange must reject specifically because feeRate exceeds approved cap
+    assert resp.status_code >= 400 or int(body.get("code", 0)) < 0, (
+        f"unexpected order acceptance: {body}"
+    )
+    error_code = int(body.get("code", -1))
+    error_msg = str(body.get("msg", "")).lower()
+    assert any(
+        term in error_msg for term in ("fee", "cap", "builder", "rate", "limit", "invalid")
+    ) or error_code in {-1100, -1111, -4000, -4001, -4028}, f"unclassified rejection: {body}"
+
+    # 5. Verify that positions remain flat and open orders are empty
+    await limiter.acquire_request(5)
+    nonce = await nonce_store.next_nonce(signer_identity.signer)
+    _, full = prepare_signed_request({"symbol": SYMBOL}, signer_identity, signer_key, nonce)
+    pos_after = (await http.get(settings.rest_base_url + "/fapi/v3/positionRisk?" + full)).json()
+    amounts_after = [D(str(p.get("positionAmt", "0"))) for p in pos_after] or [D(0)]
+    assert all(a == 0 for a in amounts_after), (
+        f"positions should remain flat after rejected order: {pos_after}"
+    )
