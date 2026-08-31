@@ -137,9 +137,12 @@ export async function createWalletConnectAdapter(projectId: string): Promise<Wal
     kind: 'walletconnect',
     async connect() {
       try {
-        const accounts = (await provider.request({
-          method: 'eth_requestAccounts',
-        })) as string[]
+        // WC requires an explicit connect(): it opens the wallet-choice
+        // modal / QR and resolves once the wallet approves the session.
+        // eth_requestAccounts before connect() throws
+        // "Please call connect() before request()".
+        await provider.connect()
+        const accounts = provider.accounts as string[]
         if (!accounts?.length) throw new WalletError('no_wallet')
         return accounts[0]
       } catch (err) {

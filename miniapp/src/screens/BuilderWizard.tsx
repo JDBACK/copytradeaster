@@ -39,8 +39,25 @@ export function BuilderWizard({ auth, onConnected }: Props) {
   const [busyMessage, setBusyMessage] = useState<string | null>(null)
   const railDone = state.step === 'sync' ? 3 : railIndex(state.step)
 
-  function report(event: string, code: string | null, detail?: string) {
-    void api.clientLog(auth, { level: 'error', event, code, detail }).catch(() => {})
+  function report(event: string, err: unknown, fallbackCode: string) {
+    const code = err instanceof WalletError ? err.code : fallbackCode
+    const parts: string[] = []
+    let cursor: unknown = err
+    for (let depth = 0; depth < 3 && cursor; depth += 1) {
+      if (cursor instanceof Error && cursor.message) parts.push(cursor.message)
+      cursor = (cursor as { cause?: unknown })?.cause
+    }
+    const detail = [...new Set(parts)].join(' | ').slice(0, 300)
+    void api
+      .clientLog(auth, { level: 'error', event, code, detail })
+      .catch(() => {})
+    return { code, detail }
+  }
+
+  function reportApi(event: string, err: ApiError) {
+    void api
+      .clientLog(auth, { level: 'error', event, code: err.code, detail: err.message.slice(0, 300) })
+      .catch(() => {})
   }
 
   function emit(event: WizardEvent) {
@@ -80,9 +97,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
       await runPrepare(address, wallet)
     } catch (err) {
       hapticNotify('error')
-      const code = err instanceof WalletError ? err.code : 'wallet_unavailable'
-      const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
-      report('wallet_connect_failed', code, detail)
+      const { code } = report('wallet_connect_failed', err, 'wallet_unavailable')
       emit({ type: 'preparation_failed', code, status: 0 })
     } finally {
       setBusyMessage(null)
@@ -100,12 +115,11 @@ export function BuilderWizard({ auth, onConnected }: Props) {
     } catch (err) {
       hapticNotify('error')
       if (err instanceof ApiError) {
-        report('prepare_failed', err.code, err.message.slice(0, 200))
+        reportApi('prepare_failed', err)
         emit({ type: 'preparation_failed', code: err.code, status: err.status })
       } else {
-        const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
-        report('prepare_failed', 'network_error', detail)
-        emit({ type: 'preparation_failed', code: 'network_error', status: 0 })
+        const { code } = report('prepare_failed', err, 'network_error')
+        emit({ type: 'preparation_failed', code, status: 0 })
       }
     } finally {
       setBusyMessage(null)
@@ -123,9 +137,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
       signature = await wallet.signTypedData(state.address, state.prepare.eip712)
     } catch (err) {
       hapticNotify('error')
-      const code = err instanceof WalletError ? err.code : 'wallet_unavailable'
-      const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
-      report('sign_failed', code, detail)
+      const { code } = report('sign_failed', err, 'wallet_unavailable')
       emit({ type: 'signing_failed', code })
       setBusyMessage(null)
       return
@@ -138,12 +150,11 @@ export function BuilderWizard({ auth, onConnected }: Props) {
     } catch (err) {
       hapticNotify('error')
       if (err instanceof ApiError) {
-        report('submit_failed', err.code, err.message.slice(0, 200))
+        reportApi('submit_failed', err)
         emit({ type: 'submit_failed', code: err.code, status: err.status })
       } else {
-        const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
-        report('submit_failed', 'network_error', detail)
-        emit({ type: 'submit_failed', code: 'network_error', status: 0 })
+        const { code } = report('submit_failed', err, 'network_error')
+        emit({ type: 'submit_failed', code, status: 0 })
       }
     } finally {
       setBusyMessage(null)
