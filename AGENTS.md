@@ -101,82 +101,133 @@ copytradeaster/
 
 ### 1. Environment Setup
 ```bash
-# Python backend
+# Python backend (Python 3.12)
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Frontend Mini App
+# Frontend Mini App (Node >= 20, pnpm v11+)
 cd miniapp
 pnpm install
+pnpm build               # builds dist bundle served by aiohttp
 cd ..
 ```
 
-### 2. Running the Bot & Services
+### 2. Configuration (`.env`)
+Create `.env` from `.env.example`. Key settings:
+```env
+# Storage & Crypto
+CT_DB_PATH=data/copytrade.sqlite3
+CT_ENCRYPTION_KEY=<64-char-hex-key>   # python -c "import secrets; print(secrets.token_hex(32))"
+
+# Telegram Control Plane
+CT_TELEGRAM_BOT_TOKEN=123456:ABC...
+CT_TELEGRAM_ADMIN_IDS=[123456789]
+
+# Mini App Transport (Stage 3)
+CT_MINIAPP_ENABLED=true
+CT_MINIAPP_STATIC_DIR=miniapp/dist
+CT_MINIAPP_PUBLIC_URL=https://<tunnel-hash>.trycloudflare.com
+
+# Testnet Environment (Fail-Closed Guards)
+CT_REST_BASE_URL=https://fapi.asterdex-testnet.com
+CT_WS_USER_BASE=wss://fstream.asterdex-testnet.com/ws
+CT_ALLOW_MAINNET=false
+CT_BUILDER_ADDRESS=0x2576e9E40A9280721CC15c57BA2F2E1C1c536EF8
+CT_BUILDER_NAME=copytradeaster
+CT_MAX_FEE_RATE=0.0001
+```
+
+### 3. Step-by-Step Launch Flow
+
+#### Step A: Build Frontend Bundle
 ```bash
-# Initialize / migrate SQLite database
+cd miniapp && pnpm build && cd ..
+```
+
+#### Step B: Start HTTPS Tunnel (for Telegram WebApp)
+```bash
+# Runs cloudflared quick tunnel on port 8080 and prints public URL:
+./scripts/dev-miniapp-tunnel.sh 8080
+# Copy the resulting https://<hash>.trycloudflare.com URL to CT_MINIAPP_PUBLIC_URL in .env
+```
+
+#### Step C: Initialize Database & Run the Bot
+```bash
+# Initialize SQLite schema & run migrations
 .venv/bin/python -m copytradeaster init-db
 
-# Run full unified process (Telegram Bot + Mini App aiohttp transport + trading engine)
+# Run unified process (Telegram Bot + Mini App aiohttp + Trading Core)
 .venv/bin/python -m copytradeaster run-bot
-# or via console script:
+# or:
 copytradeaster run-bot
+```
+*Note: Upon startup, the bot automatically registers `MenuButtonWebApp(text="ASTER COPY")` pointing to `CT_MINIAPP_PUBLIC_URL/miniapp/` in private chats and for all configured admin IDs.*
 
-# Run headless trading engine standalone (without Telegram)
-copytradeaster run
-
-# Check engine health and runtime status
+### 4. CLI Operations & Health Inspection
+```bash
+# Health & engine diagnostics (heartbeat age, runtime state, active trades, recent commands)
 copytradeaster status
+
+# Run standalone trading core (without Telegram bot)
+copytradeaster run
 
 # Force manual reconciliation sweep across followers
 copytradeaster reconcile
 copytradeaster reconcile --account <account_id>
 
-# Trading pause / resume
-copytradeaster pause    # allow_new_entries=false
-copytradeaster resume   # allow_new_entries=true
+# Trading pause / resume (safe control-plane)
+copytradeaster pause    # sets allow_new_entries=false
+copytradeaster resume   # sets allow_new_entries=true & clears emergency_active
 
-# Emergency position liquidation across all followers
+# Emergency liquidation (flat verification across active followers)
 copytradeaster emergency-close-all --yes
+
+# Telegram user management
+copytradeaster telegram-user add <telegram_user_id>
+copytradeaster telegram-user list
+copytradeaster telegram-user block <telegram_user_id>
+
+# Import credentials from wallet.txt
+copytradeaster import-wallet wallet.txt [--wipe]
+
+# Batch approve builder / agent on-chain
+copytradeaster approve-builder [--accounts all|<id1,id2>] [--max-fee-rate 0.0001]
 ```
 
-### 3. Mini App Development & Testing
+### 5. Local Dev & Preview Without Telegram
 ```bash
-# Start Cloudflare quick tunnel for Telegram WebApp HTTPS URL
-./scripts/dev-miniapp-tunnel.sh 8080
-
-# Start standalone browser preview with dev session (bypasses Telegram initData)
+# Isolated standalone browser preview (MetaMask/Rabby, dev session bypassing Telegram initData)
 .venv/bin/python scripts/preview_miniapp.py 8080
+# Open in browser: http://127.0.0.1:8080/miniapp/
 
-# Frontend development server with local proxy
-cd miniapp
-pnpm dev
+# Vite live dev server (with hot reloading & backend proxy)
+cd miniapp && pnpm dev
 ```
 
-### 4. Testing & Code Quality
+### 6. Testing & Quality Gates
 ```bash
-# Run full offline Python test suite (unit + integration + replay)
+# Full offline Python test suite (unit + integration + replay)
 pytest -q -m "not testnet"
 
-# Run with coverage report (threshold >= 87%)
+# With coverage report (threshold >= 87%)
 pytest -q -m "not testnet" --cov=copytradeaster --cov-report=term-missing
 
-# Run Python linters & formatters
+# Python lint & formatting checks
 ruff check .
 ruff format --check .
 ruff format .             # auto-format
 
-# Run Frontend quality checks
+# Frontend quality checks
 cd miniapp
 pnpm lint                 # oxlint
-pnpm test                 # vitest run
-pnpm build                # tsc -b && vite build
+pnpm test                 # vitest
+pnpm build                # tsc + vite build
 cd ..
 
-# Run signed live Aster Testnet suite (requires CT_TESTNET=1 and wallet.txt)
+# Signed live Aster Testnet test suite (requires CT_TESTNET=1 and testnet wallet.txt)
 CT_TESTNET=1 pytest tests/testnet/ -v
 ```
-
 ---
 
 ## Code Conventions & Common Patterns

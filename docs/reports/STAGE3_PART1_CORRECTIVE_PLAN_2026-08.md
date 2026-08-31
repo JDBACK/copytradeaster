@@ -1068,6 +1068,15 @@ gate — перед финальным verdict. Live testnet можно испо
 - Главные приватные ключи пользователей и их подписи отсутствуют в базе данных и логах.
 - Все сетевые вызовы осуществлялись исключительно против `fapi.asterdex-testnet.com` (trading chain 714, registration chain 56). Никаких mainnet-вызовов не производилось.
 
+### 19.6 Эксплуатационная доработка: корневой редирект и нормализация URL меню
+
+- **Проблема:** При открытии Mini App по базовому URL домена/туннеля (например, `https://...trycloudflare.com/`) без явного `/miniapp/` сервер aiohttp возвращал `404: Not Found`.
+- **Решение:**
+  1. В `src/copytradeaster/miniapp/server.py` добавлен явный 302-редирект с `/` на `/miniapp/`.
+  2. В `src/copytradeaster/telegram/runtime.py` добавлена вспомогательная функция `normalize_webapp_url`, которая гарантирует, что `MenuButtonWebApp` регистрируется с суффиксом `/miniapp/`.
+  3. В `tests/unit/application/test_engine.py` в фикстуру `make_settings` добавлена явная изоляция `miniapp_enabled=False`, устраняющая конфликт порта 8080 во время параллельного запуска тестов и живого фонового демо-процесса.
+- **Верификация:** Проверено ручным открытием интерфейса владельцем в Telegram WebApp (`result=opened successfully`).
+
 ### 19.5 Оставшиеся отложенные пункты (Part 2)
 
 - Внедрение `builder` и `feeRate` в боевой ордерный цикл движка (`trading/executor.py`) — Part 2.
