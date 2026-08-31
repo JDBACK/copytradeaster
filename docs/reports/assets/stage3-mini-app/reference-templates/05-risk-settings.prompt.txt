@@ -1,0 +1,11 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Convert the supplied Aster Copy risk screen from a no-op state into a clear dirty-state confirmation without inventing a risk range.
+Input images: Image 1 is the edit target.
+Changes:
+1. Keep the large heading "Текущее значение" and large value "1,0%" unchanged.
+2. In the preset row, remove the active outline from "1,0%" and make "2,0%" the only champagne-selected preset.
+3. Replace the range endpoint labels "0,1%" and "10,0%" with exactly "Сейчас 1,0%" on the left and "После 2,0%" on the right. Keep the calibration line but make it communicate current versus selected value, not an approved min/max range.
+4. In the demo explanation, change only "12,40 USDT" to "24,80 USDT".
+5. Change the primary button text from "Сохранить 1,0%" to exactly "Сохранить 2,0%".
+Constraints: Preserve the entire composition, title, four presets, custom-value row, demo badge, automatic-leverage note, bottom navigation, Telegram chrome, icons, colors and typography. No new range, no leverage control, no extra copy, no watermark.

@@ -1,7 +1,7 @@
 # Карта документации
 
 Что где лежит, что из этого живое, а что история, и что читать в каком порядке.
-Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-08-25.
+Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-08-26.
 
 ## Быстрый старт (что читать в новом сеансе)
 
@@ -14,14 +14,17 @@
    фактический scope Stage 2, реализованная архитектура, owner/testnet evidence,
    leverage control-plane, ограничения и выполненный acceptance verdict.
 5. `docs/DEV_PLAN_SKELETON.md` — roadmap этапов и чеклисты; что уже сделано, что дальше.
-6. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
-7. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
+6. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — актуальный design-only
+   план follower Mini App: Builder authorization, IA, восемь Aster-style
+   concepts, screen states, missing contracts и будущий UI acceptance gate.
+7. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
+8. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
   план Telegram/direct-V3 этапа и append-only журнал исполнения. Его старые
   sections/checklists — история планирования; текущую правду брать из пункта 4.
-8. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
+9. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
    guest captcha, durable access request, env-admin approval и regression gate.
-9. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
-   corrective gate после независимого аудита: план, полный журнал и evidence.
+10. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
+    corrective gate после независимого аудита: план, полный журнал и evidence.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.
 
@@ -59,6 +62,7 @@ corrective-план завершён и содержит фактический 
 | `STAGE2_ONBOARDING_UX_TYPED_ERRORS_2026-08.md` | Owner feedback corrective gate: Aster UI vocabulary, typed direct-onboarding errors, actionable Telegram retry и secret/FSM invariants (2026-08-24) |
 | `STAGE2_ONBOARDING_CHAT_UX_2026-08.md` | Фактологический follow-up по чистым onboarding-карточкам, expiry recovery, Aster prerequisites и live-safe facts (2026-08-24) |
 | `STAGE2_SAFE_LOGGING_AUDIT_2026-08.md` | Persistent rotating logging, onboarding audit classification, secret-safety и типы static/offline gate (2026-08-24); актуальные counters только в `ENGINE_TEST_STATUS_2026-08.md` |
+| `STAGE3_MINI_APP_UX_PLAN_2026-08.md` | Design-only план Stage 3 follower Mini App: Builder authorization, IA, Aster-style screen concepts, анализ, missing application contracts и UI Definition of Done (2026-08-26) |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 

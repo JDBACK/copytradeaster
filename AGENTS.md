@@ -59,16 +59,7 @@ No build step is configured yet; the commands below apply once code lands.
 
 ## Agent-Specific Instructions
 
-- Web research: use Firecrawl only (skills `firecrawl-search`, `firecrawl-scrape`), never the built-in web search.
 - Subagents: use only `GPT-5.6 Luna` with `max` reasoning (`gpt-5.6-luna`, `reasoning_effort=max`). No other subagent model or reasoning level is allowed.
-- Process orchestration: the root/main agent is the orchestrator and personally
-  performs **all audits, reviews, and acceptance checks**, including the final
-  read-only acceptance check. Subagents are not used for audit, review, or
-  acceptance; they are used only for a concrete implementation of code/tests
-  and files directly related to that implementation. At most one
-  `GPT-5.6 Luna` implementation subagent with `max` reasoning may be active at
-  a time; parallel implementation subagents are forbidden. Start the next
-  implementation subagent only after the previous one has finished and been
-  closed.
+
 - Keep answers in Russian, direct, and scoped to API facts - no ethics or marketing tangents.
 - Maintain the todo-plan in `DEV_PLAN_SKELETON.md` and record research progress in report journals.

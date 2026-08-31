@@ -1,0 +1,8 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Correct only the onboarding terminology and explanatory copy in the supplied Aster Copy screen so it matches the approved UI/UX plan.
+Input images: Image 1 is the edit target.
+Changes:
+1. Change only the first trust-rail label from "Кошелёк" to "Wallet". Keep "Agent", "Builder", and "Sync" unchanged.
+2. Replace the two explanatory lines under "Подключите основной кошелёк" with exactly: "Он нужен только для авторизации Agent и Builder." and "Основной ключ не передаётся сервису."
+Constraints: Preserve the complete composition, positions, spacing, typography, logo, icons, colors, glow, button, network and fee rows, Telegram chrome and all other text. Do not add any new element. No watermark.

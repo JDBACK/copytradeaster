@@ -1,0 +1,9 @@
+Use case: ui-mockup
+Asset type: high-fidelity Telegram Mini App mobile dashboard, portrait 9:16
+Primary request: Create a brand-new Russian daily dashboard screen for Aster Copy after successful Stage 3 Builder authorization. Realistic shippable product UI, not concept art.
+Input images: Images 1–4 are style references only. Carry over Aster's near-black field, thin modular grid, warm champagne accent, precise sans-serif typography, tabular financial figures, quiet panel borders and restrained green/red status colors. Do not copy desktop layouts, charts, order book, banners, text, or content.
+Structure: Telegram-safe top inset; compact ASTER COPY header and masked account "0x25…E5Dd"; a collapsed four-stage trust rail "Wallet · Agent · Builder · Sync" with all stages verified; one dominant copy-state block; two compact metrics; a read-only position preview; a full-width pause action; persistent bottom navigation with four items.
+Text (verbatim): "Всё работает"; "Копирование включено"; "Wallet · Agent · Builder · Sync"; "Риск на стоп"; "1,0%"; "Открытые позиции"; "2"; "BTCUSDT"; "LONG"; "+124,80 USDT"; "Плечо 200× · автоматически"; "Обновлено 12:41"; "Поставить на паузу"; "Главная"; "Позиции"; "Активность"; "Настройки"; "Демо-данные"
+Visual direction: Aster Attestation Console. The trust rail is the signature proof line, quieter than the main status. Use a thin champagne vertical marker and a small green verified dot; no giant decorative ring.
+Composition/framing: full single phone screen, straight-on, no device mockup, no surrounding scene. Dominant near-black surface; champagne only for brand, active navigation and primary control; green only for verified/profit.
+Constraints: crisp readable Cyrillic; practical touch targets; no user leverage control; no emergency button; no deposit or trading action; no purple/blue crypto gradients; no glassmorphism; no candlestick chart; no order book; no watermark; no extra text.

@@ -1,0 +1,10 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Remove the duplicate connection setting and false navigation cue from the supplied Aster Copy settings screen.
+Input images: Image 1 is the edit target.
+Changes:
+1. Under section heading "ПОДКЛЮЧЕНИЕ И БЕЗОПАСНОСТЬ", remove the entire first row labeled "Подключение" with value "Проверено".
+2. Move the existing rows "Аккаунт и Builder" and "Безопасность" upward so they become the only two rows in that section, keeping their existing values and chevrons.
+3. In the "Среда" row, remove only the right chevron because "Aster testnet" is a static value, not navigation.
+4. Close all resulting gaps while preserving the established vertical rhythm.
+Constraints: Preserve the header, copying status panel, all copy-settings rows, support rows, bottom navigation, icons, colors, typography and all other copy. Do not add a replacement row. No watermark.

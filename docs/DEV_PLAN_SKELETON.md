@@ -213,6 +213,27 @@ Stage 2 полностью закрыт для testnet scope.
 - Монетизация: builder fee (кап 0.001 futures).
 - Торговое ядро и стрим не меняются — меняется только источник кредов.
 
+#### UI/UX preparation Mini App (2026-08-26)
+
+Дизайн-анализ и восемь screen concepts зафиксированы в
+[STAGE3_MINI_APP_UX_PLAN_2026-08.md](reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md).
+Этот gate не является началом frontend/backend реализации.
+
+- [x] Изучить product truth, roadmap, architecture, Stage 2 UX/readiness и
+  Builder/Aster Code research.
+- [x] Зафиксировать follower Mini App IA, visual direction, экраны, состояния,
+  safety boundaries и accessibility floor.
+- [x] Сгенерировать и проанализировать отдельные Aster-style concepts для
+  Builder auth, Home, Positions, Activity, Risk, Settings, Account/Builder и
+  System Status.
+- [x] Зафиксировать недостающие contracts: Builder onboarding/session,
+  read-only positions, risk constraints и Builder attestation в status.
+- [ ] Утвердить wallet provider/chain scope, signature plan, фактические
+  Builder metadata/fee, risk limits и disconnect/revoke semantics.
+- [ ] Спроектировать технический Stage 3 implementation/acceptance plan.
+- [ ] Реализовать `onboarding/builder`, Mini App presenter/transport и signed
+  testnet acceptance; торговое ядро не переписывать.
+
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,
