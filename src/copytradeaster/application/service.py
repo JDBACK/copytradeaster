@@ -42,6 +42,7 @@ from copytradeaster.application.models import (
     DashboardDTO,
     DirectCredentialsInput,
     MiniAppAccessState,
+    MiniAppConnectionState,
     MiniAppSessionDTO,
     NotificationSettingsDTO,
     OnboardingApplicationError,
@@ -1022,6 +1023,7 @@ class UserApplicationService:
         *,
         account_id: str | None,
         snapshot: Any = None,
+        snapshot_captured_at: datetime | None = None,
     ) -> DashboardDTO:
         system_state = await self._system_state()
         user_row = await self._user_row(context.user_id)
@@ -1079,6 +1081,7 @@ class UserApplicationService:
             updated_at=_as_datetime(
                 _row_value(account_row, "updated_at", _row_value(account_row, "created_at"))
             ),
+            snapshot_captured_at=snapshot_captured_at,
             message=message,
             permission=permission,
             notification_enabled=enabled,
@@ -1098,7 +1101,7 @@ class UserApplicationService:
             return None
         return mask_address(str(signer))
 
-    async def dashboard(self, user_id: int) -> DashboardDTO:
+    async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO:
         try:
             context = await self._context(user_id)
             account_id = str(context.account_id) if context.account_id else None
@@ -1109,7 +1112,19 @@ class UserApplicationService:
                     account_id,
                     allow_disabled=True,
                 )
-            return await self._dashboard_for(context, row, account_id=account_id)
+            snapshot = None
+            captured_at = None
+            if account_id is not None:
+                snapshot = await self._snapshot(account_id, refresh=refresh)
+                if refresh:
+                    captured_at = self._now()
+            return await self._dashboard_for(
+                context,
+                row,
+                account_id=account_id,
+                snapshot=snapshot,
+                snapshot_captured_at=captured_at,
+            )
         except _SAFE_ERRORS:
             raise
         except Exception:
@@ -1683,24 +1698,129 @@ class UserApplicationService:
         try:
             await self._ensure_testnet()
             try:
-                await self._context(normalized)
+                context = await self._context(normalized)
             except AuthorizationError:
                 return await self._miniapp_denied_session(normalized)
-            dash = await self.dashboard(normalized)
-            connected = bool(dash.account_masked) and dash.copy_state is not CopyState.EMPTY
+
+            is_admin = context.is_admin
+            if context.account_id:
+                candidate = str(context.account_id)
+                row = await self._account_row(candidate)
+                if row is not None and _is_true(_row_value(row, "enabled", 0)):
+                    registered = await self._runtime_registered(candidate)
+                    if not registered:
+                        user_address = mask_address(str(row["user_address"]))
+                        return MiniAppSessionDTO(
+                            user_id=normalized,
+                            access_state=MiniAppAccessState.APPROVED,
+                            environment="testnet",
+                            connection_state=MiniAppConnectionState.RECOVERY_REQUIRED,
+                            account_connected=False,
+                            account_masked=user_address,
+                            copy_state=CopyState.PAUSED,
+                            is_admin=is_admin,
+                            recovery_reason="Runtime activation is pending",
+                        )
+                    dash = await self.dashboard(normalized)
+                    return MiniAppSessionDTO(
+                        user_id=normalized,
+                        access_state=MiniAppAccessState.APPROVED,
+                        environment="testnet",
+                        connection_state=MiniAppConnectionState.CONNECTED,
+                        account_connected=True,
+                        account_masked=dash.account_masked,
+                        copy_state=dash.copy_state,
+                        is_admin=is_admin,
+                    )
+
+            if self._builder_onboarding is not None:
+                attempt = await self._call_optional(
+                    self._builder_onboarding, "get_builder_attempt", normalized
+                )
+                if (
+                    attempt is not None
+                    and attempt is not _MISSING
+                    and getattr(attempt, "state", None) in {"PREPARED", "APPROVAL_SENT", "APPROVED"}
+                ):
+                    return MiniAppSessionDTO(
+                        user_id=normalized,
+                        access_state=MiniAppAccessState.APPROVED,
+                        environment="testnet",
+                        connection_state=MiniAppConnectionState.ONBOARDING,
+                        account_connected=False,
+                        account_masked=mask_address(getattr(attempt, "user_address", "")),
+                        copy_state=CopyState.EMPTY,
+                        is_admin=is_admin,
+                    )
+
             return MiniAppSessionDTO(
                 user_id=normalized,
                 access_state=MiniAppAccessState.APPROVED,
                 environment="testnet",
-                account_connected=connected,
-                account_masked=dash.account_masked if connected else None,
-                copy_state=dash.copy_state if connected else CopyState.EMPTY,
-                is_admin=dash.is_admin,
+                connection_state=MiniAppConnectionState.EMPTY,
+                account_connected=False,
+                account_masked=None,
+                copy_state=CopyState.EMPTY,
+                is_admin=is_admin,
             )
         except _SAFE_ERRORS:
             raise
-        except Exception:
+        except Exception as exc:
+            log.exception("miniapp_session failed: %s", exc)
             raise ServiceUnavailableError("mini app session is unavailable") from None
+
+    async def miniapp_recover_runtime(self, user_id: int) -> MiniAppSessionDTO:
+        """Recover a committed account whose runtime activation failed."""
+        mode = "miniapp_recover_runtime"
+        account_id: Any = self._audit_account_id(user_id)
+        log_onboarding_audit(
+            log,
+            event="attempt",
+            mode=mode,
+            user_id=user_id,
+            account_id=account_id,
+            result="started",
+            paused=True,
+        )
+        try:
+            await self._ensure_testnet()
+            context = await self._context(user_id)
+            if not context.account_id:
+                raise ValidationError("no committed account found for recovery")
+            candidate = str(context.account_id)
+            row = await self._account_row(candidate)
+            if row is None or not _is_true(_row_value(row, "enabled", 0)):
+                raise ValidationError("no enabled committed account found for recovery")
+
+            if await self._runtime_registered(candidate):
+                log_onboarding_audit(
+                    log,
+                    event="recovered",
+                    mode=mode,
+                    user_id=context.user_id,
+                    account_id=candidate,
+                    result="already_registered",
+                    paused=True,
+                )
+                return await self.miniapp_session(context.user_id)
+
+            await self._recover_builder_runtime(candidate, context)
+            log_onboarding_audit(
+                log,
+                event="recovered",
+                mode=mode,
+                user_id=context.user_id,
+                account_id=candidate,
+                result="recovered",
+                paused=True,
+            )
+            return await self.miniapp_session(context.user_id)
+        except _SAFE_ERRORS as exc:
+            self._audit_rejected(mode=mode, user_id=user_id, account_id=account_id, exc=exc)
+            raise
+        except Exception as exc:
+            self._audit_rejected(mode=mode, user_id=user_id, account_id=account_id, exc=exc)
+            raise ServiceUnavailableError("account runtime recovery is unavailable") from None
 
     async def _miniapp_denied_session(self, user_id: int) -> MiniAppSessionDTO:
         """Map a denied authorization to its durable access-request state."""
@@ -2007,6 +2127,11 @@ class UserApplicationService:
         await self._ensure_testnet()
         await self._ensure_ready()
         context, row, _ = await self._owned_account(user_id, account_id)
+        system_state = await self._system_state()
+        if system_state is not SystemState.READY:
+            raise StaleOperationError(
+                f"system state is not ready for resume (state={system_state.value})"
+            )
         if not _is_true(_row_value(row, "enabled", 0)):
             raise AuthorizationError("account is disconnected")
         if _is_true(await self._flag("emergency_active")):
@@ -2121,14 +2246,12 @@ class UserApplicationService:
     async def resume(self, user_id: int, confirmation: Confirmation | None = None) -> DashboardDTO:
         try:
             context, _, _ = await self._owned_account(user_id)
-            expected_version: str | None = None
-            if confirmation is not None:
-                record = await self._consume_confirmation(
-                    context.user_id, confirmation, expected=ConfirmationAction.RESUME
-                )
-                expected_version = record.account_version
-            elif await self._master_requires_confirmation():
+            if confirmation is None:
                 raise ConfirmationExpiredError("resume confirmation is required")
+            record = await self._consume_confirmation(
+                context.user_id, confirmation, expected=ConfirmationAction.RESUME
+            )
+            expected_version = record.account_version
             return await self._resume_account(
                 context.user_id,
                 str(context.account_id),

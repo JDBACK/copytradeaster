@@ -6,31 +6,35 @@ export type SystemState = 'ready' | 'stale' | 'degraded' | 'blocked' | 'unknown'
 
 export type AccessState = 'approved' | 'pending' | 'rejected' | 'unknown'
 
+export type ConnectionState = 'empty' | 'onboarding' | 'recovery_required' | 'connected'
+
 export interface MiniAppSessionDTO {
   user_id: number
   access_state: AccessState
   environment: string
+  connection_state?: ConnectionState
   account_connected: boolean
   account_masked?: string | null
   copy_state?: CopyState
   is_admin?: boolean
+  recovery_reason?: string | null
 }
 
 export interface BuilderPrepareDTO {
-  pending_id: string
-  user_masked: string
-  agent_masked: string
-  builder_masked: string
-  builder_name: string
-  max_fee_rate: string
-  signature_plan: string
-  can_perp_trade: boolean
-  can_withdraw: boolean
-  agent_expires_at_ms: number
-  approval_expires_at_ms: number
-  eip712: Record<string, unknown>
+  pending_id: string | null
+  user_masked?: string | null
+  agent_masked?: string | null
+  builder_masked?: string | null
+  builder_name?: string | null
+  max_fee_rate?: string | null
+  signature_plan?: string
+  can_perp_trade?: boolean
+  can_withdraw?: boolean
+  agent_expires_at_ms?: number | null
+  approval_expires_at_ms?: number | null
+  already_connected?: boolean
+  eip712?: Record<string, unknown>
 }
-
 export interface BuilderOnboardedDTO {
   account_id: string
   account_masked: string
@@ -54,6 +58,7 @@ export interface DashboardDTO {
   max_leverage?: number | null
   open_positions?: number | null
   updated_at?: string | null
+  snapshot_captured_at?: string | null
   message?: string | null
   notification_enabled: boolean
   is_admin: boolean

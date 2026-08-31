@@ -52,6 +52,7 @@ from copytradeaster.onboarding.providers import (
     SignedReadClient,
     maybe_await,
 )
+from copytradeaster.storage.repositories import BuilderOnboardingAttempt
 
 log = get_logger(__name__)
 
@@ -62,56 +63,6 @@ def _default_signer() -> tuple[str, str]:
     account = Account.create()
     key = account.key.hex()
     return account.address, (key if key.startswith("0x") else f"0x{key}")
-
-
-class _PendingApproval:
-    """One in-memory prepare→submit attempt.
-
-    Holds the generated signer key only for the TTL window.  The custom repr
-    keeps failure dumps (and therefore logs) free of key material.
-    """
-
-    __slots__ = (
-        "pending_id",
-        "telegram_user_id",
-        "user_address",
-        "signer_address",
-        "signer_private_key",
-        "params",
-        "agent_expires_at_ms",
-        "deadline_ms",
-    )
-
-    def __init__(
-        self,
-        *,
-        pending_id: str,
-        telegram_user_id: int,
-        user_address: str,
-        signer_address: str,
-        signer_private_key: str,
-        params: dict,
-        agent_expires_at_ms: int,
-        deadline_ms: int,
-    ) -> None:
-        self.pending_id = pending_id
-        self.telegram_user_id = telegram_user_id
-        self.user_address = user_address
-        self.signer_address = signer_address
-        self.signer_private_key = signer_private_key
-        self.params = params
-        self.agent_expires_at_ms = agent_expires_at_ms
-        self.deadline_ms = deadline_ms
-
-    def __repr__(self) -> str:
-        return (
-            "_PendingApproval("
-            f"pending_id={self.pending_id!r}, "
-            f"telegram_user_id={self.telegram_user_id!r}, "
-            f"user_address={mask_address(self.user_address)!r}, "
-            f"signer_address={mask_address(self.signer_address)!r}, "
-            "signer_private_key='<redacted>')"
-        )
 
 
 class BuilderOnboardingService:
@@ -137,14 +88,18 @@ class BuilderOnboardingService:
         self._activation = activation
         self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
         self._signer_factory = signer_factory or _default_signer
-        self._pending: dict[str, _PendingApproval] = {}
-        self._user_pending: dict[int, str] = {}
-        self._lock = asyncio.Lock()
+        self._user_locks: dict[int, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+
+    def _user_lock(self, user_id: int) -> asyncio.Lock:
+        if user_id not in self._user_locks:
+            self._user_locks[user_id] = asyncio.Lock()
+        return self._user_locks[user_id]
 
     # --- prepare --------------------------------------------------------------
 
     async def prepare(self, request: BuilderPrepareRequest) -> BuilderPrepareResult:
-        """Validate, generate the signer, and return the wallet signing payload."""
+        """Validate, generate or resume the signer, and return the wallet signing payload."""
         self._validate_config()
         if not isinstance(request, BuilderPrepareRequest):
             raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
@@ -167,39 +122,98 @@ class BuilderOnboardingService:
                 raise OnboardingError(OnboardingErrorCode.MASTER_ADDRESS)
         await self._check_conflict(request.telegram_user_id, user_address)
 
-        signer_address, signer_private_key = self._signer_factory()
         now_ms = self._clock_ms()
-        agent_expires_at_ms = now_ms + self._config.agent_expiry_days * 86_400_000
-        pending_id = secrets.token_hex(16)
-        params: dict = {
-            "agentName": self._config.agent_name,
-            "agentAddress": signer_address,
-            "expired": agent_expires_at_ms,
-            "canSpotTrade": False,
-            "canPerpTrade": True,
-            "canWithdraw": False,
-            "builder": self._config.builder_address,
-            "maxFeeRate": self._config.max_fee_rate,
-            "builderName": self._config.builder_name,
-            "asterChain": "Testnet",
-            "user": user_address,
-            "nonce": next_nonce(),
-        }
-        deadline_ms = now_ms + self._config.approval_ttl_s * 1000
-        pending = _PendingApproval(
-            pending_id=pending_id,
-            telegram_user_id=request.telegram_user_id,
-            user_address=user_address,
-            signer_address=signer_address,
-            signer_private_key=signer_private_key,
-            params=params,
-            agent_expires_at_ms=agent_expires_at_ms,
-            deadline_ms=deadline_ms,
-        )
-        async with self._lock:
-            self._drop_user_pending(request.telegram_user_id)
-            self._pending[pending_id] = pending
-            self._user_pending[request.telegram_user_id] = pending_id
+        async with self._user_lock(request.telegram_user_id):
+            try:
+                await self._store.cleanup_expired_prepared_attempts(now_ms)
+            except Exception:
+                log.warning("cleanup_expired_prepared_attempts failed")
+
+            existing = await self._store.get_builder_attempt(request.telegram_user_id)
+            if existing is not None:
+                if existing.state == "PREPARED":
+                    if (
+                        now_ms <= existing.approval_deadline_ms
+                        and existing.user_address.lower() == user_address.lower()
+                    ):
+                        log.info(
+                            "builder onboarding returned existing prepared pending_id=%s ttl_s=%s",
+                            existing.pending_id,
+                            self._config.approval_ttl_s,
+                        )
+                        return BuilderPrepareResult(
+                            pending_id=existing.pending_id,
+                            masked_user_address=mask_address(existing.user_address),
+                            masked_signer_address=mask_address(existing.signer_address),
+                            builder_masked=mask_address(self._config.builder_address),
+                            builder_name=self._config.builder_name,
+                            max_fee_rate=self._config.max_fee_rate,
+                            signature_plan="combined_approve_agent",
+                            can_perp_trade=True,
+                            can_withdraw=False,
+                            agent_expires_at_ms=existing.agent_expires_at_ms,
+                            approval_expires_at_ms=existing.approval_deadline_ms,
+                            eip712=eip712_json_payload(
+                                existing.params, "ApproveAgent", self._config.registration_chain_id
+                            ),
+                        )
+                    await self._store.delete_builder_attempt(request.telegram_user_id)
+                elif existing.state in {"APPROVAL_SENT", "APPROVED"}:
+                    log.info(
+                        "builder onboarding returned in-flight/approved pending_id=%s state=%s",
+                        existing.pending_id,
+                        existing.state,
+                    )
+                    return BuilderPrepareResult(
+                        pending_id=existing.pending_id,
+                        masked_user_address=mask_address(existing.user_address),
+                        masked_signer_address=mask_address(existing.signer_address),
+                        builder_masked=mask_address(self._config.builder_address),
+                        builder_name=self._config.builder_name,
+                        max_fee_rate=self._config.max_fee_rate,
+                        signature_plan="combined_approve_agent",
+                        can_perp_trade=True,
+                        can_withdraw=False,
+                        agent_expires_at_ms=existing.agent_expires_at_ms,
+                        approval_expires_at_ms=existing.approval_deadline_ms,
+                        eip712=eip712_json_payload(
+                            existing.params, "ApproveAgent", self._config.registration_chain_id
+                        ),
+                    )
+
+            signer_address, signer_private_key = self._signer_factory()
+            agent_expires_at_ms = now_ms + self._config.agent_expiry_days * 86_400_000
+            pending_id = secrets.token_hex(16)
+            params: dict = {
+                "agentName": self._config.agent_name,
+                "agentAddress": signer_address,
+                "expired": agent_expires_at_ms,
+                "canSpotTrade": False,
+                "canPerpTrade": True,
+                "canWithdraw": False,
+                "builder": self._config.builder_address,
+                "maxFeeRate": self._config.max_fee_rate,
+                "builderName": self._config.builder_name,
+                "asterChain": "Testnet",
+                "user": user_address,
+                "nonce": next_nonce(),
+            }
+            deadline_ms = now_ms + self._config.approval_ttl_s * 1000
+            account_id = stable_account_id(request.telegram_user_id)
+            attempt = BuilderOnboardingAttempt(
+                pending_id=pending_id,
+                telegram_user_id=request.telegram_user_id,
+                account_id=account_id,
+                user_address=user_address,
+                signer_address=signer_address,
+                signer_private_key=signer_private_key,
+                params=params,
+                state="PREPARED",
+                approval_deadline_ms=deadline_ms,
+                agent_expires_at_ms=agent_expires_at_ms,
+            )
+            await self._store.save_builder_attempt(attempt)
+
         log.info(
             "builder onboarding prepared pending_id=%s approval_ttl_s=%s",
             pending_id,
@@ -227,97 +241,174 @@ class BuilderOnboardingService:
         self._validate_config()
         if not isinstance(request, BuilderSubmitRequest):
             raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
-        signature = request.signature.strip() if isinstance(request.signature, str) else ""
-        if not signature or len(signature) > 200 or not signature.removeprefix("0x").isalnum():
+        if (
+            isinstance(request.telegram_user_id, bool)
+            or not isinstance(request.telegram_user_id, int)
+            or request.telegram_user_id <= 0
+        ):
+            raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
+        if not isinstance(request.pending_id, str) or not request.pending_id.strip():
             raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
 
-        async with self._lock:
-            pending = self._pending.pop(request.pending_id, None)
-            if pending is None or pending.telegram_user_id != request.telegram_user_id:
+        async with self._user_lock(request.telegram_user_id):
+            pending_id = request.pending_id.strip()
+            attempt = await self._store.get_builder_attempt_by_pending_id(pending_id)
+            if attempt is None or attempt.telegram_user_id != request.telegram_user_id:
                 raise OnboardingError(OnboardingErrorCode.APPROVAL_UNKNOWN)
-            self._user_pending.pop(pending.telegram_user_id, None)
-        if self._clock_ms() > pending.deadline_ms:
-            raise OnboardingError(OnboardingErrorCode.APPROVAL_EXPIRED)
 
-        try:
-            recovered = recover_registration(
-                pending.params,
-                signature,
-                "ApproveAgent",
-                chain_id=self._config.registration_chain_id,
-            )
-        except Exception:
-            raise OnboardingError(OnboardingErrorCode.SIGNATURE_MISMATCH) from None
-        if recovered.lower() != pending.user_address.lower():
-            raise OnboardingError(OnboardingErrorCode.SIGNATURE_MISMATCH)
+            now_ms = self._clock_ms()
 
-        submitted: dict = dict(pending.params)
-        submitted["signature"] = signature.removeprefix("0x")
-        submitted["signatureChainId"] = str(self._config.registration_chain_id)
-        try:
-            await post_signed_registration(
-                self._http,
-                self._config.base_url,
-                self._limiter,
-                "/fapi/v3/approveAgent",
-                submitted,
-            )
-        except ManagementError as exc:
-            log.warning(
-                "builder approveAgent submit failed code=%s msg=%s",
-                exc.code,
-                str(exc)[:160],
-            )
-            exchange_code = exc.code if isinstance(exc.code, int) else None
-            raise OnboardingError(
-                OnboardingErrorCode.AGENT_SUBMIT_FAILED, exchange_code=exchange_code
-            ) from None
+            if attempt.state == "PREPARED":
+                if now_ms > attempt.approval_deadline_ms:
+                    raise OnboardingError(OnboardingErrorCode.APPROVAL_EXPIRED)
 
-        client = await self._open_verify_client(pending)
-        validation = await self._verify_agent(client, pending)
-        bundle = await self._read_bundle(client, pending)
-        self._validate_bundle(bundle)
+                signature = request.signature.strip() if isinstance(request.signature, str) else ""
+                if (
+                    not signature
+                    or len(signature) > 200
+                    or not signature.removeprefix("0x").isalnum()
+                ):
+                    raise OnboardingError(OnboardingErrorCode.INVALID_INPUT)
 
-        commit = OnboardingCommit(
-            account_id=stable_account_id(pending.telegram_user_id),
-            telegram_user_id=pending.telegram_user_id,
-            user_address=pending.user_address,
-            signer_address=pending.signer_address,
-            signer_private_key=pending.signer_private_key,
-            validation=validation,
-            read_bundle=bundle,
-            allow_new_entries=False,
-        )
-        try:
-            await self._store.commit_onboarding(commit)
-        except Exception:
-            log.error("builder onboarding commit failed")
-            raise OnboardingError(OnboardingErrorCode.COMMIT_FAILED) from None
-        account_id = commit.account_id
+                try:
+                    recovered = recover_registration(
+                        attempt.params,
+                        signature,
+                        "ApproveAgent",
+                        chain_id=self._config.registration_chain_id,
+                    )
+                except Exception:
+                    raise OnboardingError(OnboardingErrorCode.SIGNATURE_MISMATCH) from None
+                if recovered.lower() != attempt.user_address.lower():
+                    raise OnboardingError(OnboardingErrorCode.SIGNATURE_MISMATCH)
 
-        if self._activation is not None:
+                attempt.state = "APPROVAL_SENT"
+                await self._store.update_builder_attempt_state(attempt.pending_id, "APPROVAL_SENT")
+
+                submitted: dict = dict(attempt.params)
+                submitted["signature"] = signature.removeprefix("0x")
+                submitted["signatureChainId"] = str(self._config.registration_chain_id)
+                try:
+                    await post_signed_registration(
+                        self._http,
+                        self._config.base_url,
+                        self._limiter,
+                        "/fapi/v3/approveAgent",
+                        submitted,
+                    )
+                    attempt.state = "APPROVED"
+                    await self._store.update_builder_attempt_state(attempt.pending_id, "APPROVED")
+                except ManagementError as exc:
+                    log.warning(
+                        "builder approveAgent submit failed code=%s msg=%s",
+                        exc.code,
+                        str(exc)[:160],
+                    )
+                    exchange_code = exc.code if isinstance(exc.code, int) else None
+                    attempt.state = "PREPARED"
+                    await self._store.update_builder_attempt_state(
+                        attempt.pending_id,
+                        "PREPARED",
+                        last_error_code=str(exchange_code or "AGENT_SUBMIT_FAILED"),
+                    )
+                    raise OnboardingError(
+                        OnboardingErrorCode.AGENT_SUBMIT_FAILED, exchange_code=exchange_code
+                    ) from None
+                except Exception as exc:
+                    log.warning("builder approveAgent remote error: %s", type(exc).__name__)
+                    raise OnboardingError(OnboardingErrorCode.SIGNED_READ_FAILED) from None
+
+            if attempt.state == "APPROVAL_SENT":
+                client = await self._open_verify_client(attempt)
+                try:
+                    await client.agent(self._ephemeral_id(attempt))
+                    attempt.state = "APPROVED"
+                    await self._store.update_builder_attempt_state(attempt.pending_id, "APPROVED")
+                except OnboardingError as exc:
+                    if exc.code == OnboardingErrorCode.AGENT_NOT_CONFIRMED:
+                        attempt.state = "PREPARED"
+                        await self._store.update_builder_attempt_state(
+                            attempt.pending_id, "PREPARED"
+                        )
+                        raise OnboardingError(OnboardingErrorCode.AGENT_NOT_CONFIRMED) from None
+                    raise
+                except Exception as exc:
+                    code = getattr(exc, "code", None)
+                    log.warning(
+                        "builder agent verify failed class=%s code=%s", type(exc).__name__, code
+                    )
+                    if code in {-1000, -2015, -2016}:
+                        attempt.state = "PREPARED"
+                        await self._store.update_builder_attempt_state(
+                            attempt.pending_id, "PREPARED"
+                        )
+                        raise OnboardingError(
+                            OnboardingErrorCode.AGENT_NOT_CONFIRMED, exchange_code=code
+                        ) from None
+                    raise OnboardingError(
+                        OnboardingErrorCode.SIGNED_READ_FAILED,
+                        exchange_code=code if isinstance(code, int) else None,
+                    ) from None
+
+            if attempt.state != "APPROVED":
+                raise OnboardingError(OnboardingErrorCode.AGENT_NOT_CONFIRMED)
+
+            client = await self._open_verify_client(attempt)
+            validation = await self._verify_agent(client, attempt)
+            bundle = await self._read_bundle(client, attempt)
             try:
-                activated = self._activation(account_id)
-                if isawaitable(activated):
-                    await activated
-            except Exception:
-                # The atomic row remains paused and can be activated on retry
-                # or during boot; never roll back a successful commit here.
-                log.error("builder onboarding runtime activation failed")
-                raise OnboardingError(OnboardingErrorCode.ACTIVATION_FAILED) from None
+                self._validate_bundle(bundle)
+            except OnboardingError as exc:
+                await self._store.update_builder_attempt_state(
+                    attempt.pending_id, "APPROVED", last_error_code=exc.code.value
+                )
+                raise
 
-        log.info("builder onboarding committed account_id=%s paused=True", account_id)
-        return BuilderOnboardingResult(
-            account_id=account_id,
-            masked_user_address=mask_address(pending.user_address),
-            masked_signer_address=mask_address(pending.signer_address),
-            builder_name=self._config.builder_name,
-            max_fee_rate=self._config.max_fee_rate,
-            position_mode=bundle.position_mode,
-            available_usdt=bundle.available_usdt,
-            agent_expires_at_ms=pending.agent_expires_at_ms,
-            paused=True,
-        )
+            commit = OnboardingCommit(
+                account_id=stable_account_id(attempt.telegram_user_id),
+                telegram_user_id=attempt.telegram_user_id,
+                user_address=attempt.user_address,
+                signer_address=attempt.signer_address,
+                signer_private_key=attempt.signer_private_key,
+                validation=validation,
+                read_bundle=bundle,
+                allow_new_entries=False,
+            )
+            try:
+                await self._store.commit_onboarding(commit)
+            except Exception:
+                log.error("builder onboarding commit failed")
+                await self._store.update_builder_attempt_state(
+                    attempt.pending_id, "APPROVED", last_error_code="COMMIT_FAILED"
+                )
+                raise OnboardingError(OnboardingErrorCode.COMMIT_FAILED) from None
+
+            account_id = commit.account_id
+            await self._store.delete_builder_attempt_by_pending_id(attempt.pending_id)
+
+            if self._activation is not None:
+                try:
+                    activated = self._activation(account_id)
+                    if isawaitable(activated):
+                        await activated
+                except Exception:
+                    # The atomic row remains paused and can be activated on retry
+                    # or during boot; never roll back a successful commit here.
+                    log.error("builder onboarding runtime activation failed")
+                    raise OnboardingError(OnboardingErrorCode.ACTIVATION_FAILED) from None
+
+            log.info("builder onboarding committed account_id=%s paused=True", account_id)
+            return BuilderOnboardingResult(
+                account_id=account_id,
+                masked_user_address=mask_address(attempt.user_address),
+                masked_signer_address=mask_address(attempt.signer_address),
+                builder_name=self._config.builder_name,
+                max_fee_rate=self._config.max_fee_rate,
+                position_mode=bundle.position_mode,
+                available_usdt=bundle.available_usdt,
+                agent_expires_at_ms=attempt.agent_expires_at_ms,
+                paused=True,
+            )
 
     # --- internals --------------------------------------------------------------
 
@@ -367,19 +458,19 @@ class BuilderOnboardingService:
             master_user_address=self._config.master_user_address,
         )
 
-    def _ephemeral_id(self, pending: _PendingApproval) -> str:
-        return f"{EPHEMERAL_PREFIX}{pending.pending_id}__"
+    def _ephemeral_id(self, attempt: BuilderOnboardingAttempt) -> str:
+        return f"{EPHEMERAL_PREFIX}{attempt.pending_id}__"
 
-    async def _open_verify_client(self, pending: _PendingApproval) -> SignedReadClient:
-        ephemeral_id = self._ephemeral_id(pending)
+    async def _open_verify_client(self, attempt: BuilderOnboardingAttempt) -> SignedReadClient:
+        ephemeral_id = self._ephemeral_id(attempt)
         identity = TradingIdentity(
             account_id=ephemeral_id,
-            user=pending.user_address,
-            signer=pending.signer_address,
+            user=attempt.user_address,
+            signer=attempt.signer_address,
             chain_id=self._config.trading_chain_id,
         )
         identity_provider = EphemeralIdentityProvider(ephemeral_id, identity)
-        key_provider = EphemeralKeyProvider(ephemeral_id, pending.signer_private_key)
+        key_provider = EphemeralKeyProvider(ephemeral_id, attempt.signer_private_key)
         try:
             client = await maybe_await(self._client_factory(identity_provider, key_provider))
         except Exception:
@@ -388,9 +479,9 @@ class BuilderOnboardingService:
         return client
 
     async def _verify_agent(
-        self, client: SignedReadClient, pending: _PendingApproval
+        self, client: SignedReadClient, attempt: BuilderOnboardingAttempt
     ) -> AgentValidationSnapshot:
-        ephemeral_id = self._ephemeral_id(pending)
+        ephemeral_id = self._ephemeral_id(attempt)
         try:
             agent = await client.agent(ephemeral_id)
         except OnboardingError:
@@ -408,15 +499,15 @@ class BuilderOnboardingService:
             ) from None
         return validate_agent_permissions(
             agent,
-            pending.signer_address,
+            attempt.signer_address,
             self._permission_config(),
             checked_at_ms=self._clock_ms(),
         )
 
     async def _read_bundle(
-        self, client: SignedReadClient, pending: _PendingApproval
+        self, client: SignedReadClient, attempt: BuilderOnboardingAttempt
     ) -> SignedReadBundle:
-        ephemeral_id = self._ephemeral_id(pending)
+        ephemeral_id = self._ephemeral_id(attempt)
         try:
             balances = tuple(await client.balance(ephemeral_id))
             positions = tuple(await client.position_risk(ephemeral_id))
@@ -447,10 +538,8 @@ class BuilderOnboardingService:
         if expected is not None and bundle.position_mode != expected:
             raise OnboardingError(OnboardingErrorCode.POSITION_MODE_MISMATCH)
 
-    def _drop_user_pending(self, telegram_user_id: int) -> None:
-        previous = self._user_pending.pop(telegram_user_id, None)
-        if previous is not None:
-            self._pending.pop(previous, None)
+    async def _drop_user_pending(self, telegram_user_id: int) -> None:
+        await self._store.delete_builder_attempt(telegram_user_id)
 
 
 __all__ = ["BuilderOnboardingService", "EPHEMERAL_PREFIX"]

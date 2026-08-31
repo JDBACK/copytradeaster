@@ -110,6 +110,13 @@ class ConfirmationAction(StrEnum):
     GLOBAL_EMERGENCY = "global_emergency"
 
 
+class MiniAppConnectionState(StrEnum):
+    EMPTY = "empty"
+    ONBOARDING = "onboarding"
+    RECOVERY_REQUIRED = "recovery_required"
+    CONNECTED = "connected"
+
+
 @dataclass(frozen=True, slots=True)
 class UserContext:
     user_id: int
@@ -117,6 +124,10 @@ class UserContext:
     role: UserRole = UserRole.USER
     account_id: str | None = None
     allowed: bool = False
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role is UserRole.ADMIN
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +151,7 @@ class DashboardDTO:
     max_leverage: int | None = None
     open_positions: int | None = None
     updated_at: datetime | None = None
+    snapshot_captured_at: datetime | None = None
     message: str | None = None
     permission: PermissionSummary = field(default_factory=PermissionSummary)
     notification_enabled: bool = True
@@ -305,10 +317,12 @@ class MiniAppSessionDTO:
     user_id: int
     access_state: MiniAppAccessState = MiniAppAccessState.UNKNOWN
     environment: str = "testnet"
+    connection_state: MiniAppConnectionState = MiniAppConnectionState.EMPTY
     account_connected: bool = False
     account_masked: str | None = None
     copy_state: CopyState = CopyState.EMPTY
     is_admin: bool = False
+    recovery_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,8 +379,7 @@ class ApplicationProtocol(Protocol):
         display_name: str | None,
     ) -> AccessRequestDTO: ...
 
-    async def dashboard(self, user_id: int) -> DashboardDTO: ...
-
+    async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO: ...
     async def status(self, user_id: int, refresh: bool = False) -> StatusDTO: ...
 
     async def risk(self, user_id: int) -> RiskDTO: ...
@@ -386,6 +399,8 @@ class ApplicationProtocol(Protocol):
     ) -> OnboardingResult: ...
 
     async def miniapp_session(self, user_id: int) -> MiniAppSessionDTO: ...
+
+    async def miniapp_recover_runtime(self, user_id: int) -> MiniAppSessionDTO: ...
 
     async def builder_prepare(self, user_id: int, user_address: str) -> BuilderPrepareDTO: ...
 

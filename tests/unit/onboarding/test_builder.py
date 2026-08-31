@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
@@ -16,6 +17,7 @@ from copytradeaster.onboarding.models import (
     BuilderSubmitRequest,
     OnboardingCommit,
 )
+from copytradeaster.storage.repositories import BuilderOnboardingAttempt
 from tests.unit.aster.conftest import KEY
 
 SIGNER = Account.from_key(KEY).address
@@ -116,6 +118,7 @@ class FakeStore:
         self.conflict = conflict
         self.commit_error = commit_error
         self.commits: list[OnboardingCommit] = []
+        self.attempts: dict[int, BuilderOnboardingAttempt] = {}
 
     async def find_identity_conflict(self, telegram_user_id: int, user_address: str):
         return self.conflict
@@ -124,6 +127,50 @@ class FakeStore:
         if self.commit_error:
             raise RuntimeError("store down")
         self.commits.append(payload)
+
+    async def get_builder_attempt(self, telegram_user_id: int) -> BuilderOnboardingAttempt | None:
+        return self.attempts.get(telegram_user_id)
+
+    async def get_builder_attempt_by_pending_id(
+        self, pending_id: str
+    ) -> BuilderOnboardingAttempt | None:
+        for att in self.attempts.values():
+            if att.pending_id == pending_id:
+                return att
+        return None
+
+    async def save_builder_attempt(self, attempt: BuilderOnboardingAttempt) -> None:
+        self.attempts[attempt.telegram_user_id] = attempt
+
+    async def update_builder_attempt_state(
+        self, pending_id: str, state: str, *, last_error_code: str | None = None
+    ) -> bool:
+        att = await self.get_builder_attempt_by_pending_id(pending_id)
+        if att is None:
+            return False
+        att.state = state
+        att.last_error_code = last_error_code
+        return True
+
+    async def delete_builder_attempt(self, telegram_user_id: int) -> bool:
+        return self.attempts.pop(telegram_user_id, None) is not None
+
+    async def delete_builder_attempt_by_pending_id(self, pending_id: str) -> bool:
+        att = await self.get_builder_attempt_by_pending_id(pending_id)
+        if att is not None:
+            self.attempts.pop(att.telegram_user_id, None)
+            return True
+        return False
+
+    async def cleanup_expired_prepared_attempts(self, now_ms: int) -> int:
+        to_del = [
+            uid
+            for uid, att in self.attempts.items()
+            if att.state == "PREPARED" and att.approval_deadline_ms < now_ms
+        ]
+        for uid in to_del:
+            del self.attempts[uid]
+        return len(to_del)
 
 
 class FakeClient:
@@ -291,14 +338,23 @@ async def test_prepare_rejects_master_address():
         raise AssertionError("expected MASTER_ADDRESS")
 
 
-async def test_new_prepare_invalidates_previous_pending():
+async def test_prepare_resumes_unexpired_pending():
     service, _store, _client, _http, _clock = _service()
 
     first = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
     second = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    assert first.pending_id == second.pending_id
+    assert first.eip712 == second.eip712
+
+
+async def test_new_user_address_invalidates_previous_pending():
+    service, _store, _client, _http, _clock = _service()
+
+    first = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    second = await service.prepare(BuilderPrepareRequest(101, OTHER_WALLET.address))
     assert first.pending_id != second.pending_id
 
-    signature = _sign_payload(second, USER_WALLET)
+    signature = _sign_payload(second, OTHER_WALLET)
     try:
         await service.submit(BuilderSubmitRequest(101, first.pending_id, signature))
     except OnboardingError as exc:
@@ -476,3 +532,96 @@ async def test_pending_repr_and_submit_request_never_leak_key_material():
     text = f"{prepared!r} {submit!r}"
     assert KEY not in text
     assert "<redacted>" in f"{submit!r}"
+
+
+async def test_submit_preflight_block_keeps_approved_for_retry():
+    client = FakeClient()
+    client.positions = [
+        PositionDTO.model_validate(
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "0.5",
+                "entryPrice": "65000",
+                "markPrice": "65000",
+                "leverage": 3,
+                "liquidationPrice": "0",
+                "marginType": "CROSSED",
+                "positionSide": "BOTH",
+                "unRealizedProfit": "0",
+            }
+        )
+    ]
+    service, store, _client, http, _clock = _service(client=client)
+
+    prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    signature = _sign_payload(prepared, USER_WALLET)
+    with pytest.raises(OnboardingError) as exc_info:
+        await service.submit(BuilderSubmitRequest(101, prepared.pending_id, signature))
+    assert exc_info.value.code is OnboardingErrorCode.ACCOUNT_NOT_FLAT
+
+    attempt = await store.get_builder_attempt(101)
+    assert attempt is not None
+    assert attempt.state == "APPROVED"
+    assert attempt.last_error_code == "account_not_flat"
+
+    # Post was done once
+    assert len(http.posted_urls) == 1
+
+    # User clears positions on exchange -> retries submit without needing new signature
+    client.positions = [_position()]
+    result = await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
+    assert result.account_id == "tg-101"
+    assert result.paused is True
+    assert await store.get_builder_attempt(101) is None
+
+
+async def test_submit_recovery_after_remote_post_timeout():
+    client = FakeClient()
+    service, store, _client, http, _clock = _service(client=client)
+
+    prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    attempt = await store.get_builder_attempt(101)
+    assert attempt is not None
+    # Simulate that remote POST was initiated and state became APPROVAL_SENT before crash/timeout
+    attempt.state = "APPROVAL_SENT"
+
+    # Next submit finds Agent via GET /agent -> state becomes APPROVED -> preflight -> commit
+    result = await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
+    assert result.account_id == "tg-101"
+    assert len(store.commits) == 1
+    assert await store.get_builder_attempt(101) is None
+
+
+async def test_submit_recovery_when_agent_not_on_exchange_reverts_to_prepared():
+    client = FakeClient()
+    client.agent_record = AsterError(-2015, "agent not found")
+    service, store, _client, http, _clock = _service(client=client)
+
+    prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    attempt = await store.get_builder_attempt(101)
+    assert attempt is not None
+    attempt.state = "APPROVAL_SENT"
+
+    with pytest.raises(OnboardingError) as exc_info:
+        await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
+    assert exc_info.value.code is OnboardingErrorCode.AGENT_NOT_CONFIRMED
+
+    # State reverted to PREPARED so user can retry approval
+    reloaded = await store.get_builder_attempt(101)
+    assert reloaded is not None
+    assert reloaded.state == "PREPARED"
+
+
+async def test_prepare_lazy_cleanups_expired_attempts():
+    service, store, _client, http, clock = _service()
+    await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    attempt = await store.get_builder_attempt(101)
+    assert attempt is not None
+
+    # Advance time past deadline
+    clock["ms"] += 700_000
+
+    await service.prepare(BuilderPrepareRequest(102, USER_ADDRESS))
+    # User 101's expired attempt is cleaned up
+    assert await store.get_builder_attempt(101) is None
+    assert await store.get_builder_attempt(102) is not None

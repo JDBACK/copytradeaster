@@ -52,6 +52,16 @@ INIT_DATA_HEADER = "X-Telegram-Init-Data"
 DEV_USER_HEADER = "X-Dev-User-Id"
 TESTNET_REST_HOST = "fapi.asterdex-testnet.com"
 
+ALLOWED_CLIENT_EVENTS = frozenset(
+    {
+        "wallet_connect_failed",
+        "prepare_failed",
+        "sign_failed",
+        "submit_failed",
+        "unknown",
+    }
+)
+
 MSG_INVALID_SESSION = "Сессия Telegram недействительна — откройте мини-ап из чата с ботом."
 MSG_BAD_BODY = "Некорректный формат запроса."
 MSG_UNAVAILABLE = "Сервис временно недоступен, попробуйте позже."
@@ -60,7 +70,6 @@ MSG_ONBOARDING_FAILED = "Подключение не завершено — сл
 
 
 def _json_default(value: Any) -> Any:
-    """JSON-safe encoding for transport-neutral DTO field values."""
     if isinstance(value, Decimal):
         return format(value, "f")
     if isinstance(value, datetime):
@@ -170,8 +179,13 @@ def create_miniapp_app(
         user_id = await _identity(request)
         if user_id is None:
             return _unauthorized()
+        body = await _body(request)
+        refresh = (bool(body) and bool(body.get("refresh"))) or request.query.get("refresh") in {
+            "1",
+            "true",
+        }
         try:
-            return _json_dto(await application.dashboard(user_id))
+            return _json_dto(await application.dashboard(user_id, refresh=refresh))
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
@@ -268,12 +282,15 @@ def create_miniapp_app(
         body = await _body(request)
         if body is None:
             return _json_error(400, "invalid_input", MSG_BAD_BODY)
-        level = str(body.get("level") or "info")
+        level = str(body.get("level") or "info").lower()
         if level not in {"info", "warning", "error"}:
             level = "info"
-        event = str(body.get("event") or "unknown")[:40]
-        code = str(body.get("code") or "-")[:60]
-        detail = str(body.get("detail") or "")[:200]
+        raw_event = str(body.get("event") or "unknown").strip().lower()
+        event = raw_event if raw_event in ALLOWED_CLIENT_EVENTS else "unknown"
+        raw_code = str(body.get("code") or "-").strip()
+        code = "".join(c for c in raw_code if c.isprintable() and c not in "\r\n\t")[:50]
+        raw_detail = str(body.get("detail") or "").strip()
+        detail = "".join(c for c in raw_detail if c.isprintable() and c not in "\r\n\t")[:100]
         log.warning(
             "client_event user=%s level=%s event=%s code=%s detail=%s",
             user_id,
@@ -311,7 +328,27 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_ONBOARDING_FAILED)
 
-    app = web.Application(client_max_size=MAX_BODY_BYTES)
+    async def builder_recover(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        try:
+            return _json_dto(await application.miniapp_recover_runtime(user_id))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, "Восстановление запуска не выполнено — попробуйте ещё раз.")
+
+    @web.middleware
+    async def security_headers(request: web.Request, handler) -> web.StreamResponse:
+        response = await handler(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if request.path.startswith("/miniapp/assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif request.path.startswith("/miniapp"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[security_headers])
     app.router.add_post("/miniapp/api/session", session)
     app.router.add_post("/miniapp/api/client-log", client_log)
     app.router.add_post("/miniapp/api/dashboard", dashboard)
@@ -321,6 +358,7 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/confirmation/confirm", confirmation_confirm)
     app.router.add_post("/miniapp/api/builder/prepare", builder_prepare)
     app.router.add_post("/miniapp/api/builder/submit", builder_submit)
+    app.router.add_post("/miniapp/api/builder/recover", builder_recover)
 
     static_dir: Path | None = settings.miniapp_static_dir
     if static_dir is not None and Path(static_dir).is_dir():

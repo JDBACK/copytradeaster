@@ -52,6 +52,8 @@ from copytradeaster.onboarding.providers import (
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
     AgentValidation,
+    BuilderOnboardingAttempt,
+    BuilderOnboardingAttemptsRepo,
     TelegramUserRepo,
 )
 from copytradeaster.trading.leverage import LeverageError
@@ -229,6 +231,38 @@ class SqliteOnboardingStore(OnboardingStore):
             owner_chat_id=int(owner["chat_id"]),
             validation=validation,
         )
+
+    async def get_builder_attempt(self, telegram_user_id: int) -> BuilderOnboardingAttempt | None:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        return await repo.get_by_user_id(telegram_user_id)
+
+    async def get_builder_attempt_by_pending_id(
+        self, pending_id: str
+    ) -> BuilderOnboardingAttempt | None:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        return await repo.get_by_pending_id(pending_id)
+
+    async def save_builder_attempt(self, attempt: BuilderOnboardingAttempt) -> None:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        await repo.save(attempt)
+
+    async def update_builder_attempt_state(
+        self, pending_id: str, state: str, *, last_error_code: str | None = None
+    ) -> bool:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        return await repo.update_state(pending_id, state, last_error_code=last_error_code)
+
+    async def delete_builder_attempt(self, telegram_user_id: int) -> bool:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        return await repo.delete(telegram_user_id)
+
+    async def delete_builder_attempt_by_pending_id(self, pending_id: str) -> bool:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        return await repo.delete_by_pending_id(pending_id)
+
+    async def cleanup_expired_prepared_attempts(self, now_ms: int) -> int:
+        repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
+        return await repo.cleanup_expired_prepared(now_ms)
 
 
 class DirectOnboardingAdapter(OnboardingPort):
@@ -410,6 +444,9 @@ class BuilderOnboardingAdapter:
         self, account_id: str, telegram_user_id: int
     ) -> tuple[str, str] | None:
         return await self._store.identity_for_recovery(account_id, telegram_user_id)
+
+    async def get_builder_attempt(self, telegram_user_id: int) -> Any:
+        return await self._store.get_builder_attempt(telegram_user_id)
 
 
 class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
