@@ -26,6 +26,15 @@ class OnboardingErrorCode(StrEnum):
     POSITION_MODE_MISMATCH = "position_mode_mismatch"
     COMMIT_FAILED = "commit_failed"
     ACTIVATION_FAILED = "activation_failed"
+    # Builder (Mini App) flow: the user's wallet signs, the backend verifies
+    # and submits.  These codes stay secret-safe across the application
+    # boundary exactly like the direct-flow codes above.
+    BUILDER_CONFIG_MISSING = "builder_config_missing"
+    APPROVAL_EXPIRED = "approval_expired"
+    APPROVAL_UNKNOWN = "approval_unknown"
+    SIGNATURE_MISMATCH = "signature_mismatch"
+    AGENT_SUBMIT_FAILED = "agent_submit_failed"
+    AGENT_NOT_CONFIRMED = "agent_not_confirmed"
 
 
 _MESSAGES: dict[OnboardingErrorCode, str] = {
@@ -62,6 +71,24 @@ _MESSAGES: dict[OnboardingErrorCode, str] = {
     OnboardingErrorCode.COMMIT_FAILED: "Не удалось атомарно сохранить onboarding.",
     OnboardingErrorCode.ACTIVATION_FAILED: (
         "Аккаунт сохранён на паузе; runtime activation требует повтора."
+    ),
+    OnboardingErrorCode.BUILDER_CONFIG_MISSING: (
+        "Builder-подключение временно недоступно: конфигурация билдера не готова."
+    ),
+    OnboardingErrorCode.APPROVAL_EXPIRED: (
+        "Заявка на авторизацию истекла. Начните подключение заново."
+    ),
+    OnboardingErrorCode.APPROVAL_UNKNOWN: (
+        "Заявка на авторизацию не найдена. Начните подключение заново."
+    ),
+    OnboardingErrorCode.SIGNATURE_MISMATCH: (
+        "Подпись выполнена другим кошельком. Подключите тот же кошелёк и повторите."
+    ),
+    OnboardingErrorCode.AGENT_SUBMIT_FAILED: (
+        "Aster не принял авторизацию Agent. Попробуйте ещё раз."
+    ),
+    OnboardingErrorCode.AGENT_NOT_CONFIRMED: (
+        "Aster не подтвердил авторизацию Agent после подписи."
     ),
 }
 

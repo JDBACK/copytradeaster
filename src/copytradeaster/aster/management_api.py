@@ -11,11 +11,56 @@ import httpx
 
 from copytradeaster.aster.ports import IdentityProvider, KeyProvider, NonceSource
 from copytradeaster.aster.rate_limits import RateLimits
-from copytradeaster.aster.signing import sign_registration
+from copytradeaster.aster.signing import build_query_string, sign_registration
 from copytradeaster.config import Settings
 from copytradeaster.logging_utils import get_logger
 
 log = get_logger(__name__)
+
+
+async def post_signed_registration(
+    http: httpx.AsyncClient,
+    base_url: str,
+    limiter: RateLimits,
+    path: str,
+    params: dict,
+    weight: int = 50,
+) -> dict:
+    """Submit a registration request whose signature came from the user's wallet.
+
+    The Builder flow never holds the user's main private key: the frontend
+    wallet signs the EIP-712 payload and this helper only carries the prepared
+    params plus ``signature``/``signatureChainId`` to the exchange.  Params
+    order is preserved because the demo reference keeps business fields first
+    and appends ``asterChain``, ``user``, ``nonce``, ``signature``,
+    ``signatureChainId``.
+    """
+    if "signature" not in params or "signatureChainId" not in params:
+        raise ManagementError("no-signature", "registration params miss user signature")
+    await limiter.acquire_request(weight)
+    qs = build_query_string([(str(k), str(v)) for k, v in params.items()])
+    url = f"{base_url.rstrip('/')}{path}?{qs}"
+    try:
+        resp = await http.post(url, content=b"")
+    except httpx.TransportError as exc:
+        raise ManagementError(-1006, f"transport error: {type(exc).__name__}") from exc
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise ManagementError(resp.status_code, resp.text[:200]) from exc
+    if resp.status_code >= 400 or (
+        isinstance(body, dict) and isinstance(body.get("code"), int) and body["code"] < 0
+    ):
+        code = int(body.get("code", 0) or 0) if isinstance(body, dict) else 0
+        raise ManagementError(code or resp.status_code, str(body.get("msg", ""))[:120])
+    # Registration responses may contain exchange payloads and addresses;
+    # only retain the action/status trace in application logs.
+    log.info(
+        "management user-signed request completed path=%s status=%s",
+        path,
+        resp.status_code,
+    )
+    return body
 
 
 class ManagementError(Exception):

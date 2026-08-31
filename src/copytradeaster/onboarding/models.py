@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from copytradeaster.aster.models import BalanceDTO, OrderDTO, PositionDTO
@@ -186,8 +186,121 @@ class DirectOnboardingResult:
         return self.masked_signer_address
 
 
+@dataclass(frozen=True, slots=True)
+class BuilderOnboardingConfig:
+    """Fail-closed policy for the testnet Builder (Mini App) onboarding flow.
+
+    The builder backend generates and stores the per-user signer key; the
+    user's main wallet only signs the ApproveAgent registration payload
+    (combined ApproveBuilder fields included).  ``builder_address`` must be
+    configured, otherwise the flow refuses to start.
+    """
+
+    base_url: str = "https://fapi.asterdex-testnet.com"
+    trading_chain_id: int = 714
+    registration_chain_id: int = 56
+    builder_address: str = ""
+    builder_name: str = "copytradeaster"
+    max_fee_rate: str = "0.0001"
+    agent_name: str = "copytradeaster"
+    agent_expiry_days: int = 30
+    approval_ttl_s: int = 10 * 60
+    expected_egress_ips: tuple[str, ...] = ()
+    require_agent_ip_whitelist: bool = True
+    expiry_safety_margin_ms: int = 5 * 60 * 1000
+    expected_position_mode: str | None = None
+    master_user_address: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderPrepareRequest:
+    telegram_user_id: int
+    user_address: str
+
+    def __repr__(self) -> str:
+        return (
+            "BuilderPrepareRequest("
+            f"telegram_user_id={self.telegram_user_id!r}, "
+            f"user_address={mask_address(self.user_address)!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderPrepareResult:
+    """Safe prepare outcome: review data plus the wallet signing payload.
+
+    ``eip712`` is the ``eth_signTypedData_v4`` JSON structure.  The generated
+    signer private key never leaves the backend and is not part of this DTO.
+    """
+
+    pending_id: str
+    masked_user_address: str
+    masked_signer_address: str
+    builder_masked: str
+    builder_name: str
+    max_fee_rate: str
+    signature_plan: str
+    can_perp_trade: bool
+    can_withdraw: bool
+    agent_expires_at_ms: int
+    approval_expires_at_ms: int
+    eip712: dict
+
+    def __repr__(self) -> str:
+        return (
+            "BuilderPrepareResult("
+            f"pending_id={self.pending_id!r}, "
+            f"masked_user_address={self.masked_user_address!r}, "
+            f"masked_signer_address={self.masked_signer_address!r}, "
+            f"builder_masked={self.builder_masked!r}, "
+            f"max_fee_rate={self.max_fee_rate!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderSubmitRequest:
+    telegram_user_id: int
+    pending_id: str
+    signature: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            "BuilderSubmitRequest("
+            f"telegram_user_id={self.telegram_user_id!r}, "
+            f"pending_id={self.pending_id!r}, signature='<redacted>')"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderOnboardingResult:
+    """Safe result of a completed Builder onboarding (always paused)."""
+
+    account_id: str
+    masked_user_address: str
+    masked_signer_address: str
+    builder_name: str
+    max_fee_rate: str
+    position_mode: str
+    available_usdt: Decimal
+    agent_expires_at_ms: int
+    paused: bool = True
+
+    @property
+    def account_masked(self) -> str:
+        return self.masked_user_address
+
+    @property
+    def signer_masked(self) -> str:
+        return self.masked_signer_address
+
+
 __all__ = [
     "AgentValidationSnapshot",
+    "BuilderOnboardingConfig",
+    "BuilderOnboardingResult",
+    "BuilderPrepareRequest",
+    "BuilderPrepareResult",
+    "BuilderSubmitRequest",
     "DirectOnboardingConfig",
     "DirectOnboardingRequest",
     "DirectOnboardingResult",
