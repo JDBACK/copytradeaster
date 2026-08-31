@@ -201,6 +201,60 @@ class Settings(BaseSettings):
             raise ValueError("CT_MINIAPP_INIT_DATA_TTL_S must be positive")
         return value
 
+    @field_validator("builder_address")
+    @classmethod
+    def _validate_builder_address(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            return ""
+        from eth_utils import is_address, to_checksum_address
+
+        if not is_address(normalized):
+            raise ValueError("CT_BUILDER_ADDRESS must be a valid EVM address")
+        return to_checksum_address(normalized)
+
+    @field_validator("builder_name")
+    @classmethod
+    def _validate_builder_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("CT_BUILDER_NAME must not be empty")
+        if len(normalized) > 64 or not normalized.isprintable():
+            raise ValueError("CT_BUILDER_NAME must be printable and at most 64 characters")
+        return normalized
+
+    @field_validator("max_fee_rate")
+    @classmethod
+    def _validate_max_fee_rate(cls, value: str) -> str:
+        try:
+            rate = Decimal(str(value).strip())
+        except Exception as exc:
+            raise ValueError("CT_MAX_FEE_RATE must be a valid decimal") from exc
+        if not rate.is_finite() or rate < Decimal(0) or rate > Decimal("0.001"):
+            raise ValueError("CT_MAX_FEE_RATE must be in [0, 0.001]")
+        return format(rate, "f")
+
+    @field_validator("registration_chain_id")
+    @classmethod
+    def _validate_registration_chain_id(cls, value: int) -> int:
+        if value != 56:
+            raise ValueError("CT_REGISTRATION_CHAIN_ID must be 56 for the testnet builder flow")
+        return value
+
+    @field_validator("builder_agent_expiry_days")
+    @classmethod
+    def _validate_agent_expiry(cls, value: int) -> int:
+        if not 1 <= value <= 365:
+            raise ValueError("CT_BUILDER_AGENT_EXPIRY_DAYS must be between 1 and 365")
+        return value
+
+    @field_validator("builder_approval_ttl_s")
+    @classmethod
+    def _validate_approval_ttl(cls, value: int) -> int:
+        if not 30 <= value <= 3600:
+            raise ValueError("CT_BUILDER_APPROVAL_TTL_S must be between 30 and 3600 seconds")
+        return value
+
     @model_validator(mode="after")
     def _validate_miniapp_dev_guard(self) -> "Settings":
         if self.miniapp_dev_unsigned and self.miniapp_dev_user_id is None:

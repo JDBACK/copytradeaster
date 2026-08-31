@@ -23,6 +23,7 @@ from copytradeaster.application.models import (
     CopyState,
     DashboardDTO,
     MiniAppAccessState,
+    MiniAppConnectionState,
     MiniAppSessionDTO,
     OnboardingApplicationError,
     SystemState,
@@ -93,7 +94,19 @@ class FakeApplication:
             raise self.fail_with
         return self.session_dto
 
-    async def dashboard(self, user_id: int) -> DashboardDTO:
+    async def miniapp_recover_runtime(self, user_id: int) -> MiniAppSessionDTO:
+        self.user_id_seen = user_id
+        if self.fail_with:
+            raise self.fail_with
+        return MiniAppSessionDTO(
+            user_id=user_id,
+            access_state=MiniAppAccessState.APPROVED,
+            environment="testnet",
+            connection_state=MiniAppConnectionState.CONNECTED,
+            account_connected=True,
+        )
+
+    async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO:
         self.user_id_seen = user_id
         self.dashboard_calls.append(user_id)
         if self.fail_with:
@@ -488,3 +501,58 @@ async def test_static_index_is_served_before_the_static_mount(tmp_path):
         assert missing.status == 404
     finally:
         await client.close()
+
+
+async def test_builder_recover_route(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/builder/recover", json={}, headers=_auth_header(init_data)
+    )
+    body = await resp.json()
+    assert body["connection_state"] == "connected"
+    assert body["account_connected"] is True
+    assert fake_app.user_id_seen == 777
+
+
+async def test_security_headers_and_cache_control(tmp_path, fake_app):
+    (tmp_path / "index.html").write_text("<html>aster-copy</html>", encoding="utf-8")
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    (assets_dir / "app.1234.js").write_text("console.log(1)", encoding="utf-8")
+
+    settings = _settings(miniapp_static_dir=tmp_path)
+    app = create_miniapp_app(settings, fake_app)
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        # Index response has nosniff and no-cache
+        resp = await client.get("/miniapp/")
+        assert resp.status == 200
+        assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+        assert resp.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
+        assert "no-cache" in resp.headers.get("Cache-Control", "")
+
+        # Asset response has immutable cache
+        asset_resp = await client.get("/miniapp/assets/app.1234.js")
+        assert asset_resp.status == 200
+        assert asset_resp.headers.get("X-Content-Type-Options") == "nosniff"
+        assert "immutable" in asset_resp.headers.get("Cache-Control", "")
+    finally:
+        await client.close()
+
+
+async def test_client_log_sanitizes_input(client):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/client-log",
+        json={
+            "level": "ERROR",
+            "event": "prepare_failed",
+            "code": "BAD\nCODE\r\t123",
+            "detail": "SOME\nDETAIL\x00456",
+        },
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["ok"] is True

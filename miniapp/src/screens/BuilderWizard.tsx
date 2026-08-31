@@ -41,25 +41,17 @@ export function BuilderWizard({ auth, onConnected }: Props) {
 
   function report(event: string, err: unknown, fallbackCode: string) {
     const code = err instanceof WalletError ? err.code : fallbackCode
-    const parts: string[] = []
-    let cursor: unknown = err
-    for (let depth = 0; depth < 3 && cursor; depth += 1) {
-      if (cursor instanceof Error && cursor.message) parts.push(cursor.message)
-      cursor = (cursor as { cause?: unknown })?.cause
-    }
-    const detail = [...new Set(parts)].join(' | ').slice(0, 300)
     void api
-      .clientLog(auth, { level: 'error', event, code, detail })
+      .clientLog(auth, { level: 'error', event, code })
       .catch(() => {})
-    return { code, detail }
+    return { code }
   }
 
   function reportApi(event: string, err: ApiError) {
     void api
-      .clientLog(auth, { level: 'error', event, code: err.code, detail: err.message.slice(0, 300) })
+      .clientLog(auth, { level: 'error', event, code: err.code })
       .catch(() => {})
   }
-
   function emit(event: WizardEvent) {
     dispatch(event)
   }
@@ -127,7 +119,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
   }
 
   async function sign() {
-    if (!state.prepare || !state.address) return
+    if (!state.prepare || !state.address || !state.prepare.pending_id) return
     hapticImpact('medium')
     emit({ type: 'signing' })
     setBusyMessage('Ждём подпись в кошельке…')
@@ -142,10 +134,15 @@ export function BuilderWizard({ auth, onConnected }: Props) {
       setBusyMessage(null)
       return
     }
-    setBusyMessage('Проверяем на Aster и подключаем счёт…')
+
+    emit({ type: 'signed', signature })
+    setBusyMessage('Проверяем Agent и Builder на Aster…')
     try {
       const result = await api.builderSubmit(auth, state.prepare.pending_id, signature)
       hapticNotify('success')
+      if (adapter && typeof adapter.disconnect === 'function') {
+        void adapter.disconnect().catch(() => {})
+      }
       onConnected(result)
     } catch (err) {
       hapticNotify('error')
@@ -202,7 +199,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
             <Row
               label={
                 <>
-                  <Check ok={prepare.can_perp_trade} /> Perps-торговля
+                  <Check ok={prepare.can_perp_trade ?? true} /> Perps-торговля
                 </>
               }
               value={prepare.can_perp_trade ? 'включена' : 'выключена'}
@@ -216,16 +213,16 @@ export function BuilderWizard({ auth, onConnected }: Props) {
               value={prepare.can_withdraw ? 'включён' : 'запрещён'}
               valueClass={prepare.can_withdraw ? 'tone-danger' : undefined}
             />
-            <Row label="Кошелёк" value={prepare.user_masked} />
-            <Row label="Agent" value={prepare.agent_masked} />
+            <Row label="Кошелёк" value={prepare.user_masked ?? '—'} />
+            <Row label="Agent" value={prepare.agent_masked ?? '—'} />
           </section>
 
           <section className="panel">
             <div className="h2">Builder и комиссия</div>
-            <Row label="Builder" value={prepare.builder_name} />
-            <Row label="Адрес Builder" value={prepare.builder_masked} />
-            <Row label="Комиссия Builder" value={formatFeeRate(prepare.max_fee_rate)} />
-            <Row label="Действует до" value={formatDateFromMs(prepare.agent_expires_at_ms)} />
+            <Row label="Builder" value={prepare.builder_name || 'copytradeaster'} />
+            <Row label="Адрес Builder" value={prepare.builder_masked ?? '—'} />
+            <Row label="Комиссия Builder" value={formatFeeRate(prepare.max_fee_rate ?? '0.0001')} />
+            <Row label="Действует до" value={formatDateFromMs(prepare.agent_expires_at_ms ?? 0)} />
           </section>
 
           {state.step === 'review' && (
