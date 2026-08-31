@@ -228,11 +228,21 @@ Stage 2 полностью закрыт для testnet scope.
   System Status.
 - [x] Зафиксировать недостающие contracts: Builder onboarding/session,
   read-only positions, risk constraints и Builder attestation в status.
-- [ ] Утвердить wallet provider/chain scope, signature plan, фактические
-  Builder metadata/fee, risk limits и disconnect/revoke semantics.
-- [ ] Спроектировать технический Stage 3 implementation/acceptance plan.
+- [x] Утвердить wallet provider/chain scope, signature plan, фактические
+  Builder metadata/fee, risk limits и disconnect/revoke semantics (реестр
+  18 решений владельца — `STAGE3_BUILDER_MINI_APP_PART1_2026-08.md` §2).
+- [x] Спроектировать технический Stage 3 implementation/acceptance plan
+  (`STAGE3_BUILDER_MINI_APP_PART1_2026-08.md`, WP0–WP5).
 - [ ] Реализовать `onboarding/builder`, Mini App presenter/transport и signed
   testnet acceptance; торговое ядро не переписывать.
+  - [x] WP1 `onboarding/builder` (e050965); WP2 application use cases (747c6f5);
+    WP3 aiohttp-транспорт (747c6f5 + 72452cf: TTL `auth_date`, home-эндпоинты,
+    dev-сессия, авто WebApp-кнопка); WP4 фронтенд (gate → wizard → success →
+    минимальный home; injected+WalletConnect-шов) + vitest; интеграция
+    полного flow через MockTransport + фикс булевых в signed query.
+  - [ ] Signed testnet e2e части 1 (`builder+feeRate` сделка +
+    `builder/userTrades.builderFee`) — прогон `CT_TESTNET=1` и ручная
+    приёмка владельцем из Telegram.
 
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка

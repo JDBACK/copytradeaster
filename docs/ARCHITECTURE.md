@@ -693,7 +693,19 @@ emergency запрещён, а `marginType` этап не меняет. Акту
 
 ```text
 onboarding/builder
+miniapp             # aiohttp-транспорт Mini App (тот же процесс)
 ```
+
+Часть 1 (реализуется в ветке `codex/stage-3-mini-app-part1`): Telegram
+WebApp-сессия с server-side HMAC-проверкой подписанного initData и TTL по
+`auth_date`, Builder-онбординг по пользовательской подписи кошелька
+(combined `approveAgent`, main-ключ не входит в систему), минимальный home
+с pause/resume на общем `UserApplicationService`. Транспорт
+(`miniapp/server.py`) смонтирован под `/miniapp/`: JSON API + собранный Vite
+бандл; frontend в `miniapp/` (Vite+React+TS, токены UX-плана; wallet-адаптер
+injected EIP-1193 + опциональный WalletConnect за `VITE_WC_PROJECT_ID`).
+Транспортные хендлеры не знают ни Aster, ни storage — только application
+use cases и typed public codes.
 
 и builder metadata в Aster requests.
 

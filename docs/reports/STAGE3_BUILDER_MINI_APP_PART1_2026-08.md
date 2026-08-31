@@ -30,6 +30,16 @@ read-only `PositionPageDTO`, risk constraints, revoke/disconnect-семанти�
 
 ## 2. Реестр решений (утверждено владельцем 2026-08-31)
 
+Волна 2 (уточнения перед WP4, 2026-08-31):
+
+| # | Решение | Значение |
+|---|---|---|
+| 19 | WalletConnect | адаптер и ленивый чанк в WP4 сразу; активация `VITE_WC_PROJECT_ID`, project ID заводит владелец к приёмке из Telegram (десктопный webview тоже без инжекта) |
+| 20 | Dev-сессия | `CT_MINIAPP_DEV_UNSIGNED` + `CT_MINIAPP_DEV_USER_ID`, fail-closed: только testnet REST base, только явные оба поля |
+| 21 | Тесты фронта | минимальный vitest (api-client, wizard reducer, home view-model, wallet-адаптер, формат); компоненты принимаются вручную |
+| 22 | Пуш ветки | держать локально до конца части 1 |
+| 23 | WebApp-кнопка | бот сам ставит `setChatMenuButton` из `CT_MINIAPP_PUBLIC_URL` при старте |
+
 | # | Решение | Значение |
 |---|---|---|
 | 1 | Хостинг мини-апа | dev: cloudflared quick-tunnel + авто-обновление WebApp-кнопки через Bot API; далее VPS + nginx + certbot |
@@ -79,22 +89,56 @@ read-only `PositionPageDTO`, risk constraints, revoke/disconnect-семанти�
 
 ## 5. Рабочие пакеты
 
-- WP0 — реестр решений, builder-адрес, конфиг (этот отчёт);
+- WP0 — реестр решений, builder-адрес, конфиг (этот отчёт); ✅
 - WP1 — `onboarding/builder`: pending-заявка с TTL, генерация signer,
   EIP-712 typed-data для кошелька, ecrecover-верификация, submit в Aster,
-  signed verify + preflight, атомарный paused-commit, typed ошибки;
+  signed verify + preflight, атомарный paused-commit, typed ошибки; ✅ (e050965)
 - WP2 — application: `MiniAppSessionDTO`, `BuilderOnboardingDTO`, use cases
   `miniapp_session`, `builder_prepare`, `builder_submit` на общем
-  `UserApplicationService`;
+  `UserApplicationService`; ✅ (747c6f5)
 - WP3 — aiohttp-транспорт в том же процессе: static + `/miniapp/api/*`
-  (initData на каждом запросе), dev-обвязка cloudflared;
+  (initData на каждом запросе), dev-обвязка cloudflared; ✅ (747c6f5,
+  72452cf: TTL auth_date, home-эндпоинты, dev-сессия, авто-кнопка)
 - WP4 — фронтенд Vite+React+TS: session gate → builder wizard (trust rail
   Wallet → Agent → Builder → Sync) → минимальный home (paused + pause/resume);
+  ✅ + vitest на чистые модули (32);
 - WP5 — тесты: unit (recover/typed data/TTL/ошибки), интеграция FakeAster
   полного flow, signed testnet e2e с проверочной сделкой; обновление
   `DEV_PLAN_SKELETON.md`, `ARCHITECTURE.md`, `ENGINE_TEST_STATUS_2026-08.md`.
+  Юнит + интеграция ✅; signed e2e написан (`test_builder_mini_app_e2e.py`),
+  ожидает прогона `CT_TESTNET=1` и ручной приёмки владельца.
 
 ## 6. Журнал
+
+### 2026-08-31 (вторая сессия — WP4/WP5)
+
+- волна 2 ответена, решения #19–#23 зафиксированы (§2);
+- К1 бэкенд: `auth_date` TTL 24ч (рекомендация доков Telegram; aiogram не
+  проверяет сам), русский текст транспорта, JSON-энкодер Decimal/datetime
+  (латентный 500 на реальных Decimal DTO), эндпоинты
+  dashboard/pause/resume/confirmation begin+confirm, dev-сессия fail-closed,
+  авто WebApp-кнопка (`register_commands`), валидатор https
+  `CT_MINIAPP_PUBLIC_URL`; 25 юнит-тестов;
+- К2 фронтенд: Vite `base:/miniapp/` + dev-proxy, telegram-web-app.js, токены
+  §5, api-client с typed-ошибками, wallet-адаптер (injected + ленивый
+  WalletConnect-чанк, BSC 56 switch/add-chain, typed wallet-ошибки),
+  session gate → wizard (trust rail, review из prepare, одна combined
+  подпись) → success → минимальный home (pause/resume + confirmation sheet);
+  pnpm v11: `allowBuilds` вместо удалённого `onlyBuiltDependencies`;
+- найдено и исправлено: aiohttp маршрут `/miniapp/` перехватывался статикой
+  (403) — index-хендлеры регистрируются до `add_static`;
+- К3: vitest 32 теста (node env) + oxlint 0 warnings, build зелёный;
+- К4.1: интеграция полного flow (`test_miniapp_builder_flow.py`) через
+  `httpx.MockTransport` — вскрыла баг: `post_signed_registration`
+  сериализовал Python bool как `True` (демо/биржа ждут `true`);
+  `stringify_param_value` теперь публичный и используется транспортом
+  регистрации; также дифференцированы HTTP-статусы application-ошибок
+  (409 confirmation_expired, 403 not_authorized, 503
+  service_unavailable/not_ready, 400 — остальные typed);
+- предсуществующий флак `test_two_equal_reductions_both_execute`
+  зафиксирован (order-dependent, соло падает на чистом дереве) — вне
+  скоупа части 1;
+- offline gate: 714 passed / 2 skipped; vitest: 32 passed; pnpm build: ok.
 
 ### 2026-08-31
 
