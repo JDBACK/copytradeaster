@@ -17,13 +17,17 @@
 6. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — актуальный design-only
    план follower Mini App: Builder authorization, IA, восемь Aster-style
    concepts, screen states, missing contracts и будущий UI acceptance gate.
-7. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
-8. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
+7. `docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md` — актуальный
+   corrective gate после независимого code/UI review: обязательные,
+   рекомендуемые и отложенные изменения, простая recovery model и signed-live
+   testnet matrix под масштаб до 100 пользователей.
+8. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
+9. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
   план Telegram/direct-V3 этапа и append-only журнал исполнения. Его старые
   sections/checklists — история планирования; текущую правду брать из пункта 4.
-9. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
+10. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
    guest captcha, durable access request, env-admin approval и regression gate.
-10. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
+11. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
     corrective gate после независимого аудита: план, полный журнал и evidence.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.
@@ -41,8 +45,9 @@
 ## docs/reports/ — отчёты кампаний и corrective-планы
 
 Отчёты фиксируют состояние на момент своей кампании: задним числом их не
-переписывать, дополнения — только новыми секциями в конце. Текущий
-corrective-план завершён и содержит фактический журнал/evidence acceptance.
+переписывать, дополнения — только новыми секциями в конце. Выполненные планы
+содержат фактический журнал/evidence acceptance; текущий открытый gate помечен
+своим статусом в таблице.
 
 | Файл | Кампания |
 |---|---|
@@ -65,6 +70,7 @@ corrective-план завершён и содержит фактический 
 | `STAGE3_MINI_APP_UX_PLAN_2026-08.md` | Design-only план Stage 3 follower Mini App: Builder authorization, IA, Aster-style screen concepts, анализ, missing application contracts и UI Definition of Done (2026-08-26) |
 | `STAGE3_BUILDER_MINI_APP_PART1_2026-08.md` | Stage 3 часть 1 (Builder-auth Mini App): реестр решений владельца (23), план WP0–WP5, факты перепроверки доков, append-only журнал — реализация, signed e2e и ручная приёмка из Telegram (2026-08-31) |
 | `STAGE3_PART1_REVIEW_GUIDE_2026-08.md` | Гайд ревьюеру по части 1: scope, коммиты, security-инварианты, ключевые файлы, все найденные проблемы и решения, команды тестов, отложенное (2026-08-31) |
+| `STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md` | Актуальный right-sized corrective plan после независимого code/UI review: REQUEST CHANGES, простая durable Builder recovery, Home/control-plane fixes и signed-live testnet кампания под 10–100 users; отдельный anti-overengineering audit (2026-08-31) |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 

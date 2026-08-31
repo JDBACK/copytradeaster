@@ -5,7 +5,17 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 1 — ЗАКРЫТА (2026-08-31, автоматика + ручная приёмка):**
+- **Stage 3, часть 1 — REOPENED / REQUEST CHANGES (независимый review
+  2026-08-31):** happy path и прежняя автоматическая/ручная приёмка остаются
+  историческим evidence, но не закрывают обнаруженные recovery и correctness
+  риски. Блокеры: RAM-only one-shot Builder attempt с риском orphan Agent,
+  нерабочий committed/runtime recovery contract, отображение риска в 100 раз
+  меньше, кэшированный Home/unsafe Resume и невалидное доказательство fee-cap с
+  assertion на «любую ошибку». Cleanup ненастоящих testnet-позиций является
+  best-effort гигиеной и не блокирует live testing. Актуальный план:
+  `docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md`. До его полного
+  выполнения и повторного review Part 1 не считается закрытой.
+- **Историческая приёмка Stage 3, часть 1 (2026-08-31):**
   Builder-auth Mini App полностью принята владельцем ИЗ TELEGRAM: визар
   (WalletConnect → TokenPocket → подпись approveAgent) → verify+preflight →
   paused-commit → success → home. Прод-БД: фолловер `tg-8264892202`

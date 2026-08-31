@@ -250,6 +250,26 @@ Stage 2 полностью закрыт для testnet scope.
     вживую (`8ce79f1`, `allow_new_entries=1`). Fee-стейтмент `/builder/userTrades`
     и полный 4-табовый shell — часть 2.
 
+#### Corrective gate Stage 3 Part 1 после независимого review (2026-08-31)
+
+Статус части 1 повторно открыт: **REQUEST CHANGES**. Подробный corrective plan,
+причины, файлы, порядок изменений и signed-live testnet matrix:
+[STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md](reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md).
+
+- [ ] Durable/idempotent Builder attempt lifecycle с encrypted signer recovery.
+- [ ] Recovery remote-success/local-failure и committed/runtime activation.
+- [ ] Исправить risk percent, fresh dashboard и fail-closed confirmed Resume.
+- [ ] Исправить signed fee-cap proof; cleanup testnet-счетов оставить
+  best-effort гигиеной, не блокирующей live testing.
+- [ ] Закрыть обязательные frontend session/config/copy gaps; timeout/log/header
+  hardening выполнить точечно без нового инфраструктурного слоя.
+- [ ] Довести UI fidelity, mobile safe-area и базовую accessibility без
+  отдельной certification campaign.
+- [ ] Пройти offline/browser и компактную signed-live testnet кампанию;
+  итоговый state snapshot справочный, ненулевой testnet-остаток не blocker.
+- [ ] Повторное независимое code/UI review: все обязательные пункты закрыты,
+  после чего обновить living verdict на CLOSED.
+
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,
