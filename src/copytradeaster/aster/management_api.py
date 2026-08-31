@@ -61,7 +61,12 @@ async def post_signed_registration(
         isinstance(body, dict) and isinstance(body.get("code"), int) and body["code"] < 0
     ):
         code = int(body.get("code", 0) or 0) if isinstance(body, dict) else 0
-        raise ManagementError(code or resp.status_code, str(body.get("msg", ""))[:120])
+        # Exchange uses "msg" for code-prefixed errors and "error" for plain
+        # text rejections (for example the builder-registry check).
+        message = ""
+        if isinstance(body, dict):
+            message = str(body.get("msg") or body.get("error") or "")[:160]
+        raise ManagementError(code or resp.status_code, message)
     # Registration responses may contain exchange payloads and addresses;
     # only retain the action/status trace in application logs.
     log.info(

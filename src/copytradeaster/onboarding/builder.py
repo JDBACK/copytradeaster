@@ -263,7 +263,11 @@ class BuilderOnboardingService:
                 submitted,
             )
         except ManagementError as exc:
-            log.warning("builder approveAgent submit failed code=%s", exc.code)
+            log.warning(
+                "builder approveAgent submit failed code=%s msg=%s",
+                exc.code,
+                str(exc)[:160],
+            )
             exchange_code = exc.code if isinstance(exc.code, int) else None
             raise OnboardingError(
                 OnboardingErrorCode.AGENT_SUBMIT_FAILED, exchange_code=exchange_code
