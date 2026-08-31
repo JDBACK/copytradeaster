@@ -11,7 +11,11 @@ import httpx
 
 from copytradeaster.aster.ports import IdentityProvider, KeyProvider, NonceSource
 from copytradeaster.aster.rate_limits import RateLimits
-from copytradeaster.aster.signing import build_query_string, sign_registration
+from copytradeaster.aster.signing import (
+    build_query_string,
+    sign_registration,
+    stringify_param_value,
+)
 from copytradeaster.config import Settings
 from copytradeaster.logging_utils import get_logger
 
@@ -38,7 +42,12 @@ async def post_signed_registration(
     if "signature" not in params or "signatureChainId" not in params:
         raise ManagementError("no-signature", "registration params miss user signature")
     await limiter.acquire_request(weight)
-    qs = build_query_string([(str(k), str(v)) for k, v in params.items()])
+    # Booleans must serialize exactly like the official demo (URLSearchParams):
+    # str(True) would produce "True", which the exchange does not parse as the
+    # signed business value.
+    qs = build_query_string(
+        [(str(k), stringify_param_value(v)) for k, v in params.items()],
+    )
     url = f"{base_url.rstrip('/')}{path}?{qs}"
     try:
         resp = await http.post(url, content=b"")

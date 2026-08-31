@@ -38,6 +38,8 @@ from copytradeaster.application.models import (
     Confirmation,
     ConfirmationAction,
     ConfirmationExpiredError,
+    NotReadyError,
+    ServiceUnavailableError,
 )
 from copytradeaster.config import Settings
 from copytradeaster.logging_utils import get_logger
@@ -94,8 +96,10 @@ def _error_status(exc: BaseException) -> int:
         return 409
     if isinstance(exc, AuthorizationError):
         return 403
+    if isinstance(exc, (ServiceUnavailableError, NotReadyError)):
+        return 503
     if isinstance(exc, ApplicationError):
-        # ValidationError, OnboardingApplicationError, NotReady, StaleOperation:
+        # ValidationError, OnboardingApplicationError, StaleOperationError:
         # typed, safe-to-display classifications with remediation copy.
         return 400
     return 503

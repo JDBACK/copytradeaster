@@ -82,7 +82,7 @@ def _field_type(value: Any) -> str:
     return "string"
 
 
-def _stringify(value: Any) -> str:
+def stringify_param_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
@@ -173,7 +173,7 @@ def sign_registration(
     typed_data = registration_typed_data(params, primary_type, chain_id)
     signed = Account.sign_message(typed_data, main_private_key_hex)
     sig = signed.signature.hex()
-    out = {k: _stringify(v) for k, v in capitalized.items()}
+    out = {k: stringify_param_value(v) for k, v in capitalized.items()}
     out["signature"] = sig
     out["signatureChainId"] = str(chain_id)
     return out, build_query_string(list(out.items()))
