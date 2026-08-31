@@ -243,6 +243,5 @@ CT_TESTNET=1 pytest tests/testnet/ -v
 
 ## Agent-Specific Instructions
 
-- **Subagents**: Use only `GPT-5.6 Luna` with `max` reasoning (`gpt-5.6-luna`, `reasoning_effort=max`). No other subagent model or reasoning level is allowed.
 - **Language & Scope**: Keep user communications in Russian, technical, direct, and scoped to API/code facts without marketing filler.
 - **Plan Maintenance**: Maintain stage milestones in `docs/DEV_PLAN_SKELETON.md` and record campaign progress in `docs/reports/`.
