@@ -240,9 +240,12 @@ Stage 2 полностью закрыт для testnet scope.
     dev-сессия, авто WebApp-кнопка); WP4 фронтенд (gate → wizard → success →
     минимальный home; injected+WalletConnect-шов) + vitest; интеграция
     полного flow через MockTransport + фикс булевых в signed query.
-  - [ ] Signed testnet e2e части 1 (`builder+feeRate` сделка +
-    `builder/userTrades.builderFee`) — прогон `CT_TESTNET=1` и ручная
-    приёмка владельцем из Telegram.
+  - [x] Signed testnet e2e части 1 — **3 passed (живой тестнет)**: билдер
+    зарегистрирован владельцем через Builder Center, faucet ASTER на perps;
+    полный онбординг с подписью кошелька → paused-commit → сделка
+    `builder+feeRate` → flat → feeRate выше капа отклонён
+    (`test_builder_mini_app_e2e.py`). Fee-стейтмент `/builder/userTrades` —
+    часть 2. Осталась ручная приёмка владельцем визара.
 
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка

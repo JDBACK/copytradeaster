@@ -110,6 +110,41 @@ read-only `PositionPageDTO`, risk constraints, revoke/disconnect-семанти�
 
 ## 6. Журнал
 
+### 2026-08-31 (третья сессия — WP5, живой тестнет)
+
+- владелец передал основной evm-ключ копика (совпал с copyc2) — e2e
+  переключён на copyc2; парсер wallet.txt выбирает ключ, восстанавливающийся
+  в evm-адрес секции (исторические `privte key` — ключи API-кошельков);
+- **живой тестнет, итеративно:**
+  - подпись main-кошелька валидна, submit дошёл до биржи;
+  - первый блокер: `Builder address … not registered in Aster` — продуктовая
+    регистрация билдера, API-ручки нет (POST /builder → 405), оба официальных
+    демо берут билдера «как данность»; тестнет-вкладки Aster Code в SPA
+    тестнета нет (подтверждено вскрытием бандла);
+  - реестр общий с мейннетом: зонд с демо-билдером `ivan` дал ошибку
+    **баланса**, не регистрации → владелец зарегистрировал наш адрес через
+    Builder Center (asterdex.com/en/aster-code) в своём браузере;
+  - второй блокер: `has no ASTER balance` — требование ≥100 ASTER на perps
+    билдера (проверка per-environment; тестнет-faucet закрывает);
+  - после faucet владельца (perps билдера ≈ $1,695) — блокеры сняты;
+- **SIGNED E2E ЗЕЛЁНЫЙ (3 passed, живой тестнет):** полный builder-онбординг
+  (подпись кошельком copyc2 → approveAgent с builder-полями → signed verify
+  → preflight → paused-commit → активация), сделка `builder+feeRate=0.0001`
+  исполнена биржей (HEDGE: BUY LONG → SELL LONG, flat подтверждён),
+  `feeRate=0.5` отклонён биржей (кап работает);
+- `/builder/userTrades` — недокументированный auth («No agent found» при
+  подписи билдер-идентичностью); fee-стейтмент отложен на часть 2 (Builder
+  Center), сделочный уровень доказан;
+- попутно доказано живьём: чистый `approveAgent` → 200 success (пайплайн
+  подписи), у copyc2 есть живой Agent с builder-привязкой (истекает через
+  30 дней, production-БД не затронута);
+- offline gate: **714 passed / 2 skipped**, ruff clean; signed gate части 1:
+  **3 passed**; vitest 32; мини-ап поднят из бота владельцем (кнопка ASTER
+  COPY в чате, home на реальных данных);
+- фикс бот-кнопки: per-chat override в админ-чате перекрывал дефолт —
+  runtime ставит WebApp-кнопку и в админ-чаты явно;
+- скрипт `scripts/preview_miniapp.py` — превью визара без Telegram.
+
 ### 2026-08-31 (вторая сессия — WP4/WP5)
 
 - волна 2 ответена, решения #19–#23 зафиксированы (§2);

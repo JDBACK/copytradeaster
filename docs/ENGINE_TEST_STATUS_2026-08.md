@@ -6,27 +6,21 @@
 ## Текущее состояние
 
 - **Stage 3, часть 1 — в разработке (ветка `codex/stage-3-mini-app-part1`):**
-  Builder-auth Mini App. Готовы WP0–WP3 и WP4: ядро Builder-онбординга
-  (`onboarding/builder.py`: prepare/EIP-712/ecrecover/TTL/verify/preflight/
-  атомарный paused-commit), application use cases
-  (`miniapp_session`/`builder_prepare`/`builder_submit` + recovery), aiohttp
-  транспорт (HMAC initData + TTL `auth_date` 24ч, dashboard/pause/resume/
-  confirmation эндпоинты, fail-closed dev-сессия для браузера, авто
-  WebApp-кнопка из `CT_MINIAPP_PUBLIC_URL`), фронтенд Vite+React+TS
-  (session gate → builder wizard по эталону 01 → success → минимальный home
-  с pause/resume и typed-подтверждением; wallet-адаптер: injected EIP-1193 +
-  ленивый WalletConnect-чанк за `VITE_WC_PROJECT_ID`), vitest на чистые
-  модули (32 теста). Интеграция полного flow через httpx.MockTransport
-  (`test_miniapp_builder_flow.py`) вскрыла и закрыла баг сериализации
-  булевых в signed query (`str(True)` → `"True"` вместо `"true"` демо).
-  Offline gate: **714 passed / 2 skipped**, ruff clean; vitest **32 passed**;
-  `pnpm build` зелёный. Signed e2e части 1
-  (`tests/testnet/test_builder_mini_app_e2e.py`: builder-flow + проверочная
-  сделка `builder+feeRate` + `builder/userTrades` c `builderFee` +
-  отклонение feeRate выше капа) готов, ожидает прогона `CT_TESTNET=1` и
-  ручной приёмки владельца. Известный флак вне этого этапа:
-  `test_two_equal_reductions_both_execute` (order-dependent, соло падает
-  даже на чистом дереве; фикс вне скоупа части 1).
+  Builder-auth Mini App. Готовы WP0–WP5: ядро Builder-онбординга
+  (`onboarding/builder.py`), application use cases, aiohttp-транспорт
+  (HMAC initData + TTL `auth_date`, home-эндпоинты, dev-сессия, авто
+  WebApp-кнопка), фронтенд Vite+React+TS (gate → wizard → success → home;
+  injected + WalletConnect-шов), vitest, интеграция полного flow,
+  **signed e2e на живом тестнете — 3 passed**: builder-онбординг с подписью
+  кошелька реального пользователя → paused-commit → сделка
+  `builder+feeRate=0.0001` исполнена биржей (HEDGE round-trip, flat) →
+  feeRate выше капа отклонён. Билдер зарегистрирован владельцем через
+  Builder Center (реестр общий с тестнетом), faucet ASTER на perps билдера
+  залит. Fee-стейтмент (`/builder/userTrades`) — часть 2 (недокументированный
+  auth). Offline gate: **714 passed / 2 skipped**, ruff clean; vitest **32**.
+  Осталось: ручная приёмка владельцем визара из браузера с MetaMask и/или
+  из Telegram (после Reown project ID). Известный флак вне этапа:
+  `test_two_equal_reductions_both_execute` (order-dependent).
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
