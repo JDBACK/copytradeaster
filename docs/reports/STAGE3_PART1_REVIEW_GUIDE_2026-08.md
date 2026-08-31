@@ -57,6 +57,7 @@ fee-стейтмент (недокументированный auth), mainnet.
 | b79776d | test: expand signed builder recovery and fee-cap coverage (L1–L8 live suites) |
 | 41c6df6 | docs: close stage 3 part 1 corrective gate |
 | 3cf8dc7 | fix: redirect root path to miniapp and normalize webapp menu url |
+| 047f5c4 | fix(miniapp): refine onboarding copy, capitalization and trust disclaimers |
 
 1. **Main-ключ не входит в систему.** `onboarding/builder.py`: prepare
    генерирует signer (`Account.create()`), submit принимает только подпись;
@@ -120,6 +121,7 @@ fee-стейтмент (недокументированный auth), mainnet.
 | 17 | **Resume в Mini App возвращал 503 (`service_unavailable`)** | `_master_requires_confirmation` использовал `_call_required`, который трактовал `False` (0 позиций у мастера) как ошибку операции. Исправлено чтением статуса напрямую (`8ce79f1`); кнопка успешно принята владельцем в Telegram (`result=success state=resumed`). |
 | 18 | `404: Not Found` при открытии Mini App по корневому URL туннеля | Добавлен автоматический 302-редирект с `/` на `/miniapp/` в `miniapp/server.py` и нормализация URL `normalize_webapp_url` в `telegram/runtime.py` (`3cf8dc7`). |
 | 19 | Офлайн-тесты `test_engine.py` конфликтовали за порт 8080 с запущенным ботом | В `make_settings` для unit-тестов жизненного цикла Stage 2 явно изолирован `miniapp_enabled=False`. |
+| 20 | Тавтология в копирайте онбординга и неоднородный регистр в таблицах параметров | Устранён дубль дисклеймера безопасности кошелька (оставлена лаконичная сноска внизу), нормализован единый регистр первой буквы («Покажем после подключения», «Включена»/«Запрещён») в `BuilderWizard.tsx` (`047f5c4`). |
 
 ## 6. Как гнать тесты
 
