@@ -2129,7 +2129,17 @@ class UserApplicationService:
             )
         except _SAFE_ERRORS:
             raise
-        except Exception:
+        except Exception as exc:
+            # Temporary field diagnostics (part-1 acceptance): log every
+            # failure class including safe ones, then keep the typed boundary.
+            log.warning(
+                "resume failed user=%s class=%s detail=%s",
+                user_id,
+                type(exc).__name__,
+                str(exc)[:160],
+            )
+            if isinstance(exc, _SAFE_ERRORS):
+                raise
             raise ServiceUnavailableError("resume operation is unavailable") from None
 
     async def begin_confirmation(

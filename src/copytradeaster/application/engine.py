@@ -29,6 +29,7 @@ from typing import Any, Protocol
 from copytradeaster.app import App
 from copytradeaster.application.models import ApplicationProtocol
 from copytradeaster.config import Settings
+from copytradeaster.logging_utils import get_logger
 from copytradeaster.notifications.console import ConsoleNotifier
 from copytradeaster.notifications.protocol import Notifier
 from copytradeaster.notifications.router import NotificationRouter
@@ -38,6 +39,8 @@ from copytradeaster.storage.repositories import CommandRepo, SettingsRepo, Teleg
 from copytradeaster.telegram.runtime import TelegramRuntime
 
 NOTIFICATION_RECOVERY_FLOOR_KEY = "stage2_notification_recovery_floor"
+
+logger = get_logger(__name__)
 
 
 class Stage2BootstrapError(RuntimeError):
@@ -285,6 +288,15 @@ class Stage2Process:
             self.app = self._app_factory(self.settings, self.db, notifier)
             self.application = self._application_factory(self.app)
             self.telegram = self._telegram_factory(self.settings, self.application)
+
+            # Code freshness marker: the operator can compare the running
+            # process against the source tree instantly (staleness caused a
+            # misleading acceptance session once).
+            from copytradeaster import application as _app_pkg
+
+            _svc = Path(_app_pkg.__file__).parent / "service.py"
+            _marker = f"{_svc.stat().st_size}:{int(_svc.stat().st_mtime)}"
+            logger.info("code marker application/service.py=%s", _marker)
 
             # App owns the shared DB close after all workers have drained.  It
             # must be READY/started before Telegram can begin polling.
