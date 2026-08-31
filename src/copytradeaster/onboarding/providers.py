@@ -9,6 +9,7 @@ from typing import Protocol
 from copytradeaster.aster.models import AgentDTO, BalanceDTO, OrderDTO, PositionDTO
 from copytradeaster.domain.models import TradingIdentity
 from copytradeaster.onboarding.models import OnboardingCommit
+from copytradeaster.storage.repositories import BuilderOnboardingAttempt
 
 
 class EphemeralIdentityProvider:
@@ -79,6 +80,26 @@ class OnboardingStore(Protocol):
     ) -> str | None: ...
 
     async def commit_onboarding(self, payload: OnboardingCommit) -> None: ...
+
+    async def get_builder_attempt(
+        self, telegram_user_id: int
+    ) -> BuilderOnboardingAttempt | None: ...
+
+    async def get_builder_attempt_by_pending_id(
+        self, pending_id: str
+    ) -> BuilderOnboardingAttempt | None: ...
+
+    async def save_builder_attempt(self, attempt: BuilderOnboardingAttempt) -> None: ...
+
+    async def update_builder_attempt_state(
+        self, pending_id: str, state: str, *, last_error_code: str | None = None
+    ) -> bool: ...
+
+    async def delete_builder_attempt(self, telegram_user_id: int) -> bool: ...
+
+    async def delete_builder_attempt_by_pending_id(self, pending_id: str) -> bool: ...
+
+    async def cleanup_expired_prepared_attempts(self, now_ms: int) -> int: ...
 
 
 ActivationCallback = Callable[[str], Awaitable[None] | None]

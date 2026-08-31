@@ -6,13 +6,14 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from aiosqlite import Row
 
+from copytradeaster.credentials import crypto
 from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.storage.database import Database
 
@@ -1464,3 +1465,155 @@ class NotificationOutboxRepo:
             f"{self._SELECT_COLUMNS} WHERE status='PENDING' ORDER BY available_at, id LIMIT ?",
             (int(limit),),
         )
+
+
+@dataclass(slots=True)
+class BuilderOnboardingAttempt:
+    pending_id: str
+    telegram_user_id: int
+    account_id: str
+    user_address: str
+    signer_address: str
+    signer_private_key: str = field(repr=False)
+    params: dict = field(default_factory=dict)
+    state: str = "PREPARED"
+    approval_deadline_ms: int = 0
+    agent_expires_at_ms: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    last_error_code: str | None = None
+
+
+class BuilderOnboardingAttemptsRepo:
+    """Encrypted persistent storage for in-flight Builder onboarding attempts."""
+
+    def __init__(self, db: Database, encryption_key: bytes) -> None:
+        self.db = db
+        self._key = encryption_key
+
+    async def save(self, attempt: BuilderOnboardingAttempt) -> None:
+        payload = json.dumps(
+            {
+                "signer_private_key": attempt.signer_private_key,
+                "params": attempt.params,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        encrypted = crypto.encrypt(self._key, payload)
+        now = _now_iso()
+        created_at = _as_iso(attempt.created_at) if attempt.created_at else now
+        updated_at = now
+        await self.db.execute_write(
+            """
+            INSERT INTO builder_onboarding_attempts(
+              pending_id, telegram_user_id, account_id, user_address, signer_address,
+              encrypted_payload, algo, state, approval_deadline_ms, agent_expires_at_ms,
+              created_at, updated_at, last_error_code
+            ) VALUES (?, ?, ?, ?, ?, ?, 'AESGCM-v1', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+              pending_id=excluded.pending_id,
+              account_id=excluded.account_id,
+              user_address=excluded.user_address,
+              signer_address=excluded.signer_address,
+              encrypted_payload=excluded.encrypted_payload,
+              algo=excluded.algo,
+              state=excluded.state,
+              approval_deadline_ms=excluded.approval_deadline_ms,
+              agent_expires_at_ms=excluded.agent_expires_at_ms,
+              updated_at=excluded.updated_at,
+              last_error_code=excluded.last_error_code
+            """,
+            (
+                attempt.pending_id,
+                int(attempt.telegram_user_id),
+                attempt.account_id,
+                attempt.user_address,
+                attempt.signer_address,
+                encrypted,
+                attempt.state,
+                int(attempt.approval_deadline_ms),
+                int(attempt.agent_expires_at_ms),
+                created_at,
+                updated_at,
+                attempt.last_error_code,
+            ),
+        )
+
+    def _row_to_attempt(self, row: Any) -> BuilderOnboardingAttempt:
+        decrypted_bytes = crypto.decrypt(self._key, bytes(row["encrypted_payload"]))
+        payload = json.loads(decrypted_bytes.decode("utf-8"))
+        return BuilderOnboardingAttempt(
+            pending_id=str(row["pending_id"]),
+            telegram_user_id=int(row["telegram_user_id"]),
+            account_id=str(row["account_id"]),
+            user_address=str(row["user_address"]),
+            signer_address=str(row["signer_address"]),
+            signer_private_key=str(payload["signer_private_key"]),
+            params=dict(payload["params"]),
+            state=str(row["state"]),
+            approval_deadline_ms=int(row["approval_deadline_ms"]),
+            agent_expires_at_ms=int(row["agent_expires_at_ms"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            last_error_code=(
+                str(row["last_error_code"]) if row["last_error_code"] is not None else None
+            ),
+        )
+
+    async def get_by_user_id(self, telegram_user_id: int) -> BuilderOnboardingAttempt | None:
+        row = await self.db.fetchone(
+            "SELECT * FROM builder_onboarding_attempts WHERE telegram_user_id=?",
+            (int(telegram_user_id),),
+        )
+        if row is None:
+            return None
+        return self._row_to_attempt(row)
+
+    async def get_by_pending_id(self, pending_id: str) -> BuilderOnboardingAttempt | None:
+        row = await self.db.fetchone(
+            "SELECT * FROM builder_onboarding_attempts WHERE pending_id=?",
+            (str(pending_id),),
+        )
+        if row is None:
+            return None
+        return self._row_to_attempt(row)
+
+    async def update_state(
+        self,
+        pending_id: str,
+        state: str,
+        *,
+        last_error_code: str | None = None,
+    ) -> bool:
+        now = _now_iso()
+        query = (
+            "UPDATE builder_onboarding_attempts "
+            "SET state=?, updated_at=?, last_error_code=? WHERE pending_id=?"
+        )
+        rowcount, _ = await self.db.execute_write(
+            query,
+            (state, now, last_error_code, str(pending_id)),
+        )
+        return rowcount > 0
+
+    async def delete(self, telegram_user_id: int) -> bool:
+        rowcount, _ = await self.db.execute_write(
+            "DELETE FROM builder_onboarding_attempts WHERE telegram_user_id=?",
+            (int(telegram_user_id),),
+        )
+        return rowcount > 0
+
+    async def delete_by_pending_id(self, pending_id: str) -> bool:
+        rowcount, _ = await self.db.execute_write(
+            "DELETE FROM builder_onboarding_attempts WHERE pending_id=?",
+            (str(pending_id),),
+        )
+        return rowcount > 0
+
+    async def cleanup_expired_prepared(self, now_ms: int) -> int:
+        query = (
+            "DELETE FROM builder_onboarding_attempts "
+            "WHERE state='PREPARED' AND approval_deadline_ms < ?"
+        )
+        rowcount, _ = await self.db.execute_write(query, (int(now_ms),))
+        return rowcount

@@ -50,6 +50,10 @@ class SqliteCredentials:
         self._roles: dict[str, str] = {}
         self._loaded = False
 
+    @property
+    def encryption_key(self) -> bytes:
+        return self._key
+
     async def load(self) -> None:
         """Warm caches from the DB (called once at boot)."""
         # SHADOW and disabled historical followers deliberately have no live

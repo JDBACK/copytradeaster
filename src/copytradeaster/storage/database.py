@@ -166,6 +166,27 @@ MIGRATIONS: list[str] = [
     "CREATE UNIQUE INDEX idx_telegram_access_requests_pending_user"
     " ON telegram_access_requests(telegram_user_id) WHERE status='PENDING'",
     "CREATE INDEX idx_telegram_access_requests_status_id ON telegram_access_requests(status, id)",
+    """
+    CREATE TABLE builder_onboarding_attempts(
+      pending_id TEXT PRIMARY KEY,
+      telegram_user_id INTEGER NOT NULL UNIQUE,
+      account_id TEXT NOT NULL,
+      user_address TEXT NOT NULL,
+      signer_address TEXT NOT NULL,
+      encrypted_payload BLOB NOT NULL,
+      algo TEXT NOT NULL DEFAULT 'AESGCM-v1',
+      state TEXT NOT NULL CHECK(state IN ('PREPARED','APPROVAL_SENT','APPROVED','COMMITTED')),
+      approval_deadline_ms INTEGER NOT NULL,
+      agent_expires_at_ms INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_error_code TEXT
+    )
+    """,
+    (
+        "CREATE INDEX IF NOT EXISTS idx_builder_attempts_user "
+        "ON builder_onboarding_attempts(telegram_user_id)"
+    ),
 ]
 
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
