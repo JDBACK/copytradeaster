@@ -49,9 +49,18 @@ class Settings(BaseSettings):
     miniapp_bind_host: str = "127.0.0.1"
     miniapp_port: int = 8080
     miniapp_static_dir: Path | None = None  # built Vite assets (miniapp/dist)
-    # Stage 3 Builder Mini App flow
-    builder_agent_expiry_days: int = 30  # approveAgent `expired` lifetime set by the backend
-    builder_approval_ttl_s: int = 600  # prepare -> wallet-signature submit window
+    # Public https URL of the deployed Mini App; when set, the bot installs it
+    # as the private-chat menu button (WebApp) instead of the command list.
+    miniapp_public_url: str = ""
+    # Telegram signs initData once per launch; replayed strings older than this
+    # are rejected server-side (Telegram docs recommend checking auth_date).
+    miniapp_init_data_ttl_s: int = 86_400
+    # Local development only: a plain browser has no Telegram context, so the
+    # transport may accept a declared dev user id instead of signed initData.
+    # Fail-closed: requires the explicit flag, an explicit user id, and a
+    # testnet REST base URL; the header is ignored in every other case.
+    miniapp_dev_unsigned: bool = False
+    miniapp_dev_user_id: int | None = None
     dry_run: bool = False  # True: commands are logged, no HTTP sent
     allow_mainnet: bool = False
     shadow_accounts_enabled: bool = False
@@ -173,6 +182,30 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_symbols(cls, values: list[str]) -> list[str]:
         return list(dict.fromkeys(symbol.strip().upper() for symbol in values if symbol.strip()))
+
+    @field_validator("miniapp_public_url")
+    @classmethod
+    def _validate_miniapp_public_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            return ""
+        parsed = urlparse(normalized)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("CT_MINIAPP_PUBLIC_URL must be an https URL")
+        return normalized
+
+    @field_validator("miniapp_init_data_ttl_s")
+    @classmethod
+    def _validate_miniapp_ttl(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("CT_MINIAPP_INIT_DATA_TTL_S must be positive")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_miniapp_dev_guard(self) -> "Settings":
+        if self.miniapp_dev_unsigned and self.miniapp_dev_user_id is None:
+            raise ValueError("CT_MINIAPP_DEV_UNSIGNED requires an explicit CT_MINIAPP_DEV_USER_ID")
+        return self
 
     @model_validator(mode="after")
     def _load_local_botkey(self) -> "Settings":

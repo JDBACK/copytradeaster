@@ -18,7 +18,9 @@ from aiogram.types import (
     CallbackQuery,
     ErrorEvent,
     MenuButtonCommands,
+    MenuButtonWebApp,
     Message,
+    WebAppInfo,
 )
 
 from copytradeaster.application.models import ApplicationProtocol, UserContext
@@ -147,8 +149,13 @@ async def _safe_error_handler(event: ErrorEvent, bot: Bot, **_: Any) -> None:
             await message.answer("Временная ошибка. Попробуйте /menu ещё раз.")
 
 
-async def register_commands(bot: Bot) -> None:
-    """Install the narrow Stage 2 command surface and private menu button."""
+async def register_commands(bot: Bot, *, web_app_url: str | None = None) -> None:
+    """Install the narrow Stage 2 command surface and private menu button.
+
+    When the Mini App is deployed (``CT_MINIAPP_PUBLIC_URL``), the private
+    menu button launches it instead of the command list — the command surface
+    stays available through ``/`` as before.
+    """
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="Запустить бота"),
@@ -158,7 +165,15 @@ async def register_commands(bot: Bot) -> None:
         ],
         scope=BotCommandScopeAllPrivateChats(),
     )
-    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    if web_app_url:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="ASTER COPY",
+                web_app=WebAppInfo(url=web_app_url),
+            )
+        )
+    else:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
 async def ensure_webhook_clean(bot: Bot) -> tuple[str, str]:
@@ -202,7 +217,10 @@ class TelegramRuntime:
     async def startup(self) -> None:
         await ensure_webhook_clean(self.bot)
         try:
-            await register_commands(self.bot)
+            await register_commands(
+                self.bot,
+                web_app_url=self.settings.miniapp_public_url or None,
+            )
         except AiogramError as exc:
             # Commands/menu-button metadata is best effort; handlers remain
             # usable when Telegram temporarily rejects configuration calls.

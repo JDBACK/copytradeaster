@@ -1675,6 +1675,23 @@ async def test_webhook_cleanup_rechecks_and_commands_set_menu_button() -> None:
     assert any(type(call).__name__ == "SetChatMenuButton" for call in api.calls)
 
 
+@pytest.mark.asyncio
+async def test_register_commands_installs_webapp_menu_button_when_configured() -> None:
+    api = StubSession()
+    bot = Bot("123456:dummy", session=api)
+
+    await register_commands(bot, web_app_url="https://mini.example.org/miniapp/")
+
+    menu_calls = [call for call in api.calls if type(call).__name__ == "SetChatMenuButton"]
+    assert len(menu_calls) == 1
+    button = menu_calls[0].menu_button
+    assert type(button).__name__ == "MenuButtonWebApp"
+    assert button.text == "ASTER COPY"
+    assert button.web_app.url == "https://mini.example.org/miniapp/"
+    commands = [call for call in api.calls if type(call).__name__ == "SetMyCommands"]
+    assert len(commands) == 1
+
+
 def test_production_runtime_and_dispatcher_fail_closed_without_application() -> None:
     with pytest.raises(ValueError, match="application protocol"):
         create_dispatcher(settings())
