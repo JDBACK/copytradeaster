@@ -366,10 +366,14 @@ def create_miniapp_app(
         async def index(_request: web.Request) -> web.FileResponse:
             return web.FileResponse(Path(static_dir) / "index.html")  # type: ignore[arg-type]
 
+        async def root_redirect(_request: web.Request) -> web.Response:
+            raise web.HTTPFound("/miniapp/")
+
         # Route order matters: aiohttp resolves resources in registration
         # order, so the index handlers must be added before the static mount
         # or the static router answers /miniapp/ with 403 (no directory
         # listing).
+        app.router.add_get("/", root_redirect)
         app.router.add_get("/miniapp", index)
         app.router.add_get("/miniapp/", index)
         app.router.add_static("/miniapp/", Path(static_dir))

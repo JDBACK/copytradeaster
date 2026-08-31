@@ -101,6 +101,7 @@ def make_settings(
         telegram_admin_ids=admin_ids or [],
         telegram_notifications_enabled=notifications,
         telegram_bot_token="123:token",
+        miniapp_enabled=False,
     )
 
 

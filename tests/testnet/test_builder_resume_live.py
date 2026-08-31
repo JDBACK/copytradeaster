@@ -28,7 +28,6 @@ from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.domain.models import RiskPolicy, TradingIdentity
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
-    AgentValidationRepo,
     SettingsRepo,
     TelegramUserRepo,
 )
@@ -143,6 +142,7 @@ async def live_app_env(test_settings):
 
         def master_has_open_positions(self):
             return False
+
     app = FakeLiveApp()
     adapter = AppStage2RuntimeAdapter(app)
     service = UserApplicationService(adapter, admin_ids=[])

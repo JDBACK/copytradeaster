@@ -149,6 +149,19 @@ async def _safe_error_handler(event: ErrorEvent, bot: Bot, **_: Any) -> None:
             await message.answer("Временная ошибка. Попробуйте /menu ещё раз.")
 
 
+def normalize_webapp_url(url: str | None) -> str | None:
+    """Ensure the Mini App URL terminates in /miniapp/."""
+    if not url:
+        return None
+    cleaned = url.strip()
+    if not cleaned:
+        return None
+    cleaned_root = cleaned.rstrip("/")
+    if not cleaned_root.endswith("/miniapp"):
+        return f"{cleaned_root}/miniapp/"
+    return f"{cleaned_root}/"
+
+
 async def register_commands(bot: Bot, *, web_app_url: str | None = None) -> None:
     """Install the narrow Stage 2 command surface and private menu button.
 
@@ -165,11 +178,12 @@ async def register_commands(bot: Bot, *, web_app_url: str | None = None) -> None
         ],
         scope=BotCommandScopeAllPrivateChats(),
     )
-    if web_app_url:
+    target_url = normalize_webapp_url(web_app_url)
+    if target_url:
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="ASTER COPY",
-                web_app=WebAppInfo(url=web_app_url),
+                web_app=WebAppInfo(url=target_url),
             )
         )
     else:
@@ -183,7 +197,8 @@ async def install_admin_webapp_buttons(bot: Bot, settings: Settings) -> None:
     beats the bot default and would hide the Mini App for exactly the people
     who test it first.  Best effort: failures never block startup.
     """
-    if not settings.miniapp_public_url:
+    target_url = normalize_webapp_url(settings.miniapp_public_url)
+    if not target_url:
         return
     for admin_id in settings.telegram_admin_ids:
         try:
@@ -191,7 +206,7 @@ async def install_admin_webapp_buttons(bot: Bot, settings: Settings) -> None:
                 chat_id=admin_id,
                 menu_button=MenuButtonWebApp(
                     text="ASTER COPY",
-                    web_app=WebAppInfo(url=settings.miniapp_public_url),
+                    web_app=WebAppInfo(url=target_url),
                 ),
             )
         except AiogramError as exc:
