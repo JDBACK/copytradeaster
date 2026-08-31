@@ -202,7 +202,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
                   <Check ok={prepare.can_perp_trade ?? true} /> Perps-торговля
                 </>
               }
-              value={prepare.can_perp_trade ? 'включена' : 'выключена'}
+            value={prepare.can_perp_trade ? 'Включена' : 'Выключена'}
             />
             <Row
               label={
@@ -210,8 +210,8 @@ export function BuilderWizard({ auth, onConnected }: Props) {
                   <Check ok={!prepare.can_withdraw} /> Вывод средств
                 </>
               }
-              value={prepare.can_withdraw ? 'включён' : 'запрещён'}
-              valueClass={prepare.can_withdraw ? 'tone-danger' : undefined}
+            value={prepare.can_withdraw ? 'Включён' : 'Запрещён'}
+            valueClass={prepare.can_withdraw ? 'tone-danger' : undefined}
             />
             <Row label="Кошелёк" value={prepare.user_masked ?? '—'} />
             <Row label="Agent" value={prepare.agent_masked ?? '—'} />
@@ -251,7 +251,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
       )}
 
       <p className="footer-note">
-        Кошелёк нужен только для авторизации Agent и Builder. Основной ключ не передаётся сервису.
+        Основной приватный ключ остаётся в вашем кошельке и никогда не передаётся сервису.
       </p>
     </div>
   )
@@ -275,12 +275,12 @@ function WalletStep({
       <section className="panel">
         <div className="h2">Подключите основной кошелёк</div>
         <p className="lede">
-          Он нужен только для авторизации Agent и Builder. Основной ключ не передаётся сервису.
+          Для безопасной авторизации Agent и Builder на бирже Aster без передачи приватного ключа.
         </p>
         <Row label="Сеть подписи" value={`BNB Smart Chain (${REGISTRATION_CHAIN_ID})`} />
         <Row
           label="Комиссия Builder"
-          value={address ? 'в review ниже' : 'покажем после подключения'}
+          value={address ? 'В review ниже' : 'Покажем после подключения'}
         />
       </section>
       {address && (
