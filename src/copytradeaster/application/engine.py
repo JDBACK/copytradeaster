@@ -235,6 +235,7 @@ class Stage2Process:
         self.app: App | None = None
         self.application: ApplicationProtocol | None = None
         self.telegram: Stage2TelegramRuntime | None = None
+        self.miniapp: Any | None = None
         self.worker: Stage2OutboxWorker | None = None
         self.notifier: Notifier | None = None
         self._worker_started = False
@@ -288,6 +289,12 @@ class Stage2Process:
             # App owns the shared DB close after all workers have drained.  It
             # must be READY/started before Telegram can begin polling.
             await self.app.start()
+
+            if self.settings.miniapp_enabled:
+                from copytradeaster.miniapp.server import MiniAppServer
+
+                self.miniapp = MiniAppServer(self.settings, self.application)
+                await self.miniapp.start()
 
             if self.settings.telegram_notifications_enabled:
                 self.worker = self._worker_factory(self.telegram.bot, self.db, self.settings)
@@ -350,6 +357,15 @@ class Stage2Process:
                     errors.append(exc)
                 finally:
                     self._worker_stopped = True
+
+            miniapp = getattr(self, "miniapp", None)
+            if miniapp is not None:
+                try:
+                    await miniapp.stop()
+                except BaseException as exc:  # noqa: BLE001 - continue teardown
+                    errors.append(exc)
+                finally:
+                    self.miniapp = None
 
             app = self.app
             if app is not None and not self._app_stopped:

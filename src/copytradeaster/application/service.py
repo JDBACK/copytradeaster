@@ -33,12 +33,16 @@ from copytradeaster.application.models import (
     AdminUserItem,
     AdminUserPage,
     AuthorizationError,
+    BuilderOnboardedDTO,
+    BuilderPrepareDTO,
     Confirmation,
     ConfirmationAction,
     ConfirmationExpiredError,
     CopyState,
     DashboardDTO,
     DirectCredentialsInput,
+    MiniAppAccessState,
+    MiniAppSessionDTO,
     NotificationSettingsDTO,
     OnboardingApplicationError,
     OnboardingResult,
@@ -54,8 +58,10 @@ from copytradeaster.application.models import (
     ValidationError,
 )
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
-from copytradeaster.onboarding.errors import OnboardingError
+from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import (
+    BuilderPrepareRequest,
+    BuilderSubmitRequest,
     DirectOnboardingRequest,
     DirectOnboardingResult,
     mask_address,
@@ -434,6 +440,7 @@ class UserApplicationService:
         validations: Any | None = None,
         outbox: Any | None = None,
         onboarding: Any | None = None,
+        builder_onboarding: Any | None = None,
         emergency_controller: EmergencyControllerPort | None = None,
         testnet_check: bool | Callable[[], bool | Awaitable[bool]] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -463,6 +470,7 @@ class UserApplicationService:
         self._onboarding = (
             onboarding if onboarding is not None else getattr(runtime, "onboarding", None)
         )
+        self._builder_onboarding = builder_onboarding
         self._emergency = (
             emergency_controller
             if emergency_controller is not None
@@ -1666,6 +1674,229 @@ class UserApplicationService:
                 exc=exc,
             )
             raise ServiceUnavailableError("credential replacement is unavailable") from None
+
+    async def miniapp_session(self, user_id: int) -> MiniAppSessionDTO:
+        """Server-derived Mini App session: access state plus connected account."""
+        normalized = self._numeric_id(user_id)
+        if normalized is None:
+            raise ValidationError("Telegram user ID is invalid")
+        try:
+            await self._ensure_testnet()
+            try:
+                await self._context(normalized)
+            except AuthorizationError:
+                return await self._miniapp_denied_session(normalized)
+            dash = await self.dashboard(normalized)
+            connected = bool(dash.account_masked) and dash.copy_state is not CopyState.EMPTY
+            return MiniAppSessionDTO(
+                user_id=normalized,
+                access_state=MiniAppAccessState.APPROVED,
+                environment="testnet",
+                account_connected=connected,
+                account_masked=dash.account_masked if connected else None,
+                copy_state=dash.copy_state if connected else CopyState.EMPTY,
+                is_admin=dash.is_admin,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("mini app session is unavailable") from None
+
+    async def _miniapp_denied_session(self, user_id: int) -> MiniAppSessionDTO:
+        """Map a denied authorization to its durable access-request state."""
+        try:
+            request = await self.access_request(user_id)
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("mini app session is unavailable") from None
+        state = MiniAppAccessState.UNKNOWN
+        if request is not None:
+            if request.status is AccessRequestStatus.PENDING:
+                state = MiniAppAccessState.PENDING
+            elif request.status is AccessRequestStatus.REJECTED:
+                state = MiniAppAccessState.REJECTED
+            elif request.status is AccessRequestStatus.APPROVED:
+                # Approved but not authorized: access was revoked afterwards.
+                state = MiniAppAccessState.REJECTED
+        return MiniAppSessionDTO(user_id=user_id, access_state=state, environment="testnet")
+
+    async def builder_prepare(self, user_id: int, user_address: str) -> BuilderPrepareDTO:
+        mode = "builder_prepare"
+        account_id: Any = self._audit_account_id(user_id)
+        log_onboarding_audit(
+            log,
+            event="attempt",
+            mode=mode,
+            user_id=user_id,
+            account_id=account_id,
+            result="started",
+            paused=None,
+        )
+        try:
+            await self._ensure_testnet()
+            if self._builder_onboarding is None:
+                raise ServiceUnavailableError("builder onboarding is unavailable")
+            if not isinstance(user_address, str) or not user_address.strip():
+                raise ValidationError("wallet address is required")
+            context = await self._context(user_id)
+            # A previous submit may have committed durably but failed runtime
+            # publication.  Retry only that publication before the prepare
+            # conflict check would classify the user as already connected.
+            if context.account_id:
+                candidate = str(context.account_id)
+                row = await self._account_row(candidate)
+                if row is not None and _is_true(_row_value(row, "enabled", 0)):
+                    if await self._runtime_registered(candidate):
+                        raise OnboardingApplicationError(OnboardingErrorCode.OWNER_CONFLICT)
+                    recovered_dto = await self._recover_builder_runtime(candidate, context)
+                    log_onboarding_audit(
+                        log,
+                        event="recovered",
+                        mode=mode,
+                        user_id=context.user_id,
+                        account_id=candidate,
+                        result="recovered",
+                        paused=True,
+                    )
+                    return recovered_dto
+            try:
+                result = await self._builder_onboarding.prepare(
+                    BuilderPrepareRequest(
+                        telegram_user_id=context.user_id,
+                        user_address=user_address.strip(),
+                    )
+                )
+            except OnboardingError as exc:
+                raise OnboardingApplicationError(exc.code) from None
+            safe_result = BuilderPrepareDTO(
+                pending_id=result.pending_id,
+                user_masked=result.masked_user_address,
+                agent_masked=result.masked_signer_address,
+                builder_masked=result.builder_masked,
+                builder_name=result.builder_name,
+                max_fee_rate=result.max_fee_rate,
+                signature_plan=result.signature_plan,
+                can_perp_trade=result.can_perp_trade,
+                can_withdraw=result.can_withdraw,
+                agent_expires_at_ms=result.agent_expires_at_ms,
+                approval_expires_at_ms=result.approval_expires_at_ms,
+                eip712=result.eip712,
+            )
+            log_onboarding_audit(
+                log,
+                event="success",
+                mode=mode,
+                user_id=context.user_id,
+                account_id=account_id,
+                result="prepared",
+                paused=None,
+            )
+            return safe_result
+        except _SAFE_ERRORS as exc:
+            self._audit_rejected(mode=mode, user_id=user_id, account_id=account_id, exc=exc)
+            raise
+        except Exception as exc:
+            self._audit_rejected(mode=mode, user_id=user_id, account_id=account_id, exc=exc)
+            raise ServiceUnavailableError("builder onboarding is unavailable") from None
+
+    async def builder_submit(
+        self, user_id: int, pending_id: str, signature: str
+    ) -> BuilderOnboardedDTO:
+        mode = "builder_submit"
+        account_id: Any = self._audit_account_id(user_id)
+        log_onboarding_audit(
+            log,
+            event="attempt",
+            mode=mode,
+            user_id=user_id,
+            account_id=account_id,
+            result="started",
+            paused=None,
+        )
+        try:
+            await self._ensure_testnet()
+            if self._builder_onboarding is None:
+                raise ServiceUnavailableError("builder onboarding is unavailable")
+            if (
+                not isinstance(pending_id, str)
+                or not pending_id.strip()
+                or not isinstance(signature, str)
+                or not signature.strip()
+            ):
+                raise ValidationError("builder approval is invalid")
+            context = await self._context(user_id)
+            try:
+                result = await self._builder_onboarding.submit(
+                    BuilderSubmitRequest(
+                        telegram_user_id=context.user_id,
+                        pending_id=pending_id.strip(),
+                        signature=signature.strip(),
+                    )
+                )
+            except OnboardingError as exc:
+                raise OnboardingApplicationError(exc.code) from None
+            if str(result.account_id) != stable_account_id(context.user_id) or not result.paused:
+                raise ValidationError("onboarding result is invalid")
+            safe_result = BuilderOnboardedDTO(
+                account_id=str(result.account_id),
+                account_masked=str(result.account_masked),
+                signer_masked=str(result.signer_masked),
+                builder_name=str(result.builder_name),
+                max_fee_rate=str(result.max_fee_rate),
+                position_mode=str(result.position_mode),
+                available_usdt=result.available_usdt,
+                agent_expires_at_ms=int(result.agent_expires_at_ms),
+                paused=True,
+                message="account connected paused",
+            )
+            log_onboarding_audit(
+                log,
+                event="success",
+                mode=mode,
+                user_id=context.user_id,
+                account_id=safe_result.account_id,
+                result="success",
+                paused=safe_result.paused,
+            )
+            return safe_result
+        except _SAFE_ERRORS as exc:
+            self._audit_rejected(mode=mode, user_id=user_id, account_id=account_id, exc=exc)
+            raise
+        except Exception as exc:
+            self._audit_rejected(mode=mode, user_id=user_id, account_id=account_id, exc=exc)
+            raise ServiceUnavailableError("builder onboarding is unavailable") from None
+
+    async def _recover_builder_runtime(
+        self, account_id: str, context: UserContext
+    ) -> BuilderPrepareDTO:
+        """Re-publish a committed-but-unpublished Builder account runtime."""
+        self._require_method(self._runtime, "recover_account_runtime")
+        self._require_method(self._builder_onboarding, "identity_for_recovery")
+        identity = await self._call_required(
+            self._builder_onboarding,
+            "identity_for_recovery",
+            account_id,
+            context.user_id,
+        )
+        if identity is None:
+            raise OnboardingApplicationError(OnboardingErrorCode.OWNER_CONFLICT)
+        user_address, signer_address = identity
+        async with self._account_lock(account_id):
+            recovered = await self._call_required(
+                self._runtime,
+                "recover_account_runtime",
+                account_id,
+                user_address,
+                signer_address,
+            )
+        if not recovered:
+            raise ServiceUnavailableError("account runtime recovery was rejected")
+        return BuilderPrepareDTO(
+            pending_id=None,
+            already_connected=True,
+            user_masked=mask_address(str(user_address)),
+        )
 
     @staticmethod
     def _decimal_input(value: Any, field: str) -> Decimal:

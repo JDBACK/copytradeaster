@@ -28,9 +28,15 @@ from copytradeaster.aster.trading_api import AsterClient
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.domain.models import AccountState
 from copytradeaster.logging_utils import get_logger
+from copytradeaster.onboarding.builder import BuilderOnboardingService
 from copytradeaster.onboarding.direct import DirectOnboardingService, validate_agent_permissions
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import (
+    BuilderOnboardingConfig,
+    BuilderOnboardingResult,
+    BuilderPrepareRequest,
+    BuilderPrepareResult,
+    BuilderSubmitRequest,
     DirectOnboardingConfig,
     DirectOnboardingRequest,
     DirectOnboardingResult,
@@ -135,6 +141,30 @@ class SqliteOnboardingStore(OnboardingStore):
     async def owner_for(self, telegram_user_id: int) -> Any | None:
         """Return the pre-allowlisted row used by onboarding/replacement."""
         return await self._users.get(telegram_user_id)
+
+    async def identity_for_recovery(
+        self, account_id: str, telegram_user_id: int
+    ) -> tuple[str, str] | None:
+        """Return (user_address, signer_address) when this user durably owns
+        the account; used to re-publish a committed-but-unpublished Builder
+        runtime.  Returns None when ownership or durable state cannot be
+        proven."""
+        owner = await self._users.get(telegram_user_id)
+        if owner is None or str(owner["role"]) not in {"USER", "ADMIN"}:
+            return None
+        if str(owner["account_id"] or "") != account_id:
+            return None
+        account = await self._db.fetchone(
+            "SELECT user_address, enabled FROM accounts WHERE id=?", (account_id,)
+        )
+        if account is None or not int(account["enabled"]):
+            return None
+        validation = await self._db.fetchone(
+            "SELECT signer_address FROM agent_validations WHERE account_id=?", (account_id,)
+        )
+        if validation is None:
+            return None
+        return str(account["user_address"]), str(validation["signer_address"])
 
     def validation_record(self, payload: OnboardingCommit | Any) -> AgentValidation:
         validation = payload.validation
@@ -308,6 +338,78 @@ class DirectOnboardingAdapter(OnboardingPort):
             available_usdt=preflight.available_usdt,
             paused=True,
         )
+
+
+class BuilderOnboardingAdapter:
+    """Aster V3 Builder-flow onboarding adapter for Mini App part 1.
+
+    Wraps `BuilderOnboardingService` with the same App-scoped HTTP client,
+    rate limiter, and paused activation as the direct adapter.  The generated
+    signer key is committed through the same encrypted store boundary.
+    """
+
+    def __init__(self, app: App, store: SqliteOnboardingStore) -> None:
+        self._app = app
+        self._store = store
+        override = bool(app.cfg.testnet_ip_whitelist_override and app.cfg.is_testnet)
+        master_user_address = None
+        if "main" in app.credentials.account_ids(role="master"):
+            master_user_address = app.credentials.identity("main").user
+        config = BuilderOnboardingConfig(
+            base_url=app.cfg.rest_base_url,
+            trading_chain_id=714,
+            registration_chain_id=app.cfg.registration_chain_id,
+            builder_address=app.cfg.builder_address,
+            builder_name=app.cfg.builder_name,
+            max_fee_rate=app.cfg.max_fee_rate,
+            agent_expiry_days=app.cfg.builder_agent_expiry_days,
+            approval_ttl_s=app.cfg.builder_approval_ttl_s,
+            expected_egress_ips=tuple(app.cfg.aster_egress_ips),
+            require_agent_ip_whitelist=app.cfg.require_agent_ip_whitelist and not override,
+            expected_position_mode=app.cfg.position_mode,
+            master_user_address=master_user_address,
+        )
+        self._service = BuilderOnboardingService(
+            app.http,
+            app.limiter,
+            self._client_factory,
+            store,
+            config=config,
+            activation=self._activate,
+        )
+
+    def _client_factory(
+        self,
+        identities: EphemeralIdentityProvider,
+        keys: EphemeralKeyProvider,
+    ) -> AsterClient:
+        return AsterClient(
+            http=self._app.http,
+            base_url=self._app.cfg.rest_base_url,
+            limiter=self._app.limiter,
+            identities=identities,
+            keys=keys,
+            nonces=self._app.nonces,
+            dry_run=self._app.cfg.dry_run,
+        )
+
+    async def _activate(self, account_id: str) -> None:
+        if self._app.follower_registry.get(account_id) is None:
+            await self._app.register_follower(account_id)
+        # The account is committed paused; leverage must be confirmed per
+        # symbol BEFORE the user is allowed to resume entries.
+        await _prepare_follower_leverage(self._app, account_id)
+
+    async def prepare(self, request: BuilderPrepareRequest) -> BuilderPrepareResult:
+        return await self._service.prepare(request)
+
+    async def submit(self, request: BuilderSubmitRequest) -> BuilderOnboardingResult:
+        return await self._service.submit(request)
+
+    async def identity_for_recovery(
+        self, account_id: str, telegram_user_id: int
+    ) -> tuple[str, str] | None:
+        return await self._store.identity_for_recovery(account_id, telegram_user_id)
 
 
 class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
@@ -565,6 +667,7 @@ class Stage2Composition:
 
     runtime: AppStage2RuntimeAdapter
     onboarding: DirectOnboardingAdapter
+    builder_onboarding: BuilderOnboardingAdapter
     emergency_state: AppEmergencyStateAdapter
     emergency: EmergencyController
     application: UserApplicationService
@@ -583,6 +686,7 @@ def build_stage2_composition(
         permission_override=bool(app.cfg.testnet_ip_whitelist_override and app.cfg.is_testnet),
     )
     onboarding = DirectOnboardingAdapter(app, store)
+    builder_onboarding = BuilderOnboardingAdapter(app, store)
     emergency_state = AppEmergencyStateAdapter(app)
     emergency = EmergencyController(
         lifecycle_factory=app.follower_lifecycle,
@@ -593,14 +697,18 @@ def build_stage2_composition(
         runtime,
         admin_ids=app.cfg.telegram_admin_ids if admin_ids is None else admin_ids,
         onboarding=onboarding,
+        builder_onboarding=builder_onboarding,
         emergency_controller=emergency,
     )
-    return Stage2Composition(runtime, onboarding, emergency_state, emergency, application)
+    return Stage2Composition(
+        runtime, onboarding, builder_onboarding, emergency_state, emergency, application
+    )
 
 
 __all__ = [
     "AppEmergencyStateAdapter",
     "AppStage2RuntimeAdapter",
+    "BuilderOnboardingAdapter",
     "DirectOnboardingAdapter",
     "SqliteOnboardingStore",
     "Stage2Composition",

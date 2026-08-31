@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     builder_address: str = ""  # empty -> approve_agent goes without builder
     builder_name: str = "copytradeaster"
     max_fee_rate: str = "0.0001"  # builder fee cap (futures limit 0.001)
+    # Stage 3 Builder Mini App flow
+    builder_agent_expiry_days: int = 30  # approveAgent `expired` lifetime set by the backend
+    builder_approval_ttl_s: int = 600  # prepare -> wallet-signature submit window
+    # Stage 3 Mini App transport (aiohttp in the same process)
+    miniapp_enabled: bool = False
+    miniapp_bind_host: str = "127.0.0.1"
+    miniapp_port: int = 8080
+    miniapp_static_dir: Path | None = None  # built Vite assets (miniapp/dist)
+    # Stage 3 Builder Mini App flow
+    builder_agent_expiry_days: int = 30  # approveAgent `expired` lifetime set by the backend
+    builder_approval_ttl_s: int = 600  # prepare -> wallet-signature submit window
     dry_run: bool = False  # True: commands are logged, no HTTP sent
     allow_mainnet: bool = False
     shadow_accounts_enabled: bool = False

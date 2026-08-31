@@ -85,6 +85,15 @@ class CopyState(StrEnum):
     BLOCKED = "blocked"
 
 
+class MiniAppAccessState(StrEnum):
+    """Server-derived access result for the Mini App session gate."""
+
+    APPROVED = "approved"
+    PENDING = "pending"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
 class SystemState(StrEnum):
     READY = "ready"
     STALE = "stale"
@@ -285,6 +294,61 @@ class AdminAccessRequestPage:
     has_next: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class MiniAppSessionDTO:
+    """Transport-neutral Mini App session result.
+
+    The Telegram initData check happens at the transport; this DTO carries
+    only the server-derived outcome and never a chat identity or secret.
+    """
+
+    user_id: int
+    access_state: MiniAppAccessState = MiniAppAccessState.UNKNOWN
+    environment: str = "testnet"
+    account_connected: bool = False
+    account_masked: str | None = None
+    copy_state: CopyState = CopyState.EMPTY
+    is_admin: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderPrepareDTO:
+    """Review payload shown to the user before the wallet signature.
+
+    ``already_connected`` reports a recovered runtime after a previous commit
+    whose activation failed; in that case ``pending_id`` is None and the
+    presenter routes straight to the connected home instead of the wizard.
+    """
+
+    pending_id: str | None
+    already_connected: bool = False
+    user_masked: str | None = None
+    agent_masked: str | None = None
+    builder_masked: str | None = None
+    builder_name: str = ""
+    max_fee_rate: str = ""
+    signature_plan: str = "combined_approve_agent"
+    can_perp_trade: bool = True
+    can_withdraw: bool = False
+    agent_expires_at_ms: int = 0
+    approval_expires_at_ms: int = 0
+    eip712: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderOnboardedDTO:
+    account_id: str
+    account_masked: str
+    signer_masked: str
+    builder_name: str
+    max_fee_rate: str
+    position_mode: str
+    available_usdt: Decimal
+    agent_expires_at_ms: int
+    paused: bool = True
+    message: str | None = None
+
+
 class ApplicationProtocol(Protocol):
     """Shared application boundary; implementations live outside Telegram."""
 
@@ -320,6 +384,14 @@ class ApplicationProtocol(Protocol):
     async def replace_direct(
         self, user_id: int, credentials: DirectCredentialsInput
     ) -> OnboardingResult: ...
+
+    async def miniapp_session(self, user_id: int) -> MiniAppSessionDTO: ...
+
+    async def builder_prepare(self, user_id: int, user_address: str) -> BuilderPrepareDTO: ...
+
+    async def builder_submit(
+        self, user_id: int, pending_id: str, signature: str
+    ) -> BuilderOnboardedDTO: ...
 
     async def update_risk(self, user_id: int, values: RiskUpdateInput) -> RiskDTO: ...
 
