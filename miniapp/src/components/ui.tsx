@@ -26,11 +26,17 @@ export function TrustRail({
   return (
     <nav className="rail" aria-label="Этапы подключения">
       {RAIL_STEPS.map((label, index) => {
-        const state = index < doneCount ? 'done' : index === active ? 'active' : ''
+        const isDone = index < doneCount
+        const isActive = index === active
+        const state = isDone ? 'done' : isActive ? 'active' : ''
         return (
-          <div key={label} className={`rail-step ${state}`}>
+          <div
+            key={label}
+            className={`rail-step ${state}`}
+            aria-current={isActive ? 'step' : undefined}
+          >
             <div className="rail-circle">
-              {index < doneCount ? (
+              {isDone ? (
                 <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden>
                   <path
                     d="M4 10.5 8.2 14.5 16 6"
@@ -107,11 +113,32 @@ export function ErrorBox({
   )
 }
 
-export function Sheet({ title, body, children }: { title: string; body: string; children: ReactNode }) {
+export function Sheet({
+  title,
+  body,
+  onClose,
+  children,
+}: {
+  title: string
+  body: string
+  onClose?: () => void
+  children: ReactNode
+}) {
   return (
-    <div className="overlay" role="dialog" aria-modal aria-label={title}>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sheet-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && onClose) {
+          onClose()
+        }
+      }}
+    >
       <div className="sheet">
-        <div className="h2">{title}</div>
+        <h2 id="sheet-title" className="h2">
+          {title}
+        </h2>
         <p className="lede">{body}</p>
         {children}
       </div>

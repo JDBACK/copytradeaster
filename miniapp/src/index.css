@@ -33,6 +33,10 @@
   box-sizing: border-box;
 }
 
+:focus-visible {
+  outline: 2px solid var(--champagne);
+  outline-offset: 2px;
+}
 html,
 body {
   margin: 0;
@@ -339,6 +343,18 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   padding: 18px 10px 6px;
+  position: relative;
+}
+
+.rail::before {
+  content: '';
+  position: absolute;
+  top: 41px;
+  left: 36px;
+  right: 36px;
+  height: 2px;
+  background: var(--border);
+  z-index: 0;
 }
 
 .rail-step {
@@ -347,6 +363,8 @@ body {
   align-items: center;
   gap: 8px;
   width: 64px;
+  position: relative;
+  z-index: 1;
 }
 
 .rail-circle {
