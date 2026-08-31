@@ -233,7 +233,7 @@ Stage 2 полностью закрыт для testnet scope.
   18 решений владельца — `STAGE3_BUILDER_MINI_APP_PART1_2026-08.md` §2).
 - [x] Спроектировать технический Stage 3 implementation/acceptance plan
   (`STAGE3_BUILDER_MINI_APP_PART1_2026-08.md`, WP0–WP5).
-- [ ] Реализовать `onboarding/builder`, Mini App presenter/transport и signed
+- [x] Реализовать `onboarding/builder`, Mini App presenter/transport и signed
   testnet acceptance; торговое ядро не переписывать.
   - [x] WP1 `onboarding/builder` (e050965); WP2 application use cases (747c6f5);
     WP3 aiohttp-транспорт (747c6f5 + 72452cf: TTL `auth_date`, home-эндпоинты,
@@ -244,8 +244,11 @@ Stage 2 полностью закрыт для testnet scope.
     зарегистрирован владельцем через Builder Center, faucet ASTER на perps;
     полный онбординг с подписью кошелька → paused-commit → сделка
     `builder+feeRate` → flat → feeRate выше капа отклонён
-    (`test_builder_mini_app_e2e.py`). Fee-стейтмент `/builder/userTrades` —
-    часть 2. Осталась ручная приёмка владельцем визара.
+    (`test_builder_mini_app_e2e.py`).
+  - [x] Ручная приёмка владельцем из Telegram: визар (WalletConnect →
+    TokenPocket → подпись) → success → home; Возобновить/Пауза работают
+    вживую (`8ce79f1`, `allow_new_entries=1`). Fee-стейтмент `/builder/userTrades`
+    и полный 4-табовый shell — часть 2.
 
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка

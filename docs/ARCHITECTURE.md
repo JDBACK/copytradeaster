@@ -214,7 +214,7 @@ production execution path. Миграции — упорядоченный сп�
 (прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). В Stage 1
 direct-набор принимается CLI-импортом (`cli/main.py`) и складывается в
 `credentials/`. В Stage 2 появился `onboarding/direct`; независимый
-`onboarding/builder` остаётся границей Stage 3.
+`onboarding/builder` реализован в Stage 3 (часть 1).
 
 Stage 2 direct-path реализован в `onboarding/direct.py`: локальная проверка
 адресов/key pair, подписанный `GET /fapi/v3/agent`, balance/position/open-order
@@ -826,7 +826,7 @@ copytradeaster/
 Tree отражает фактическую структуру после Stage 2. Отдельный
 `master/observer.py` не понадобился: рабочая граница `UserStream` +
 `MasterProjector` уже остаётся ясной, а механическое выделение файла не меняет
-архитектуру. `onboarding/builder` появится только в Stage 3.
+архитектуру. `onboarding/builder` и `miniapp/` реализованы в Stage 3 (часть 1).
 
 ## 18. Архитектурные правила проекта
 
