@@ -9,3 +9,6 @@ wallet.txt
 data/
 .coverage
 prompt-exports/2026-08-24-plan-symbol-leverage-storage.md
+miniapp/node_modules/
+miniapp/dist/
+.impeccable/
