@@ -18,7 +18,7 @@ describe('api client', () => {
     const fetchMock = mockFetch(async () => Response.json({ ok: 1 }))
     const result = await api.session(auth)
     expect(result).toEqual({ ok: 1 })
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     const headers = init.headers as Record<string, string>
     expect(headers['X-Telegram-Init-Data']).toBe('signed-data')
     expect(headers['X-Dev-User-Id']).toBe('42')
@@ -28,7 +28,7 @@ describe('api client', () => {
   it('omits dev header without devUserId', async () => {
     const fetchMock = mockFetch(async () => Response.json({}))
     await api.session({ initData: 'x' })
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect((init.headers as Record<string, string>)['X-Dev-User-Id']).toBeUndefined()
   })
 
@@ -61,7 +61,7 @@ describe('api client', () => {
   it('sends the confirmation object on resume', async () => {
     const fetchMock = mockFetch(async () => Response.json({ copy_state: 'active' }))
     await api.resume(auth, { token: 'tok', action: 'resume', account_id: 'tg-1' })
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(JSON.parse(String(init.body))).toEqual({
       confirmation: { token: 'tok', action: 'resume', account_id: 'tg-1' },
     })

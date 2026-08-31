@@ -176,6 +176,30 @@ async def register_commands(bot: Bot, *, web_app_url: str | None = None) -> None
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
+async def install_admin_webapp_buttons(bot: Bot, settings: Settings) -> None:
+    """Install the WebApp button explicitly in every admin chat.
+
+    A stale per-chat override (for example from an earlier BotFather setup)
+    beats the bot default and would hide the Mini App for exactly the people
+    who test it first.  Best effort: failures never block startup.
+    """
+    if not settings.miniapp_public_url:
+        return
+    for admin_id in settings.telegram_admin_ids:
+        try:
+            await bot.set_chat_menu_button(
+                chat_id=admin_id,
+                menu_button=MenuButtonWebApp(
+                    text="ASTER COPY",
+                    web_app=WebAppInfo(url=settings.miniapp_public_url),
+                ),
+            )
+        except AiogramError as exc:
+            logger.warning(
+                "Mini App menu button for chat %s failed (%s)", admin_id, type(exc).__name__
+            )
+
+
 async def ensure_webhook_clean(bot: Bot) -> tuple[str, str]:
     """Delete a configured webhook and re-check that polling can own updates."""
     before = await bot.get_webhook_info()
@@ -221,6 +245,7 @@ class TelegramRuntime:
                 self.bot,
                 web_app_url=self.settings.miniapp_public_url or None,
             )
+            await install_admin_webapp_buttons(self.bot, self.settings)
         except AiogramError as exc:
             # Commands/menu-button metadata is best effort; handlers remain
             # usable when Telegram temporarily rejects configuration calls.
