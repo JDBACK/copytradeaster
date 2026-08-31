@@ -1,5 +1,12 @@
 # Stage 3 Part 1 — corrective plan после независимого code/UI review
 
+> **Актуальный audit addendum (2026-09-01):** после проверки итогового кода и
+> полного signed Testnet-прогона gate остаётся открытым. Фактический вердикт и
+> точный remediation-план находятся в
+> [`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`](STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
+> Журнал выполнения ниже сохранён как историческая запись и не является
+> актуальной независимой приёмкой.
+
 Дата ревью: 2026-08-31
 Ветка: `codex/stage-3-mini-app-part1`
 Статус: **REOPENED / REQUEST CHANGES**

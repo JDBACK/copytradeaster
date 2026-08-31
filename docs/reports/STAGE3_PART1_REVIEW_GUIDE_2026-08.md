@@ -1,5 +1,11 @@
 # Stage 3, часть 1 — гайд для ревьюера (2026-08-31)
 
+> **Актуальный audit addendum (2026-09-01):** итоговый повторный прогон и
+> оставшиеся обязательные исправления зафиксированы в
+> [`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`](STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
+> Исторические claims `CLOSED` и live-counters ниже нельзя использовать без
+> этого addendum.
+
 Ветка: `codex/stage-3-mini-app-part1`. Что это: вход фолловера в копитрейд
 через Telegram Mini App с Builder-авторизацией — main-ключ пользователя не
 входит в систему, билдер генерирует и хранит signer/Agent, первая сделка
