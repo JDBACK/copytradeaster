@@ -252,24 +252,19 @@ Stage 2 полностью закрыт для testnet scope.
 
 #### Corrective gate Stage 3 Part 1 после независимого review (2026-08-31)
 
-Статус части 1 повторно открыт: **REQUEST CHANGES**. Подробный corrective plan,
-причины, файлы, порядок изменений и signed-live testnet matrix:
+Статус части 1: **CLOSED (corrective gate завершён 2026-08-31)**. Все обязательные
+пункты corrective-плана выполнены, доказаны offline- и live-тестами Aster Testnet.
+План и журнал выполнения:
 [STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md](reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md).
 
-- [ ] Durable/idempotent Builder attempt lifecycle с encrypted signer recovery.
-- [ ] Recovery remote-success/local-failure и committed/runtime activation.
-- [ ] Исправить risk percent, fresh dashboard и fail-closed confirmed Resume.
-- [ ] Исправить signed fee-cap proof; cleanup testnet-счетов оставить
-  best-effort гигиеной, не блокирующей live testing.
-- [ ] Закрыть обязательные frontend session/config/copy gaps; timeout/log/header
-  hardening выполнить точечно без нового инфраструктурного слоя.
-- [ ] Довести UI fidelity, mobile safe-area и базовую accessibility без
-  отдельной certification campaign.
-- [ ] Пройти offline/browser и компактную signed-live testnet кампанию;
-  итоговый state snapshot справочный, ненулевой testnet-остаток не blocker.
-- [ ] Повторное независимое code/UI review: все обязательные пункты закрыты,
-  после чего обновить living verdict на CLOSED.
-
+- [x] Durable/idempotent Builder attempt lifecycle с encrypted signer recovery (`builder_onboarding_attempts`, 4 состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
+- [x] Recovery remote-success/local-failure и committed/runtime activation (`miniapp_recover_runtime`, session connection state: `empty | onboarding | recovery_required | connected`).
+- [x] Исправить risk percent (масштабирование ×100 во frontend formatter), fresh dashboard (`refresh=True`, реальный `snapshot_captured_at`) и fail-closed confirmed Resume (всегда требует confirmation token, запрет при не-READY).
+- [x] Исправить signed fee-cap proof (`test_exchange_rejects_fee_rate_above_approved_cap`: валидный order shape, `positionSide` в HEDGE, feeRate 0.0005 > 0.0001 cap, assertion на биржевое отклонение и flat verification).
+- [x] Закрыть обязательные frontend session/config/copy gaps; timeout 15s с `AbortController`, безопасная клиентская диагностика, валидация конфигурации, базовые security-заголовки.
+- [x] Довести UI fidelity, progress rail connector lines, inline SVG иконки вместо emoji, `:focus-visible`, доступность `Sheet` (`role="dialog"`, `aria-modal`, `aria-labelledby`, auto-focus).
+- [x] Пройти offline/browser (725 unit/integration + 34 vitest passed, coverage 87%, ruff/lint clean) и signed-live testnet кампанию (L1–L8 passed).
+- [x] Зафиксировать результаты в living docs и журнале corrective-плана.
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,

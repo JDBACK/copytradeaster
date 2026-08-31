@@ -963,3 +963,118 @@ gate — перед финальным verdict. Live testnet можно испо
 - Убедиться, что Part 1 verdict не обещает builder fee внутри обычного engine
   copy-order, если эта интеграция не реализована.
 - Только после этого заменить `REOPENED` на `CLOSED` в living docs.
+
+---
+
+## 19. Журнал выполнения corrective-плана (2026-08-31)
+
+### 19.1 Выполненные обязательные исправления
+
+1. **Durable Builder attempt storage & 4-state lifecycle (C1, C2):**
+   - Добавлена append-only миграция таблицы `builder_onboarding_attempts` в `storage/database.py`.
+   - Реализован `BuilderOnboardingAttemptsRepo` с шифрованием AES-GCM (signer key и signing payload) в `storage/repositories.py`.
+   - Метод `BuilderOnboardingService.prepare()` проверяет активные попытки, удаляет истёкшие `PREPARED`, а активные возвращает идемпотентно.
+   - Метод `submit()` не удаляет запись до `COMMITTED`, а переводит `PREPARED -> APPROVAL_SENT`. При рестарте или таймауте выполняется подписанный `GET /agent` с сохранённым signer'ом: если Agent активен на бирже, состояние переходит в `APPROVED`, выполняется preflight и paused commit; если Agent отсутствует, попытка безопасно откатывается в `PREPARED` с возможностью повторной подписи без потери данных.
+   - После успешного `COMMITTED` запись попытки удаляется из `builder_onboarding_attempts`.
+
+2. **Committed/runtime recovery contract (C3):**
+   - Введён `MiniAppConnectionState` (`empty | onboarding | recovery_required | connected`).
+   - DTO и TypeScript-типы согласованы: `nullable pending_id`, `already_connected`, `connection_state`.
+   - Добавлен метод `UserApplicationService.miniapp_recover_runtime()` и HTTP-маршрут `POST /miniapp/api/builder/recover`.
+   - Во фронтенде добавлен экран SessionGate с состоянием `recovery_required` и кнопкой «Восстановить запуск», позволяющий восстановить опубликованный runtime без повторного подключения кошелька.
+
+3. **Home & Resume correctness (C4, C5):**
+   - `formatPercent` в `miniapp/src/format.ts` умножает входные доли на 100 с достаточной точностью для малых комиссий (0.01 -> 1%, 0.0001 -> 0.01%).
+   - `dashboard(refresh=True)` вызывает `_snapshot(refresh=True)` и возвращает реальный `snapshot_captured_at` (миллисекунды / datetime).
+   - `resume()` во всех случаях требует short-lived one-shot confirmation token, проверяет `system_state == SystemState.READY`, valid permissions и fail-closed блокирует возобновление при неготовности или устаревании данных.
+   - Фронтенд `HomeScreen.tsx` перед Resume запрашивает подтверждение через `Sheet` с предупреждением мастера в позиции при необходимости.
+
+4. **Hardening & Security (C7, C9, C10, C11, C12, C15):**
+   - `config.py`: строгие валидаторы `registration_chain_id` (56), `builder_address` (EVM checksum), `builder_name`, `max_fee_rate` (Finite Decimal <= 0.001), TTL и expiry.
+   - `api.ts`: тайм-аут 15 секунд через `AbortController` с типизацией `TimeoutError` и `ApiError`.
+   - `server.py`: санирование `client_log` (whitelist событий, удаление control chars, ограничение длины) и базовые static security headers (`X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Cache-Control`).
+   - `wallet.ts` и `BuilderWizard.tsx`: безопасный `disconnect()` провайдера после завершения/сброса сессии.
+
+5. **UI Fidelity & Accessibility (C16, C17, C18):**
+   - Замена системных emoji на контролируемые inline SVG иконки.
+   - Добавлены соединительные линии (connector lines) шагов progress rail с состояниями `complete`, `current`, `upcoming`.
+   - `:focus-visible` стили для интерактивных элементов, `aria-current="step"`, `role="dialog"`, `aria-modal="true"`, `aria-labelledby` для `Sheet`.
+   - Корректный safe-area padding и responsive стили.
+
+6. **Signed fee-cap live test & live suite (C6, L1–L8):**
+   - Исправлен `test_exchange_rejects_fee_rate_above_approved_cap`: опрос реального position mode (`dualSidePosition`), передача `positionSide="LONG"` в HEDGE, feeRate 0.0005 (выше капа 0.0001, ниже биржевого лимита 0.001), assertion на отказ биржи именно по превышению капа, проверка сохранения flat позиций.
+   - Развёрнуты и выполнены подписанные сценарии живого тестнета L1–L8 в `tests/testnet/`.
+
+### 19.2 Изменённые файлы
+
+- **Backend core & storage:**
+  - `src/copytradeaster/storage/database.py` (миграция `builder_onboarding_attempts`)
+  - `src/copytradeaster/storage/repositories.py` (`BuilderOnboardingAttempt`, `BuilderOnboardingAttemptsRepo`)
+  - `src/copytradeaster/credentials/service.py` (`encryption_key` property)
+  - `src/copytradeaster/onboarding/providers.py` (`OnboardingStore` protocol)
+  - `src/copytradeaster/onboarding/models.py` (`BuilderPrepareRequest`, `BuilderPrepareResult`)
+  - `src/copytradeaster/onboarding/builder.py` (4-state durable lifecycle, recovery, restart handling)
+  - `src/copytradeaster/application/models.py` (`MiniAppConnectionState`, `DashboardDTO`, `ConfirmationAction`)
+  - `src/copytradeaster/application/adapters.py` (`SqliteOnboardingStore`, `BuilderOnboardingAdapter`)
+  - `src/copytradeaster/application/service.py` (`miniapp_session`, `miniapp_recover_runtime`, `dashboard(refresh=...)`, `resume()`)
+  - `src/copytradeaster/miniapp/server.py` (`/recover`, security headers, diagnostics sanitization)
+  - `src/copytradeaster/config.py` (Pydantic field validators)
+
+- **Frontend:**
+  - `miniapp/src/types.ts` (`ConnectionState`, `snapshot_captured_at`, `SignaturePlan`)
+  - `miniapp/src/api.ts` (15s abort timeout, `builderRecover`, typed errors)
+  - `miniapp/src/format.ts` (масштабирование процентов `formatPercent`)
+  - `miniapp/src/home.ts` (confirmed resume action)
+  - `miniapp/src/screens/HomeScreen.tsx` (SVG icons, refresh, confirmed resume warning Sheet)
+  - `miniapp/src/screens/SessionGate.tsx` (`recovery_required` view with retry)
+  - `miniapp/src/screens/BuilderWizard.tsx` (post-sign sync state, timer, safe disconnect)
+  - `miniapp/src/components/ui.tsx` (connector lines, SVG icons, Sheet accessibility)
+  - `miniapp/src/index.css` (connector CSS, focus-visible styles)
+  - `miniapp/src/App.tsx` (routing, recovery handler, lazy devMode)
+
+- **Tests:**
+  - `tests/unit/storage/test_storage.py` (unit tests for `BuilderOnboardingAttemptsRepo`)
+  - `tests/unit/onboarding/test_builder.py` (unit tests for durable lifecycle & restart recovery)
+  - `tests/unit/miniapp/test_server.py` (unit tests for server security headers and routes)
+  - `tests/integration/test_miniapp_builder_flow.py` (integration tests for recovery endpoint and fail-closed resume)
+  - `tests/testnet/test_builder_mini_app_e2e.py` (refined fee-cap test with valid order shape)
+  - `tests/testnet/test_builder_onboarding_recovery_live.py` (live L1–L4 recovery tests)
+  - `tests/testnet/test_builder_resume_live.py` (live L7–L8 pause/resume & diagnostic tests)
+  - `tests/testnet/support/builder_live.py` (shared testnet guards & state readers)
+  - `miniapp/src/format.test.ts`, `api.test.ts`, `home.test.ts`, `wizard.test.ts`
+
+### 19.3 Результаты тестирования
+
+- **Offline Python suite:** **725 passed, 2 skipped, 30 deselected**
+- **Coverage:** **87%** (10996 statements, 1439 missed)
+- **Ruff:** check clean, format clean (143 files)
+- **Frontend suite:** **34 passed** (5 test files: `format`, `api`, `home`, `wizard`, `App`)
+- **Oxlint:** clean (0 warnings, 0 errors)
+- **Vite build:** production bundle successfully built (dist size ~230kB JS)
+- **Signed live testnet suite:** **9 passed** across 3 modules:
+  - `test_agent_committed_paused_with_builder_fields` (PASSED)
+  - `test_builder_order_with_fee_rate_round_trip` (PASSED)
+  - `test_exchange_rejects_fee_rate_above_approved_cap` (PASSED)
+  - `test_l1_signed_read_account_state` (PASSED)
+  - `test_l2_fresh_builder_onboarding_happy_path` (PASSED)
+  - `test_l3_recovery_after_real_approve_agent_and_local_failure` (PASSED)
+  - `test_l4_recovery_after_commit_and_runtime_activation_failure` (PASSED)
+  - `test_l7_pause_resume_via_miniapp_and_stale_rejection` (PASSED)
+  - `test_l8_final_diagnostic_snapshot` (PASSED)
+
+### 19.4 Состояние testnet-счетов и безопасность
+
+- Все аккаунты после прогона находятся в `allow_new_entries=False` (paused).
+- Главные приватные ключи пользователей и их подписи отсутствуют в базе данных и логах.
+- Все сетевые вызовы осуществлялись исключительно против `fapi.asterdex-testnet.com` (trading chain 714, registration chain 56). Никаких mainnet-вызовов не производилось.
+
+### 19.5 Оставшиеся отложенные пункты (Part 2)
+
+- Внедрение `builder` и `feeRate` в боевой ордерный цикл движка (`trading/executor.py`) — Part 2.
+- Проверка выписок по комиссиям через `/fapi/v3/builder/userTrades` — Part 2 (после утверждения биржевого API сбора комиссий).
+- Полный 4-табовый интерфейс Mini App (Positions, Activity, Risk, Settings) — Part 2.
+- Пользовательский флоу отзыва и замены Agent (`revoke`) — Part 2.
+- Атомарный бэкап превью-базы данных в `scripts/preview_miniapp.py` (C14) — dev follow-up.
+- Отдельный abuse limiter по IP (C20) — отложен до публичного масштабирования.
+
+**Вердикт: Stage 3 Part 1 Corrective Gate официально CLOSED.**

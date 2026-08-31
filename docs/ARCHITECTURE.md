@@ -206,7 +206,7 @@ production execution path. Миграции — упорядоченный сп�
 Приватные signer keys в БД хранятся только зашифрованными (AESGCM, ключ вне БД:
 `CT_ENCRYPTION_KEY`). Реализация: `credentials/service.py` + `credentials/crypto.py`.
 
-Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder signer-ключи генерирует и хранит билдер — приватные ключи фолловера в систему не попадают. Для этого пути `credentials/` не используется; торговый core получает builder-идентичность (builderId, feeRate) через тот же TradingIdentity.
+Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder сгенерированный signer-ключ шифруется и персистится в `credentials/` после успешного commit, а главный приватный ключ пользователя в backend никогда не передаётся и не сохраняется. До момента commit промежуточное состояние онбординга хранится в таблице `builder_onboarding_attempts` (состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
 
 ### `onboarding/`
 
@@ -214,7 +214,7 @@ production execution path. Миграции — упорядоченный сп�
 (прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). В Stage 1
 direct-набор принимается CLI-импортом (`cli/main.py`) и складывается в
 `credentials/`. В Stage 2 появился `onboarding/direct`; независимый
-`onboarding/builder` реализован в Stage 3 (часть 1).
+durable `onboarding/builder` реализован в Stage 3 (часть 1).
 
 Stage 2 direct-path реализован в `onboarding/direct.py`: локальная проверка
 адресов/key pair, подписанный `GET /fapi/v3/agent`, balance/position/open-order

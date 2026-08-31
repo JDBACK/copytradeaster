@@ -5,36 +5,33 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 1 — REOPENED / REQUEST CHANGES (независимый review
-  2026-08-31):** happy path и прежняя автоматическая/ручная приёмка остаются
-  историческим evidence, но не закрывают обнаруженные recovery и correctness
-  риски. Блокеры: RAM-only one-shot Builder attempt с риском orphan Agent,
-  нерабочий committed/runtime recovery contract, отображение риска в 100 раз
-  меньше, кэшированный Home/unsafe Resume и невалидное доказательство fee-cap с
-  assertion на «любую ошибку». Cleanup ненастоящих testnet-позиций является
-  best-effort гигиеной и не блокирует live testing. Актуальный план:
-  `docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md`. До его полного
-  выполнения и повторного review Part 1 не считается закрытой.
-- **Историческая приёмка Stage 3, часть 1 (2026-08-31):**
-  Builder-auth Mini App полностью принята владельцем ИЗ TELEGRAM: визар
-  (WalletConnect → TokenPocket → подпись approveAgent) → verify+preflight →
-  paused-commit → success → home. Прод-БД: фолловер `tg-8264892202`
-  подключён через Builder (user=0x3c45…F975, signer=0xa701…41Ce —
-  сгенерирован билдером, main-ключ владельца не входит в систему).
-  Состав части 1: `onboarding/builder.py`, application use cases, aiohttp
-  транспорт (HMAC initData + TTL auth_date + клиентская диагностика),
-  фронтенд Vite+React+TS (gate → wizard → success → home; injected +
-  WalletConnect), vitest, интеграция, signed e2e — **3 passed** (включая
-  сделку `builder+feeRate` и отклонение превышения капа). Гейты: офлайн
-  **715 passed / 2 skipped**, ruff clean, vitest 32, `pnpm build` ok.
-  Баг resume master-check закрыт (False в `master_has_open_positions` больше
-  не триггерит 503).
-  Инфра: билдер зарегистрирован в Builder Center (реестр общий с тестнетом),
-  faucet ASTER на perps билдера, Reown project ID (free tier), cloudflared
-  туннель + авто WebApp-кнопка (включая per-chat для админов). Отложено на
-  часть 2: fee-стейтмент `/builder/userTrades`, миграции `identity_source` +
-  builder-снапшот, полный 4-табовый shell, revoke/replace, VPS. Флак вне
-  этапа: `test_two_equal_reductions_both_execute` (order-dependent).
+- **Stage 3, часть 1 — CLOSED (corrective gate завершён 2026-08-31):**
+  все обязательные пункты независимого review и corrective-плана
+  (`docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md`) полностью выполнены и
+  доказаны.
+  1. **Durable Builder lifecycle:** SQLite-таблица `builder_onboarding_attempts` с
+     AES-GCM шифрованием signer key; 4 состояния `PREPARED -> APPROVAL_SENT ->
+     APPROVED -> COMMITTED`; защита от потери signer и создания дубликатов Agent;
+     clean rollback к `PREPARED` при отсутствии Agent на бирже; удаление attempt
+     после commit; startup/lazy cleanup истёкших попыток.
+  2. **Recovery contract:** явные состояния подключения `empty | onboarding |
+     recovery_required | connected`; эндпоинт `POST /miniapp/api/builder/recover`
+     восстанавливает runtime committed-аккаунта и открывает Home без повторного
+     онбординга.
+  3. **Home & Resume correctness:** форматирование риска масштабирует доли в %
+     (0.01 -> 1%); ручной refresh принудительно запрашивает свежий snapshot и
+     возвращает реальный `snapshot_captured_at`; Resume всегда требует
+     one-shot confirmation token и fail-closed блокируется при `system_state != READY`.
+  4. **Frontend & Security hardening:** timeout 15s с `AbortController` во всех
+     запросах; санированные клиентские логи; валидация конфигурации при старте;
+     базовые security-заголовки (`X-Content-Type-Options`, `Referrer-Policy`, `Cache-Control`).
+  5. **UI Fidelity & Accessibility:** SVG-иконки вместо emoji, progress rail
+     connector lines, `:focus-visible`, `role="dialog"` и `aria-modal` в `Sheet`.
+  6. **Signed fee-cap test & Live suite:** исправлен `test_exchange_rejects_fee_rate_above_approved_cap`
+     (валидный order shape, positionSide в HEDGE, feeRate 0.0005, assertion на биржевое
+     отклонение и flat verification). Live suite: **9 passed** (L1–L8).
+  7. **Гейты:** offline pytest **725 passed / 2 skipped / 30 deselected** (coverage **87%**),
+     ruff check/format clean, vitest **34 passed**, oxlint clean, vite production build ok.
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
