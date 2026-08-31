@@ -33,16 +33,44 @@ function authHeaders(auth: AuthContext): Record<string, string> {
   return headers
 }
 
-export async function post<T>(path: string, body: unknown, auth: AuthContext): Promise<T> {
+const DEFAULT_TIMEOUT_MS = 15_000
+
+export async function post<T>(
+  path: string,
+  body: unknown,
+  auth: AuthContext,
+  options?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<T> {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort('timeout'), timeoutMs)
+
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      clearTimeout(timeoutId)
+      throw new ApiError(0, 'aborted', 'Запрос отменён.')
+    }
+    options.signal.addEventListener('abort', () => controller.abort('aborted'), { once: true })
+  }
+
   let response: Response
   try {
     response = await fetch(path, {
       method: 'POST',
       headers: authHeaders(auth),
       body: JSON.stringify(body ?? {}),
+      signal: controller.signal,
     })
   } catch {
+    if (controller.signal.aborted) {
+      if (options?.signal?.aborted) {
+        throw new ApiError(0, 'aborted', 'Запрос отменён.')
+      }
+      throw new ApiError(0, 'timeout_error', 'Время ожидания ответа сервера истекло. Попробуйте снова.')
+    }
     throw new ApiError(0, 'network_error', 'Нет связи с сервером. Проверьте интернет.')
+  } finally {
+    clearTimeout(timeoutId)
   }
   const data: unknown = await response.json().catch(() => null)
   if (!response.ok) {
@@ -55,12 +83,15 @@ export async function post<T>(path: string, body: unknown, auth: AuthContext): P
   }
   return data as T
 }
-
 export const api = {
-  session: (auth: AuthContext) => post<MiniAppSessionDTO>('/miniapp/api/session', {}, auth),
+  session: (auth: AuthContext, options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+    post<MiniAppSessionDTO>('/miniapp/api/session', {}, auth, options),
 
-  dashboard: (auth: AuthContext) => post<DashboardDTO>('/miniapp/api/dashboard', {}, auth),
-
+  dashboard: (
+    auth: AuthContext,
+    refresh = false,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<DashboardDTO>('/miniapp/api/dashboard', { refresh }, auth, options),
   pause: (auth: AuthContext) => post<DashboardDTO>('/miniapp/api/pause', {}, auth),
 
   resume: (auth: AuthContext, confirmation?: ConfirmationDTO) =>
@@ -78,6 +109,11 @@ export const api = {
       { pending_id: pendingId, signature },
       auth,
     ),
+  builderRecover: (
+    auth: AuthContext,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<MiniAppSessionDTO>('/miniapp/api/builder/recover', {}, auth, options),
+
 
   /** Fire-and-forget diagnostics: lands in the operator's server log. */
   clientLog: (

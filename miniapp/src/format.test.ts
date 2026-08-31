@@ -8,9 +8,12 @@ describe('russian formatting', () => {
     expect(formatFeeRate(0.0005)).toBe('до 0,05%')
   })
 
-  it('renders risk percent', () => {
-    expect(formatPercent('1.5')).toBe('1,5%')
-    expect(formatPercent(2)).toBe('2%')
+  it('renders risk percent from fractional domain values', () => {
+    expect(formatPercent('0.01')).toBe('1%')
+    expect(formatPercent('0.015')).toBe('1,5%')
+    expect(formatPercent('0.0001')).toBe('0,01%')
+    expect(formatPercent(0)).toBe('0%')
+    expect(formatPercent('1')).toBe('100%')
     expect(formatPercent(null)).toBe('—')
     expect(formatPercent('garbage')).toBe('—')
   })

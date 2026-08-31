@@ -3,7 +3,7 @@ import { api, ApiError, type AuthContext } from './api'
 
 const auth: AuthContext = { initData: 'signed-data', devUserId: 42 }
 
-function mockFetch(impl: () => Promise<Response>) {
+function mockFetch(impl: (url?: string, init?: RequestInit) => Promise<Response>) {
   const fetchMock = vi.fn(impl)
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -65,5 +65,41 @@ describe('api client', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       confirmation: { token: 'tok', action: 'resume', account_id: 'tg-1' },
     })
+  })
+
+  it('calls builderRecover endpoint correctly', async () => {
+    const fetchMock = mockFetch(async () =>
+      Response.json({ access_state: 'approved', connection_state: 'connected' }),
+    )
+    const result = await api.builderRecover(auth)
+    expect(result.connection_state).toBe('connected')
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/miniapp/api/builder/recover')
+  })
+
+  it('aborts on timeout and throws timeout_error', async () => {
+    vi.useFakeTimers()
+    try {
+      mockFetch((_url?: string, init?: RequestInit) => {
+        let rejectPromise: ((reason?: unknown) => void) | undefined
+        const promise = new Promise<Response>((_, reject) => {
+          rejectPromise = reject
+        })
+        const signal = init?.signal
+        signal?.addEventListener('abort', () => {
+          const err = new Error('aborted')
+          err.name = 'AbortError'
+          if (rejectPromise) rejectPromise(err)
+        })
+        return promise
+      })
+      const pending = api.dashboard(auth, false, { timeoutMs: 100 })
+      vi.advanceTimersByTime(150)
+      const err = (await pending.catch((e: unknown) => e)) as ApiError
+      expect(err.code).toBe('timeout_error')
+      expect(err.message).toContain('истекло')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

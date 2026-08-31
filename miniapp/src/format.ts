@@ -11,9 +11,10 @@ export function formatFeeRate(value: string | number): string {
 
 export function formatPercent(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '—'
-  const num = typeof value === 'string' ? Number(value) : value
-  if (!Number.isFinite(num)) return '—'
-  return `${num.toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`
+  const rate = typeof value === 'string' ? Number(value) : value
+  if (!Number.isFinite(rate)) return '—'
+  const percent = rate * 100
+  return `${percent.toLocaleString('ru-RU', { maximumFractionDigits: 4 })}%`
 }
 
 export function formatUsdt(value: string | number | null | undefined): string {
