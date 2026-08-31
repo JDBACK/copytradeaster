@@ -1988,7 +1988,14 @@ class UserApplicationService:
             raise ServiceUnavailableError("pause operation is unavailable") from None
 
     async def _master_requires_confirmation(self) -> bool:
-        return bool(await self._call_required(self._runtime, "master_has_open_positions"))
+        getter = getattr(self._runtime, "master_has_open_positions", _MISSING)
+        if getter is _MISSING:
+            raise ServiceUnavailableError("required application operation is unavailable")
+        if callable(getter):
+            result = await _maybe_await(getter())
+        else:
+            result = getter
+        return bool(result)
 
     async def _resume_account(
         self,
@@ -2129,17 +2136,7 @@ class UserApplicationService:
             )
         except _SAFE_ERRORS:
             raise
-        except Exception as exc:
-            # Temporary field diagnostics (part-1 acceptance): log every
-            # failure class including safe ones, then keep the typed boundary.
-            log.warning(
-                "resume failed user=%s class=%s detail=%s",
-                user_id,
-                type(exc).__name__,
-                str(exc)[:160],
-            )
-            if isinstance(exc, _SAFE_ERRORS):
-                raise
+        except Exception:
             raise ServiceUnavailableError("resume operation is unavailable") from None
 
     async def begin_confirmation(

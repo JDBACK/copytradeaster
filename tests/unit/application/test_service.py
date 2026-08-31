@@ -1075,6 +1075,17 @@ async def test_global_pause_resume_are_durable_and_reopen_admission(environment)
     assert ("resume_entries",) in runtime.actions
 
 
+async def test_resume_without_confirmation_when_master_has_no_positions(environment):
+    db, runtime, _, _, service = environment
+    runtime.master_has_positions = False
+    await service.pause(7)
+    assert (await SettingsRepo(db).get_policy("tg-7")).allow_new_entries is False
+
+    dashboard = await service.resume(7)
+    assert dashboard.copy_state is CopyState.ACTIVE
+    assert (await SettingsRepo(db).get_policy("tg-7")).allow_new_entries is True
+
+
 async def test_resume_safety_rejects_manual_or_external_state_without_reopen(environment):
     db, runtime, _, _, service = environment
     runtime.fail_resume_safety = StaleOperationError("manual state")
