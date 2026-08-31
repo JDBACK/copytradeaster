@@ -299,9 +299,13 @@ def create_miniapp_app(
         async def index(_request: web.Request) -> web.FileResponse:
             return web.FileResponse(Path(static_dir) / "index.html")  # type: ignore[arg-type]
 
-        app.router.add_static("/miniapp/", Path(static_dir))
+        # Route order matters: aiohttp resolves resources in registration
+        # order, so the index handlers must be added before the static mount
+        # or the static router answers /miniapp/ with 403 (no directory
+        # listing).
         app.router.add_get("/miniapp", index)
         app.router.add_get("/miniapp/", index)
+        app.router.add_static("/miniapp/", Path(static_dir))
     else:
         log.warning("miniapp static dir not configured or missing; API-only mode")
 

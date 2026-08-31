@@ -466,3 +466,25 @@ async def test_confirmation_begin_rejects_forbidden_action(client, fake_app):
     )
     assert resp.status == 403
     assert fake_app.begin_calls == []
+
+
+# --- static bundle serving ----------------------------------------------------
+
+
+async def test_static_index_is_served_before_the_static_mount(tmp_path):
+    (tmp_path / "index.html").write_text("<html>aster-copy</html>", encoding="utf-8")
+    settings = _settings(miniapp_static_dir=tmp_path)
+    app = create_miniapp_app(settings, fake_app)
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        for path in ("/miniapp/", "/miniapp"):
+            resp = await client.get(path)
+            assert resp.status == 200
+            assert "aster-copy" in await resp.text()
+        # Unknown paths stay inside the static mount (SPA assets resolve there).
+        missing = await client.get("/miniapp/assets/none.js")
+        assert missing.status == 404
+    finally:
+        await client.close()
