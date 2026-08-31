@@ -110,12 +110,13 @@ fee-стейтмент (недокументированный auth), mainnet.
 | 14 | Resume отклонён: `emergency_active=true` из истории | штатный CLI resume (флаг персистентен by design) |
 | 15 | Биржа: `Builder address not registered` / `has no ASTER balance` | продуктовые шаги: регистрация в Builder Center (реестр общий — доказано зондом) + faucet ≥100 ASTER на perps билдера |
 | 16 | Тайминг-флак `test_two_equal_reductions_both_execute` | задокументирован (order-dependent, вне этапа) |
+| 17 | **Resume в Mini App возвращал 503 (`service_unavailable`)** | `_master_requires_confirmation` использовал `_call_required`, который трактовал `False` (0 позиций у мастера) как ошибку операции. Исправлено чтением статуса напрямую (`8ce79f1`); кнопка успешно принята владельцем в Telegram (`result=success state=resumed`). |
 
 ## 6. Как гнать тесты
 
 ```bash
 # офлайн-гейт (быстро, без сети)
-.venv/bin/python -m pytest -q -m "not testnet"          # 714 passed / 2 skipped
+.venv/bin/python -m pytest -q -m "not testnet"          # 715 passed / 2 skipped
 .venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .
 
 # фронт

@@ -3,12 +3,11 @@
 Дата старта: 2026-08-31
 
 Статус: **часть 1 закрыта 2026-08-31** — реализация, signed e2e (3 passed,
-живой тестнет) и ручная приёмка владельцем из Telegram (WalletConnect →
-TokenPocket → подпись → paused-commit → home). Design-этап закрыт в
-`STAGE3_MINI_APP_UX_PLAN_2026-08.md`. Гайд для ревьюера:
-`STAGE3_PART1_REVIEW_GUIDE_2026-08.md`. Открытый пункт приёмки: resume
-билдер-фолловера из мини-апа возвращает service_unavailable (диагностика
-в логе; direct-путь в боте не затронут) — разбирается отдельно.
+живой тестнет), ручная приёмка владельцем из Telegram (WalletConnect →
+TokenPocket → подпись → paused-commit → home) и успешный resume из
+мини-апа (баг master-check устранён в `8ce79f1`, `allow_new_entries=1`
+подтверждён аудитом). Design-этап закрыт в `STAGE3_MINI_APP_UX_PLAN_2026-08.md`.
+Гайд для ревьюера: `STAGE3_PART1_REVIEW_GUIDE_2026-08.md`. Открытых блокеров нет.
 
 Среда: только Aster Futures testnet (`fapi.asterdex-testnet.com`)
 
