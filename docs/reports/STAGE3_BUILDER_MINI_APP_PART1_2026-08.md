@@ -110,6 +110,25 @@ read-only `PositionPageDTO`, risk constraints, revoke/disconnect-семанти�
 
 ## 6. Журнал
 
+### 2026-08-31 (ручная приёмка владельцем — принята)
+
+- Reown project ID получен (free tier), WalletConnect активирован
+  (`VITE_WC_PROJECT_ID`, git-ignored local env);
+- fixes по ходу приёмки: дубль кнопки подключения; клиентская диагностика
+  `POST /miniapp/api/client-log` (ошибки фронта падают в лог оператора с
+  кодом и причиной); текст `wallet_unavailable`; код ошибки виден в боксе;
+- WC-адаптер: явный `provider.connect()` (иначе «Please call connect()
+  before request()»); модалка выбора кошельков открывается в Telegram;
+- `.env`: прописан `CT_BUILDER_ADDRESS` (бот валидировал конфиг до этого);
+- **РУЧНАЯ ПРИЁМКА ИЗ TELEGRAM ПРОЙДЕНА владельцем**: второй аккаунт
+  (direct из stage 2) отключён в боте → визар из Telegram → WalletConnect →
+  TokenPocket → подпись approveAgent → verify+preflight → commit paused →
+  success → home. Прод-БД: `tg-8264892202` user=0x3c45…F975 (кошелёк
+  владельца), signer=0xa701…41Ce (сгенерирован билдером), chain 714, paused.
+- **ЧАСТЬ 1 ЗАКРЫТА** (автоматика + ручная приёмка). Известные отложенные
+  пункты: fee-стейтмент `/builder/userTrades` (недокументированный auth) и
+  `identity_source`+builder-снапшот миграция — часть 2.
+
 ### 2026-08-31 (третья сессия — WP5, живой тестнет)
 
 - владелец передал основной evm-ключ копика (совпал с copyc2) — e2e

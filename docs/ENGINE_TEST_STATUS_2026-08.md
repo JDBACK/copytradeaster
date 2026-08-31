@@ -5,22 +5,24 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 1 — в разработке (ветка `codex/stage-3-mini-app-part1`):**
-  Builder-auth Mini App. Готовы WP0–WP5: ядро Builder-онбординга
-  (`onboarding/builder.py`), application use cases, aiohttp-транспорт
-  (HMAC initData + TTL `auth_date`, home-эндпоинты, dev-сессия, авто
-  WebApp-кнопка), фронтенд Vite+React+TS (gate → wizard → success → home;
-  injected + WalletConnect-шов), vitest, интеграция полного flow,
-  **signed e2e на живом тестнете — 3 passed**: builder-онбординг с подписью
-  кошелька реального пользователя → paused-commit → сделка
-  `builder+feeRate=0.0001` исполнена биржей (HEDGE round-trip, flat) →
-  feeRate выше капа отклонён. Билдер зарегистрирован владельцем через
-  Builder Center (реестр общий с тестнетом), faucet ASTER на perps билдера
-  залит. Fee-стейтмент (`/builder/userTrades`) — часть 2 (недокументированный
-  auth). Offline gate: **714 passed / 2 skipped**, ruff clean; vitest **32**.
-  Осталось: ручная приёмка владельцем визара из браузера с MetaMask и/или
-  из Telegram (после Reown project ID). Известный флак вне этапа:
-  `test_two_equal_reductions_both_execute` (order-dependent).
+- **Stage 3, часть 1 — ЗАКРЫТА (2026-08-31, автоматика + ручная приёмка):**
+  Builder-auth Mini App полностью принята владельцем ИЗ TELEGRAM: визар
+  (WalletConnect → TokenPocket → подпись approveAgent) → verify+preflight →
+  paused-commit → success → home. Прод-БД: фолловер `tg-8264892202`
+  подключён через Builder (user=0x3c45…F975, signer=0xa701…41Ce —
+  сгенерирован билдером, main-ключ владельца не входит в систему).
+  Состав части 1: `onboarding/builder.py`, application use cases, aiohttp
+  транспорт (HMAC initData + TTL auth_date + клиентская диагностика),
+  фронтенд Vite+React+TS (gate → wizard → success → home; injected +
+  WalletConnect), vitest, интеграция, signed e2e — **3 passed** (включая
+  сделку `builder+feeRate` и отклонение превышения капа). Гейты: офлайн
+  **714 passed / 2 skipped**, ruff clean, vitest 32, `pnpm build` ok.
+  Инфра: билдер зарегистрирован в Builder Center (реестр общий с тестнетом),
+  faucet ASTER на perps билдера, Reown project ID (free tier), cloudflared
+  туннель + авто WebApp-кнопка (включая per-chat для админов). Отложено на
+  часть 2: fee-стейтмент `/builder/userTrades`, миграции `identity_source` +
+  builder-снапшот, полный 4-табовый shell, revoke/replace, VPS. Флак вне
+  этапа: `test_two_equal_reductions_both_execute` (order-dependent).
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
