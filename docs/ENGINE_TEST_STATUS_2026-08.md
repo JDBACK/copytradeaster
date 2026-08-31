@@ -16,7 +16,9 @@
   фронтенд Vite+React+TS (gate → wizard → success → home; injected +
   WalletConnect), vitest, интеграция, signed e2e — **3 passed** (включая
   сделку `builder+feeRate` и отклонение превышения капа). Гейты: офлайн
-  **714 passed / 2 skipped**, ruff clean, vitest 32, `pnpm build` ok.
+  **715 passed / 2 skipped**, ruff clean, vitest 32, `pnpm build` ok.
+  Баг resume master-check закрыт (False в `master_has_open_positions` больше
+  не триггерит 503).
   Инфра: билдер зарегистрирован в Builder Center (реестр общий с тестнетом),
   faucet ASTER на perps билдера, Reown project ID (free tier), cloudflared
   туннель + авто WebApp-кнопка (включая per-chat для админов). Отложено на
