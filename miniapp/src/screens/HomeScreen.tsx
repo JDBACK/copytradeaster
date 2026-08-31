@@ -21,19 +21,22 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
   const [error, setError] = useState<string | null>(null)
   const [pendingConfirmation, setPendingConfirmation] = useState<ConfirmationDTO | null>(null)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (isUserTriggered = false) => {
+    if (isUserTriggered) setActing(true)
     try {
-      const dashboard = await api.dashboard(auth)
+      const dashboard = await api.dashboard(auth, isUserTriggered)
       if (dashboard.copy_state === 'empty') {
         onNotConnected()
         return
       }
       setLoad({ kind: 'ready', dashboard })
+      setError(null)
     } catch (err) {
       setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
+    } finally {
+      if (isUserTriggered) setActing(false)
     }
   }, [auth, onNotConnected])
-
   useEffect(() => {
     // Initial data fetch: refresh() only sets state after await (async), so
     // this is the standard external-system sync, not a cascading render.
@@ -56,7 +59,26 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
     }
   }
 
-  async function resume(confirmation?: ConfirmationDTO) {
+  async function handleStartResume() {
+    if (load.kind !== 'ready') return
+    if (load.dashboard.system_state !== 'ready') {
+      setError('stale_operation')
+      return
+    }
+    setActing(true)
+    setError(null)
+    try {
+      const pending = await api.beginConfirmation(auth, 'resume')
+      setPendingConfirmation(pending)
+    } catch (err) {
+      hapticNotify('error')
+      setError(err instanceof ApiError ? err.code : 'network_error')
+    } finally {
+      setActing(false)
+    }
+  }
+
+  async function handleConfirmResume(confirmation: ConfirmationDTO) {
     setActing(true)
     setError(null)
     try {
@@ -65,19 +87,9 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
       setPendingConfirmation(null)
       setLoad({ kind: 'ready', dashboard })
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'confirmation_expired' && !confirmation) {
-        // Master is in a position: the app requires an explicit confirmation.
-        try {
-          const pending = await api.beginConfirmation(auth, 'resume')
-          setPendingConfirmation(pending)
-        } catch (beginErr) {
-          setError(beginErr instanceof ApiError ? beginErr.code : 'network_error')
-        }
-      } else {
-        hapticNotify('error')
-        setError(err instanceof ApiError ? err.code : 'network_error')
-        setPendingConfirmation(null)
-      }
+      hapticNotify('error')
+      setError(err instanceof ApiError ? err.code : 'network_error')
+      setPendingConfirmation(null)
     } finally {
       setActing(false)
     }
@@ -136,7 +148,27 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
 
       <section className="panel state-card">
         <div className="state-icon" aria-hidden>
-          {view.tone === 'active' ? '✓' : view.tone === 'paused' ? '⏸' : '!'}
+          {view.tone === 'active' ? (
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M5 12.5 9.5 17 19 7"
+                stroke="var(--success)"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          ) : view.tone === 'paused' ? (
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+              <rect x="6" y="5" width="4" height="14" rx="1.5" fill="var(--warning)" />
+              <rect x="14" y="5" width="4" height="14" rx="1.5" fill="var(--warning)" />
+            </svg>
+          ) : (
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="var(--danger)" strokeWidth="2" />
+              <path d="M12 8v5M12 16h.01" stroke="var(--danger)" strokeWidth="2.2" strokeLinecap="round" />
+            </svg>
+          )}
         </div>
         <h1 className="h1" style={{ margin: 0 }}>
           {view.title}
@@ -150,7 +182,8 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
         </div>
         <div className="freshness">
           <span className={`dot ${systemDot}`} aria-hidden />
-          Система: {systemLabel(dashboard.system_state)} · Обновлено {formatTime(dashboard.updated_at)}
+          Система: {systemLabel(dashboard.system_state)} · Снимок:{' '}
+          {formatTime(dashboard.snapshot_captured_at || dashboard.updated_at)}
         </div>
       </section>
 
@@ -172,7 +205,17 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
       {view.actionLabel === 'pause' && (
         <div className="btn-stack">
           <button type="button" className="btn btn-primary" disabled={acting} onClick={() => void pause()}>
-            {acting ? 'Ставим на паузу…' : '⏸ Поставить на паузу'}
+            {acting ? (
+              'Ставим на паузу…'
+            ) : (
+              <>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <rect x="6" y="4" width="4" height="16" rx="1.5" />
+                  <rect x="14" y="4" width="4" height="16" rx="1.5" />
+                </svg>
+                Поставить на паузу
+              </>
+            )}
           </button>
           <p className="footer-note">Пауза останавливает только новые входы — защита продолжит работать.</p>
         </div>
@@ -183,15 +226,24 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
           <button
             type="button"
             className="btn btn-primary"
-            disabled={acting}
-            onClick={() => void resume()}
+            disabled={acting || dashboard.system_state !== 'ready'}
+            onClick={() => void handleStartResume()}
           >
-            {acting ? 'Возобновляем…' : '▶ Возобновить'}
+            {acting ? (
+              'Загрузка…'
+            ) : (
+              <>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M7 5.5v13a1 1 0 0 0 1.5.86l11-6.5a1 1 0 0 0 0-1.72l-11-6.5A1 1 0 0 0 7 5.5Z" />
+                </svg>
+                Возобновить
+              </>
+            )}
           </button>
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={() => void refresh()}
+            onClick={() => void refresh(true)}
             disabled={acting}
           >
             Обновить данные
@@ -201,8 +253,13 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
 
       {view.actionLabel === null && (
         <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh()}>
-            Обновить данные
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={acting}
+            onClick={() => void refresh(true)}
+          >
+            {acting ? 'Обновляем…' : 'Обновить данные'}
           </button>
         </div>
       )}
@@ -213,9 +270,9 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
             type="button"
             className="btn btn-primary"
             disabled={acting}
-            onClick={() => void resume(pendingConfirmation)}
+            onClick={() => void handleConfirmResume(pendingConfirmation)}
           >
-            Подтвердить возобновление
+            {acting ? 'Возобновляем…' : 'Подтвердить возобновление'}
           </button>
           <button
             type="button"
@@ -234,9 +291,9 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
 function systemLabel(state: DashboardDTO['system_state']): string {
   switch (state) {
     case 'ready':
-      return 'в порядке'
+      return 'готова'
     case 'stale':
-      return 'обновляется'
+      return 'данные устарели'
     case 'degraded':
       return 'деградация'
     case 'blocked':

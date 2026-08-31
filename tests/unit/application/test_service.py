@@ -1075,13 +1075,17 @@ async def test_global_pause_resume_are_durable_and_reopen_admission(environment)
     assert ("resume_entries",) in runtime.actions
 
 
-async def test_resume_without_confirmation_when_master_has_no_positions(environment):
+async def test_resume_requires_confirmation_even_when_master_has_no_positions(environment):
     db, runtime, _, _, service = environment
     runtime.master_has_positions = False
     await service.pause(7)
     assert (await SettingsRepo(db).get_policy("tg-7")).allow_new_entries is False
 
-    dashboard = await service.resume(7)
+    with pytest.raises(ConfirmationExpiredError):
+        await service.resume(7)
+
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+    dashboard = await service.resume(7, confirmation=confirmation)
     assert dashboard.copy_state is CopyState.ACTIVE
     assert (await SettingsRepo(db).get_policy("tg-7")).allow_new_entries is True
 

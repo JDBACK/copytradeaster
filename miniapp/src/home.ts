@@ -38,7 +38,7 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
     case 'degraded':
       return {
         title: 'Требуется проверка',
-        subtitle: 'Данные обновляются — действие пока не нужно',
+        subtitle: 'Обнаружены расхождения — обновите статус',
         tone: 'attention',
         actionLabel: null,
       }
@@ -59,8 +59,11 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
   }
 }
 
-/** Resume confirmation copy, mirrored from the bot UX (master in position). */
+/** Resume confirmation copy, without inaccurate safety claims. */
 export const RESUME_CONFIRM_TITLE = 'Возобновить копирование?'
 export const RESUME_CONFIRM_BODY =
-  'Мастер сейчас в позиции. Новый вход повторит его сделку по текущей цене, ' +
-  'риск и защита рассчитаются заново. Это безопасно, но вход будет не по цене мастера.'
+  'Мастер сейчас в позиции. При возобновлении система может открыть позицию по текущей рыночной цене ' +
+  'с расчётом риска и выставлением защиты.'
+export const RESUME_CONFIRM_FLAT_BODY =
+  'Новые входы снова станут доступны с текущими настройками риска. ' +
+  'Закрытия и защитные действия продолжают работать.'

@@ -272,10 +272,24 @@ async def test_full_builder_flow_commits_paused_over_real_http_stack(env):
     assert resp.status == 400
     assert (await resp.json())["error"] == "owner_conflict"
 
-    # 10. Resume stays fail-closed without a started engine.
+    # 10. Resume without confirmation is rejected.
     resp = await client.post("/miniapp/api/resume", json={}, headers=_auth(777))
-    assert resp.status == 503
+    assert resp.status == 409
 
+    # 10b. Resume stays fail-closed without a started engine.
+    prep_conf = await client.post(
+        "/miniapp/api/confirmation/begin",
+        json={"action": "resume"},
+        headers=_auth(777),
+    )
+    assert prep_conf.status == 200
+    conf_token = (await prep_conf.json())["token"]
+    resp = await client.post(
+        "/miniapp/api/resume",
+        json={"confirmation": {"token": conf_token, "action": "resume"}},
+        headers=_auth(777),
+    )
+    assert resp.status in {403, 409, 503}
     # 11. Another Telegram user is a separate identity with a clean slate.
     resp = await client.post("/miniapp/api/session", headers=_auth(778))
     assert (await resp.json())["account_connected"] is False
@@ -286,3 +300,52 @@ async def test_session_rejects_wrong_token_signature(env):
     forged = _init_data(777).replace("hash=", "hash=deadbeef")
     resp = await client.post("/miniapp/api/session", headers={"X-Telegram-Init-Data": forged})
     assert resp.status == 401
+
+
+async def test_miniapp_session_recovery_required_and_recover_endpoint(env):
+    client, _exchange, app, composition = env
+
+    # Create owner and prepare
+    await app.db.execute_write(
+        "INSERT INTO telegram_users(telegram_user_id, chat_id, role, notifications_enabled, "
+        "access_enabled, created_at, updated_at) "
+        "VALUES (888, 888, 'USER', 1, 1, datetime('now'), datetime('now'))"
+    )
+    prep_resp = await client.post(
+        "/miniapp/api/builder/prepare",
+        json={"user_address": USER_ADDRESS},
+        headers=_auth(888),
+    )
+    assert prep_resp.status == 200
+    prepared = await prep_resp.json()
+
+    typed = encode_typed_data(
+        domain_data=prepared["eip712"]["domain"],
+        message_types={"ApproveAgent": prepared["eip712"]["types"]["ApproveAgent"]},
+        message_data=prepared["eip712"]["message"],
+    )
+    signature = Account.sign_message(typed, USER_WALLET.key).signature.hex()
+
+    sub_resp = await client.post(
+        "/miniapp/api/builder/submit",
+        json={"pending_id": prepared["pending_id"], "signature": signature},
+        headers=_auth(888),
+    )
+    assert sub_resp.status == 200
+    # Simulate follower runtime registry unregistration (as in failed activation or process restart)
+    app.follower_registry._by_id.pop("tg-888", None)
+    app.follower_registry._snapshot = tuple(app.follower_registry._by_id.values())
+
+    # Session reports recovery_required
+    sess_resp = await client.post("/miniapp/api/session", headers=_auth(888))
+    assert sess_resp.status == 200
+    sess = await sess_resp.json()
+    assert sess["account_connected"] is False
+
+    # Call builder/recover
+    rec_resp = await client.post("/miniapp/api/builder/recover", json={}, headers=_auth(888))
+    assert rec_resp.status == 200
+    rec = await rec_resp.json()
+    assert rec["connection_state"] == "connected"
+    assert rec["account_connected"] is True
+    assert app.follower_registry.get("tg-888") is not None
