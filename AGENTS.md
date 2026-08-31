@@ -17,9 +17,10 @@ AsterDex (V3 API) copy-trade bot: mirrors a master trader's positions on followe
   - New reports go to `docs/reports/`, named `TOPIC_YYYY-MM.md`, with research dates logged inside.
 - `.firecrawl/` - Firecrawl scrape cache. Ignored by git; never commit.
 - `wallet.txt` - local key assembly: main account + copy accounts (currently testnet). Local-only, git-ignored.
-  - `src/copytradeaster/` - the package: `aster/` (REST client, signing), `master/` (projector of the master stream), `trading/` (coordinator/planner/executor/reconciler/leverage/registry), `risk/`, `storage/` (SQLite repos + migrations), `credentials/`, `notifications/`, `onboarding/`, `application/`, `telegram/`, `cli/`, entry points `app.py` / `__main__.py`.
+  - `src/copytradeaster/` - the package: `aster/` (REST client, signing), `master/` (projector of the master stream), `trading/` (coordinator/planner/executor/reconciler/leverage/registry), `risk/`, `storage/` (SQLite repos + migrations), `credentials/`, `notifications/`, `onboarding/` (direct + builder), `application/`, `telegram/`, `miniapp/` (aiohttp Mini App transport, Stage 3 part 1), `cli/`, entry points `app.py` / `__main__.py`.
+- `miniapp/` - Mini App frontend (Vite + React + TS; built bundle served by the bot under `/miniapp/`; git-ignored node_modules/dist).
 - `tests/` - pytest suites: `unit/`, `integration/` (FakeAster e2e), `testnet/` (signed, marker-gated by `CT_TESTNET=1`), `replay/`.
-- `scripts/` - operational scripts (`hybrid_load_test.py` etc.).
+- `scripts/` - operational scripts (`hybrid_load_test.py`, `dev-miniapp-tunnel.sh`, `preview_miniapp.py` etc.).
 - `data/` - SQLite databases and load-run artifacts.
 
 ## Build, Test, and Development Commands

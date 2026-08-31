@@ -63,6 +63,7 @@ corrective-план завершён и содержит фактический 
 | `STAGE2_ONBOARDING_CHAT_UX_2026-08.md` | Фактологический follow-up по чистым onboarding-карточкам, expiry recovery, Aster prerequisites и live-safe facts (2026-08-24) |
 | `STAGE2_SAFE_LOGGING_AUDIT_2026-08.md` | Persistent rotating logging, onboarding audit classification, secret-safety и типы static/offline gate (2026-08-24); актуальные counters только в `ENGINE_TEST_STATUS_2026-08.md` |
 | `STAGE3_MINI_APP_UX_PLAN_2026-08.md` | Design-only план Stage 3 follower Mini App: Builder authorization, IA, Aster-style screen concepts, анализ, missing application contracts и UI Definition of Done (2026-08-26) |
+| `STAGE3_BUILDER_MINI_APP_PART1_2026-08.md` | Stage 3 часть 1 (Builder-auth Mini App): реестр решений владельца (23), план WP0–WP5, факты перепроверки доков, append-only журнал — реализация, signed e2e и ручная приёмка из Telegram (2026-08-31) |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 

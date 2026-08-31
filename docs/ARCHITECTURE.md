@@ -718,6 +718,11 @@ copytradeaster/
 │
 ├── pyproject.toml
 ├── AGENTS.md                       # правила работы агентов с репо
+├── miniapp/                        # Mini App frontend (Vite+React+TS, Stage 3 part 1)
+│   ├── src/screens/                #   session gate, builder wizard, success, home
+│   ├── src/wallet.ts               #   injected EIP-1193 + WalletConnect adapter
+│   └── dist/                       #   собранный бандл (раздаёт бот, git-ignored)
+├── scripts/                        # operational scripts (tunnel, mini app preview, load tests)
 ├── docs/                           # документация; карта — docs/docs_map.md
 │   ├── docs_map.md                 # что где лежит и когда читать
 │   ├── ARCHITECTURE.md             # этот файл
@@ -801,6 +806,10 @@ copytradeaster/
 │       │   ├── access.py          # captcha challenges and access request store
 │       │   ├── middleware.py      # authorization and activity tracker middleware
 │       │   └── routers/           # navigation/settings/admin handlers (common, settings, access)
+│       ├── miniapp/
+│       │   └── server.py          # Mini App aiohttp transport: HMAC initData сессия,
+│       │                          #   builder/dashboard/pause/resume/confirmation, client-log,
+│       │                          #   static /miniapp/ (Vite bundle)
 │       └── cli/
 │           └── main.py            # run/run-bot/import/admin commands
 │
