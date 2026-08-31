@@ -78,4 +78,10 @@ export const api = {
       { pending_id: pendingId, signature },
       auth,
     ),
+
+  /** Fire-and-forget diagnostics: lands in the operator's server log. */
+  clientLog: (
+    auth: AuthContext,
+    payload: { level: string; event: string; code?: string | null; detail?: string | null },
+  ) => post<{ ok: boolean }>('/miniapp/api/client-log', payload, auth).catch(() => ({ ok: false })),
 }

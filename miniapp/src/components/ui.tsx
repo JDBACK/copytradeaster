@@ -86,11 +86,22 @@ function RailGlyph({ index }: { index: number }) {
   }
 }
 
-export function ErrorBox({ title, hint, children }: { title: string; hint: string; children?: ReactNode }) {
+export function ErrorBox({
+  title,
+  hint,
+  code,
+  children,
+}: {
+  title: string
+  hint: string
+  code?: string
+  children?: ReactNode
+}) {
   return (
     <section className="error-box" role="alert">
       <div className="error-title">{title}</div>
       <div className="error-hint">{hint}</div>
+      {code && <div className="error-code num">код: {code}</div>}
       {children}
     </section>
   )

@@ -107,6 +107,10 @@ const COPY: Record<string, ErrorCopy> = {
     title: 'Кошелёк не найден',
     hint: 'Установите MetaMask или другой EVM-кошелёк, либо откройте мини-ап из Telegram.',
   },
+  wallet_unavailable: {
+    title: 'Кошелёк недоступен',
+    hint: 'Не удалось открыть подключение. Проверьте интернет и попробуйте ещё раз; на телефоне должен быть установлен кошелёк (TokenPocket, MetaMask…).',
+  },
 }
 
 const FALLBACK: ErrorCopy = {

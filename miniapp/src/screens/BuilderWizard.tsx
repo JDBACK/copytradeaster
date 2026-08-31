@@ -1,5 +1,9 @@
 /** Builder onboarding wizard (эталон 01-builder-auth):
- * Wallet → Agent → Builder → Sync, одна combined-подпись approveAgent. */
+ * Wallet → Agent → Builder → Sync, одна combined-подпись approveAgent.
+ *
+ * Every failure is reported to the server log (fire-and-forget client log)
+ * so acceptance issues are visible to the operator without user screenshots.
+ */
 
 import { useLayoutEffect, useReducer, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
@@ -11,6 +15,8 @@ import {
   initialWizardState,
   railIndex,
   wizardReducer,
+  type WizardEvent,
+  type WizardState,
 } from '../wizard'
 import type { BuilderOnboardedDTO } from '../types'
 import {
@@ -32,6 +38,14 @@ export function BuilderWizard({ auth, onConnected }: Props) {
   const [adapter, setAdapter] = useState<WalletAdapter | null>(null)
   const [busyMessage, setBusyMessage] = useState<string | null>(null)
   const railDone = state.step === 'sync' ? 3 : railIndex(state.step)
+
+  function report(event: string, code: string | null, detail?: string) {
+    void api.clientLog(auth, { level: 'error', event, code, detail }).catch(() => {})
+  }
+
+  function emit(event: WizardEvent) {
+    dispatch(event)
+  }
 
   useLayoutEffect(() => {
     // Signing is a destructive-to-abort action: warn before accidental close.
@@ -58,19 +72,18 @@ export function BuilderWizard({ auth, onConnected }: Props) {
   async function connectWallet() {
     hapticImpact('light')
     setBusyMessage('Подключаем кошелёк…')
-    dispatch({ type: 'connecting' })
+    emit({ type: 'connecting' })
     try {
       const wallet = await resolveAdapter()
       const address = await wallet.connect()
-      dispatch({ type: 'wallet_connected', address })
+      emit({ type: 'wallet_connected', address })
       await runPrepare(address, wallet)
     } catch (err) {
       hapticNotify('error')
-      dispatch({
-        type: 'preparation_failed',
-        code: err instanceof WalletError ? err.code : 'wallet_unavailable',
-        status: 0,
-      })
+      const code = err instanceof WalletError ? err.code : 'wallet_unavailable'
+      const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
+      report('wallet_connect_failed', code, detail)
+      emit({ type: 'preparation_failed', code, status: 0 })
     } finally {
       setBusyMessage(null)
     }
@@ -78,18 +91,21 @@ export function BuilderWizard({ auth, onConnected }: Props) {
 
   async function runPrepare(address: string, wallet: WalletAdapter) {
     setBusyMessage('Готовим данные авторизации…')
-    dispatch({ type: 'preparing' })
+    emit({ type: 'preparing' })
     try {
       await wallet.switchToRegistrationChain()
       const dto = await api.builderPrepare(auth, address)
       hapticImpact('medium')
-      dispatch({ type: 'prepared', prepare: dto, address })
+      emit({ type: 'prepared', prepare: dto, address })
     } catch (err) {
       hapticNotify('error')
       if (err instanceof ApiError) {
-        dispatch({ type: 'preparation_failed', code: err.code, status: err.status })
+        report('prepare_failed', err.code, err.message.slice(0, 200))
+        emit({ type: 'preparation_failed', code: err.code, status: err.status })
       } else {
-        dispatch({ type: 'preparation_failed', code: 'network_error', status: 0 })
+        const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
+        report('prepare_failed', 'network_error', detail)
+        emit({ type: 'preparation_failed', code: 'network_error', status: 0 })
       }
     } finally {
       setBusyMessage(null)
@@ -99,7 +115,7 @@ export function BuilderWizard({ auth, onConnected }: Props) {
   async function sign() {
     if (!state.prepare || !state.address) return
     hapticImpact('medium')
-    dispatch({ type: 'signing' })
+    emit({ type: 'signing' })
     setBusyMessage('Ждём подпись в кошельке…')
     let signature = ''
     try {
@@ -107,10 +123,10 @@ export function BuilderWizard({ auth, onConnected }: Props) {
       signature = await wallet.signTypedData(state.address, state.prepare.eip712)
     } catch (err) {
       hapticNotify('error')
-      dispatch({
-        type: 'signing_failed',
-        code: err instanceof WalletError ? err.code : 'wallet_unavailable',
-      })
+      const code = err instanceof WalletError ? err.code : 'wallet_unavailable'
+      const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
+      report('sign_failed', code, detail)
+      emit({ type: 'signing_failed', code })
       setBusyMessage(null)
       return
     }
@@ -122,9 +138,12 @@ export function BuilderWizard({ auth, onConnected }: Props) {
     } catch (err) {
       hapticNotify('error')
       if (err instanceof ApiError) {
-        dispatch({ type: 'submit_failed', code: err.code, status: err.status })
+        report('submit_failed', err.code, err.message.slice(0, 200))
+        emit({ type: 'submit_failed', code: err.code, status: err.status })
       } else {
-        dispatch({ type: 'submit_failed', code: 'network_error', status: 0 })
+        const detail = err instanceof Error ? err.message.slice(0, 200) : undefined
+        report('submit_failed', 'network_error', detail)
+        emit({ type: 'submit_failed', code: 'network_error', status: 0 })
       }
     } finally {
       setBusyMessage(null)
@@ -142,14 +161,14 @@ export function BuilderWizard({ auth, onConnected }: Props) {
       <TrustRail active={railIndex(state.step)} doneCount={railDone} />
 
       {error && (
-        <ErrorBox title={error.title} hint={error.hint}>
-          {state.errorCode !== 'owner_conflict' && state.step === 'wallet' && (
-            <button type="button" className="linklike" onClick={() => dispatch({ type: 'restart' })}>
+        <ErrorBox title={error.title} hint={error.hint} code={state.errorCode ?? undefined}>
+          {state.step === 'wallet' && state.errorCode !== 'owner_conflict' && (
+            <button type="button" className="linklike" onClick={() => emit({ type: 'restart' })}>
               Начать заново
             </button>
           )}
           {state.step === 'review' && (
-            <button type="button" className="linklike" onClick={() => dispatch({ type: 'dismiss_error' })}>
+            <button type="button" className="linklike" onClick={() => emit({ type: 'dismiss_error' })}>
               Понятно
             </button>
           )}
@@ -223,21 +242,8 @@ export function BuilderWizard({ auth, onConnected }: Props) {
         </>
       )}
 
-      {state.step === 'wallet' && (
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={state.busy}
-            onClick={connectWallet}
-          >
-            {busyMessage ?? 'Подключить кошелёк'}
-          </button>
-        </div>
-      )}
-
       <p className="footer-note">
-        Он нужен только для авторизации Agent и Builder. Основной ключ не передаётся сервису.
+        Кошелёк нужен только для авторизации Agent и Builder. Основной ключ не передаётся сервису.
       </p>
     </div>
   )
@@ -264,7 +270,10 @@ function WalletStep({
           Он нужен только для авторизации Agent и Builder. Основной ключ не передаётся сервису.
         </p>
         <Row label="Сеть подписи" value={`BNB Smart Chain (${REGISTRATION_CHAIN_ID})`} />
-        <Row label="Комиссия Builder" value={address ? 'см. ниже' : 'покажем после подключения'} />
+        <Row
+          label="Комиссия Builder"
+          value={address ? 'в review ниже' : 'покажем после подключения'}
+        />
       </section>
       {address && (
         <div className="info-box">
@@ -290,3 +299,5 @@ function WalletStep({
 function short(address: string): string {
   return address.length > 14 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address
 }
+
+export type { WizardState, WizardEvent }

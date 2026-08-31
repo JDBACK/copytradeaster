@@ -260,6 +260,30 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_ACTION_FAILED)
 
+    async def client_log(request: web.Request) -> web.Response:
+        """Diagnostics channel: client-side failures land in the operator log."""
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        if body is None:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        level = str(body.get("level") or "info")
+        if level not in {"info", "warning", "error"}:
+            level = "info"
+        event = str(body.get("event") or "unknown")[:40]
+        code = str(body.get("code") or "-")[:60]
+        detail = str(body.get("detail") or "")[:200]
+        log.warning(
+            "client_event user=%s level=%s event=%s code=%s detail=%s",
+            user_id,
+            level,
+            event,
+            code,
+            detail,
+        )
+        return web.json_response({"ok": True})
+
     async def builder_prepare(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -289,6 +313,7 @@ def create_miniapp_app(
 
     app = web.Application(client_max_size=MAX_BODY_BYTES)
     app.router.add_post("/miniapp/api/session", session)
+    app.router.add_post("/miniapp/api/client-log", client_log)
     app.router.add_post("/miniapp/api/dashboard", dashboard)
     app.router.add_post("/miniapp/api/pause", pause)
     app.router.add_post("/miniapp/api/resume", resume)
