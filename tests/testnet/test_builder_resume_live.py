@@ -96,6 +96,7 @@ class LiveSignedRuntime:
         self.snapshot: AccountState | None = None
         self.actions: list[str] = []
         self.signed_reads = 0
+        self.permission_reads = 0
 
     async def _retry_read(self, call: Callable[[], Awaitable[Any]]) -> Any:
         for attempt in range(8):
@@ -168,6 +169,7 @@ class LiveSignedRuntime:
 
     async def refresh_agent_permission(self, account_id: str) -> AgentValidation:
         agent = await self._retry_read(lambda: self.client.agent(account_id))
+        self.permission_reads += 1
         checked_at_ms = int(time.time() * 1000)
         status = "VALID"
         try:
@@ -269,7 +271,9 @@ async def live_http_env(test_settings):
         ip_whitelist="testnet-live-override",
         status="VALID_OVERRIDE",
         expired_ms=int((datetime.now(UTC) + timedelta(days=30)).timestamp() * 1000),
-        checked_at=datetime.now(UTC).isoformat(),
+        # Force Resume through the real signed /agent permission boundary.
+        # A fresh seeded row would make this nominally-live test trust cache.
+        checked_at=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
     )
     await credentials.import_identity(
         account_id=account_id,
@@ -409,6 +413,7 @@ async def test_l7_pause_resume_via_real_miniapp_http(live_http_env):
     assert {"fresh_snapshot", "resume_safety_checked", "resumed", "reconciled"}.issubset(
         runtime.actions
     )
+    assert runtime.permission_reads >= 1
     policy = await SettingsRepo(db).get_policy(account_id)
     assert policy is not None and policy.allow_new_entries is True
 

@@ -8,6 +8,8 @@
 
 База сравнения: `c2a9584f91bb7de5023cbe87bd86f3ad5ac9a762`
 
+Remediation implementation HEAD: `a9d67a6` (`fix: harden builder onboarding recovery`)
+
 ## 1. Вердикт
 
 Stage 3 Part 1 имеет хороший и подходящий проекту фундамент, но corrective gate пока нельзя считать полностью закрытым.
@@ -376,3 +378,56 @@ Backend выставляет `snapshot_captured_at` только при `refresh
 - Live-тесты действительно делают Aster Testnet calls; fake tests так не называются.
 - Manual Telegram/WalletConnect acceptance выполнен на текущем HEAD.
 - `docs/ENGINE_TEST_STATUS_2026-08.md` содержит фактические counters и timestamp прогона.
+
+## 19. Implementation addendum — 2026-09-01
+
+Этот раздел является актуальным результатом исполнения аудита. Исходные
+находки и обоснования выше сохранены без переписывания истории.
+
+| ID | Статус | Фактическое изменение |
+|---|---|---|
+| R1 | выполнено | unknown POST outcome сохраняет `APPROVAL_SENT`; recovery сначала делает signed GET, blind POST retry отсутствует |
+| R2 | выполнено | добавлены `onboarding_state` и authenticated `resume-attempt`; пустая signature допустима только для server-owned `APPROVAL_SENT`/`APPROVED` |
+| R3 | выполнено в коде harness | L3 реально отправляет Testnet approval и теряет локальный success; L7 использует aiohttp Mini App, stale permission seed и signed Aster account/Agent reads; manual evidence отделён от pytest |
+| R4 | выполнено | paused account commit переводит attempt в `COMMITTED`; activation success очищает, failure восстанавливается лениво |
+| R5 | выполнено | initial Home запрашивает `refresh=true`; account row timestamp больше не используется как snapshot freshness |
+| R6 | выполнено | `Sheet` снова fixed overlay; добавлены Escape, overlay close, focus trap/restore и body scroll lock |
+| R7 | выполнено | Builder/application logs не получают raw exception text; regression tests проверяют отсутствие payload |
+| R8 | выполнено в коде harness | signed GET имеет bounded retries с новым nonce; order POST использует unique client id и query-based unknown resolution; fee assertions сужены до cap semantics |
+| R9 | частично | living docs синхронизированы; сохранены два current-HEAD local-browser evidence; Telegram/WalletConnect screenshots и manual run требуют владельца |
+
+### 19.1 Verification
+
+Полный offline/backend и frontend gate зелёный; точные counters, coverage и
+duration хранятся только в `../ENGINE_TEST_STATUS_2026-08.md`.
+
+Полный `tests/testnet/` не был сокращён до новых Builder-модулей и не был
+выдан за green. Public server-time endpoint ответил успешно, но signed account
+endpoints (`/agent`, `/openOrders`, `/positionRisk`, `/positionSide/dual` и
+зависимые paths) массово вернули `Aster -1000 System error`, включая старые
+Stage 1/2 сценарии. Harness оставлен fail-closed: ошибки не преобразованы в
+пустые snapshots, fake state или skips.
+
+Current-HEAD local-browser evidence снят штатным `scripts/preview_miniapp.py`
+на изолированной копии SQLite и мобильном viewport 393×852:
+
+- [Wallet step](assets/stage3-mini-app/current-head-a9d67a6/wallet-step.jpg);
+- [recovery + фактический Testnet error state](assets/stage3-mini-app/current-head-a9d67a6/recovery-testnet-error.jpg).
+
+Эти PNG доказывают текущий build/DOM/визуальное состояние, но не заменяют
+Telegram WebView, WalletConnect или подпись TokenPocket. Production SQLite во
+время browser-аудита не изменялась.
+
+### 19.2 Текущий verdict
+
+Кодовая remediation R1–R8 завершена и offline доказана. Финальный Stage 3 Part
+1 gate остаётся **OPEN** ровно по двум внешним acceptance-пунктам:
+
+1. зелёный повтор полного signed Testnet suite после восстановления Aster
+   signed account endpoints;
+2. ручной Telegram + WalletConnect/TokenPocket прогон и screenshots текущего
+   build/HEAD.
+
+Остаточная Testnet-позиция не считается финансовым риском; cleanup нужен только
+для повторяемости. Однако во время текущего incident authoritative signed reads
+недоступны, поэтому утверждать `flat/no orders` без доказательства нельзя.

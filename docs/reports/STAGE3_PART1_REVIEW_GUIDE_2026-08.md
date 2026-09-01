@@ -5,6 +5,13 @@
 > [`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`](STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
 > Исторические claims `CLOSED` и live-counters ниже нельзя использовать без
 > этого addendum.
+>
+> **Результат remediation (2026-09-01):** кодовые пункты R1–R8 реализованы в
+> `a9d67a6`; точные текущие offline/frontend/live counters находятся только в
+> `../ENGINE_TEST_STATUS_2026-08.md`. Финальный gate остаётся открытым до
+> зелёного полного Testnet-прогона и ручной Telegram/WalletConnect-приёмки
+> текущего HEAD. Текущий Testnet массово возвращает `-1000` на signed account
+> reads; это записано как внешний красный прогон, а не скрыто skip-ами.
 
 Ветка: `codex/stage-3-mini-app-part1`. Что это: вход фолловера в копитрейд
 через Telegram Mini App с Builder-авторизацией — main-ключ пользователя не
@@ -64,6 +71,7 @@ fee-стейтмент (недокументированный auth), mainnet.
 | 41c6df6 | docs: close stage 3 part 1 corrective gate |
 | 3cf8dc7 | fix: redirect root path to miniapp and normalize webapp menu url |
 | 047f5c4 | fix(miniapp): refine onboarding copy, capitalization and trust disclaimers |
+| a9d67a6 | R1–R8: ambiguous approval recovery, signatureless resume, COMMITTED lifecycle, fresh Home, modal Sheet, safe logs и genuine live harness |
 
 1. **Main-ключ не входит в систему.** `onboarding/builder.py`: prepare
    генерирует signer (`Account.create()`), submit принимает только подпись;
@@ -132,8 +140,8 @@ fee-стейтмент (недокументированный auth), mainnet.
 ## 6. Как гнать тесты
 
 ```bash
-# офлайн-гейт (быстро, без сети)
-.venv/bin/python -m pytest -q -m "not testnet"          # 725 passed / 2 skipped / 30 deselected
+# офлайн-гейт (быстро, без сети; актуальный счётчик — только в ENGINE_TEST_STATUS)
+.venv/bin/python -m pytest -q -m "not testnet" --cov=copytradeaster --cov-report=term-missing
 .venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .
 
 # фронт

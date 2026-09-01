@@ -252,10 +252,15 @@ Stage 2 полностью закрыт для testnet scope.
 
 #### Corrective gate Stage 3 Part 1 после независимого review (2026-08-31)
 
-Статус части 1: **CLOSED (corrective gate завершён 2026-08-31)**. Все обязательные
-пункты corrective-плана выполнены, доказаны offline- и live-тестами Aster Testnet.
-План и журнал выполнения:
-[STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md](reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md).
+Статус части 1: **REMEDIATION IMPLEMENTED / FINAL LIVE GATE OPEN
+(2026-09-01)**. Кодовые пункты R1–R8 финального аудита реализованы в
+`a9d67a6`; offline/frontend gate зелёный. Полный signed Testnet suite выполнен,
+но массово получил внешний `Aster -1000` на signed account endpoints. Поэтому
+исторический `CLOSED` не восстанавливается до зелёного повтора и ручной
+Telegram/WalletConnect-приёмки текущего HEAD. Актуальные counters находятся
+только в `ENGINE_TEST_STATUS_2026-08.md`; план и аудит:
+[STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md](reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md),
+[STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md](reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
 
 - [x] Durable/idempotent Builder attempt lifecycle с encrypted signer recovery (`builder_onboarding_attempts`, 4 состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
 - [x] Recovery remote-success/local-failure и committed/runtime activation (`miniapp_recover_runtime`, session connection state: `empty | onboarding | recovery_required | connected`).
@@ -263,8 +268,19 @@ Stage 2 полностью закрыт для testnet scope.
 - [x] Исправить signed fee-cap proof (`test_exchange_rejects_fee_rate_above_approved_cap`: валидный order shape, `positionSide` в HEDGE, feeRate 0.0005 > 0.0001 cap, assertion на биржевое отклонение и flat verification).
 - [x] Закрыть обязательные frontend session/config/copy gaps; timeout 15s с `AbortController`, безопасная клиентская диагностика, валидация конфигурации, базовые security-заголовки.
 - [x] Довести UI fidelity, progress rail connector lines, inline SVG иконки вместо emoji, `:focus-visible`, доступность `Sheet` (`role="dialog"`, `aria-modal`, `aria-labelledby`, auto-focus).
-- [x] Пройти offline/browser (725 unit/integration + 34 vitest passed, coverage 87%, ruff/lint clean) и signed-live testnet кампанию (L1–L8 passed).
-- [x] Зафиксировать результаты в living docs и журнале corrective-плана.
+- [x] Исправить ambiguous `approveAgent` outcome: сохранить `APPROVAL_SENT`,
+  восстанавливать через signed GET и не повторять POST вслепую.
+- [x] Добавить signatureless recovery только для server-owned
+  `APPROVAL_SENT`/`APPROVED`, реально использовать `COMMITTED`, санировать логи,
+  исправить initial Home freshness и modal Sheet.
+- [x] Заменить псевдо-live L3/L7/L8 настоящими Testnet/HTTP сценариями и
+  усилить signed read/order outcome/fee-cap helpers.
+- [x] Пройти полный offline/frontend gate и записать фактический красный
+  Testnet-прогон в living docs без fake/skip-подмены.
+- [ ] Повторить полный `tests/testnet/` после восстановления signed account
+  endpoints Aster; требуется зелёный результат.
+- [ ] Выполнить ручную Telegram + WalletConnect/TokenPocket приёмку и получить
+  current-HEAD screenshots состояний из R9.
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,

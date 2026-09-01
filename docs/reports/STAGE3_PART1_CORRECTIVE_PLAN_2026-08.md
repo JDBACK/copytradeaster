@@ -6,6 +6,13 @@
 > [`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`](STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
 > Журнал выполнения ниже сохранён как историческая запись и не является
 > актуальной независимой приёмкой.
+>
+> **Implementation addendum (2026-09-01):** R1–R8 финального аудита
+> реализованы в `a9d67a6`. Актуальный статус и counters находятся в
+> `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` и
+> `../ENGINE_TEST_STATUS_2026-08.md`. Финальный gate остаётся открытым:
+> текущий Aster Testnet возвращает `-1000` на signed account reads, а
+> current-HEAD manual Telegram acceptance ещё не выполнен.
 
 Дата ревью: 2026-08-31
 Ветка: `codex/stage-3-mini-app-part1`
@@ -1102,4 +1109,5 @@ gate — перед финальным verdict. Live testnet можно испо
 - Атомарный бэкап превью-базы данных в `scripts/preview_miniapp.py` (C14) — dev follow-up.
 - Отдельный abuse limiter по IP (C20) — отложен до публичного масштабирования.
 
-**Вердикт: Stage 3 Part 1 Corrective Gate официально CLOSED.**
+**Исторический вердикт 2026-08-31: CLOSED. Он отменён аудитом 2026-09-01;
+актуальный статус см. в addendum в начале документа.**

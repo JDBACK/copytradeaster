@@ -5,33 +5,43 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 1 — CLOSED (corrective gate завершён 2026-08-31):**
-  все обязательные пункты независимого review и corrective-плана
-  (`docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md`) полностью выполнены и
-  доказаны.
-  1. **Durable Builder lifecycle:** SQLite-таблица `builder_onboarding_attempts` с
-     AES-GCM шифрованием signer key; 4 состояния `PREPARED -> APPROVAL_SENT ->
-     APPROVED -> COMMITTED`; защита от потери signer и создания дубликатов Agent;
-     clean rollback к `PREPARED` при отсутствии Agent на бирже; удаление attempt
-     после commit; startup/lazy cleanup истёкших попыток.
-  2. **Recovery contract:** явные состояния подключения `empty | onboarding |
-     recovery_required | connected`; эндпоинт `POST /miniapp/api/builder/recover`
-     восстанавливает runtime committed-аккаунта и открывает Home без повторного
-     онбординга.
-  3. **Home & Resume correctness:** форматирование риска масштабирует доли в %
-     (0.01 -> 1%); ручной refresh принудительно запрашивает свежий snapshot и
-     возвращает реальный `snapshot_captured_at`; Resume всегда требует
-     one-shot confirmation token и fail-closed блокируется при `system_state != READY`.
-  4. **Frontend & Security hardening:** timeout 15s с `AbortController` во всех
-     запросах; санированные клиентские логи; валидация конфигурации при старте;
-     базовые security-заголовки (`X-Content-Type-Options`, `Referrer-Policy`, `Cache-Control`).
-  5. **UI Fidelity & Accessibility:** SVG-иконки вместо emoji, progress rail
-     connector lines, `:focus-visible`, `role="dialog"` и `aria-modal` в `Sheet`.
-  6. **Signed fee-cap test & Live suite:** исправлен `test_exchange_rejects_fee_rate_above_approved_cap`
-     (валидный order shape, positionSide в HEDGE, feeRate 0.0005, assertion на биржевое
-     отклонение и flat verification). Live suite: **9 passed** (L1–L8).
-  7. **Гейты:** offline pytest **725 passed / 2 skipped / 30 deselected** (coverage **87%**),
-     ruff check/format clean, vitest **34 passed**, oxlint clean, vite production build ok.
+- **Stage 3, часть 1 — REMEDIATION IMPLEMENTED / FINAL LIVE GATE OPEN
+  (2026-09-01, code HEAD `a9d67a6`):** обязательные кодовые исправления R1–R8
+  из `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` реализованы. Gate пока
+  нельзя называть `CLOSED`: текущий полный signed Testnet-прогон массово падает
+  на внешнем `Aster -1000 System error`, а ручная Telegram + WalletConnect
+  приёмка именно этого HEAD ещё не выполнена.
+  1. **Unknown remote outcome:** transport/5xx/`-1000/-1006/-1007` после
+     `approveAgent` сохраняют `APPROVAL_SENT`; recovery сначала проверяет Agent
+     idempotent signed GET и не делает blind повтор POST.
+  2. **Recovery без второй подписи:** session публикует только безопасный
+     `onboarding_state`; `POST /miniapp/api/builder/resume-attempt` разрешён без
+     подписи только для server-owned `APPROVAL_SENT`/`APPROVED`. `PREPARED`
+     по-прежнему требует wallet signature.
+  3. **Durable lifecycle:** после paused account commit записывается
+     `COMMITTED`; успешная runtime activation очищает attempt, а activation
+     failure восстанавливается лениво и идемпотентно.
+  4. **Home/UI/logs:** первый Home load требует fresh snapshot; account
+     `updated_at` больше не выдаётся за snapshot time; `Sheet` снова является
+     modal overlay с Escape/focus management; raw exception payload не пишется
+     в Builder/Mini App logs.
+  5. **Live harness:** L3 действительно отправляет Testnet `approveAgent`, затем
+     теряет локальный success response; L7 использует aiohttp Mini App API,
+     намеренно stale seed и реальные signed account/Agent permission reads;
+     order POST имеет unique client id и разрешает
+     unknown outcome только через query. Fake-only evidence больше не выдаётся
+     за signed live.
+  6. **Актуальный offline/frontend gate:** offline pytest **732 passed / 2
+     skipped / 30 deselected** за **16.96 s**, total coverage **87%**; Ruff
+     check/format и `git diff --check` clean. Frontend: Vitest **41 passed**,
+     Oxlint clean, TypeScript + Vite production build passed.
+  7. **Актуальный полный signed Testnet gate:** **1 passed / 1 skipped / 21
+     failed / 7 errors** за **224.08 s**. Public `GET /fapi/v3/time` прошёл;
+     подписанные `/agent`, `/openOrders`, `/positionRisk`,
+     `/positionSide/dual` и зависимые account paths отвечали `-1000`. Ошибка
+     воспроизводится также старым Stage 1/2 live suite, поэтому это фактический
+     внешний Testnet incident, а не основание ослаблять assertions или заменять
+     live reads фейками.
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.

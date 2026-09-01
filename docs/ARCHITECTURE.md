@@ -208,6 +208,15 @@ production execution path. Миграции — упорядоченный сп�
 
 Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder сгенерированный signer-ключ шифруется и персистится в `credentials/` после успешного commit, а главный приватный ключ пользователя в backend никогда не передаётся и не сохраняется. До момента commit промежуточное состояние онбординга хранится в таблице `builder_onboarding_attempts` (состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
 
+`APPROVAL_SENT` является fail-closed состоянием неизвестного результата
+удалённого `approveAgent`: transport/5xx/unknown exchange response не откатывает
+его в `PREPARED` и не разрешает слепой повтор user-signed POST. Recovery сначала
+проверяет Agent идемпотентным signed GET. Mini App может продолжить без второй
+wallet signature только server-owned `APPROVAL_SENT`/`APPROVED`; `PREPARED`
+всегда требует подпись. После paused account commit attempt переводится в
+`COMMITTED`, а затем очищается после runtime activation либо лениво при
+идемпотентном recovery.
+
 ### `onboarding/`
 
 Способ получения `TradingIdentity`. Два независимых адаптера: `direct`

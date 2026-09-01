@@ -2,12 +2,13 @@
 
 Дата старта: 2026-08-31
 
-Статус: **часть 1 закрыта 2026-08-31** — реализация, signed e2e (3 passed,
-живой тестнет), ручная приёмка владельцем из Telegram (WalletConnect →
-TokenPocket → подпись → paused-commit → home) и успешный resume из
-мини-апа (баг master-check устранён в `8ce79f1`, `allow_new_entries=1`
-подтверждён аудитом). Design-этап закрыт в `STAGE3_MINI_APP_UX_PLAN_2026-08.md`.
-Гайд для ревьюера: `STAGE3_PART1_REVIEW_GUIDE_2026-08.md`. Открытых блокеров нет.
+Статус: **историческая приёмка 2026-08-31 сохранена; corrective gate повторно
+открыт 2026-09-01**. Кодовые пункты финального аудита R1–R8 реализованы в
+`a9d67a6`, но окончательное `CLOSED` требует зелёного полного Testnet-прогона и
+ручной Telegram + WalletConnect/TokenPocket приёмки именно текущего HEAD.
+Актуальные counters и внешний `Aster -1000` incident записаны только в
+`../ENGINE_TEST_STATUS_2026-08.md`. Основной итоговый документ:
+`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`.
 
 Среда: только Aster Futures testnet (`fapi.asterdex-testnet.com`)
 
@@ -113,6 +114,25 @@ read-only `PositionPageDTO`, risk constraints, revoke/disconnect-семанти�
   ожидает прогона `CT_TESTNET=1` и ручной приёмки владельца.
 
 ## 6. Журнал
+
+### 2026-09-01 (финальная remediation-реализация)
+
+- unknown outcome удалённого `approveAgent` больше не откатывается в
+  `PREPARED`: `APPROVAL_SENT` сохраняется, recovery делает signed GET и не
+  повторяет user-signed POST вслепую;
+- добавлен server-owned `resume-attempt`: `APPROVAL_SENT`/`APPROVED`
+  продолжаются без новой wallet signature, а `PREPARED` остаётся fail-closed;
+- lifecycle действительно использует `COMMITTED`, activation failure
+  восстанавливается лениво, raw exception payload удалён из логов;
+- initial Home получает fresh snapshot, а Resume sheet снова modal overlay с
+  Escape/focus management;
+- L3/L7 и fee-cap harness переписаны на реальные Aster Testnet calls, bounded
+  signed reads и resolve unknown order outcome через unique client order id;
+- offline/frontend gates зелёные. Полный signed suite фактически выполнен, но
+  красный из-за массового внешнего `-1000` на signed account endpoints. Тесты
+  не ослаблялись и не переводились в skip ради зелёного отчёта;
+- следующая обязательная точка: повтор полного Testnet suite после
+  восстановления endpoints и новая ручная Telegram/WalletConnect-приёмка.
 
 ### 2026-08-31 (ручная приёмка владельцем — принята)
 
