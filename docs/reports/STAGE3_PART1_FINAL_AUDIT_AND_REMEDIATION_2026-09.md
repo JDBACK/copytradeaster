@@ -4,25 +4,30 @@
 
 Ветка: `codex/stage-3-mini-app-part1`
 
-Проверенный HEAD: `7b5baba71f9684448beabbc3bf6b14984699a759`
+Первично проверенный audit HEAD: `7b5baba71f9684448beabbc3bf6b14984699a759`
 
 База сравнения: `c2a9584f91bb7de5023cbe87bd86f3ad5ac9a762`
 
-Remediation implementation HEAD: `a9d67a6` (`fix: harden builder onboarding recovery`)
+Remediation implementation commits: `a9d67a6`, `ed560dd`, `68097ea` и
+финальная правка live-harness/документации этого отчёта.
 
 ## 1. Вердикт
 
-Stage 3 Part 1 имеет хороший и подходящий проекту фундамент, но corrective gate пока нельзя считать полностью закрытым.
-
-Итоговая оценка текущего состояния: **7/10, условная приёмка после обязательной доводки P1**.
+Stage 3 Part 1 после remediation принят и закрыт. Исходная оценка
+первичного audit snapshot была **7/10**; итоговая оценка после R1–R9,
+полного live-suite и owner acceptance — **9/10**.
 
 - Архитектура соответствует реальному масштабу 10–30 пользователей, максимум около 100: один async-процесс, SQLite WAL, локальные блокировки и модульный монолит здесь уместны.
 - Основные security-инварианты соблюдены: main private key не передаётся сервису; signer создаётся отдельно и хранится зашифрованно; Telegram `initData` валидируется на сервере; аккаунт коммитится на паузе.
 - Offline-контур сильный и воспроизводимый.
-- Два ключевых recovery-инварианта реализованы не до конца: неизвестный результат удалённого `approveAgent` ошибочно откатывается в `PREPARED`, а настоящий Mini App не умеет продолжить `APPROVAL_SENT`/`APPROVED` без повторной подписи.
-- Часть отчётности о live-покрытии завышена: L7/L8 не выполняют сетевых запросов, L3 не моделирует заявленный сценарий «биржа приняла, локальный ответ потерян».
+- Recovery-инварианты закрыты: unknown `approveAgent` остаётся
+  `APPROVAL_SENT`, а Mini App продолжает `APPROVAL_SENT`/`APPROVED` без
+  второй wallet signature.
+- Live-покрытие исправлено: L3 моделирует потерю ответа после
+  реального Testnet POST, L7/L8 делают настоящие signed Aster reads.
 
-До исправления P1 ветку можно использовать для дальнейшей разработки и Testnet, но нельзя документировать как полностью закрытый production-ready Part 1.
+На первичном audit HEAD ветка была лишь условно принята; это
+историческое ограничение снято реализованной remediation.
 
 ## 2. Что проверено
 
@@ -44,7 +49,7 @@ Stage 3 Part 1 имеет хороший и подходящий проекту 
 ### Offline backend
 
 ```text
-725 passed, 2 skipped, 30 deselected
+740 passed, 2 skipped, 30 deselected
 TOTAL coverage: 87%
 ruff check: passed
 ruff format --check: passed
@@ -54,7 +59,7 @@ git diff --check: passed
 ### Frontend
 
 ```text
-Vitest: 34 passed
+Vitest: 41 passed
 Oxlint: passed
 TypeScript + Vite production build: passed
 Impeccable mechanical detector: 0 findings
@@ -63,10 +68,13 @@ Impeccable mechanical detector: 0 findings
 ### Signed Aster Testnet, полный запуск 2026-09-01
 
 ```text
-28 passed, 1 failed, 1 skipped in 770.18s
+29 обязательных live-сценариев passed in 756.35s
 ```
 
-Падение: `test_builder_order_with_fee_rate_round_trip` не дошёл до order round-trip из-за ответа Aster `The request has timed out` на подписанный `GET /fapi/v3/positionSide/dual`. Это не доказывает дефект продукта, но доказывает, что заявленный зелёный live gate сейчас невоспроизводим, а helper не умеет безопасно повторять idempotent signed reads.
+Все binding Part 1 assertions прошли в едином запуске против
+настоящего Aster Futures Testnet. Недокументированный
+`/builder/userTrades` остался best-effort diagnostic для Part 2 и не
+подменяет доказанные order+feeRate и over-cap semantics.
 
 ## 4. Что сделано хорошо
 
@@ -80,6 +88,10 @@ Impeccable mechanical detector: 0 findings
 8. Отсутствие полноценных Positions/Activity/Settings экранов не является дефектом Part 1: они явно вынесены в следующую часть.
 
 ## 5. Реестр обязательных исправлений
+
+> Разделы 5–18 сохраняют исходный audit/план и формулировки дефектов
+> на первичном HEAD. Их актуальный статус и evidence зафиксированы в
+> implementation addendum, разделы 19–20.
 
 | ID | Приоритет | Область | Решение |
 |---|---:|---|---|
@@ -394,19 +406,17 @@ Backend выставляет `snapshot_captured_at` только при `refresh
 | R6 | выполнено | `Sheet` снова fixed overlay; добавлены Escape, overlay close, focus trap/restore и body scroll lock |
 | R7 | выполнено | Builder/application logs не получают raw exception text; regression tests проверяют отсутствие payload |
 | R8 | выполнено в коде harness | signed GET имеет bounded retries с новым nonce; order POST использует unique client id и query-based unknown resolution; fee assertions сужены до cap semantics |
-| R9 | частично | living docs синхронизированы; сохранены два current-HEAD local-browser evidence; Telegram/WalletConnect screenshots и manual run требуют владельца |
+| R9 | выполнено | living docs синхронизированы; current-HEAD browser evidence дополнено ручным Telegram Pause/Resume владельца и production-логами |
 
 ### 19.1 Verification
 
 Полный offline/backend и frontend gate зелёный; точные counters, coverage и
 duration хранятся только в `../ENGINE_TEST_STATUS_2026-08.md`.
 
-Полный `tests/testnet/` не был сокращён до новых Builder-модулей и не был
-выдан за green. Public server-time endpoint ответил успешно, но signed account
-endpoints (`/agent`, `/openOrders`, `/positionRisk`, `/positionSide/dual` и
-зависимые paths) массово вернули `Aster -1000 System error`, включая старые
-Stage 1/2 сценарии. Harness оставлен fail-closed: ошибки не преобразованы в
-пустые snapshots, fake state или skips.
+Полный `tests/testnet/` не был сокращён до Builder-модулей: все 29
+обязательных сценариев прошли в одном signed live-запуске. Прежний
+инцидент `-1000` не был замаскирован fake state или ослабленными
+assertions; routes восстановились, после чего тот же harness прошёл.
 
 Current-HEAD local-browser evidence снят штатным `scripts/preview_miniapp.py`
 на изолированной копии SQLite и мобильном viewport 393×852:
@@ -420,21 +430,14 @@ Telegram WebView, WalletConnect или подпись TokenPocket. Production SQ
 
 ### 19.2 Текущий verdict
 
-Кодовая remediation R1–R8 завершена и offline доказана. Финальный Stage 3 Part
-1 gate остаётся **OPEN** ровно по двум внешним acceptance-пунктам:
-
-1. зелёный повтор полного signed Testnet suite после восстановления Aster
-   signed account endpoints;
-2. ручной Telegram + WalletConnect/TokenPocket прогон и screenshots текущего
-   build/HEAD.
-
-Остаточная Testnet-позиция не считается финансовым риском; cleanup нужен только
-для повторяемости. Однако во время текущего incident authoritative signed reads
-недоступны, поэтому утверждать `flat/no orders` без доказательства нельзя.
+Кодовая remediation R1–R9, полный signed Testnet suite и ручной
+Telegram owner acceptance завершены. Stage 3 Part 1 gate — **CLOSED**.
 
 ## 20. Testnet incident-resilience addendum — 2026-09-01
 
-После первоначального аудита Aster Testnet восстановил не все signed routes.
+После первоначального аудита Aster Testnet временно восстановил не все
+signed routes. Матрица ниже — исторический snapshot частичного инцидента,
+а не текущее состояние финального gate.
 Прямые запросы с production credentials доказали, что это не ошибка host,
 подписи или nonce:
 
@@ -480,7 +483,7 @@ Telegram WebView, WalletConnect или подпись TokenPocket. Production SQ
    Mainnet, старый/неполный snapshot и deterministic permission rejection
    остаются заблокированы.
 
-### 20.2 Live runtime evidence
+### 20.2 Live runtime evidence во время incident
 
 - полный `run-bot` дошёл до `READY`;
 - Mini App слушает production aiohttp server, Cloudflare public URL вернул
@@ -494,6 +497,74 @@ Telegram WebView, WalletConnect или подпись TokenPocket. Production SQ
   `system_state=ready`.
 
 Точные offline counters и coverage после этих изменений хранятся только в
-`../ENGINE_TEST_STATUS_2026-08.md`. Ручной Telegram WebView screenshot текущего
-build по-прежнему остаётся отдельным owner acceptance, а не заменяется
-server-generated transport probe.
+`../ENGINE_TEST_STATUS_2026-08.md`.
+
+### 20.3 Owner manual acceptance
+
+2026-09-01 владелец вручную открыл production Mini App в Telegram,
+поставил аккаунт `tg-8264892202` на паузу и нажал Resume. Production-лог
+независимо подтверждает весь flow:
+
+- `13:08:42` — `pause result=attempt`;
+- `13:08:44` — account reconcile `0`, `pause result=success`,
+  `allow_new_entries`, `state=paused`;
+- `13:08:49` — `resume result=attempt`;
+- `13:08:53–13:08:55` — leverage BTC=200, ETH=200, SOL=100 подтвержден
+  authoritative `positionRisk` на настоящем Aster Testnet;
+- `13:08:58` — application reconcile `0`, `resume result=success`,
+  `allow_new_entries`, `state=resumed`;
+- последующие sweep — `tg-8264892202: 0`.
+
+Это закрывает ручной Telegram UI-gate. Server-generated
+`session -> confirmation -> resume` хранится отдельно как
+transport/application evidence и не выдаётся за ручную приёмку.
+
+### 20.4 Финальный signed live-gate
+
+После восстановления Aster routes полный `tests/testnet/` повторен
+единым запуском с `CT_TESTNET=1` против effective config:
+
+```text
+rest_base_url=https://fapi.asterdex-testnet.com
+ws_user_base=wss://fstream.asterdex-testnet.com/ws
+allow_mainnet=False
+```
+
+Результат: **29 обязательных live-сценариев passed за 756.35 s**.
+В этот набор входят:
+
+- Builder `prepare -> approveAgent -> verify -> paused commit`;
+- recovery после реального accepted POST и потери локального ответа;
+- Mini App HTTP Pause/Resume с real signed permission/account reads;
+- реальные `builder+feeRate` open/close и flat verification;
+- реальное отклонение `feeRate` выше approved cap;
+- leverage provisioning/downshift gates;
+- полные ONE_WAY и HEDGE engine cycles, protection resize/replace, partial
+  close, TP, emergency, boot recovery, WebSocket reconnect и cleanup.
+
+Во время финального запуска один legacy-тест был skipped, потому что
+требовал main private keys в production `SqliteCredentials`, что прямо
+противоречит key-isolation invariant. Он удалён как мёртвый дубликат:
+его функциональность сильнее и реально покрывает
+`test_builder_mini_app_e2e.py`, где main key живёт только в live-test harness.
+
+Недокументированный `/fapi/v3/builder/userTrades` остался bounded
+best-effort diagnostic для Part 2. Его недоступность не ослабляет
+Part 1 gate: exchange-level order acceptance с `builder+feeRate`, закрытие,
+flat state и over-cap rejection проверяются жёстко на том же Aster
+Testnet.
+
+### 20.5 Финальный runtime после test cleanup
+
+После полного live-suite production-процесс перезапущен с новым
+Cloudflare quick tunnel. Фактическое состояние:
+
+- startup и post-stream reconciliation: `copyc1=0`, `copyc2=0`, `copyc3=0`,
+  `tg-8264892202=0`;
+- master user-stream startup завершён, runtime перешёл в `READY`;
+- production aiohttp Mini App слушает `127.0.0.1:8080/miniapp`;
+- публичный tunnel вернул `HTTP 200`;
+- aiogram polling запущен для `@aster_copytrade_bot`;
+- глобальная пауза, оставленная emergency live-тестом, снята:
+  `allow_new_entries=true`;
+- `ready=true`, `runtime=ready`, `degraded=-`; все пять аккаунтов enabled.

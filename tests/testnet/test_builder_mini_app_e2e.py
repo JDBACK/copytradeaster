@@ -10,8 +10,10 @@ Marker `testnet`, требует CT_TESTNET=1 и wallet.txt с секциями 
 2. Проверочная сделка от сгенерированного signer'а с `builder` + `feeRate`
    (снимает риск «подключён, но не торгует» и закрывает исторический
    Builder-e2e Stage 1): MARKET BUY -> reduceOnly SELL -> flat.
-3. `GET /fapi/v3/builder/userTrades` подписью билдера: сделка видна билдеру
-   с `builderFee`.
+3. Best-effort diagnostic `GET /fapi/v3/builder/userTrades` подписью
+   билдера. Endpoint не документирован для этого auth context и
+   относится к Builder Center / Part 2, поэтому не является binding
+   acceptance Stage 3 Part 1.
 4. `feeRate` выше одобренного `maxFeeRate` отклоняется биржей.
 5. Финал: счёт flat, ордеров нет.  Отзыв Agent не выполняется (revoke —
    часть 2, решение #11 реестра): Agent истечёт через 30 дней.
@@ -511,6 +513,7 @@ async def test_builder_order_with_fee_rate_round_trip(flowctx, http):
         limiter,
         weight=5,
         allowed_error_codes=frozenset({-2015, -2016}),
+        optional_after_retries=True,
     )
     if body is None:
         print(

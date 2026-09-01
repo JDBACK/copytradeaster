@@ -194,11 +194,16 @@ async def signed_read_json(
     weight: int,
     attempts: int = 8,
     allowed_error_codes: frozenset[int] = frozenset(),
+    optional_after_retries: bool = False,
 ) -> dict[str, Any] | list[Any] | None:
     """Perform a retryable signed GET with a fresh nonce per attempt.
 
     Only idempotent reads are retried. Definitive exchange rejections fail
     immediately unless the caller explicitly allows their numeric code.
+    ``optional_after_retries`` is reserved for non-acceptance diagnostics: it
+    still exhausts the real read retries, then returns ``None`` instead of
+    turning an unavailable out-of-scope endpoint into a failure of the
+    already-proven binding scenario.
     """
     if attempts < 1:
         raise ValueError("attempts must be positive")
@@ -232,6 +237,8 @@ async def signed_read_json(
                 pytest.fail(f"signed GET {path} was rejected ({last_category})")
         if attempt < attempts:
             await asyncio.sleep(min(0.5 * attempt, 1.5))
+    if optional_after_retries:
+        return None
     pytest.fail(
         f"signed GET {path} remained unavailable after {attempts} attempts ({last_category})"
     )

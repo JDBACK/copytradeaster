@@ -1,16 +1,15 @@
-# Статус работ — copytradeaster (этапы 1–2)
+# Статус работ — copytradeaster (этапы 1–3)
 
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Актуальная рабочая
 ветка Stage 3, часть 1: `codex/stage-3-mini-app-part1`.
 
 ## Текущее состояние
 
-- **Stage 3, часть 1 — REMEDIATION + TESTNET INCIDENT RESILIENCE IMPLEMENTED /
-  FINAL MANUAL GATE OPEN (2026-09-01):** обязательные кодовые исправления R1–R8
-  из `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` реализованы. Gate пока
-  нельзя называть `CLOSED`: текущий полный signed Testnet-прогон массово падает
-  на внешнем `Aster -1000 System error`, а ручная Telegram + WalletConnect
-  приёмка именно этого HEAD ещё не выполнена.
+- **Stage 3, часть 1 — CLOSED (2026-09-01):** все обязательные
+  исправления R1–R9 из
+  `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` выполнены.
+  Offline, frontend, полный state-changing signed Aster Testnet suite и
+  ручная Telegram Mini App приёмка владельца зелёные.
   1. **Unknown remote outcome:** transport/5xx/`-1000/-1006/-1007` после
      `approveAgent` сохраняют `APPROVAL_SENT`; recovery сначала проверяет Agent
      idempotent signed GET и не делает blind повтор POST.
@@ -32,17 +31,20 @@
      unknown outcome только через query. Fake-only evidence больше не выдаётся
      за signed live.
   6. **Актуальный offline/frontend gate:** offline pytest **740 passed / 2
-     skipped / 30 deselected** за **18.23 s**, total coverage **87%**; Ruff
+     skipped / 30 deselected** за **17.02 s**, total coverage **87%**; Ruff
      check/format и `git diff --check` clean. Frontend: Vitest **41 passed**,
      Oxlint clean, TypeScript + Vite production build passed.
-  7. **Актуальный полный signed Testnet gate:** **1 passed / 1 skipped / 21
-     failed / 7 errors** за **224.08 s**. Public `GET /fapi/v3/time` прошёл;
-     подписанные `/agent`, `/openOrders`, `/positionRisk`,
-     `/positionSide/dual` и зависимые account paths отвечали `-1000`. Ошибка
-     воспроизводится также старым Stage 1/2 live suite, поэтому это фактический
-     внешний Testnet incident, а не основание ослаблять assertions или заменять
-     live reads фейками.
-  8. **Incident-resilience live evidence (настоящий Aster Testnet):** signed
+  7. **Актуальный полный signed Testnet gate:** в едином запуске
+     все **29 обязательных state-changing/live сценариев passed** за
+     **756.35 s** против `https://fapi.asterdex-testnet.com`. Пройдены
+     Builder onboarding/recovery, Mini App Pause/Resume, builder+feeRate order,
+     over-cap rejection, leverage control-plane, ONE_WAY/HEDGE, WebSocket,
+     emergency, boot recovery, protective-order convergence и flat cleanup.
+     Один legacy-дубликат, требовавший хранить main private keys в
+     production credentials, был skipped в этом запуске и затем удалён:
+     его полностью заменяет прошедший `test_builder_mini_app_e2e.py`.
+  8. **Incident-resilience live evidence (настоящий Aster Testnet):** во время
+     частичного инцидента signed
      `balance`, `positionRisk` и symbol-scoped `allOrders` отвечают `200`, тогда
      как `positionSide/dual`, `openOrders`, `listenKey`, `leverageBracket` и
      `agent` во время инцидента отвечают `-1000`. Добавлены только
@@ -52,14 +54,24 @@
      `positionRisk`; 24h bounded permission cache только для явного Testnet
      override и только после unknown Agent-read failure. Частичные/расходящиеся
      данные, mainnet и deterministic permission rejection остаются fail-closed.
-  9. **Запущенный production runtime:** `READY`, Telegram polling и публичная
-     Mini App (`HTTP 200`) работают в REST-reconciliation режиме. Повторные
-     live sweep дали по `0` действий на `copyc1`–`copyc3` и
+     После восстановления routes полный live-suite прошёл без этих
+     fallback-путей как подмены assertions.
+  9. **Финальный production runtime после live-suite:** `READY`, master
+     user-stream запущен, Telegram polling и новая публичная Mini App
+     отвечает `HTTP 200`. Startup/post-stream/sweep дали по `0` действий
+     на `copyc1`–`copyc3` и
      `tg-8264892202`. Production Mini App flow `session -> confirmation ->
      resume` вернул `HTTP 200`, `copy_state=active`, `system_state=ready` для
      `tg-8264892202`; leverage readiness подтверждена реальными
-     `positionRisk`: BTC/ETH=200, SOL=100. Это transport/application evidence,
-     но не замена ручному Telegram WebView screenshot владельца.
+     `positionRisk`: BTC/ETH=200, SOL=100. Оставленная emergency-тестом
+     глобальная пауза снята; `allow_new_entries=true`, все пять аккаунтов
+     enabled. Это отдельное transport/application evidence.
+  10. **Owner manual Telegram acceptance:** production-лог подтверждает
+      ручной WebView flow владельца: `13:08:42 pause attempt` →
+      `13:08:44 pause success/state=paused` → `13:08:49 resume attempt` →
+      real Testnet leverage confirmation BTC/ETH=200, SOL=100 →
+      `13:08:58 resume success/state=resumed`. Последующие sweep дают
+      `tg-8264892202: 0`. Ручной UI-gate закрыт.
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
