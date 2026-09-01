@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,10 @@ from copytradeaster.domain.models import TradingIdentity
 from copytradeaster.storage.repositories import NonceStore
 
 WALLET_FILE = Path("wallet.txt")
+UNKNOWN_READ_CODES = frozenset({-1000, -1006, -1007})
 
 
-def load_wallet_section(name: str) -> tuple[str, str]:
-    """Return (main_evm_address, main_evm_private_key) from wallet.txt."""
+def _wallet_sections() -> dict[str, dict[str, str]]:
     if not WALLET_FILE.exists():
         pytest.skip("wallet.txt not found")
     text = WALLET_FILE.read_text(encoding="utf-8")
@@ -35,7 +36,12 @@ def load_wallet_section(name: str) -> tuple[str, str]:
         elif current is not None and ":" in stripped:
             key, value = stripped.split(":", 1)
             sections[current][key.strip().lower()] = value.strip()
-    section = sections.get(name) or {}
+    return sections
+
+
+def load_wallet_section(name: str) -> tuple[str, str]:
+    """Return (main_evm_address, main_evm_private_key) from wallet.txt."""
+    section = _wallet_sections().get(name) or {}
     address = section.get("evm adress", "")
     if not address.startswith("0x"):
         pytest.skip(f"wallet.txt section {name!r} has no evm adress")
@@ -47,6 +53,28 @@ def load_wallet_section(name: str) -> tuple[str, str]:
         except Exception:
             continue
     pytest.skip(f"wallet.txt section {name!r} has no main-key matching its evm address")
+
+
+def load_api_wallet_section(name: str) -> tuple[str, str, str]:
+    """Return (main user, API signer, API private key) from wallet.txt.
+
+    The values are validated by deriving the signer address from the private
+    key. They are never included in assertion messages or logs.
+    """
+    section = _wallet_sections().get(name) or {}
+    user_address = section.get("evm adress", "")
+    signer_address = section.get("api wallet adress", "")
+    if not user_address.startswith("0x") or not signer_address.startswith("0x"):
+        pytest.skip(f"wallet.txt section {name!r} has no user/API wallet pair")
+    for candidate in section.values():
+        if not candidate.startswith("0x") or len(candidate) != 66:
+            continue
+        try:
+            if Account.from_key(candidate).address.casefold() == signer_address.casefold():
+                return user_address, signer_address, candidate
+        except Exception:
+            continue
+    pytest.skip(f"wallet.txt section {name!r} has no key matching its API wallet")
 
 
 def ensure_testnet_guard(
@@ -72,33 +100,77 @@ async def get_live_account_state(
     private_key: str,
     nonce_store: NonceStore,
     limiter: RateLimits,
+    *,
+    include_agent: bool = True,
 ) -> dict[str, Any]:
     """Read agent, balance, positions, open orders, dual side position."""
-    await limiter.acquire_request(5)
-    nonce = await nonce_store.next_nonce(identity.signer)
-    _, full = prepare_signed_request({}, identity, private_key, nonce)
-    agent_resp = await http.get(f"{base_url}/fapi/v3/agent?{full}")
-    agent = agent_resp.json() if agent_resp.status_code == 200 else None
+    agent = None
+    if include_agent:
+        agent = await signed_read_json(
+            http,
+            base_url,
+            "/fapi/v3/agent",
+            {},
+            identity,
+            private_key,
+            nonce_store,
+            limiter,
+            weight=5,
+            allowed_error_codes=frozenset({-2015, -2016}),
+        )
+    balances = await signed_read_json(
+        http,
+        base_url,
+        "/fapi/v3/balance",
+        {},
+        identity,
+        private_key,
+        nonce_store,
+        limiter,
+        weight=5,
+    )
+    positions = await signed_read_json(
+        http,
+        base_url,
+        "/fapi/v3/positionRisk",
+        {},
+        identity,
+        private_key,
+        nonce_store,
+        limiter,
+        weight=5,
+    )
+    open_orders = await signed_read_json(
+        http,
+        base_url,
+        "/fapi/v3/openOrders",
+        {"symbol": "BTCUSDT"},
+        identity,
+        private_key,
+        nonce_store,
+        limiter,
+        weight=1,
+    )
+    dual = await signed_read_json(
+        http,
+        base_url,
+        "/fapi/v3/positionSide/dual",
+        {},
+        identity,
+        private_key,
+        nonce_store,
+        limiter,
+        weight=30,
+    )
 
-    nonce = await nonce_store.next_nonce(identity.signer)
-    _, full = prepare_signed_request({}, identity, private_key, nonce)
-    bal_resp = await http.get(f"{base_url}/fapi/v3/balance?{full}")
-    balances = bal_resp.json() if bal_resp.status_code == 200 else []
-
-    nonce = await nonce_store.next_nonce(identity.signer)
-    _, full = prepare_signed_request({}, identity, private_key, nonce)
-    pos_resp = await http.get(f"{base_url}/fapi/v3/positionRisk?{full}")
-    positions = pos_resp.json() if pos_resp.status_code == 200 else []
-
-    nonce = await nonce_store.next_nonce(identity.signer)
-    _, full = prepare_signed_request({}, identity, private_key, nonce)
-    orders_resp = await http.get(f"{base_url}/fapi/v3/openOrders?{full}")
-    open_orders = orders_resp.json() if orders_resp.status_code == 200 else []
-
-    nonce = await nonce_store.next_nonce(identity.signer)
-    _, full = prepare_signed_request({}, identity, private_key, nonce)
-    dual_resp = await http.get(f"{base_url}/fapi/v3/positionSide/dual?{full}")
-    dual = dual_resp.json() if dual_resp.status_code == 200 else {}
+    if not isinstance(balances, list):
+        pytest.fail("signed balance read returned a non-list payload")
+    if not isinstance(positions, list):
+        pytest.fail("signed positionRisk read returned a non-list payload")
+    if not isinstance(open_orders, list):
+        pytest.fail("signed openOrders read returned a non-list payload")
+    if not isinstance(dual, dict):
+        pytest.fail("signed position-mode read returned a non-object payload")
 
     return {
         "agent": agent,
@@ -107,6 +179,62 @@ async def get_live_account_state(
         "open_orders": open_orders,
         "dual_side_position": bool(dual.get("dualSidePosition")),
     }
+
+
+async def signed_read_json(
+    http: httpx.AsyncClient,
+    base_url: str,
+    path: str,
+    params: dict[str, str],
+    identity: TradingIdentity,
+    private_key: str,
+    nonce_store: NonceStore,
+    limiter: RateLimits,
+    *,
+    weight: int,
+    attempts: int = 8,
+    allowed_error_codes: frozenset[int] = frozenset(),
+) -> dict[str, Any] | list[Any] | None:
+    """Perform a retryable signed GET with a fresh nonce per attempt.
+
+    Only idempotent reads are retried. Definitive exchange rejections fail
+    immediately unless the caller explicitly allows their numeric code.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+    last_category = "unknown"
+    for attempt in range(1, attempts + 1):
+        await limiter.acquire_request(weight)
+        nonce = await nonce_store.next_nonce(identity.signer)
+        _, full = prepare_signed_request(params, identity, private_key, nonce)
+        try:
+            response = await http.get(f"{base_url.rstrip('/')}{path}?{full}")
+        except httpx.TransportError as exc:
+            last_category = type(exc).__name__
+        else:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+                code = response.status_code
+                retryable = response.status_code >= 500 or response.status_code < 400
+            else:
+                code = int(body.get("code", 0) or 0) if isinstance(body, dict) else 0
+                if code in allowed_error_codes:
+                    return None
+                retryable = response.status_code >= 500 or code in UNKNOWN_READ_CODES
+                if response.status_code < 400 and code >= 0:
+                    if isinstance(body, (dict, list)):
+                        return body
+                    pytest.fail(f"signed GET {path} returned an unsupported payload type")
+            last_category = f"http={response.status_code},code={code}"
+            if not retryable:
+                pytest.fail(f"signed GET {path} was rejected ({last_category})")
+        if attempt < attempts:
+            await asyncio.sleep(min(0.5 * attempt, 1.5))
+    pytest.fail(
+        f"signed GET {path} remained unavailable after {attempts} attempts ({last_category})"
+    )
 
 
 async def best_effort_flatten(

@@ -82,6 +82,7 @@ class FakeApplication:
     dashboard_dto: DashboardDTO = field(default_factory=_dashboard_dto)
     prepare_calls: list = field(default_factory=list)
     submit_calls: list = field(default_factory=list)
+    resume_attempt_calls: list = field(default_factory=list)
     dashboard_calls: list = field(default_factory=list)
     pause_calls: list = field(default_factory=list)
     resume_calls: list = field(default_factory=list)
@@ -136,6 +137,12 @@ class FakeApplication:
             agent_expires_at_ms=0,
             paused=True,
         )
+
+    async def builder_resume_attempt(self, user_id: int) -> BuilderOnboardedDTO:
+        self.resume_attempt_calls.append(user_id)
+        if self.submit_fail_with:
+            raise self.submit_fail_with
+        return await self.builder_submit(user_id, "server-owned", "")
 
     async def pause(self, user_id: int) -> DashboardDTO:
         self.pause_calls.append(user_id)
@@ -512,6 +519,20 @@ async def test_builder_recover_route(client, fake_app):
     assert body["connection_state"] == "connected"
     assert body["account_connected"] is True
     assert fake_app.user_id_seen == 777
+
+
+async def test_builder_resume_attempt_route_uses_authenticated_user(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/builder/resume-attempt",
+        json={"pending_id": "client-must-not-control-this"},
+        headers=_auth_header(init_data),
+    )
+    body = await resp.json()
+    assert resp.status == 200
+    assert body["account_id"] == "tg-777"
+    assert fake_app.resume_attempt_calls == [777]
+    assert fake_app.submit_calls[-1] == (777, "server-owned", "")
 
 
 async def test_security_headers_and_cache_control(tmp_path, fake_app):

@@ -4,8 +4,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import { describeError } from '../errors'
-import { formatPercent, formatTime } from '../format'
-import { RESUME_CONFIRM_BODY, RESUME_CONFIRM_TITLE, homeViewModel } from '../home'
+import { formatPercent } from '../format'
+import { RESUME_CONFIRM_BODY, RESUME_CONFIRM_TITLE, homeViewModel, snapshotLabel } from '../home'
 import { hapticImpact, hapticNotify } from '../telegram'
 import type { ConfirmationDTO, DashboardDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
@@ -24,7 +24,7 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
   const refresh = useCallback(async (isUserTriggered = false) => {
     if (isUserTriggered) setActing(true)
     try {
-      const dashboard = await api.dashboard(auth, isUserTriggered)
+      const dashboard = await api.dashboard(auth, true)
       if (dashboard.copy_state === 'empty') {
         onNotConnected()
         return
@@ -183,7 +183,7 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
         <div className="freshness">
           <span className={`dot ${systemDot}`} aria-hidden />
           Система: {systemLabel(dashboard.system_state)} · Снимок:{' '}
-          {formatTime(dashboard.snapshot_captured_at || dashboard.updated_at)}
+          {snapshotLabel(dashboard.snapshot_captured_at)}
         </div>
       </section>
 
@@ -265,7 +265,13 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
       )}
 
       {pendingConfirmation && (
-        <Sheet title={RESUME_CONFIRM_TITLE} body={RESUME_CONFIRM_BODY}>
+        <Sheet
+          title={RESUME_CONFIRM_TITLE}
+          body={RESUME_CONFIRM_BODY}
+          onClose={() => {
+            if (!acting) setPendingConfirmation(null)
+          }}
+        >
           <button
             type="button"
             className="btn btn-primary"

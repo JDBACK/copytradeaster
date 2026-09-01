@@ -448,6 +448,9 @@ class BuilderOnboardingAdapter:
     async def get_builder_attempt(self, telegram_user_id: int) -> Any:
         return await self._store.get_builder_attempt(telegram_user_id)
 
+    async def delete_builder_attempt(self, telegram_user_id: int) -> bool:
+        return await self._store.delete_builder_attempt(telegram_user_id)
+
 
 class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
     """Concrete Stage 2 runtime port backed by one composed :class:`App`."""

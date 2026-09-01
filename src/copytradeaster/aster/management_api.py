@@ -21,6 +21,8 @@ from copytradeaster.logging_utils import get_logger
 
 log = get_logger(__name__)
 
+UNKNOWN_MUTATION_CODES = frozenset({-1000, -1006, -1007})
+
 
 async def post_signed_registration(
     http: httpx.AsyncClient,
@@ -52,11 +54,19 @@ async def post_signed_registration(
     try:
         resp = await http.post(url, content=b"")
     except httpx.TransportError as exc:
-        raise ManagementError(-1006, f"transport error: {type(exc).__name__}") from exc
+        raise ManagementError(
+            -1006,
+            f"transport error: {type(exc).__name__}",
+            outcome_unknown=True,
+        ) from exc
     try:
         body = resp.json()
     except ValueError as exc:
-        raise ManagementError(resp.status_code, resp.text[:200]) from exc
+        raise ManagementError(
+            resp.status_code,
+            resp.text[:200],
+            outcome_unknown=resp.status_code >= 500 or 200 <= resp.status_code < 300,
+        ) from exc
     if resp.status_code >= 400 or (
         isinstance(body, dict) and isinstance(body.get("code"), int) and body["code"] < 0
     ):
@@ -66,7 +76,12 @@ async def post_signed_registration(
         message = ""
         if isinstance(body, dict):
             message = str(body.get("msg") or body.get("error") or "")[:160]
-        raise ManagementError(code or resp.status_code, message)
+        error_code = code or resp.status_code
+        raise ManagementError(
+            error_code,
+            message,
+            outcome_unknown=resp.status_code >= 500 or error_code in UNKNOWN_MUTATION_CODES,
+        )
     # Registration responses may contain exchange payloads and addresses;
     # only retain the action/status trace in application logs.
     log.info(
@@ -78,10 +93,22 @@ async def post_signed_registration(
 
 
 class ManagementError(Exception):
-    def __init__(self, code: int | str, msg: str) -> None:
+    def __init__(
+        self,
+        code: int | str,
+        msg: str,
+        *,
+        outcome_unknown: bool = False,
+    ) -> None:
         super().__init__(f"{code}: {msg}")
         self.code = code
         self.msg = msg
+        self.outcome_unknown = bool(outcome_unknown)
+
+
+def is_unknown_registration_outcome(exc: ManagementError) -> bool:
+    """Return whether a user-signed mutation may have reached the exchange."""
+    return exc.outcome_unknown or exc.code in UNKNOWN_MUTATION_CODES
 
 
 class ManagementClient:

@@ -31,6 +31,10 @@ const COPY: Record<string, ErrorCopy> = {
     title: 'Заявка не найдена',
     hint: 'Начните подключение заново.',
   },
+  approval_signature_required: {
+    title: 'Нужна подпись кошелька',
+    hint: 'Вернитесь к шагу подключения и подтвердите разрешение в кошельке.',
+  },
   signature_mismatch: {
     title: 'Подпись не совпала',
     hint: 'Убедитесь, что подписываете тем же кошельком, что подключили, и попробуйте снова.',
@@ -38,6 +42,10 @@ const COPY: Record<string, ErrorCopy> = {
   agent_submit_failed: {
     title: 'Aster отклонил авторизацию',
     hint: 'Биржа не приняла подпись. Попробуйте ещё раз через минуту.',
+  },
+  approval_status_unknown: {
+    title: 'Проверяем результат',
+    hint: 'Подпись уже отправлена. Повторите проверку — заново подписывать ничего не нужно.',
   },
   agent_not_confirmed: {
     title: 'Agent не подтверждён',

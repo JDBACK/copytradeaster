@@ -67,6 +67,13 @@ describe('api client', () => {
     })
   })
 
+  it('requests a fresh exchange snapshot when dashboard refresh is true', async () => {
+    const fetchMock = mockFetch(async () => Response.json({ copy_state: 'paused' }))
+    await api.dashboard(auth, true)
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ refresh: true })
+  })
+
   it('calls builderRecover endpoint correctly', async () => {
     const fetchMock = mockFetch(async () =>
       Response.json({ access_state: 'approved', connection_state: 'connected' }),
@@ -75,6 +82,17 @@ describe('api client', () => {
     expect(result.connection_state).toBe('connected')
     const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('/miniapp/api/builder/recover')
+  })
+
+  it('continues a server-owned builder attempt without client signature data', async () => {
+    const fetchMock = mockFetch(async () =>
+      Response.json({ account_id: 'tg-42', paused: true }),
+    )
+    const result = await api.builderResumeAttempt(auth)
+    expect(result.account_id).toBe('tg-42')
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/miniapp/api/builder/resume-attempt')
+    expect(JSON.parse(String(init.body))).toEqual({})
   })
 
   it('aborts on timeout and throws timeout_error', async () => {

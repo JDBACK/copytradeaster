@@ -6,6 +6,7 @@ All requests execute against the live Aster testnet (fapi.asterdex-testnet.com).
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from copytradeaster.trading.registry import FollowerRegistry
 from tests.testnet.support.builder_live import (
     ensure_testnet_guard,
     get_live_account_state,
+    load_api_wallet_section,
     load_wallet_section,
 )
 
@@ -51,6 +53,63 @@ pytestmark = [
 USER_TG_ID = 777_000_102
 USER_SECTION = "copyc2"
 BUILDER_SECTION = "builder"
+
+
+async def _submit_with_read_retries(
+    service: BuilderOnboardingService,
+    telegram_user_id: int,
+    pending_id: str,
+    signature: str,
+):
+    """Retry only durable verification/commit states, never approveAgent POST."""
+    for attempt in range(12):
+        try:
+            return await service.submit(
+                BuilderSubmitRequest(
+                    telegram_user_id,
+                    pending_id,
+                    signature if attempt == 0 else "",
+                )
+            )
+        except OnboardingError as exc:
+            if exc.code not in {
+                OnboardingErrorCode.AGENT_NOT_CONFIRMED,
+                OnboardingErrorCode.SIGNED_READ_FAILED,
+            }:
+                raise
+            if attempt == 11:
+                raise
+            await asyncio.sleep(1.5)
+    raise AssertionError("unreachable builder live retry state")
+
+
+class _LoseSuccessfulApproveResponse:
+    """Deliver approveAgent to Aster, then emulate loss of its HTTP response."""
+
+    def __init__(self, inner: httpx.AsyncClient) -> None:
+        self._inner = inner
+        self.approve_posts = 0
+
+    async def post(self, url: str, *args, **kwargs):
+        response = await self._inner.post(url, *args, **kwargs)
+        if "/fapi/v3/approveAgent?" not in url:
+            return response
+        self.approve_posts += 1
+        try:
+            body = response.json()
+        except ValueError:
+            return response
+        code = int(body.get("code", 0) or 0) if isinstance(body, dict) else 0
+        if response.status_code < 400 and code >= 0:
+            request = response.request
+            raise httpx.ReadTimeout(
+                "approveAgent response lost after exchange acceptance",
+                request=request,
+            )
+        return response
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
 
 
 @pytest.fixture
@@ -72,8 +131,8 @@ async def http_client():
 
 
 async def test_l1_signed_read_account_state(test_settings, http_client):
-    """L1: Signed read of current account state (Agent, mode, balance, positions)."""
-    user_address, user_key = load_wallet_section(USER_SECTION)
+    """L1: Signed read of live mode, balance, positions, and BTC open orders."""
+    user_address, signer_address, signer_key = load_api_wallet_section(USER_SECTION)
     limiter = RateLimits(2400, 1200, 300)
     db = Database(test_settings.db_path)
     await db.connect()
@@ -83,16 +142,17 @@ async def test_l1_signed_read_account_state(test_settings, http_client):
     identity = TradingIdentity(
         account_id="tg-live-read",
         user=user_address,
-        signer=user_address,
+        signer=signer_address,
         chain_id=714,
     )
     state = await get_live_account_state(
         http_client,
         test_settings.rest_base_url,
         identity,
-        user_key,
+        signer_key,
         nonce_store,
         limiter,
+        include_agent=False,
     )
     await db.close()
 
@@ -158,7 +218,12 @@ async def test_l2_fresh_builder_onboarding_happy_path(test_settings, http_client
     )
     signature = Account.sign_message(typed, user_key).signature.hex()
 
-    result = await service.submit(BuilderSubmitRequest(USER_TG_ID, prepared.pending_id, signature))
+    result = await _submit_with_read_retries(
+        service,
+        USER_TG_ID,
+        prepared.pending_id,
+        signature,
+    )
     assert result.paused is True
     assert result.account_id == f"tg-{USER_TG_ID}"
     assert activated_accounts == [f"tg-{USER_TG_ID}"]
@@ -176,7 +241,7 @@ async def test_l2_fresh_builder_onboarding_happy_path(test_settings, http_client
 
 
 async def test_l3_recovery_after_real_approve_agent_and_local_failure(test_settings, http_client):
-    """L3: Recovery after remote approval: local failure before commit recovers with same signer."""
+    """L3: Real remote acceptance + lost response recovers without another POST/signature."""
     user_address, user_key = load_wallet_section(USER_SECTION)
     builder_address, _ = load_wallet_section(BUILDER_SECTION)
 
@@ -212,8 +277,9 @@ async def test_l3_recovery_after_real_approve_agent_and_local_failure(test_setti
             nonces=NonceStore(db),
         )
 
+    lossy_http = _LoseSuccessfulApproveResponse(http_client)
     service = BuilderOnboardingService(
-        http_client,
+        lossy_http,
         limiter,
         client_factory,
         store,
@@ -228,10 +294,18 @@ async def test_l3_recovery_after_real_approve_agent_and_local_failure(test_setti
     )
     signature = Account.sign_message(typed, user_key).signature.hex()
 
-    # 1. Simulate in-flight state where remote approval was interrupted
-    await store.update_builder_attempt_state(prepared.pending_id, "APPROVAL_SENT")
+    # The real POST reaches Aster and succeeds. Only the local response is lost.
+    with pytest.raises(OnboardingError) as lost_info:
+        await service.submit(BuilderSubmitRequest(tg_id, prepared.pending_id, signature))
+    if lost_info.value.code is OnboardingErrorCode.AGENT_SUBMIT_FAILED:
+        pytest.skip("builder address is not registered in Aster Testnet")
+    assert lost_info.value.code is OnboardingErrorCode.APPROVAL_STATUS_UNKNOWN
+    assert lossy_http.approve_posts == 1
+    pending = await store.get_builder_attempt(tg_id)
+    assert pending is not None
+    assert pending.state == "APPROVAL_SENT"
 
-    # 2. Re-create service (simulating crash / restart)
+    # Re-create the service (process restart) with the normal transport.
     service_after_restart = BuilderOnboardingService(
         http_client,
         limiter,
@@ -240,23 +314,16 @@ async def test_l3_recovery_after_real_approve_agent_and_local_failure(test_setti
         config=config,
     )
 
-    # 3. First submit after restart checks GET /agent -> not found -> reverts to PREPARED
-    with pytest.raises(OnboardingError) as exc_info:
-        await service_after_restart.submit(
-            BuilderSubmitRequest(tg_id, prepared.pending_id, signature)
-        )
-    assert exc_info.value.code is OnboardingErrorCode.AGENT_NOT_CONFIRMED
-
-    # 4. Check state reverted to PREPARED
-    att = await store.get_builder_attempt(tg_id)
-    assert att is not None
-    assert att.state == "PREPARED"
-
-    # 5. Retry submit posts approval, verifies agent, and completes paused commit
-    result = await service_after_restart.submit(
-        BuilderSubmitRequest(tg_id, prepared.pending_id, signature)
+    # Agent visibility may lag the successful POST. Retry only the idempotent
+    # verification/commit path; the empty signature proves no re-sign occurs.
+    result = await _submit_with_read_retries(
+        service_after_restart,
+        tg_id,
+        prepared.pending_id,
+        "",
     )
     assert result.paused is True
+    assert lossy_http.approve_posts == 1
     assert await store.get_builder_attempt(tg_id) is None
 
     await db.close()
@@ -299,13 +366,18 @@ async def test_l4_recovery_after_commit_and_runtime_activation_failure(test_sett
             nonces=NonceStore(db),
         )
 
-    # 1. Onboard without runtime activation callback (simulating broken activation)
+    async def fail_activation(_account_id: str) -> None:
+        raise RuntimeError("injected runtime publication failure")
+
+    # 1. The real onboarding commits the paused account, then runtime
+    # publication fails. The durable attempt must remain COMMITTED.
     service = BuilderOnboardingService(
         http_client,
         limiter,
         client_factory,
         store,
         config=config,
+        activation=fail_activation,
     )
 
     prepared = await service.prepare(BuilderPrepareRequest(tg_id, user_address))
@@ -316,8 +388,12 @@ async def test_l4_recovery_after_commit_and_runtime_activation_failure(test_sett
     )
     signature = Account.sign_message(typed, user_key).signature.hex()
 
-    onboarded = await service.submit(BuilderSubmitRequest(tg_id, prepared.pending_id, signature))
-    assert onboarded.paused is True
+    with pytest.raises(OnboardingError) as activation_info:
+        await _submit_with_read_retries(service, tg_id, prepared.pending_id, signature)
+    assert activation_info.value.code is OnboardingErrorCode.ACTIVATION_FAILED
+    committed = await store.get_builder_attempt(tg_id)
+    assert committed is not None
+    assert committed.state == "COMMITTED"
 
     # 2. Setup UserApplicationService without pre-registered runtime
     from copytradeaster.application.adapters import (
@@ -370,5 +446,6 @@ async def test_l4_recovery_after_commit_and_runtime_activation_failure(test_sett
     assert recovered_sess.connection_state == MiniAppConnectionState.CONNECTED
     assert recovered_sess.account_connected is True
     assert fake_app.follower_registry.get(f"tg-{tg_id}") is not None
+    assert await store.get_builder_attempt(tg_id) is None
 
     await db.close()

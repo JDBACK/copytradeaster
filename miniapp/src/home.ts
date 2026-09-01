@@ -1,6 +1,7 @@
 /** Pure Home view-model (minimal part-1 scope over DashboardDTO). */
 
 import type { DashboardDTO } from './types'
+import { formatTime } from './format'
 
 export type HomeTone = 'active' | 'paused' | 'empty' | 'attention'
 
@@ -57,6 +58,10 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
         actionLabel: null,
       }
   }
+}
+
+export function snapshotLabel(capturedAt: string | null | undefined): string {
+  return capturedAt ? formatTime(capturedAt) : 'не получен'
 }
 
 /** Resume confirmation copy, without inaccurate safety claims. */

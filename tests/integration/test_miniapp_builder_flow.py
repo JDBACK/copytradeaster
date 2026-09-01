@@ -51,6 +51,7 @@ class FakeExchange:
 
     def __init__(self) -> None:
         self.approvals: list[dict[str, str]] = []
+        self.lose_next_approval_response = False
 
     def agent_for(self, user: str) -> dict | None:
         for params in self.approvals:
@@ -72,6 +73,12 @@ class FakeExchange:
         path = request.url.path
         if request.method == "POST" and path == "/fapi/v3/approveAgent":
             self.approvals.append(params)
+            if self.lose_next_approval_response:
+                self.lose_next_approval_response = False
+                raise httpx.ReadTimeout(
+                    "approveAgent response lost after remote acceptance",
+                    request=request,
+                )
             return httpx.Response(200, json={"code": 0, "msg": "ok"})
         if request.method == "GET" and path == "/fapi/v3/agent":
             agent = self.agent_for(params.get("user", ""))
@@ -300,6 +307,69 @@ async def test_session_rejects_wrong_token_signature(env):
     forged = _init_data(777).replace("hash=", "hash=deadbeef")
     resp = await client.post("/miniapp/api/session", headers={"X-Telegram-Init-Data": forged})
     assert resp.status == 401
+
+
+async def test_remote_accepted_response_loss_recovers_without_second_signature(env):
+    client, exchange, app, composition = env
+    user_id = 779
+    await app.db.execute_write(
+        "INSERT INTO telegram_users(telegram_user_id, chat_id, role, notifications_enabled, "
+        "access_enabled, created_at, updated_at) "
+        "VALUES (?, ?, 'USER', 1, 1, datetime('now'), datetime('now'))",
+        (user_id, user_id),
+    )
+
+    prep_resp = await client.post(
+        "/miniapp/api/builder/prepare",
+        json={"user_address": USER_ADDRESS},
+        headers=_auth(user_id),
+    )
+    assert prep_resp.status == 200
+    prepared = await prep_resp.json()
+
+    # A PREPARED attempt may never bypass the wallet signature.
+    premature = await client.post(
+        "/miniapp/api/builder/resume-attempt",
+        json={},
+        headers=_auth(user_id),
+    )
+    assert premature.status == 400
+    assert (await premature.json())["error"] == "approval_signature_required"
+
+    typed = encode_typed_data(
+        domain_data=prepared["eip712"]["domain"],
+        message_types={"ApproveAgent": prepared["eip712"]["types"]["ApproveAgent"]},
+        message_data=prepared["eip712"]["message"],
+    )
+    signature = Account.sign_message(typed, USER_WALLET.key).signature.hex()
+
+    exchange.lose_next_approval_response = True
+    submit = await client.post(
+        "/miniapp/api/builder/submit",
+        json={"pending_id": prepared["pending_id"], "signature": signature},
+        headers=_auth(user_id),
+    )
+    assert submit.status == 400
+    assert (await submit.json())["error"] == "approval_status_unknown"
+    assert len(exchange.approvals) == 1
+
+    session = await client.post("/miniapp/api/session", headers=_auth(user_id))
+    assert session.status == 200
+    session_body = await session.json()
+    assert session_body["connection_state"] == "onboarding"
+    assert session_body["onboarding_state"] == "APPROVAL_SENT"
+
+    recovered = await client.post(
+        "/miniapp/api/builder/resume-attempt",
+        json={},
+        headers=_auth(user_id),
+    )
+    assert recovered.status == 200, await recovered.text()
+    result = await recovered.json()
+    assert result["account_id"] == f"tg-{user_id}"
+    assert result["paused"] is True
+    assert len(exchange.approvals) == 1
+    assert app.credentials.identity(f"tg-{user_id}").user.lower() == USER_ADDRESS.lower()
 
 
 async def test_miniapp_session_recovery_required_and_recover_endpoint(env):

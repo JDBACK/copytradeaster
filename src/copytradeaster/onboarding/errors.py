@@ -32,8 +32,10 @@ class OnboardingErrorCode(StrEnum):
     BUILDER_CONFIG_MISSING = "builder_config_missing"
     APPROVAL_EXPIRED = "approval_expired"
     APPROVAL_UNKNOWN = "approval_unknown"
+    APPROVAL_SIGNATURE_REQUIRED = "approval_signature_required"
     SIGNATURE_MISMATCH = "signature_mismatch"
     AGENT_SUBMIT_FAILED = "agent_submit_failed"
+    APPROVAL_STATUS_UNKNOWN = "approval_status_unknown"
     AGENT_NOT_CONFIRMED = "agent_not_confirmed"
 
 
@@ -81,11 +83,17 @@ _MESSAGES: dict[OnboardingErrorCode, str] = {
     OnboardingErrorCode.APPROVAL_UNKNOWN: (
         "Заявка на авторизацию не найдена. Начните подключение заново."
     ),
+    OnboardingErrorCode.APPROVAL_SIGNATURE_REQUIRED: (
+        "Для этой заявки ещё требуется подпись кошелька."
+    ),
     OnboardingErrorCode.SIGNATURE_MISMATCH: (
         "Подпись выполнена другим кошельком. Подключите тот же кошелёк и повторите."
     ),
     OnboardingErrorCode.AGENT_SUBMIT_FAILED: (
         "Aster не принял авторизацию Agent. Попробуйте ещё раз."
+    ),
+    OnboardingErrorCode.APPROVAL_STATUS_UNKNOWN: (
+        "Aster ещё не подтвердил результат авторизации. Повторите проверку без новой подписи."
     ),
     OnboardingErrorCode.AGENT_NOT_CONFIRMED: (
         "Aster не подтвердил авторизацию Agent после подписи."

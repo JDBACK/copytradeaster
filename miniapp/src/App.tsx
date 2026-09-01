@@ -5,14 +5,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError, type AuthContext } from './api'
 import { HomeScreen } from './screens/HomeScreen'
 import { BuilderWizard } from './screens/BuilderWizard'
+import { BuilderAttemptRecovery } from './screens/BuilderAttemptRecovery'
 import { SessionGate, type GateState } from './screens/SessionGate'
 import { SuccessScreen } from './screens/SuccessScreen'
 import { initData, isTelegram, setupTelegram } from './telegram'
 import type { BuilderOnboardedDTO, MiniAppSessionDTO } from './types'
+import { sessionDestination } from './session'
 
 type Phase =
   | { kind: 'gate'; state: GateState }
   | { kind: 'wizard' }
+  | { kind: 'attempt_recovery' }
   | { kind: 'success'; result: BuilderOnboardedDTO }
   | { kind: 'home' }
 
@@ -33,15 +36,18 @@ export default function App() {
 
   const routeSession = useCallback((session: MiniAppSessionDTO) => {
     setGateError(undefined)
-    switch (session.access_state) {
-      case 'approved':
-        if (session.connection_state === 'recovery_required') {
-          setPhase({ kind: 'gate', state: 'recovery_required' })
-        } else if (session.account_connected || session.connection_state === 'connected') {
-          setPhase({ kind: 'home' })
-        } else {
-          setPhase({ kind: 'wizard' })
-        }
+    switch (sessionDestination(session)) {
+      case 'runtime_recovery':
+        setPhase({ kind: 'gate', state: 'recovery_required' })
+        break
+      case 'attempt_recovery':
+        setPhase({ kind: 'attempt_recovery' })
+        break
+      case 'home':
+        setPhase({ kind: 'home' })
+        break
+      case 'wizard':
+        setPhase({ kind: 'wizard' })
         break
       case 'pending':
         setPhase({ kind: 'gate', state: 'pending' })
@@ -118,6 +124,12 @@ export default function App() {
       )}
       {phase.kind === 'wizard' && (
         <BuilderWizard auth={auth} onConnected={(result) => setPhase({ kind: 'success', result })} />
+      )}
+      {phase.kind === 'attempt_recovery' && (
+        <BuilderAttemptRecovery
+          auth={auth}
+          onConnected={(result) => setPhase({ kind: 'success', result })}
+        />
       )}
       {phase.kind === 'success' && (
         <SuccessScreen result={phase.result} onHome={() => setPhase({ kind: 'home' })} />

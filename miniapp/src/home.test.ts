@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { homeViewModel, RESUME_CONFIRM_BODY } from './home'
+import { homeViewModel, RESUME_CONFIRM_BODY, snapshotLabel } from './home'
 import type { DashboardDTO } from './types'
 
 function dashboard(overrides: Partial<DashboardDTO> = {}): DashboardDTO {
@@ -51,5 +51,10 @@ describe('home view model', () => {
 
   it('resume confirmation explains the master-in-position entry', () => {
     expect(RESUME_CONFIRM_BODY).toContain('Мастер сейчас в позиции')
+  })
+
+  it('never substitutes account updated_at for a missing exchange snapshot', () => {
+    expect(snapshotLabel(undefined)).toBe('не получен')
+    expect(snapshotLabel(null)).toBe('не получен')
   })
 })

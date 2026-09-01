@@ -1835,6 +1835,24 @@ async def test_global_resume_rolls_back_flag_and_confirmation_unknown_action(env
         await service.confirm_action(100, forged)
 
 
+async def test_miniapp_session_unexpected_log_omits_exception_payload(
+    environment, caplog, monkeypatch
+):
+    _, _, _, _, service = environment
+    secret = "remote-response-secret-must-not-be-logged"
+
+    async def broken_account_row(_account_id: str):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(service, "_account_row", broken_account_row)
+    with caplog.at_level("ERROR"), pytest.raises(ServiceUnavailableError):
+        await service.miniapp_session(7)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "miniapp_session failed class=RuntimeError" in messages
+    assert secret not in messages
+
+
 def test_service_public_surface_matches_application_protocol():
     protocol_methods = {
         name

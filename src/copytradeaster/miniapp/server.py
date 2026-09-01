@@ -328,6 +328,15 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_ONBOARDING_FAILED)
 
+    async def builder_resume_attempt(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        try:
+            return _json_dto(await application.builder_resume_attempt(user_id))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_ONBOARDING_FAILED)
+
     async def builder_recover(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -358,6 +367,7 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/confirmation/confirm", confirmation_confirm)
     app.router.add_post("/miniapp/api/builder/prepare", builder_prepare)
     app.router.add_post("/miniapp/api/builder/submit", builder_submit)
+    app.router.add_post("/miniapp/api/builder/resume-attempt", builder_resume_attempt)
     app.router.add_post("/miniapp/api/builder/recover", builder_recover)
 
     static_dir: Path | None = settings.miniapp_static_dir

@@ -8,6 +8,8 @@ export type AccessState = 'approved' | 'pending' | 'rejected' | 'unknown'
 
 export type ConnectionState = 'empty' | 'onboarding' | 'recovery_required' | 'connected'
 
+export type OnboardingState = 'PREPARED' | 'APPROVAL_SENT' | 'APPROVED' | 'COMMITTED'
+
 export interface MiniAppSessionDTO {
   user_id: number
   access_state: AccessState
@@ -18,6 +20,7 @@ export interface MiniAppSessionDTO {
   copy_state?: CopyState
   is_admin?: boolean
   recovery_reason?: string | null
+  onboarding_state?: OnboardingState | null
 }
 
 export interface BuilderPrepareDTO {

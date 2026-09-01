@@ -1,6 +1,6 @@
 /** Shared presentational pieces (part-1 scope). */
 
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 
 export function Brand({ right }: { right?: ReactNode }) {
   return (
@@ -124,18 +124,72 @@ export function Sheet({
   onClose?: () => void
   children: ReactNode
 }) {
+  const sheetRef = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    const focusableSelector =
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    const focusables = () =>
+      Array.from(sheetRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])
+    const frame = window.requestAnimationFrame(() => {
+      ;(focusables()[0] ?? sheetRef.current)?.focus()
+    })
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && onCloseRef.current) {
+        event.preventDefault()
+        onCloseRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      if (items.length === 0) {
+        event.preventDefault()
+        sheetRef.current?.focus()
+        return
+      }
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', handleKeyDown)
+      document.body.style.overflow = previousOverflow
+      previousFocus?.focus()
+    }
+  }, [])
+
   return (
     <div
+      className="overlay"
       role="dialog"
       aria-modal="true"
       aria-labelledby="sheet-title"
       onClick={(e) => {
-        if (e.target === e.currentTarget && onClose) {
-          onClose()
+        if (e.target === e.currentTarget && onCloseRef.current) {
+          onCloseRef.current()
         }
       }}
     >
-      <div className="sheet">
+      <div ref={sheetRef} className="sheet" tabIndex={-1}>
         <h2 id="sheet-title" className="h2">
           {title}
         </h2>

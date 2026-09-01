@@ -109,11 +109,14 @@ export const api = {
       { pending_id: pendingId, signature },
       auth,
     ),
+  builderResumeAttempt: (
+    auth: AuthContext,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<BuilderOnboardedDTO>('/miniapp/api/builder/resume-attempt', {}, auth, options),
   builderRecover: (
     auth: AuthContext,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<MiniAppSessionDTO>('/miniapp/api/builder/recover', {}, auth, options),
-
 
   /** Fire-and-forget diagnostics: lands in the operator's server log. */
   clientLog: (

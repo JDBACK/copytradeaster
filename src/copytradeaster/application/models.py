@@ -323,6 +323,7 @@ class MiniAppSessionDTO:
     copy_state: CopyState = CopyState.EMPTY
     is_admin: bool = False
     recovery_reason: str | None = None
+    onboarding_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +408,8 @@ class ApplicationProtocol(Protocol):
     async def builder_submit(
         self, user_id: int, pending_id: str, signature: str
     ) -> BuilderOnboardedDTO: ...
+
+    async def builder_resume_attempt(self, user_id: int) -> BuilderOnboardedDTO: ...
 
     async def update_risk(self, user_id: int, values: RiskUpdateInput) -> RiskDTO: ...
 

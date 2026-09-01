@@ -3,10 +3,10 @@
 The backend generates and stores the per-user signer key; the user's main
 wallet only signs the ApproveAgent registration payload (combined ApproveBuilder
 fields included).  The flow mirrors `onboarding/direct.py`: local validation,
-typed failures, signed remote verification, atomic paused commit, and only
-then runtime activation.  Pending approvals live in memory with a short TTL;
-the generated signer key never crosses the application boundary and is never
-logged.
+typed failures, signed remote verification, atomic paused account commit, and
+only then runtime activation. Pending approvals are encrypted in SQLite with a
+short TTL; the generated signer key never crosses the application boundary and
+is never logged.
 """
 
 from __future__ import annotations
@@ -20,7 +20,11 @@ from urllib.parse import urlsplit
 
 from eth_account import Account
 
-from copytradeaster.aster.management_api import ManagementError, post_signed_registration
+from copytradeaster.aster.management_api import (
+    ManagementError,
+    is_unknown_registration_outcome,
+    post_signed_registration,
+)
 from copytradeaster.aster.signing import (
     eip712_json_payload,
     next_nonce,
@@ -299,12 +303,27 @@ class BuilderOnboardingService:
                     attempt.state = "APPROVED"
                     await self._store.update_builder_attempt_state(attempt.pending_id, "APPROVED")
                 except ManagementError as exc:
-                    log.warning(
-                        "builder approveAgent submit failed code=%s msg=%s",
-                        exc.code,
-                        str(exc)[:160],
-                    )
                     exchange_code = exc.code if isinstance(exc.code, int) else None
+                    if is_unknown_registration_outcome(exc):
+                        log.warning(
+                            "builder approveAgent outcome unknown class=%s code=%s",
+                            type(exc).__name__,
+                            exchange_code,
+                        )
+                        await self._store.update_builder_attempt_state(
+                            attempt.pending_id,
+                            "APPROVAL_SENT",
+                            last_error_code=str(exchange_code or "APPROVAL_STATUS_UNKNOWN"),
+                        )
+                        raise OnboardingError(
+                            OnboardingErrorCode.APPROVAL_STATUS_UNKNOWN,
+                            exchange_code=exchange_code,
+                        ) from None
+                    log.warning(
+                        "builder approveAgent rejected class=%s code=%s",
+                        type(exc).__name__,
+                        exchange_code,
+                    )
                     attempt.state = "PREPARED"
                     await self._store.update_builder_attempt_state(
                         attempt.pending_id,
@@ -315,8 +334,13 @@ class BuilderOnboardingService:
                         OnboardingErrorCode.AGENT_SUBMIT_FAILED, exchange_code=exchange_code
                     ) from None
                 except Exception as exc:
-                    log.warning("builder approveAgent remote error: %s", type(exc).__name__)
-                    raise OnboardingError(OnboardingErrorCode.SIGNED_READ_FAILED) from None
+                    log.warning("builder approveAgent outcome unknown class=%s", type(exc).__name__)
+                    await self._store.update_builder_attempt_state(
+                        attempt.pending_id,
+                        "APPROVAL_SENT",
+                        last_error_code="APPROVAL_STATUS_UNKNOWN",
+                    )
+                    raise OnboardingError(OnboardingErrorCode.APPROVAL_STATUS_UNKNOWN) from None
 
             if attempt.state == "APPROVAL_SENT":
                 client = await self._open_verify_client(attempt)
@@ -326,9 +350,14 @@ class BuilderOnboardingService:
                     await self._store.update_builder_attempt_state(attempt.pending_id, "APPROVED")
                 except OnboardingError as exc:
                     if exc.code == OnboardingErrorCode.AGENT_NOT_CONFIRMED:
-                        attempt.state = "PREPARED"
+                        next_state = (
+                            "PREPARED" if now_ms > attempt.approval_deadline_ms else "APPROVAL_SENT"
+                        )
+                        attempt.state = next_state
                         await self._store.update_builder_attempt_state(
-                            attempt.pending_id, "PREPARED"
+                            attempt.pending_id,
+                            next_state,
+                            last_error_code=exc.code.value,
                         )
                         raise OnboardingError(OnboardingErrorCode.AGENT_NOT_CONFIRMED) from None
                     raise
@@ -337,10 +366,15 @@ class BuilderOnboardingService:
                     log.warning(
                         "builder agent verify failed class=%s code=%s", type(exc).__name__, code
                     )
-                    if code in {-1000, -2015, -2016}:
-                        attempt.state = "PREPARED"
+                    if code in {-2015, -2016}:
+                        next_state = (
+                            "PREPARED" if now_ms > attempt.approval_deadline_ms else "APPROVAL_SENT"
+                        )
+                        attempt.state = next_state
                         await self._store.update_builder_attempt_state(
-                            attempt.pending_id, "PREPARED"
+                            attempt.pending_id,
+                            next_state,
+                            last_error_code=str(code),
                         )
                         raise OnboardingError(
                             OnboardingErrorCode.AGENT_NOT_CONFIRMED, exchange_code=code
@@ -384,7 +418,16 @@ class BuilderOnboardingService:
                 raise OnboardingError(OnboardingErrorCode.COMMIT_FAILED) from None
 
             account_id = commit.account_id
-            await self._store.delete_builder_attempt_by_pending_id(attempt.pending_id)
+            attempt.state = "COMMITTED"
+            try:
+                await self._store.update_builder_attempt_state(
+                    attempt.pending_id,
+                    "COMMITTED",
+                )
+            except Exception:
+                # The paused account is authoritative after commit. A stale
+                # APPROVED attempt is cleaned by session/runtime recovery.
+                log.warning("builder committed attempt state update failed")
 
             if self._activation is not None:
                 try:
@@ -396,6 +439,13 @@ class BuilderOnboardingService:
                     # or during boot; never roll back a successful commit here.
                     log.error("builder onboarding runtime activation failed")
                     raise OnboardingError(OnboardingErrorCode.ACTIVATION_FAILED) from None
+
+            try:
+                await self._store.delete_builder_attempt_by_pending_id(attempt.pending_id)
+            except Exception:
+                # Cleanup is not part of account correctness. The committed
+                # attempt remains encrypted and is removed lazily on session.
+                log.warning("builder committed attempt cleanup failed")
 
             log.info("builder onboarding committed account_id=%s paused=True", account_id)
             return BuilderOnboardingResult(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
@@ -98,12 +99,20 @@ class FakeResponse:
 
 
 class FakeHTTP:
-    def __init__(self, response: FakeResponse | None = None) -> None:
+    def __init__(
+        self,
+        response: FakeResponse | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
         self.response = response or FakeResponse()
+        self.error = error
         self.posted_urls: list[str] = []
 
     async def post(self, url: str, content: bytes = b""):
         self.posted_urls.append(url)
+        if self.error is not None:
+            raise self.error
         return self.response
 
 
@@ -522,6 +531,9 @@ async def test_activation_failure_keeps_durable_commit():
         raise AssertionError("expected ACTIVATION_FAILED")
     # The commit succeeded; only the runtime publication failed.
     assert len(store.commits) == 1
+    attempt = await store.get_builder_attempt(101)
+    assert attempt is not None
+    assert attempt.state == "COMMITTED"
 
 
 async def test_pending_repr_and_submit_request_never_leak_key_material():
@@ -577,25 +589,77 @@ async def test_submit_preflight_block_keeps_approved_for_retry():
 
 async def test_submit_recovery_after_remote_post_timeout():
     client = FakeClient()
-    service, store, _client, http, _clock = _service(client=client)
+    http = FakeHTTP(error=httpx.ReadTimeout("lost approveAgent response"))
+    service, store, _client, http, clock = _service(client=client, http=http)
 
     prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    signature = _sign_payload(prepared, USER_WALLET)
+    with pytest.raises(OnboardingError) as exc_info:
+        await service.submit(BuilderSubmitRequest(101, prepared.pending_id, signature))
+    assert exc_info.value.code is OnboardingErrorCode.APPROVAL_STATUS_UNKNOWN
+
     attempt = await store.get_builder_attempt(101)
-    assert attempt is not None
-    # Simulate that remote POST was initiated and state became APPROVAL_SENT before crash/timeout
-    attempt.state = "APPROVAL_SENT"
+    assert attempt is not None and attempt.state == "APPROVAL_SENT"
+    assert attempt.last_error_code == "-1006"
+
+    # Simulate a process restart after the exchange accepted the mutation but
+    # the local HTTP response was lost. Recovery must not POST again.
+    http.error = None
+    service, _store, _client, _http, _clock = _service(
+        client=client,
+        store=store,
+        http=http,
+        clock=clock,
+    )
 
     # Next submit finds Agent via GET /agent -> state becomes APPROVED -> preflight -> commit
     result = await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
     assert result.account_id == "tg-101"
+    assert len(http.posted_urls) == 1
     assert len(store.commits) == 1
     assert await store.get_builder_attempt(101) is None
 
 
-async def test_submit_recovery_when_agent_not_on_exchange_reverts_to_prepared():
+async def test_unknown_approval_log_omits_transport_payload(caplog):
+    secret = "signature-or-response-secret"
+    http = FakeHTTP(error=httpx.ReadTimeout(secret))
+    service, _store, _client, _http, _clock = _service(http=http)
+    prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+
+    with caplog.at_level("WARNING"), pytest.raises(OnboardingError):
+        await service.submit(
+            BuilderSubmitRequest(101, prepared.pending_id, _sign_payload(prepared, USER_WALLET))
+        )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "outcome unknown" in messages
+    assert secret not in messages
+
+
+async def test_submit_unknown_agent_read_keeps_approval_sent():
+    client = FakeClient()
+    client.agent_record = AsterError(-1000, "unknown exchange outcome")
+    service, store, _client, _http, _clock = _service(client=client)
+
+    prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
+    attempt = await store.get_builder_attempt(101)
+    assert attempt is not None
+    await store.update_builder_attempt_state(prepared.pending_id, "APPROVAL_SENT")
+
+    with pytest.raises(OnboardingError) as exc_info:
+        await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
+    assert exc_info.value.code is OnboardingErrorCode.SIGNED_READ_FAILED
+    assert exc_info.value.exchange_code == -1000
+
+    reloaded = await store.get_builder_attempt(101)
+    assert reloaded is not None
+    assert reloaded.state == "APPROVAL_SENT"
+
+
+async def test_submit_recovery_waits_until_deadline_before_allowing_resign():
     client = FakeClient()
     client.agent_record = AsterError(-2015, "agent not found")
-    service, store, _client, http, _clock = _service(client=client)
+    service, store, _client, http, clock = _service(client=client)
 
     prepared = await service.prepare(BuilderPrepareRequest(101, USER_ADDRESS))
     attempt = await store.get_builder_attempt(101)
@@ -606,7 +670,17 @@ async def test_submit_recovery_when_agent_not_on_exchange_reverts_to_prepared():
         await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
     assert exc_info.value.code is OnboardingErrorCode.AGENT_NOT_CONFIRMED
 
-    # State reverted to PREPARED so user can retry approval
+    # A single not-found response may be exchange propagation delay. Never
+    # enable a blind re-submit while the original approval window is active.
+    reloaded = await store.get_builder_attempt(101)
+    assert reloaded is not None
+    assert reloaded.state == "APPROVAL_SENT"
+
+    clock["ms"] += 601_000
+    with pytest.raises(OnboardingError) as expired_info:
+        await service.submit(BuilderSubmitRequest(101, prepared.pending_id, ""))
+    assert expired_info.value.code is OnboardingErrorCode.AGENT_NOT_CONFIRMED
+
     reloaded = await store.get_builder_attempt(101)
     assert reloaded is not None
     assert reloaded.state == "PREPARED"
