@@ -288,11 +288,11 @@ Stage 2 полностью закрыт для testnet scope.
 файлам, live Testnet gates и anti-overengineering boundaries зафиксированы в
 [STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md](reports/STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md).
 
-- [ ] P2.0: app shell с четырьмя root tabs и завершённый Home (2026-09-01;
-  P2.0 implementation complete; owner Telegram acceptance pending; frontend/backend
-  gates зелёные, визуально проверено на полном engine boot с реальными
-  testnet-данными; owner walkthrough в Telegram WebView — перед закрытием;
-  журнал: [STAGE3_PART2_PROGRESS_2026-09.md](reports/STAGE3_PART2_PROGRESS_2026-09.md)).
+- [x] P2.0: app shell с четырьмя root tabs и завершённый Home (2026-09-01;
+  implementation и automated browser acceptance завершены на полном engine
+  boot с реальными testnet-данными; общий owner walkthrough в Telegram WebView
+  перенесён в финальный gate всей Part 2 и не блокирует P2.1; журнал:
+  [STAGE3_PART2_PROGRESS_2026-09.md](reports/STAGE3_PART2_PROGRESS_2026-09.md)).
 - [ ] P2.1: read-only Positions из authoritative follower state.
 - [ ] P2.2: безопасная Activity timeline без внутренних payload/secrets.
 - [ ] P2.3: Settings root и существующие Notifications use cases.

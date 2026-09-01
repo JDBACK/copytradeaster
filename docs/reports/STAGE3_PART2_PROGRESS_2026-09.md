@@ -4,7 +4,7 @@
 
 Ветка: `codex/stage-3-mini-app-part2` (baseline `main@660c1f5`).
 
-## P2.0 — app shell и завершение Home: IMPLEMENTED / OWNER ACCEPTANCE PENDING (2026-09-01)
+## P2.0 — app shell и завершение Home: CLOSED (2026-09-01)
 
 Сделано:
 
@@ -30,7 +30,7 @@
 
 Gates:
 
-- frontend: vitest 50/50 (включая `navigation.test.ts`), oxlint 0/0,
+- frontend: vitest 53/53 (navigation и corrective trust/accessibility cases), oxlint 0/0,
   `pnpm build` зелёный;
 - offline backend suite (regression): 740 passed, без изменений;
 - визуальная проверка: `scripts/preview_miniapp_engine.py` (полный engine
@@ -40,7 +40,7 @@ Gates:
   session; Home показывает реальные данные (`Всё работает`, система готова,
   риск 1%, позиций 0, свежий snapshot). Скриншоты: `/tmp/p2-shots/01..04`.
 
-Осталось по live gate P2.0 (за владельцем, в Telegram WebView на телефоне):
+Отложено в общий финальный gate Part 2 и не блокирует переход к P2.1:
 
 - реальные Pause/Resume из shell Home;
 - safe-area/bottom nav на фактическом viewport;
