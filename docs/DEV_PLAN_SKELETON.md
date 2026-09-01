@@ -252,13 +252,11 @@ Stage 2 полностью закрыт для testnet scope.
 
 #### Corrective gate Stage 3 Part 1 после независимого review (2026-08-31)
 
-Статус части 1: **REMEDIATION IMPLEMENTED / FINAL LIVE GATE OPEN
-(2026-09-01)**. Кодовые пункты R1–R8 финального аудита реализованы в
-`a9d67a6`; offline/frontend gate зелёный. Полный signed Testnet suite выполнен,
-но массово получил внешний `Aster -1000` на signed account endpoints. Поэтому
-исторический `CLOSED` не восстанавливается до зелёного повтора и ручной
-Telegram/WalletConnect-приёмки текущего HEAD. Актуальные counters находятся
-только в `ENGINE_TEST_STATUS_2026-08.md`; план и аудит:
+Статус части 1: **CLOSED (2026-09-01)**. Кодовые пункты R1–R9 финального
+аудита реализованы, полный signed Testnet suite повторён успешно, а владелец
+подтвердил current-HEAD Pause/Resume в Telegram Mini App. Актуальные counters
+и live evidence находятся только в `ENGINE_TEST_STATUS_2026-08.md`; план и
+аудит:
 [STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md](reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md),
 [STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md](reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
 
@@ -277,10 +275,34 @@ Telegram/WalletConnect-приёмки текущего HEAD. Актуальны�
   усилить signed read/order outcome/fee-cap helpers.
 - [x] Пройти полный offline/frontend gate и записать фактический красный
   Testnet-прогон в living docs без fake/skip-подмены.
-- [ ] Повторить полный `tests/testnet/` после восстановления signed account
-  endpoints Aster; требуется зелёный результат.
-- [ ] Выполнить ручную Telegram + WalletConnect/TokenPocket приёмку и получить
-  current-HEAD screenshots состояний из R9.
+- [x] Повторить полный `tests/testnet/` после восстановления signed account
+  endpoints Aster и получить зелёный результат.
+- [x] Выполнить ручную Telegram + WalletConnect/TokenPocket приёмку и получить
+  current-HEAD evidence состояний из R9.
+
+#### Stage 3 Part 2 — оставшийся follower Mini App (план 2026-09-01)
+
+Отдельного исполнимого Part 2 до этого не существовало: общий design-only
+документ описывал восемь экранов, но не учитывал уже закрытый Part 1 и
+имеющиеся application use cases. Адаптированный scope, точные изменения по
+файлам, live Testnet gates и anti-overengineering boundaries зафиксированы в
+[STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md](reports/STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md).
+
+- [ ] P2.0: app shell с четырьмя root tabs и завершённый Home.
+- [ ] P2.1: read-only Positions из authoritative follower state.
+- [ ] P2.2: безопасная Activity timeline без внутренних payload/secrets.
+- [ ] P2.3: Settings root и существующие Notifications use cases.
+- [ ] P2.4: единственная числовая настройка Risk on Stop с backend constraints.
+- [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.
+- [ ] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle.
+- [ ] P2.7: account-specific `builder + feeRate` в обычном copy-engine и
+  финальное закрытие Stage 3.
+
+Новые бизнес-функции принимаются по настоящему Aster Futures Testnet через
+production application/aiohttp path. Fake/fixtures допустимы для чистых
+formatters, navigation, DOM/layout и security regression, но не заменяют live
+биржевое доказательство.
+
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,
