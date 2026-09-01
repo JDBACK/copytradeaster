@@ -153,28 +153,34 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
 
       {error && <ErrorBox {...describeError(error)} />}
 
-      <nav className="panel rail trust-strip" aria-label="Проверка подключения">
-        {trust.map((item) => (
-          <div key={item.key} className={`rail-step${item.done ? ' done' : ''}`}>
-            <div className="rail-circle">
-              {item.done ? (
-                <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden>
-                  <path
-                    d="M4 10.5 8.2 14.5 16 6"
-                    stroke="currentColor"
-                    strokeWidth="2.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              ) : (
-                <span className="trust-pending" aria-hidden />
-              )}
-            </div>
-            <div className="rail-label">{item.label}</div>
-          </div>
-        ))}
-      </nav>
+      <section className="panel rail trust-strip" aria-label="Статус подключения">
+        <ol style={{ display: 'contents', listStyle: 'none', padding: 0, margin: 0 }}>
+          {trust.map((item) => (
+            <li
+              key={item.key}
+              className={`rail-step${item.done ? ' done' : ''}`}
+              aria-label={`${item.label}: ${item.done ? 'проверено' : 'не проверено'}`}
+            >
+              <div className="rail-circle">
+                {item.done ? (
+                  <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden>
+                    <path
+                      d="M4 10.5 8.2 14.5 16 6"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : (
+                  <span className="trust-pending" aria-hidden />
+                )}
+              </div>
+              <div className="rail-label" aria-hidden="true">{item.label}</div>
+            </li>
+          ))}
+        </ol>
+      </section>
 
       <section className="panel state-card">
         <div className="state-icon" aria-hidden>

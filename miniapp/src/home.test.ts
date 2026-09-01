@@ -61,15 +61,33 @@ describe('home view model', () => {
 })
 
 describe('trust summary', () => {
-  it('marks every step done for a connected, synced account', () => {
+  it('marks wallet and agent done, but builder remains pending before P2.6', () => {
     const items = trustSummary(dashboard({ snapshot_captured_at: '2026-09-01T12:41:00Z' }))
     expect(items.map((item) => item.label)).toEqual(['Wallet', 'Agent', 'Builder', 'Sync'])
-    expect(items.every((item) => item.done)).toBe(true)
+    expect(items.find((item) => item.key === 'wallet')?.done).toBe(true)
+    expect(items.find((item) => item.key === 'agent')?.done).toBe(true)
+    expect(items.find((item) => item.key === 'builder')?.done).toBe(false)
+    expect(items.find((item) => item.key === 'sync')?.done).toBe(true)
   })
 
-  it('sync is not done without a ready system or a fresh snapshot', () => {
-    const items = trustSummary(dashboard({ system_state: 'stale', snapshot_captured_at: null }))
+  it('direct/unverified builder does not receive success', () => {
+    const items = trustSummary(dashboard({ snapshot_captured_at: '2026-09-01T12:41:00Z' }))
+    expect(items.find((item) => item.key === 'builder')?.done).toBe(false)
+  })
+
+  it('stale system with snapshot does not get successful sync', () => {
+    const items = trustSummary(dashboard({ system_state: 'stale', snapshot_captured_at: '2026-09-01T12:41:00Z' }))
     expect(items.find((item) => item.key === 'sync')?.done).toBe(false)
+  })
+
+  it('ready system without snapshot does not get successful sync', () => {
+    const items = trustSummary(dashboard({ system_state: 'ready', snapshot_captured_at: null }))
+    expect(items.find((item) => item.key === 'sync')?.done).toBe(false)
+  })
+
+  it('ready system with snapshot gets successful sync', () => {
+    const items = trustSummary(dashboard({ system_state: 'ready', snapshot_captured_at: '2026-09-01T12:41:00Z' }))
+    expect(items.find((item) => item.key === 'sync')?.done).toBe(true)
   })
 
   it('wallet and agent follow the masked identities, never invented', () => {

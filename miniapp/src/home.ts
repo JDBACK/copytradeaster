@@ -71,17 +71,19 @@ export interface TrustItem {
 }
 
 /** Compact verified trust summary (эталон 02-home-active): Wallet → Agent →
- * Builder → Sync.  Every item is derived from the dashboard payload; the
- * Builder step reflects the persisted identity source once P2.6 lands it. */
+ * Builder → Sync.  Every item is derived from backend facts; until the
+ * persisted identity source / Builder attestation lands in P2.6, Builder
+ * remains unverified (done: false). Sync requires both system_state === 'ready'
+ * AND a fresh snapshot timestamp. */
 export function trustSummary(dashboard: DashboardDTO): TrustItem[] {
   return [
     { key: 'wallet', label: 'Wallet', done: Boolean(dashboard.account_masked) },
     { key: 'agent', label: 'Agent', done: Boolean(dashboard.signer_masked) },
-    { key: 'builder', label: 'Builder', done: true },
+    { key: 'builder', label: 'Builder', done: false },
     {
       key: 'sync',
       label: 'Sync',
-      done: dashboard.system_state === 'ready' || Boolean(dashboard.snapshot_captured_at),
+      done: dashboard.system_state === 'ready' && Boolean(dashboard.snapshot_captured_at),
     },
   ]
 }

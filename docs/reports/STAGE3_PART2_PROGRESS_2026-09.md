@@ -4,7 +4,7 @@
 
 Ветка: `codex/stage-3-mini-app-part2` (baseline `main@660c1f5`).
 
-## P2.0 — app shell и завершение Home: РЕАЛИЗОВАНО (2026-09-01)
+## P2.0 — app shell и завершение Home: IMPLEMENTED / OWNER ACCEPTANCE PENDING (2026-09-01)
 
 Сделано:
 
