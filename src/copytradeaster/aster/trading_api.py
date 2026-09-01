@@ -231,7 +231,38 @@ class AsterClient:
     async def open_orders(self, account_id: str, symbol: str | None = None) -> list[OrderDTO]:
         params = {"symbol": symbol} if symbol else {}
         weight = 1 if symbol else 40
-        body = await self._signed(account_id, "GET", "/fapi/v3/openOrders", params, weight=weight)
+        try:
+            body = await self._signed(
+                account_id, "GET", "/fapi/v3/openOrders", params, weight=weight
+            )
+        except AsterError as exc:
+            # Aster Futures Testnet intermittently returns -1000 from
+            # openOrders while the same signed identity/nonce succeeds on
+            # balance, positionRisk and allOrders.  allOrders is an
+            # authoritative documented substitute only for a concrete symbol;
+            # never turn an unavailable all-symbol snapshot into an empty list.
+            if symbol is None or exc.code not in UNKNOWN_CODES:
+                raise
+            log.warning(
+                "openOrders unavailable; using symbol-scoped allOrders account_id=%s symbol=%s",
+                account_id,
+                symbol,
+            )
+            body = await self._signed(
+                account_id,
+                "GET",
+                "/fapi/v3/allOrders",
+                {"symbol": symbol, "limit": "1000"},
+                weight=5,
+            )
+            if not isinstance(body, list):
+                raise AsterError(-1000, "invalid allOrders response") from exc
+            body = [
+                row
+                for row in body
+                if isinstance(row, dict)
+                and str(row.get("status", "")) in {"NEW", "PARTIALLY_FILLED"}
+            ]
         return [OrderDTO.model_validate(x) for x in body]
 
     async def agent(self, account_id: str) -> AgentDTO:

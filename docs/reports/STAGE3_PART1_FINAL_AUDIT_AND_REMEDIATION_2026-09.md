@@ -431,3 +431,69 @@ Telegram WebView, WalletConnect или подпись TokenPocket. Production SQ
 Остаточная Testnet-позиция не считается финансовым риском; cleanup нужен только
 для повторяемости. Однако во время текущего incident authoritative signed reads
 недоступны, поэтому утверждать `flat/no orders` без доказательства нельзя.
+
+## 20. Testnet incident-resilience addendum — 2026-09-01
+
+После первоначального аудита Aster Testnet восстановил не все signed routes.
+Прямые запросы с production credentials доказали, что это не ошибка host,
+подписи или nonce:
+
+| Signed route | Фактический результат |
+|---|---|
+| `GET /fapi/v3/balance` | `200` |
+| `GET /fapi/v3/positionRisk` | `200` |
+| `GET /fapi/v3/allOrders?symbol=...` | `200` |
+| `GET/POST /fapi/v3/positionSide/dual` | `400 / -1000` |
+| `GET /fapi/v3/openOrders` | `400 / -1000` |
+| `POST /fapi/v3/listenKey` | `400 / -1000` |
+| `GET /fapi/v3/leverageBracket` | `400 / -1000` |
+| `GET /fapi/v3/agent` | `400 / -1000` во время Resume refresh |
+
+`fapi.asterdex-testnet.com` здесь является настоящим Aster Futures Testnet API;
+ни один из перечисленных live probes не использовал `MockTransport`,
+`FakeAster` или подменённые credentials.
+
+### 20.1 Реализованные fallback-пути
+
+1. `AsterClient.open_orders(account, symbol)` сначала вызывает официальный
+   `openOrders`; только unknown-класс ошибки переключает его на официальный
+   `allOrders` с `limit=1000` и фильтром `NEW/PARTIALLY_FILLED`. All-symbol
+   запрос никогда не превращается в частичный или пустой snapshot.
+2. Master full rebuild сначала читает `positionRisk` и получает open orders
+   только по реально открытым master symbols. Pending entry orders мастер не
+   копируются по контракту state replication.
+3. Недоступность `positionSide/dual` больше не останавливает весь boot. Aster
+   всё равно отклоняет order с несовместимым `positionSide`, поэтому новый риск
+   остаётся fail-closed.
+4. Недоступность `listenKey` переводит runtime на authoritative REST snapshot
+   каждый reconcile interval; stream продолжает reconnect. После стартового
+   snapshot/reconcile runtime может стать `READY` с временной задержкой реакции
+   до REST interval.
+5. Если `leverageBracket` недоступен, candidate разрешено создать только из
+   unanimous current-boot `positionRisk` всех активных REAL followers. Неполный
+   набор или разные значения не создают candidate. Explicit Resume всё равно
+   делает POST; unknown outcome разрешается повторным authoritative
+   `positionRisk`, без blind второго write.
+6. Если signed `GET /agent` падает именно unknown-классом, Resume может принять
+   cached `VALID_OVERRIDE` только на Testnet, не старше 24 часов, с
+   `read/perp=true`, `withdraw=false`, `whitelist_ok=true` и будущим expiry.
+   Mainnet, старый/неполный snapshot и deterministic permission rejection
+   остаются заблокированы.
+
+### 20.2 Live runtime evidence
+
+- полный `run-bot` дошёл до `READY`;
+- Mini App слушает production aiohttp server, Cloudflare public URL вернул
+  `HTTP 200`, aiogram polling запущен для production test bot;
+- startup и последующие REST sweep по всем четырём followers создали `0`
+  действий;
+- `positionRisk` подтвердил flat и HEDGE rows для всех пяти аккаунтов;
+- unanimous follower leverage: BTCUSDT=200, ETHUSDT=200, SOLUSDT=100;
+- production Mini App application flow `session -> confirmation -> resume`
+  для `tg-8264892202` завершился `HTTP 200`, `copy_state=active`,
+  `system_state=ready`.
+
+Точные offline counters и coverage после этих изменений хранятся только в
+`../ENGINE_TEST_STATUS_2026-08.md`. Ручной Telegram WebView screenshot текущего
+build по-прежнему остаётся отдельным owner acceptance, а не заменяется
+server-generated transport probe.

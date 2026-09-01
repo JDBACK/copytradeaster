@@ -3,9 +3,11 @@
 Design (docs/ARCHITECTURE.md §4, `risk/` + `trading/`):
 
 * **Exchange capability** and **account configuration** are distinct state.
-  The global RAM catalog keeps only a *candidate* maximum per symbol
-  (``POST``-validated optimistic target).  The only truth a trade may size
-  against is the *account-confirmed* value for ``(account_id, symbol)``.
+  The global RAM catalog normally keeps the advertised maximum per symbol.
+  If that metadata endpoint is unavailable, a unanimous set of fresh
+  follower ``positionRisk`` observations may conservatively seed the already
+  configured value instead.  The only truth a trade may size against remains
+  the *account-confirmed* value for ``(account_id, symbol)``.
 * The exchange itself persists the configured leverage; this module is a RAM
   model of that state, never a source of truth.  SQLite deliberately stays out
   (not business state, stale after downtime, re-verified from the exchange at
@@ -86,7 +88,7 @@ def _max_initial_leverage(response: Any) -> int:
 
 @dataclass(frozen=True, slots=True)
 class CandidateLeverage:
-    """Exchange-advertised maximum for one symbol (optimistic target)."""
+    """Desired provisioned leverage for one symbol in the current generation."""
 
     leverage: int
     observed_at: float
@@ -239,11 +241,21 @@ class LeverageManager:
                     response = await client.leverage_bracket(self._catalog_account, symbol)
                 maximum = _max_initial_leverage(response)
             except Exception as exc:  # noqa: BLE001 - keep previous candidates
-                log.warning(
-                    "leverage catalog refresh failed for %s: %s",
-                    symbol,
-                    _error_category(exc),
-                )
+                seeded = self._seed_candidate_from_observed_accounts(symbol)
+                if seeded is None:
+                    log.warning(
+                        "leverage catalog refresh failed for %s: %s",
+                        symbol,
+                        _error_category(exc),
+                    )
+                else:
+                    log.warning(
+                        "leverage bracket unavailable for %s (%s); using unanimous "
+                        "current follower configuration=%s",
+                        symbol,
+                        _error_category(exc),
+                        seeded.leverage,
+                    )
                 await self._pace()
                 continue
             current = self._candidate.get(symbol)
@@ -264,6 +276,46 @@ class LeverageManager:
             )
             await self._pace()
         self._catalog_attempted_at = time.monotonic()
+
+    def _seed_candidate_from_observed_accounts(self, symbol: str) -> CandidateLeverage | None:
+        """Use only a unanimous, current-boot follower configuration.
+
+        ``_confirmed`` is RAM-only and is populated from authoritative
+        positionRisk snapshots during this process boot.  Requiring every
+        enabled REAL follower to have the same positive value prevents a
+        partial snapshot or account-specific cap from becoming a global
+        target.  A pre-existing catalog candidate always wins.
+        """
+        if symbol in self._candidate:
+            return None
+        account_ids = tuple(dict.fromkeys(self._accounts()))
+        if not account_ids:
+            return None
+        observed: list[ConfirmedLeverage] = []
+        for account_id in account_ids:
+            item = self._confirmed.get((account_id, symbol))
+            if item is None or item.leverage <= 0:
+                return None
+            observed.append(item)
+        values = {item.leverage for item in observed}
+        if len(values) != 1:
+            return None
+        leverage = values.pop()
+        revision = self._next_revision()
+        candidate = CandidateLeverage(
+            leverage=leverage,
+            observed_at=time.monotonic(),
+            revision=revision,
+        )
+        self._candidate[symbol] = candidate
+        for account_id, item in zip(account_ids, observed, strict=True):
+            self._confirmed[(account_id, symbol)] = ConfirmedLeverage(
+                leverage=item.leverage,
+                confirmed_at=item.confirmed_at,
+                catalog_revision=revision,
+                sequence=self._next_seq(),
+            )
+        return candidate
 
     def _next_revision(self) -> int:
         self._revision += 1

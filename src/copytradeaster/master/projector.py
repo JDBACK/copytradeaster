@@ -144,13 +144,21 @@ class MasterProjector:
             if b.asset == "USDT":
                 available = b.available_balance
                 break
+        position_rows = await client.position_risk(account_id)
+        # The copy engine mirrors held state, not pending master entry orders.
+        # Querying only symbols with non-flat positions preserves every
+        # protective order relevant to replication and permits the documented
+        # symbol-scoped allOrders recovery path when Testnet openOrders is down.
+        held_symbols = sorted({str(p.symbol) for p in position_rows if p.position_amt != 0})
+        orders = []
+        for symbol in held_symbols:
+            orders.extend(await client.open_orders(account_id, symbol=symbol))
         positions: dict[PositionKey, PositionState] = {}
-        orders = await client.open_orders(account_id)  # single fetch
         open_orders: dict[str, list] = {str(o.symbol): [] for o in orders}
         for dto in orders:
             open_orders.setdefault(str(dto.symbol), []).append(dto)
         held_keys: set[PositionKey] = set()
-        for p in await client.position_risk(account_id):
+        for p in position_rows:
             key = PositionKey(symbol=str(p.symbol), pos_side=p.position_side)
             same_symbol = [
                 o

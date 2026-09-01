@@ -409,6 +409,7 @@ class TestRebuildFull:
 
     async def test_rest_snapshot(self, deps, monkeypatch):
         projector, _, _ = deps
+        requested_order_symbols: list[str | None] = []
 
         class FakeBalanceDTO:
             def __init__(self):
@@ -448,6 +449,7 @@ class TestRebuildFull:
                 return [FakePositionDTO()]
 
             async def open_orders(self, account_id, symbol=None):
+                requested_order_symbols.append(symbol)
                 return [
                     FakeOrderDTO("STOP_MARKET", "64000", 1),
                     FakeOrderDTO("TAKE_PROFIT_MARKET", "70000", 2),
@@ -462,6 +464,38 @@ class TestRebuildFull:
         assert pos.leverage == 5
         assert pos.stop is not None and pos.stop.stop_price == D("64000")
         assert pos.take_profit is not None and pos.take_profit.stop_price == D("70000")
+        assert requested_order_symbols == ["BTCUSDT"]
+
+    async def test_flat_snapshot_does_not_require_open_order_history(self, deps):
+        projector, _, _ = deps
+
+        class Balance:
+            asset = "USDT"
+            available_balance = D("500")
+
+        class FlatPosition:
+            symbol = "BTCUSDT"
+            position_amt = D(0)
+            entry_price = D(0)
+            mark_price = D("65000")
+            leverage = 5
+            liquidation_price = D(0)
+            position_side = PosSide.BOTH
+
+        class Client:
+            async def balance(self, account_id):
+                return [Balance()]
+
+            async def position_risk(self, account_id, symbol=None):
+                return [FlatPosition()]
+
+            async def open_orders(self, account_id, symbol=None):
+                raise AssertionError("flat master must not request order history")
+
+        state = await projector.rebuild_full(Client(), "main")
+
+        assert state.available_usdt == D("500")
+        assert state.positions == {}
 
     async def test_hedge_protection_without_reduce_only_is_recovered(self, deps):
         projector, _, _ = deps

@@ -25,12 +25,14 @@ class FakeLevClient:
         timeout_first_post: bool = False,
         risk_leverages: list[int] | None = None,
         risk_error: bool = False,
+        bracket_error: bool = False,
     ) -> None:
         self.account_max = account_max
         self.reject_first_post = reject_first_post
         self.timeout_first_post = timeout_first_post
         self.risk_leverages = risk_leverages
         self.risk_error = risk_error
+        self.bracket_error = bracket_error
         self.bracket_calls: list[tuple[str, str]] = []
         self.set_calls: list[tuple[str, str, int]] = []
         self._posts = 0
@@ -58,6 +60,8 @@ class FakeLevClient:
         from copytradeaster.aster.models import LeverageBracketResponse
 
         self.bracket_calls.append((account_id, symbol))
+        if self.bracket_error:
+            raise AsterError(-1000, "System error")
         return LeverageBracketResponse.model_validate(
             {
                 "symbol": symbol,
@@ -197,6 +201,54 @@ async def test_observe_restores_confirmed_state_after_restart_without_writes():
     assert manager.confirmed("copyc1", "BTCUSDT") == 200
     # Reconstruction is a pure RAM fold of an already-paid-for read.
     assert clients["copyc1"].set_calls == []
+
+
+async def test_unavailable_bracket_seeds_unanimous_live_configuration():
+    clients = {
+        "main": FakeLevClient(bracket_error=True),
+        "copyc1": FakeLevClient(timeout_first_post=True, risk_leverages=[200]),
+        "copyc2": FakeLevClient(risk_leverages=[200]),
+    }
+    manager = make_manager(
+        clients,
+        symbols=["BTCUSDT"],
+        accounts=lambda: ["copyc1", "copyc2"],
+    )
+    manager.observe("copyc1", {"BTCUSDT": 200})
+    manager.observe("copyc2", {"BTCUSDT": 200})
+
+    await manager.refresh_catalog(["BTCUSDT"])
+
+    assert manager.is_ready("copyc1", "BTCUSDT")
+    assert manager.is_ready("copyc2", "BTCUSDT")
+    assert manager.confirmed("copyc1", "BTCUSDT") == 200
+    # Explicit Resume still revalidates. The real POST outcome may be unknown;
+    # the authoritative positionRisk value resolves it without a second write.
+    report = await manager.prepare_account("copyc1", ["BTCUSDT"])
+    assert report == PrepareReport(confirmed={"BTCUSDT": 200}, failed={})
+    assert clients["copyc1"].bracket_calls == []
+
+
+async def test_unavailable_bracket_rejects_divergent_or_partial_observations():
+    clients = {
+        "main": FakeLevClient(bracket_error=True),
+        "copyc1": FakeLevClient(),
+        "copyc2": FakeLevClient(),
+    }
+    manager = make_manager(
+        clients,
+        symbols=["BTCUSDT"],
+        accounts=lambda: ["copyc1", "copyc2"],
+    )
+    manager.observe("copyc1", {"BTCUSDT": 200})
+    await manager.refresh_catalog(["BTCUSDT"])
+    assert manager._candidate.get("BTCUSDT") is None  # noqa: SLF001
+
+    manager.observe("copyc2", {"BTCUSDT": 100})
+    await manager.refresh_catalog(["BTCUSDT"])
+    assert manager._candidate.get("BTCUSDT") is None  # noqa: SLF001
+    assert not manager.is_ready("copyc1", "BTCUSDT")
+    assert not manager.is_ready("copyc2", "BTCUSDT")
 
 
 async def test_bulk_prepare_respects_bounded_concurrency():

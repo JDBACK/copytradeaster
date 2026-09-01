@@ -381,25 +381,28 @@ class App:
             )
 
         # 5. bootstrap position modes + snapshots
-        mode_is_hedge = await self.master_client.get_position_mode("main")
         want_hedge = cfg.position_mode == "HEDGE"
-        if mode_is_hedge != want_hedge:
-            log.warning("position mode mismatch on master - setting %s", cfg.position_mode)
-            try:
+        try:
+            mode_is_hedge = await self.master_client.get_position_mode("main")
+            if mode_is_hedge != want_hedge:
+                log.warning("position mode mismatch on master - setting %s", cfg.position_mode)
                 await self.master_client.set_position_mode("main", want_hedge)
-            except Exception as exc:  # noqa: BLE001 - -4068: open positions block switch
-                log.warning("master position mode not changed (%s); continuing as-is", exc)
-                category = _error_category(exc)
-                await self._emit_notification(
-                    event_key=f"warning:position-mode:main:{self._notification_token}:{category}",
-                    kind="engine.position_mode",
-                    severity=NotificationSeverity.WARN,
-                    account_id="main",
-                    text=(
-                        "Не удалось изменить режим позиции master; продолжаем с текущим "
-                        f"режимом (категория: {category})."
-                    ),
-                )
+        except Exception as exc:  # noqa: BLE001 - Testnet may fail account config reads
+            # Do not turn a broken metadata endpoint into a total outage.  An
+            # order carrying the wrong positionSide is rejected by Aster, so
+            # risk-increasing execution still fails closed at the exchange.
+            log.warning("master position mode unavailable (%s); continuing fail-closed", exc)
+            category = _error_category(exc)
+            await self._emit_notification(
+                event_key=f"warning:position-mode:main:{self._notification_token}:{category}",
+                kind="engine.position_mode",
+                severity=NotificationSeverity.WARN,
+                account_id="main",
+                text=(
+                    "Не удалось проверить режим позиции master; торговые команды с "
+                    f"несовместимым режимом будут отклонены биржей (категория: {category})."
+                ),
+            )
         for fr in self.followers:
             if fr.execution_mode == "SHADOW":
                 continue
@@ -461,10 +464,7 @@ class App:
         )
         stream_task = asyncio.create_task(self.stream.run(self.stop_event))
         self._stream_task = stream_task
-        try:
-            await asyncio.wait_for(self._stream_ready.wait(), timeout=STREAM_READY_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise RuntimeError("master user stream did not become ready") from exc
+        await self._wait_for_stream_startup()
         self._sweep_task = asyncio.create_task(self._periodic_sweep())
         self._ingest_task = asyncio.create_task(self._ingest_loop())
         # 8. READY
@@ -477,6 +477,31 @@ class App:
             text="Движок готов к работе.",
         )
         log.info("READY")
+
+    async def _wait_for_stream_startup(self) -> bool:
+        """Prefer the low-latency stream, but keep REST reconciliation live.
+
+        The startup snapshot and reconciliation have already completed before
+        this method runs.  When Testnet's listenKey endpoint is unavailable,
+        the UserStream task keeps retrying and ``_periodic_sweep`` temporarily
+        performs an authoritative master REST snapshot on every cycle.
+        """
+        try:
+            await asyncio.wait_for(self._stream_ready.wait(), timeout=STREAM_READY_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("master user stream unavailable; starting with authoritative REST polling")
+            await self._emit_notification(
+                event_key=f"warning:master-stream:{self._notification_token}:rest-fallback",
+                kind="engine.stream_fallback",
+                severity=NotificationSeverity.WARN,
+                account_id="main",
+                text=(
+                    "Поток master временно недоступен; движок использует регулярные "
+                    "REST-снимки до восстановления подключения."
+                ),
+            )
+            return False
+        return True
 
     async def run_until_stopped(self) -> None:
         try:
@@ -712,9 +737,13 @@ class App:
                 pass
             try:
                 sweep_count += 1
-                if sweep_count % MASTER_RESNAPSHOT_EVERY_SWEEPS == 0:
+                if (
+                    not self._stream_ready.is_set()
+                    or sweep_count % MASTER_RESNAPSHOT_EVERY_SWEEPS == 0
+                ):
                     # authoritative master state: heals projector drift that the
-                    # informational ACCOUNT_UPDATE only logs
+                    # informational ACCOUNT_UPDATE only logs. Without a live
+                    # stream this is also the primary state-change trigger.
                     await self.projector.rebuild_full(self.master_client, "main")
                 report = await self.reconciler.reconcile(self.projector.state, reason="sweep")
                 if all(created >= 0 for created in report.per_account.values()) and not (
@@ -728,7 +757,7 @@ class App:
 
     @property
     def ready(self) -> bool:
-        """Whether startup reconciliation and the master stream are READY."""
+        """Whether startup reconciliation and an authoritative refresh path are READY."""
         return self._ready
 
     @property

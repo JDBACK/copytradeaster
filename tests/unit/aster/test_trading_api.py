@@ -173,6 +173,44 @@ class TestSignedRequests:
         assert dict(p1)["symbol"] == dict(p2)["symbol"] == "BTCUSDT"
 
     @respx.mock
+    async def test_symbol_open_orders_falls_back_to_active_all_orders(self, limiter):
+        respx.get(f"{BASE}/fapi/v3/openOrders").respond(
+            status_code=400,
+            json={"code": -1000, "msg": "System error"},
+        )
+        all_orders = respx.get(f"{BASE}/fapi/v3/allOrders").respond(
+            json=[
+                {**ORDER_RESPONSE, "orderId": 11, "status": "NEW"},
+                {**ORDER_RESPONSE, "orderId": 12, "status": "PARTIALLY_FILLED"},
+                {**ORDER_RESPONSE, "orderId": 13, "status": "FILLED"},
+                {**ORDER_RESPONSE, "orderId": 14, "status": "CANCELED"},
+            ]
+        )
+        client = make_client(limiter)
+
+        orders = await client.open_orders("copyc1", symbol="BTCUSDT")
+
+        assert [order.order_id for order in orders] == [11, 12]
+        sent = dict(all_orders.calls[0].request.url.params)
+        assert sent["symbol"] == "BTCUSDT"
+        assert sent["limit"] == "1000"
+
+    @respx.mock
+    async def test_all_symbol_open_orders_never_degrades_to_partial_history(self, limiter):
+        respx.get(f"{BASE}/fapi/v3/openOrders").respond(
+            status_code=400,
+            json={"code": -1000, "msg": "System error"},
+        )
+        history = respx.get(f"{BASE}/fapi/v3/allOrders").respond(json=[])
+        client = make_client(limiter)
+
+        with pytest.raises(AsterError) as exc_info:
+            await client.open_orders("copyc1")
+
+        assert exc_info.value.code == -1000
+        assert not history.called
+
+    @respx.mock
     async def test_query_order_minus2013_returns_none(self):
         respx.get(f"{BASE}/fapi/v3/order").respond(json={"code": -2013, "msg": "no such order"})
         client = make_client()

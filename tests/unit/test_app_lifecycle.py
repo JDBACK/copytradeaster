@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import copytradeaster.app as app_module
 from copytradeaster.app import (
     TESTNET_REST_URL,
     TESTNET_WS_URL,
@@ -328,3 +329,29 @@ def test_app_composes_leverage_control_plane(tmp_path):
     assert app.leverage._symbols == tuple(  # noqa: SLF001
         dict.fromkeys(s.strip().upper() for s in app.cfg.symbol_whitelist)
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):
+    app = App.__new__(App)
+    app._stream_ready = asyncio.Event()
+    app._notification_token = "test-token"
+    events: list[NotificationEvent] = []
+
+    async def collect(event_key, kind, severity, text, account_id=None):
+        events.append(
+            NotificationEvent(
+                event_key=event_key,
+                kind=kind,
+                severity=severity,
+                text=text,
+                account_id=account_id,
+            )
+        )
+
+    app._emit_notification = collect
+    monkeypatch.setattr(app_module, "STREAM_READY_TIMEOUT_S", 0.001)
+
+    assert await app._wait_for_stream_startup() is False
+    assert events[0].kind == "engine.stream_fallback"
+    assert events[0].account_id == "main"

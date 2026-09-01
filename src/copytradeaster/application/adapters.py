@@ -17,6 +17,7 @@ from typing import Any
 
 from copytradeaster.app import App
 from copytradeaster.application.control import EmergencyController, EmergencyReport
+from copytradeaster.application.models import ServiceUnavailableError
 from copytradeaster.application.service import (
     OnboardingPort,
     Stage2AccountLifecycle,
@@ -24,7 +25,7 @@ from copytradeaster.application.service import (
     UserApplicationService,
 )
 from copytradeaster.aster.models import AgentDTO
-from copytradeaster.aster.trading_api import AsterClient
+from copytradeaster.aster.trading_api import UNKNOWN_CODES, AsterClient, AsterError
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.domain.models import AccountState
 from copytradeaster.logging_utils import get_logger
@@ -584,7 +585,14 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         if runtime is None:
             raise KeyError(f"follower runtime {account_id!r} not found")
         identity = self.credentials.identity(account_id)
-        agent: AgentDTO = await runtime.client.agent(account_id)
+        try:
+            agent: AgentDTO = await runtime.client.agent(account_id)
+        except AsterError as exc:
+            if exc.code in UNKNOWN_CODES:
+                raise ServiceUnavailableError(
+                    "signed Agent permission read is unavailable"
+                ) from None
+            raise
         checked_at_ms = int(time.time() * 1000)
         status = "VALID"
         try:

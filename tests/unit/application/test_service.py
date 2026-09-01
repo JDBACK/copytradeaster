@@ -148,6 +148,7 @@ class FakeRuntime:
         self.fail_resume = False
         self.fail_resume_safety = None
         self.permission_refresh_calls = 0
+        self.permission_refresh_error = None
         self.events: list[str] = []
         self.admission_open = True
         self.control_report_success = True
@@ -190,6 +191,8 @@ class FakeRuntime:
 
     async def refresh_agent_permission(self, account_id: str):
         self.permission_refresh_calls += 1
+        if self.permission_refresh_error is not None:
+            raise self.permission_refresh_error
         return AgentValidation(
             signer_address="0x2222222222222222222222222222222222222222",
             can_read=True,
@@ -1162,6 +1165,55 @@ async def test_valid_testnet_permission_override_requires_explicit_adapter_flag(
     allowed = await service.begin_confirmation(7, ConfirmationAction.RESUME)
     result = await service.confirm_action(7, allowed)
     assert result.copy_state is CopyState.ACTIVE
+
+
+async def test_resume_uses_bounded_testnet_override_cache_on_unknown_agent_read(environment):
+    db, runtime, _, clock, service = environment
+    override = AgentValidation(
+        signer_address="0x2222222222222222222222222222222222222222",
+        can_read=True,
+        can_perp_trade=True,
+        can_withdraw=False,
+        expired_ms=2_000_000_000_000,
+        ip_whitelist="",
+        status="VALID_OVERRIDE",
+        checked_at=(clock.value - timedelta(minutes=2)).isoformat(),
+    )
+    await AgentValidationRepo(db).upsert("tg-7", validation=override)
+    runtime.permission_override = True
+    runtime.permission_refresh_error = ServiceUnavailableError("Aster unavailable")
+    await service.pause(7)
+
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+    result = await service.resume(7, confirmation)
+
+    assert result.copy_state is CopyState.ACTIVE
+    assert runtime.permission_refresh_calls == 1
+
+
+async def test_resume_rejects_expired_testnet_override_cache_on_unknown_agent_read(environment):
+    db, runtime, _, clock, service = environment
+    override = AgentValidation(
+        signer_address="0x2222222222222222222222222222222222222222",
+        can_read=True,
+        can_perp_trade=True,
+        can_withdraw=False,
+        expired_ms=2_000_000_000_000,
+        ip_whitelist="",
+        status="VALID_OVERRIDE",
+        checked_at=(clock.value - timedelta(days=2)).isoformat(),
+    )
+    await AgentValidationRepo(db).upsert("tg-7", validation=override)
+    runtime.permission_override = True
+    runtime.permission_refresh_error = ServiceUnavailableError("Aster unavailable")
+    await service.pause(7)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+
+    with pytest.raises(ServiceUnavailableError):
+        await service.resume(7, confirmation)
+
+    policy = await SettingsRepo(db).get_policy("tg-7")
+    assert policy is not None and policy.allow_new_entries is False
 
 
 async def test_disconnect_safety_failure_keeps_account_enabled_and_credentials(environment):

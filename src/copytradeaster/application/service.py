@@ -81,6 +81,7 @@ from copytradeaster.storage.repositories import (
 TESTNET_REST_URL = "https://fapi.asterdex-testnet.com"
 TESTNET_WS_URL = "wss://fstream.asterdex-testnet.com/ws"
 PERMISSION_TTL_SECONDS = 60
+TESTNET_PERMISSION_FALLBACK_TTL_SECONDS = 86_400
 ACTIVITY_PAGE_SIZE = 10
 ADMIN_PAGE_SIZE = 10
 ACCESS_REQUEST_RETRY_COOLDOWN_SECONDS = 60
@@ -2238,19 +2239,48 @@ class UserApplicationService:
         if permission_stale:
             # A stale row is never trusted.  The only valid refresh path is a
             # signed adapter read followed by an explicit repository upsert.
-            await self._refresh_permission_snapshot(account_id)
-            permission, checked_at = await self._permission(account_id)
-            validation_row = await self._validation_row(account_id)
             try:
-                permission_expiry = int(_row_value(validation_row, "expired_ms", 0))
-            except (TypeError, ValueError):
-                permission_expiry = 0
-            if (
-                checked_at is None
-                or (self._now() - checked_at).total_seconds() > self._permission_ttl
-                or permission_expiry <= int(self._now().timestamp() * 1000)
-            ):
-                raise StaleOperationError("permission validation is stale")
+                await self._refresh_permission_snapshot(account_id)
+            except ServiceUnavailableError:
+                override_method = self._require_method(self._runtime, "permission_override_allowed")
+                override_allowed = bool(await _maybe_await(override_method(account_id)))
+                age_seconds = (
+                    None
+                    if checked_at is None
+                    else max((self._now() - checked_at).total_seconds(), 0)
+                )
+                cached_override_valid = (
+                    override_allowed
+                    and age_seconds is not None
+                    and age_seconds <= TESTNET_PERMISSION_FALLBACK_TTL_SECONDS
+                    and permission_expiry > int(self._now().timestamp() * 1000)
+                    and permission.can_read is True
+                    and permission.can_perp_trade is True
+                    and permission.can_withdraw is False
+                    and permission.whitelist_ok is True
+                    and permission.warning == "permission_check_override"
+                )
+                if not cached_override_valid:
+                    raise
+                log.warning(
+                    "signed Agent permission refresh unavailable; using bounded Testnet "
+                    "override cache account_id=%s age_s=%d",
+                    account_id,
+                    int(age_seconds),
+                )
+            else:
+                permission, checked_at = await self._permission(account_id)
+                validation_row = await self._validation_row(account_id)
+                try:
+                    permission_expiry = int(_row_value(validation_row, "expired_ms", 0))
+                except (TypeError, ValueError):
+                    permission_expiry = 0
+                if (
+                    checked_at is None
+                    or (self._now() - checked_at).total_seconds() > self._permission_ttl
+                    or permission_expiry <= int(self._now().timestamp() * 1000)
+                ):
+                    raise StaleOperationError("permission validation is stale")
         override_allowed = False
         if permission.warning == "permission_check_override":
             override_method = self._require_method(self._runtime, "permission_override_allowed")
