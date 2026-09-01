@@ -32,9 +32,10 @@
      за signed live.
   6. **Актуальный offline/frontend gate:** offline pytest **740 passed / 2
      skipped / 30 deselected** за **17.02 s**, total coverage **87%**; Ruff
-     check/format и `git diff --check` clean. Frontend: Vitest **50 passed**
-     (Part 2 P2.0 добавил `navigation.test.ts`; baseline Part 1 — 41 passed),
-     Oxlint clean, TypeScript + Vite production build passed.
+     check/format и `git diff --check` clean. Frontend: Vitest **53 passed**
+     (Part 2 P2.0: navigation и corrective trust/accessibility cases;
+     baseline Part 1 — 41 passed), Oxlint clean, TypeScript + Vite production
+     build passed.
   7. **Актуальный полный signed Testnet gate:** в едином запуске
      все **29 обязательных state-changing/live сценариев passed** за
      **756.35 s** против `https://fapi.asterdex-testnet.com`. Пройдены
