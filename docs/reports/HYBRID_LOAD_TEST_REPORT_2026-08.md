@@ -164,3 +164,15 @@ coordinator, executor и journal без сети; финальный hybrid run 
 
 Hybrid load gate пройден. Код и отчёт готовы к передаче на ревью с указанными
 ограничениями. Mainnet и реальные средства не использовались.
+
+## Post-final-review rerun — 2026-08-23
+
+После закрытия находок финального ревью (dust zero-target, flip episode semantics,
+protective convergence) выполнен контрольный повторный прогон load-гейта:
+
+- **Артефакты:** `data/hybrid-load-20260823T075504Z.{json,sqlite3}`;
+- **Слоты:** 30 (3 REAL `copyc1`–`copyc3` + 27 SHADOW);
+- **Циклы:** 100/100;
+- **Команды:** **12 207 / 12 207 `CONFIRMED`**;
+- **Ошибки:** 0 FAILED / UNKNOWN / SUBMITTED / SENDING / BLOCKED, `ingest_dropped=0`, cleanup errors=0;
+- **Аудит:** 31/31 аккаунтов flat/no-orders до и после cleanup; 1 авторитетная рекавери мастера.

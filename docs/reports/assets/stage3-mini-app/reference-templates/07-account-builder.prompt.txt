@@ -1,0 +1,10 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Correct only the glossary and demo-data badge placement in the supplied Aster Copy Account and Builder screen.
+Input images: Image 1 is the edit target.
+Changes:
+1. Change only the first trust-rail label from "Кошелёк" to "Wallet". Keep "Agent", "Builder", and "Sync" unchanged.
+2. Remove the bottom "Демо-данные" badge completely from below the navigation.
+3. Add one small quiet outlined badge reading exactly "Демо-данные" in the top-right header area, opposite the back arrow and aligned within the safe area. It must not overlap the centered title.
+4. Keep the bottom navigation clean with exactly four equal items and clear safe-area spacing.
+Constraints: Preserve the title, verified rail, account/Agent/Builder/fee/permissions data, refresh action, disconnect warning, icons, colors, typography and all other text. Do not add any other element. No watermark.

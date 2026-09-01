@@ -16,8 +16,12 @@ State-based reconciliation contract:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import json
+import re
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
@@ -41,6 +45,13 @@ from copytradeaster.domain.models import (
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.master.projector import MasterDelta, MasterState
+from copytradeaster.notifications.formatter import format_skip_reason
+from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
+from copytradeaster.notifications.protocol import (
+    NotificationCallback,
+    Notifier,
+    as_notifier,
+)
 from copytradeaster.risk.engine import (
     deviation_exceeded,
     entry_quantity,
@@ -54,7 +65,9 @@ from copytradeaster.storage.repositories import (
     SyncBasisRepo,
 )
 from copytradeaster.trading.executor import Executor, command_key_of
+from copytradeaster.trading.leverage import LeverageManager
 from copytradeaster.trading.planner import build_plan
+from copytradeaster.trading.registry import FollowerRegistry
 
 log = get_logger(__name__)
 
@@ -62,6 +75,21 @@ STOP_TYPES = ("STOP_MARKET", "STOP")
 TP_TYPES = ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
 
 POSTFILL_RECOMPUTE_DEBOUNCE_S = 2.0
+NOTIFICATION_KEY_CACHE_MAX = 4096
+_SAFE_FRAGMENT = re.compile(r"[^A-Za-z0-9_.:-]+")
+
+
+def _safe_fragment(value: object, fallback: str = "unknown") -> str:
+    text = _SAFE_FRAGMENT.sub("_", str(value or ""))[:80].strip("_")
+    return text or fallback
+
+
+def _error_category(exc: BaseException) -> str:
+    """Keep exception details in logs; expose only a stable safe category."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        return f"aster_{_safe_fragment(code, 'error')}"
+    return _safe_fragment(type(exc).__name__, "error")
 
 
 @dataclass(slots=True)
@@ -81,6 +109,8 @@ class FollowerRuntime:
 class SkipRecord:
     symbol: str
     reason: SkipReason
+    pos_side: PosSide = PosSide.BOTH
+    trade_id: int | None = None
 
 
 def _canonical_target(t: TargetPosition) -> str:
@@ -149,7 +179,7 @@ def _pick_with_extras(orders: list, order_types: tuple[str, ...]):
 class Coordinator:
     def __init__(
         self,
-        followers: list[FollowerRuntime],
+        followers: list[FollowerRuntime] | FollowerRegistry,
         settings: SettingsRepo,
         executor: Executor,
         trades: CopyTradeRepo,
@@ -163,8 +193,12 @@ class Coordinator:
         stale_master_ms: int = 5000,
         basis: SyncBasisRepo | None = None,
         snapshot_symbols: set[str] | None = None,
+        notifier: Notifier | NotificationCallback | None = None,
+        leverage: LeverageManager | None = None,
     ) -> None:
-        self._followers = followers
+        self._registry = (
+            followers if isinstance(followers, FollowerRegistry) else FollowerRegistry(followers)
+        )
         self._settings = settings
         self._executor = executor
         self._trades = trades
@@ -174,40 +208,116 @@ class Coordinator:
         self._whitelist = set(symbol_whitelist)
         self._fee_buffer = fee_buffer_pct
         self._working_type = working_type
+        # ``on_notify`` remains a narrow legacy text callback for Stage-1
+        # embedders/tests.  The application composition root uses the
+        # structured ``notifier`` port below; no user-facing exception text
+        # crosses that boundary.
         self._on_notify = on_notify
+        self._notifier = as_notifier(notifier) if notifier is not None else None
+        self._on_notify_accepts_event = self._callback_accepts_event(on_notify)
         self._stale_master_ms = stale_master_ms
         self._error_streaks: dict[str, int] = {}
+        self._error_incidents: dict[str, int] = {}
         self._basis = basis
         self._snapshot_symbols = snapshot_symbols
         self._last_master_state: MasterState | None = None
         self._last_postfill_recompute: dict[str, float] = {}
         self._postfill_tasks: set[asyncio.Task] = set()
+        self._postfill_admission_lock = asyncio.Lock()
+        self._postfill_admission_open = True
+        self._generation_admission_lock = asyncio.Lock()
+        self._generation_idle = asyncio.Event()
+        self._generation_idle.set()
+        self._generation_admission_open = True
+        self._active_generations = 0
+        self._notification_keys_seen: set[str] = set()
+        # Control-plane for follower leverage (candidate catalog + confirmed
+        # per-account state). None keeps the legacy test seam where the target
+        # leverage resolves from the client/policy without a control plane.
+        self._leverage = leverage
+        self._notification_key_order: deque[str] = deque()
+
+    @staticmethod
+    def _callback_accepts_event(callback: Callable[..., Awaitable[None]] | None) -> bool:
+        if callback is None or hasattr(callback, "emit"):
+            return callback is not None
+        try:
+            parameters = list(inspect.signature(callback).parameters.values())
+        except (TypeError, ValueError):
+            return False
+        if any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+            return True
+        positional = [
+            parameter
+            for parameter in parameters
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if not positional:
+            return False
+        parameter = positional[0]
+        annotation = parameter.annotation
+        return (
+            parameter.name in {"event", "notification", "notification_event"}
+            or annotation is NotificationEvent
+            or str(annotation).endswith("NotificationEvent")
+        )
 
     async def on_master_delta(self, delta: MasterDelta) -> None:
         self._last_master_state = delta.state
-        # Capture freshness once for the whole fan-out generation. A slow
-        # signed follower must not make later followers reject the same
-        # authoritative master delta halfway through the gather.
-        master_fresh = self._state_fresh(delta.state)
-        results = await asyncio.gather(
-            *(
-                self._recompute_follower(fr, delta, master_fresh=master_fresh)
-                for fr in self._followers
-            ),
-            return_exceptions=True,
-        )
-        for fr, result in zip(self._followers, results, strict=True):
-            if isinstance(result, Exception):
-                streak = self._error_streaks.get(fr.account_id, 0) + 1
-                self._error_streaks[fr.account_id] = streak
-                log.error("follower %s recompute failed (%d): %s", fr.account_id, streak, result)
-                if streak >= 3:
-                    await self._app_flags.set_flag(
-                        "degraded", f"{fr.account_id}:recompute:{result}"
+        if not await self._enter_generation():
+            return
+        followers = self._registry.snapshot()
+        try:
+            # Capture freshness once for the whole fan-out generation. A slow
+            # signed follower must not make later followers reject the same
+            # authoritative master delta halfway through the gather.
+            master_fresh = self._state_fresh(delta.state)
+            results = await asyncio.gather(
+                *(
+                    self._recompute_follower(fr, delta, master_fresh=master_fresh)
+                    for fr in followers
+                ),
+                return_exceptions=True,
+            )
+            for fr, result in zip(followers, results, strict=True):
+                if isinstance(result, Exception):
+                    streak = self._error_streaks.get(fr.account_id, 0) + 1
+                    self._error_streaks[fr.account_id] = streak
+                    log.error(
+                        "follower %s recompute failed (%d): %s", fr.account_id, streak, result
                     )
-                await self._notify(f"[{fr.account_id}] recompute error: {result}")
-            else:
-                self._error_streaks[fr.account_id] = 0
+                    if streak >= 3:
+                        await self._app_flags.set_flag(
+                            "degraded",
+                            f"{fr.account_id}:recompute:{_error_category(result)}",
+                        )
+                    if streak not in (1, 3):
+                        continue
+                    category = _error_category(result)
+                    safe_account = _safe_fragment(fr.account_id)
+                    if streak == 1:
+                        incident = self._error_incidents.get(fr.account_id, 0) + 1
+                        self._error_incidents[fr.account_id] = incident
+                    else:
+                        incident = self._error_incidents.get(fr.account_id, 1)
+                    await self._notify(
+                        (
+                            f"Сверка follower {safe_account} не выполнена "
+                            f"(категория: {category}, инцидент {incident}, streak {streak})."
+                        ),
+                        event_key=(
+                            f"degraded:recompute:{safe_account}:incident-{incident}:"
+                            f"streak-{streak}:{category}"
+                        ),
+                        account_id=fr.account_id,
+                        kind="follower.recompute_failed",
+                        severity=NotificationSeverity.WARN,
+                    )
+                else:
+                    self._error_streaks[fr.account_id] = 0
+        finally:
+            await self._leave_generation()
 
     async def on_command_confirmed(self, account_id: str, action: ExecutionAction) -> None:
         """Post-fill safety net: re-run the affected follower right after an
@@ -224,13 +334,16 @@ class Coordinator:
         if now - last < POSTFILL_RECOMPUTE_DEBOUNCE_S:
             return
         self._last_postfill_recompute[account_id] = now
-        fr = next((f for f in self._followers if f.account_id == account_id), None)
+        fr = self._registry.get(account_id)
         state = self._last_master_state
         if fr is None or state is None:
             return
-        task = asyncio.create_task(self._postfill_recompute(fr, state))
-        self._postfill_tasks.add(task)
-        task.add_done_callback(self._postfill_tasks.discard)
+        async with self._postfill_admission_lock:
+            if not self._postfill_admission_open:
+                return
+            task = asyncio.create_task(self._postfill_recompute(fr, state))
+            self._postfill_tasks.add(task)
+            task.add_done_callback(self._postfill_tasks.discard)
 
     async def _postfill_recompute(self, fr: FollowerRuntime, state: MasterState) -> None:
         try:
@@ -242,6 +355,92 @@ class Coordinator:
             await self._recompute_follower(fr, MasterDelta(frozenset({"*"}), state))
         except Exception as exc:  # noqa: BLE001 - notification path must not raise
             log.warning("post-fill recompute failed for %s: %s", fr.account_id, exc)
+
+    async def close_postfill_admission(self) -> None:
+        """Stop new post-fill tasks before a bounded shutdown drain."""
+        lock = getattr(self, "_postfill_admission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._postfill_admission_lock = lock
+        async with lock:
+            self._postfill_admission_open = False
+
+    async def open_postfill_admission(self) -> None:
+        """Re-open post-fill admission for an explicitly resumed runtime."""
+        lock = getattr(self, "_postfill_admission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._postfill_admission_lock = lock
+        async with lock:
+            self._postfill_admission_open = True
+
+    async def close_generation_admission(self, timeout_s: float = 5.0) -> None:
+        """Close fan-out/reconcile admission and wait for active generations."""
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        lock = getattr(self, "_generation_admission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._generation_admission_lock = lock
+            idle = asyncio.Event()
+            idle.set()
+            self._generation_idle = idle
+            self._generation_admission_open = True
+            self._active_generations = 0
+        async with lock:
+            self._generation_admission_open = False
+            if self._active_generations == 0:
+                self._generation_idle.set()
+            idle = self._generation_idle
+        await asyncio.wait_for(idle.wait(), timeout=timeout_s)
+
+    async def open_generation_admission(self) -> None:
+        """Re-open fan-out/reconcile admission after a completed pause."""
+        lock = getattr(self, "_generation_admission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._generation_admission_lock = lock
+            self._generation_idle = asyncio.Event()
+            self._generation_idle.set()
+            self._active_generations = 0
+        async with lock:
+            self._generation_admission_open = True
+
+    async def pause_barrier(self, timeout_s: float = 5.0) -> None:
+        """Persist pause and wait until no admitted generation can place entries."""
+        await self._app_flags.set_flag("allow_new_entries", "false")
+        await self.close_generation_admission(timeout_s=timeout_s)
+
+    async def resume_after_pause(self) -> None:
+        """Persist resume before allowing another generation to start."""
+        await self._app_flags.set_flag("allow_new_entries", "true")
+        await self.open_generation_admission()
+
+    async def _enter_generation(self) -> bool:
+        lock = getattr(self, "_generation_admission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._generation_admission_lock = lock
+            self._generation_idle = asyncio.Event()
+            self._generation_idle.set()
+            self._generation_admission_open = True
+            self._active_generations = 0
+        async with lock:
+            if not self._generation_admission_open:
+                return False
+            self._active_generations += 1
+            self._generation_idle.clear()
+            return True
+
+    async def _leave_generation(self) -> None:
+        lock = getattr(self, "_generation_admission_lock", None)
+        if lock is None:
+            return
+        async with lock:
+            self._active_generations -= 1
+            if self._active_generations <= 0:
+                self._active_generations = 0
+                self._generation_idle.set()
 
     def _state_fresh(self, master: MasterState) -> bool:
         """False when the master state predates stale_master_ms; event_time==0
@@ -288,10 +487,36 @@ class Coordinator:
             delta.state,
             actual,
             policy,
+            client=fr.client,
             master_fresh=master_fresh,
         )
         for skip in skips:
-            await self._notify(f"[{fr.account_id}] SKIP {skip.symbol}: {skip.reason}")
+            if skip.reason in {
+                SkipReason.PAUSED,
+                SkipReason.INTENTIONAL_FLAT,
+                SkipReason.OWN_PROTECTIVE_FILLED,
+            }:
+                continue
+            safe_account = _safe_fragment(fr.account_id)
+            safe_symbol = _safe_fragment(skip.symbol)
+            safe_reason = _safe_fragment(skip.reason.value)
+            safe_pos_side = _safe_fragment(skip.pos_side.value)
+            episode = self._skip_episode_token(skip, delta.state)
+            skip_text = format_skip_reason(
+                skip.symbol,
+                skip.reason,
+                skip.pos_side,
+                account_id=fr.account_id,
+            )
+            await self._notify(
+                skip_text,
+                event_key=(
+                    f"skip:{safe_account}:{safe_symbol}:{safe_pos_side}:{safe_reason}:{episode}"
+                ),
+                account_id=fr.account_id,
+                kind="copy.skip",
+                severity=NotificationSeverity.INFO,
+            )
         plan = build_plan(
             actual,
             TargetState(account_id=fr.account_id, targets=targets),
@@ -312,7 +537,7 @@ class Coordinator:
             ],
         )
         plan = await self._bind_plan_context(fr.account_id, targets, plan, actual)
-        results = await self._executor.submit(plan)
+        results = await self._executor.submit(plan, client=fr.client)
         if any(
             action.kind in (ActionKind.MARKET_OPEN, ActionKind.MARKET_CLOSE)
             and result.status == "CONFIRMED"
@@ -322,11 +547,65 @@ class Coordinator:
                 fr, delta.state, targets, plan, results
             )
             results.extend(safety_results)
+        await self._notify_command_results(fr.account_id, results)
         # SUBMITTED and BLOCKED are not converged: in particular, a blocked
         # protection cancel must keep the previous sizing basis so the next
         # reconciliation retries the complete safety transition.
         failed = any(r.status != "CONFIRMED" for r in results)
         await self._persist_refs(fr.account_id, targets, failed=failed, master=delta.state)
+
+    @staticmethod
+    def _skip_episode_token(skip: SkipRecord, master: MasterState) -> str:
+        """Return a stable bounded identity for one master copy episode.
+
+        Normal projector state has a durable ``copy_trades.trade_id``.  Tests,
+        boot snapshots, and manually composed coordinators may not have one;
+        in that case hash stable leg state rather than the per-sweep event
+        timestamp, so an unchanged actionable skip is emitted once.
+        """
+        if skip.trade_id is not None:
+            return f"trade-{skip.trade_id}"
+        position = master.positions.get(PositionKey(skip.symbol, skip.pos_side))
+        material = {
+            "symbol": skip.symbol,
+            "pos_side": skip.pos_side.value,
+            "qty": None if position is None else str(position.qty),
+            "entry": None if position is None else str(position.entry_price),
+            "stop": (
+                None if position is None or position.stop is None else str(position.stop.stop_price)
+            ),
+            "tp": (
+                None
+                if position is None or position.take_profit is None
+                else str(position.take_profit.stop_price)
+            ),
+        }
+        digest = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:16]
+        return f"state-{digest}"
+
+    async def _notify_command_results(self, account_id: str, results: list) -> None:
+        """Report non-terminal command results without exposing raw errors."""
+        safe_account = _safe_fragment(account_id)
+        for result in results:
+            if result.status == "CONFIRMED":
+                continue
+            safe_status = _safe_fragment(result.status)
+            safe_reason = _safe_fragment(result.error or result.status)
+            await self._notify(
+                (
+                    f"Follower {safe_account}: команда не подтверждена "
+                    f"({safe_status}, категория: {safe_reason})."
+                ),
+                event_key=(
+                    f"degraded:command:{safe_account}:{_safe_fragment(result.command_key)}:"
+                    f"{safe_status}:{safe_reason}"
+                ),
+                account_id=account_id,
+                kind="execution.degraded",
+                severity=NotificationSeverity.WARN,
+            )
 
     async def _post_execution_converge(
         self,
@@ -355,10 +634,16 @@ class Coordinator:
             self._coid_factory(),
             working_type=self._working_type,
         )
+        # Keep only protection/cancel actions. A protection here belongs to an
+        # ALREADY-CONFIRMED entry whose leverage the exchange accepted, so any
+        # intra-plan leverage prerequisite is dropped: a dangling reference
+        # would wrongly BLOCK safety-critical post-fill protection.
         protection_plan = dc_replace(
             protection_plan,
             actions=[
-                action
+                dc_replace(action, depends_on_action_id=None)
+                if action.depends_on_action_id is not None
+                else action
                 for action in protection_plan.actions
                 if action.kind
                 in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP, ActionKind.CANCEL_ORDER)
@@ -369,7 +654,7 @@ class Coordinator:
             protection_plan = await self._bind_plan_context(
                 fr.account_id, adjusted, protection_plan, actual
             )
-            results.extend(await self._executor.submit(protection_plan))
+            results.extend(await self._executor.submit(protection_plan, client=fr.client))
 
         verified = await self._snapshot(fr)
         verified_targets = self._targets_at_actual_qty(targets, verified)
@@ -422,12 +707,21 @@ class Coordinator:
             close_plan = await self._bind_plan_context(
                 fr.account_id, zero_targets, close_plan, verified
             )
-            results.extend(await self._executor.submit(close_plan))
+            results.extend(await self._executor.submit(close_plan, client=fr.client))
         reason = ",".join(f"{key.symbol}:{key.pos_side.value}" for key in unsafe_opened)
         await self._app_flags.set_flag(
             "degraded", f"{fr.account_id}:unprotected-entry-flattened:{reason}"
         )
-        await self._notify(f"[{fr.account_id}] unsafe entry flattened: {reason}")
+        safe_account = _safe_fragment(fr.account_id)
+        safe_reason = _safe_fragment(reason)
+        master_stamp = _safe_fragment(master.event_time, "snapshot")
+        await self._notify(
+            f"Follower {safe_account}: небезопасный вход закрыт ({safe_reason}).",
+            event_key=f"unsafe:{safe_account}:{master_stamp}:{safe_reason}",
+            account_id=fr.account_id,
+            kind="risk.unsafe_flatten",
+            severity=NotificationSeverity.CRITICAL,
+        )
         return results
 
     @staticmethod
@@ -504,7 +798,15 @@ class Coordinator:
         orders_by_symbol: dict[str, list] = {}
         for o in orders:
             orders_by_symbol.setdefault(o.symbol, []).append(o)
+        leverages_by_symbol: dict[str, set[int]] = {}
         for p in await fr.client.position_risk(fr.account_id):
+            leverage = int(p.leverage)
+            if leverage > 0:
+                # Leverage is exchange-persisted per symbol and present on
+                # every positionRisk row, INCLUDING flat legs. Dropping the
+                # row used to make "no position" look like "leverage unknown"
+                # and forced a redundant cold-path SET before every entry.
+                leverages_by_symbol.setdefault(p.symbol, set()).add(leverage)
             key = PositionKey(symbol=p.symbol, pos_side=p.position_side)
             leg_orders = [
                 o
@@ -519,7 +821,7 @@ class Coordinator:
                 key=key,
                 qty=p.position_amt,
                 entry_price=p.entry_price,
-                leverage=int(p.leverage),
+                leverage=leverage,
                 mark_price=p.mark_price,
                 liquidation_price=p.liquidation_price,
                 stop=stop,
@@ -553,10 +855,20 @@ class Coordinator:
                 extra_stops=extra_stops,
                 extra_tps=extra_tps,
             )
+        # Only an UNAMBIGUOUS per-symbol value counts as knowledge; disagreeing
+        # rows (isolated per-side leverage) stay unknown and fail closed.
+        symbol_leverages = {
+            symbol: next(iter(values))
+            for symbol, values in leverages_by_symbol.items()
+            if len(values) == 1
+        }
+        if self._leverage is not None and symbol_leverages:
+            self._leverage.observe(fr.account_id, symbol_leverages)
         return AccountState(
             account_id=fr.account_id,
             available_usdt=available,
             positions=positions,
+            symbol_leverages=symbol_leverages,
             open_orders=[o.model_dump() for o in orders],
         )
 
@@ -567,6 +879,7 @@ class Coordinator:
         actual: AccountState,
         policy: RiskPolicy,
         *,
+        client: AsterClient | None = None,
         master_fresh: bool | None = None,
     ) -> tuple[list[TargetPosition], list[SkipRecord]]:
         targets: list[TargetPosition] = []
@@ -604,18 +917,13 @@ class Coordinator:
                 continue  # handled by the actual-side loop above
 
             follower_pos = actual.positions.get(key)
-            leverage = (
-                min(master_pos.leverage, policy.max_leverage)
-                if master_pos.leverage > 0
-                else policy.max_leverage
-            )
 
             if follower_pos is None or follower_pos.qty == 0:
                 if not self._stop_usable(master_pos, master_stop):
                     # stop on the wrong side of the CURRENT market: unusable as
                     # copy level. Never validated against the historical entry -
                     # that misclassified legitimate profit-locking stops.
-                    skips.append(SkipRecord(key.symbol, SkipReason.NO_STOP))
+                    skips.append(await self._skip_record(key, SkipReason.NO_STOP))
                     continue
                 # expected fill price is the CURRENT market, not the master's
                 # historical entry; the deviation gate compares the two
@@ -627,18 +935,18 @@ class Coordinator:
                     and expected > 0
                     and deviation_exceeded(master_pos.entry_price, expected, policy)
                 ):
-                    skips.append(SkipRecord(key.symbol, SkipReason.ENTRY_DEVIATION))
+                    skips.append(await self._skip_record(key, SkipReason.ENTRY_DEVIATION))
                     continue
                 # a-precondition: never open against a stale view of the master -
                 # the position may already be closed on the exchange while the WS
                 # event is still in flight (observed live on testnet)
                 if not master_fresh:
-                    skips.append(SkipRecord(key.symbol, SkipReason.STALE_MASTER))
+                    skips.append(await self._skip_record(key, SkipReason.STALE_MASTER))
                     continue
                 # a-precondition: no re-entry while the same master episode was
                 # already ended by THIS follower's own protective fill (stop OR tp)
                 if await self._ended_by_own_protective(account_id, key):
-                    skips.append(SkipRecord(key.symbol, SkipReason.OWN_PROTECTIVE_FILLED))
+                    skips.append(await self._skip_record(key, SkipReason.OWN_PROTECTIVE_FILLED))
                     continue
                 # a-precondition: the follower is flat on purpose INSIDE this
                 # master episode - a proportional reduction target rounded down
@@ -648,11 +956,31 @@ class Coordinator:
                 if self._basis is not None and await self._basis.is_zero_target(
                     account_id, key.symbol, key.pos_side.value
                 ):
-                    skips.append(SkipRecord(key.symbol, SkipReason.INTENTIONAL_FLAT))
+                    skips.append(await self._skip_record(key, SkipReason.INTENTIONAL_FLAT))
                     continue
                 if not entries_allowed:
-                    skips.append(SkipRecord(key.symbol, SkipReason.PAUSED))
+                    skips.append(await self._skip_record(key, SkipReason.PAUSED))
                     continue
+                # Leverage readiness is the final entry precondition: the
+                # control plane must hold a confirmed value for THIS account
+                # and generation before any new exposure. Not-ready skips the
+                # entry (never blocks closes/reductions/protection) and
+                # enqueues a bounded background preparation.
+                if self._leverage is not None:
+                    if not self._leverage.is_ready(account_id, key.symbol):
+                        self._leverage.request_prepare(account_id, key.symbol)
+                        skips.append(await self._skip_record(key, SkipReason.LEVERAGE_NOT_READY))
+                        continue
+                    leverage = self._leverage.confirmed(account_id, key.symbol)
+                else:
+                    # Legacy test seam without a composed control plane.
+                    leverage = await self._target_leverage(
+                        account_id,
+                        key.symbol,
+                        master_pos,
+                        policy,
+                        client=client,
+                    )
                 decision = entry_quantity(
                     policy,
                     actual.available_usdt,
@@ -672,7 +1000,7 @@ class Coordinator:
                         master_stop,
                         decision.reason,
                     )
-                    skips.append(SkipRecord(key.symbol, decision.reason))
+                    skips.append(await self._skip_record(key, decision.reason))
                     continue
                 qty = decision.qty if master_qty > 0 else -decision.qty
                 targets.append(
@@ -713,7 +1041,7 @@ class Coordinator:
                         qty=Decimal(0),
                         stop_price=None,
                         tp_price=None,
-                        leverage=leverage,
+                        leverage=follower_pos.leverage,
                         hold_flat_until_episode_end=False,
                     )
                 )
@@ -764,6 +1092,15 @@ class Coordinator:
                 )
             if not entries_allowed and target_abs > current_abs:
                 target_abs = current_abs  # pause: increases blocked
+            if (
+                self._leverage is not None
+                and target_abs > current_abs
+                and not self._leverage.is_ready(account_id, key.symbol)
+            ):
+                # Not-ready control plane blocks only the risk-INCREASING part;
+                # reductions, closes and protection updates keep flowing.
+                self._leverage.request_prepare(account_id, key.symbol)
+                target_abs = current_abs
             # post-fill protection: never hold more than the real risk cap from
             # the ACTUAL follower entry and the effective stop distance
             if effective_stop is not None and cap < current_abs and master_fresh:
@@ -776,6 +1113,26 @@ class Coordinator:
             target_stop, target_stop_type = self._target_stop_for_existing(
                 master_pos, master_stop, master_stop_type, follower_pos
             )
+            leverage = follower_pos.leverage
+            if target_abs > current_abs:
+                if self._leverage is not None:
+                    # Ready (clamped above otherwise): size against the
+                    # account-confirmed value instead of a network read.
+                    confirmed = self._leverage.confirmed(account_id, key.symbol)
+                    if confirmed is not None:
+                        leverage = confirmed
+                else:
+                    # Legacy test seam without a composed control plane.
+                    # Existing-leg reductions, closes and protection updates
+                    # keep running if the bracket read is unavailable; only a
+                    # real increase needs the exchange maximum.
+                    leverage = await self._target_leverage(
+                        account_id,
+                        key.symbol,
+                        master_pos,
+                        policy,
+                        client=client,
+                    )
             qty = target_abs if master_qty > 0 else -target_abs
             targets.append(
                 TargetPosition(
@@ -790,6 +1147,49 @@ class Coordinator:
                 )
             )
         return targets, skips
+
+    async def _target_leverage(
+        self,
+        account_id: str,
+        symbol: str,
+        master_pos: PositionState,
+        policy: RiskPolicy,
+        *,
+        client: AsterClient | None,
+    ) -> int:
+        """Legacy/test-seam leverage resolution (NO control plane composed).
+
+        Production reconciliation uses ``LeverageManager`` RAM reads and never
+        enters this method. ``targets_for`` remains a small public test seam
+        and may be called without a runtime client, where the policy/master
+        value keeps existing pure sizing tests useful; a client exposing
+        ``max_leverage`` keeps the historical exchange-resolution tests valid.
+        """
+        if client is not None:
+            resolver = getattr(client, "max_leverage", None)
+            if callable(resolver):
+                value = await resolver(account_id, symbol)
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError("invalid exchange maximum leverage")
+                return value
+            if isinstance(client, AsterClient):
+                raise RuntimeError("AsterClient maximum leverage operation is unavailable")
+        return (
+            min(master_pos.leverage, policy.max_leverage)
+            if master_pos.leverage > 0
+            else policy.max_leverage
+        )
+
+    async def _skip_record(self, key: PositionKey, reason: SkipReason) -> SkipRecord:
+        """Attach the durable master episode id when one is available."""
+        active = await self._trades.active_trade(key.symbol, key.pos_side.value)
+        trade_id = int(active["trade_id"]) if active is not None else None
+        return SkipRecord(
+            symbol=key.symbol,
+            reason=reason,
+            pos_side=key.pos_side,
+            trade_id=trade_id,
+        )
 
     def _stop_usable(self, master_pos: PositionState, stop: Decimal | None) -> bool:
         """Usable = sits on the protective side of the CURRENT market price.
@@ -872,7 +1272,7 @@ class Coordinator:
         return False
 
     def _client_for(self, account_id: str):
-        for fr in self._followers:
+        for fr in self._registry.snapshot():
             if fr.account_id == account_id:
                 return fr.client
         return None
@@ -1025,22 +1425,145 @@ class Coordinator:
             row = await self._trades.latest_trade(symbol, pos_side_value)
         return int(row["trade_id"]) if row is not None else None
 
-    async def _notify(self, text: str) -> None:
+    async def _notify(
+        self,
+        text: str,
+        *,
+        event_key: str | None = None,
+        account_id: str | None = None,
+        kind: str = "engine.info",
+        severity: NotificationSeverity = NotificationSeverity.INFO,
+    ) -> None:
+        """Emit one structured event without making trading depend on it.
+
+        ``event_key`` is supplied by each decision boundary and remains stable
+        across retries/reconciles.  The legacy text callback is retained only
+        for existing Stage-1 callers; the normal App path always uses the
+        structured notifier.
+        """
+        notification_key = event_key or f"{kind}:{_safe_fragment(account_id)}"
+        if notification_key in self._notification_keys_seen:
+            return
+        if self._notifier is not None:
+            event = NotificationEvent(
+                event_key=notification_key,
+                account_id=account_id,
+                kind=kind,
+                severity=severity,
+                text=text,
+            )
+            try:
+                await self._notifier.emit(event)
+            except Exception:  # noqa: BLE001 - sink failures are isolated
+                log.exception(
+                    "notification enqueue failed (event_key=%s kind=%s account_id=%s)",
+                    event.event_key,
+                    event.kind,
+                    event.account_id,
+                )
+                return
+            self._remember_notification_key(notification_key)
+            return
         if self._on_notify is not None:
-            await self._on_notify(text)
+            try:
+                if self._on_notify_accepts_event:
+                    await self._on_notify(
+                        NotificationEvent(
+                            event_key=notification_key,
+                            account_id=account_id,
+                            kind=kind,
+                            severity=severity,
+                            text=text,
+                        )
+                    )
+                else:
+                    await self._on_notify(text)
+            except Exception:  # noqa: BLE001 - legacy sink is also best-effort
+                log.exception("legacy notification callback failed")
+                return
+            self._remember_notification_key(notification_key)
+
+    def _remember_notification_key(self, event_key: str) -> None:
+        self._notification_keys_seen.add(event_key)
+        self._notification_key_order.append(event_key)
+        while len(self._notification_key_order) > NOTIFICATION_KEY_CACHE_MAX:
+            expired = self._notification_key_order.popleft()
+            self._notification_keys_seen.discard(expired)
 
     @property
     def followers(self) -> list[FollowerRuntime]:
-        return list(self._followers)
+        return list(self._registry.snapshot())
+
+    @property
+    def registry(self) -> FollowerRegistry:
+        return self._registry
+
+    async def drain_postfill_tasks(
+        self, timeout_s: float = 5.0, *, close_admission: bool = True
+    ) -> None:
+        """Finish spawned safety recomputes before transport/storage shutdown.
+
+        Closing admission is the default so a task cannot be added between the
+        final set inspection and resource teardown.  Callers that only want a
+        non-shutdown drain may opt out explicitly.
+        """
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        if close_admission:
+            await self.close_postfill_admission()
+        deadline = time.monotonic() + timeout_s
+        while self._postfill_tasks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                tasks = tuple(self._postfill_tasks)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                return
+            tasks = tuple(self._postfill_tasks)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=remaining
+                )
+            except TimeoutError:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                return
 
     @property
     def commands(self):
         return self._executor._commands
 
     async def recompute_follower(self, fr: FollowerRuntime, delta: MasterDelta) -> None:
-        await self._recompute_follower(fr, delta)
+        if not await self._enter_generation():
+            return
+        try:
+            await self._recompute_follower(fr, delta)
+        finally:
+            await self._leave_generation()
+
+    async def snapshot_follower(self, fr: FollowerRuntime) -> AccountState:
+        """Public read boundary for application status and safety checks."""
+        async with fr.lock:
+            return await self._snapshot(fr)
+
+    async def snapshot_follower_locked(self, fr: FollowerRuntime) -> AccountState:
+        """Snapshot boundary for callers already holding ``fr.lock``.
+
+        The lifecycle context acquires ``FollowerRuntime.lock`` before the
+        executor account lock and uses this method without reacquiring the
+        non-reentrant asyncio lock.
+        """
+        return await self._snapshot(fr)
 
     async def targets_for(
-        self, account_id: str, master: MasterState, actual: AccountState, policy: RiskPolicy
+        self,
+        account_id: str,
+        master: MasterState,
+        actual: AccountState,
+        policy: RiskPolicy,
+        *,
+        client: AsterClient | None = None,
     ) -> tuple[list[TargetPosition], list[SkipRecord]]:
-        return await self._targets_for(account_id, master, actual, policy)
+        return await self._targets_for(account_id, master, actual, policy, client=client)

@@ -66,6 +66,7 @@ async def test_app_does_not_reconcile_or_publish_ready_with_unresolved_sending(t
     cfg = Settings(
         encryption_key="ab" * 32,
         db_path=db_path,
+        log_path=tmp_path / "logs" / "app.log",
         rest_base_url=BASE,
         ws_user_base="wss://fstream.asterdex-testnet.com/ws",
     )

@@ -1,23 +1,162 @@
-# Статус работ — торговый движок копитрейда (этап 1)
+# Статус работ — copytradeaster (этапы 1–3)
 
-Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Ветка `codex/stage1-core`.
+Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Актуальная рабочая
+ветка Stage 3, часть 1: `codex/stage-3-mini-app-part1`.
 
 ## Текущее состояние
 
+- **Stage 3, часть 1 — CLOSED (2026-09-01):** все обязательные
+  исправления R1–R9 из
+  `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` выполнены.
+  Offline, frontend, полный state-changing signed Aster Testnet suite и
+  ручная Telegram Mini App приёмка владельца зелёные.
+  1. **Unknown remote outcome:** transport/5xx/`-1000/-1006/-1007` после
+     `approveAgent` сохраняют `APPROVAL_SENT`; recovery сначала проверяет Agent
+     idempotent signed GET и не делает blind повтор POST.
+  2. **Recovery без второй подписи:** session публикует только безопасный
+     `onboarding_state`; `POST /miniapp/api/builder/resume-attempt` разрешён без
+     подписи только для server-owned `APPROVAL_SENT`/`APPROVED`. `PREPARED`
+     по-прежнему требует wallet signature.
+  3. **Durable lifecycle:** после paused account commit записывается
+     `COMMITTED`; успешная runtime activation очищает attempt, а activation
+     failure восстанавливается лениво и идемпотентно.
+  4. **Home/UI/logs:** первый Home load требует fresh snapshot; account
+     `updated_at` больше не выдаётся за snapshot time; `Sheet` снова является
+     modal overlay с Escape/focus management; raw exception payload не пишется
+     в Builder/Mini App logs.
+  5. **Live harness:** L3 действительно отправляет Testnet `approveAgent`, затем
+     теряет локальный success response; L7 использует aiohttp Mini App API,
+     намеренно stale seed и реальные signed account/Agent permission reads;
+     order POST имеет unique client id и разрешает
+     unknown outcome только через query. Fake-only evidence больше не выдаётся
+     за signed live.
+  6. **Актуальный offline/frontend gate:** offline pytest **740 passed / 2
+     skipped / 30 deselected** за **17.02 s**, total coverage **87%**; Ruff
+     check/format и `git diff --check` clean. Frontend: Vitest **41 passed**,
+     Oxlint clean, TypeScript + Vite production build passed.
+  7. **Актуальный полный signed Testnet gate:** в едином запуске
+     все **29 обязательных state-changing/live сценариев passed** за
+     **756.35 s** против `https://fapi.asterdex-testnet.com`. Пройдены
+     Builder onboarding/recovery, Mini App Pause/Resume, builder+feeRate order,
+     over-cap rejection, leverage control-plane, ONE_WAY/HEDGE, WebSocket,
+     emergency, boot recovery, protective-order convergence и flat cleanup.
+     Один legacy-дубликат, требовавший хранить main private keys в
+     production credentials, был skipped в этом запуске и затем удалён:
+     его полностью заменяет прошедший `test_builder_mini_app_e2e.py`.
+  8. **Incident-resilience live evidence (настоящий Aster Testnet):** во время
+     частичного инцидента signed
+     `balance`, `positionRisk` и symbol-scoped `allOrders` отвечают `200`, тогда
+     как `positionSide/dual`, `openOrders`, `listenKey`, `leverageBracket` и
+     `agent` во время инцидента отвечают `-1000`. Добавлены только
+     доказуемые fallback-пути: `openOrders(symbol) -> allOrders` с фильтром
+     `NEW/PARTIALLY_FILLED`; REST master snapshot на каждом sweep при
+     недоступном stream; unanimous current-boot follower leverage из
+     `positionRisk`; 24h bounded permission cache только для явного Testnet
+     override и только после unknown Agent-read failure. Частичные/расходящиеся
+     данные, mainnet и deterministic permission rejection остаются fail-closed.
+     После восстановления routes полный live-suite прошёл без этих
+     fallback-путей как подмены assertions.
+  9. **Финальный production runtime после live-suite:** `READY`, master
+     user-stream запущен, Telegram polling и новая публичная Mini App
+     отвечает `HTTP 200`. Startup/post-stream/sweep дали по `0` действий
+     на `copyc1`–`copyc3` и
+     `tg-8264892202`. Production Mini App flow `session -> confirmation ->
+     resume` вернул `HTTP 200`, `copy_state=active`, `system_state=ready` для
+     `tg-8264892202`; leverage readiness подтверждена реальными
+     `positionRisk`: BTC/ETH=200, SOL=100. Оставленная emergency-тестом
+     глобальная пауза снята; `allow_new_entries=true`, все пять аккаунтов
+     enabled. Это отдельное transport/application evidence.
+  10. **Owner manual Telegram acceptance:** production-лог подтверждает
+      ручной WebView flow владельца: `13:08:42 pause attempt` →
+      `13:08:44 pause success/state=paused` → `13:08:49 resume attempt` →
+      real Testnet leverage confirmation BTC/ETH=200, SOL=100 →
+      `13:08:58 resume success/state=resumed`. Последующие sweep дают
+      `tg-8264892202: 0`. Ручной UI-gate закрыт.
 - **Stage 1 CLOSED (corrective acceptance 2026-08-23):** новых P0/P1 по
   заявленному testnet scope не осталось; код можно фиксировать и пушить для
   перехода к Stage 2. Mainnet по-прежнему запрещён guard-ом Stage 1.
+- **Stage 2 CLOSED (2026-08-24):** Telegram-бот, direct V3 onboarding,
+  управление риском, notification outbox, общий Bot/Mini App application layer,
+  а также полный цикл ручной приёмки владельцем (WP9b), включая живой
+  `resume/copy cycle` (открытие BTCUSDT LONG, авто-плечо 200x, стоп, доставка
+  Telegram-уведомлений `MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `MARKET_CLOSE`,
+  полный flat всех подписчиков), успешно выполнены и проверены на Aster Testnet.
+- **Ручной WP9b ПРИНЯТ:** владелец подтвердил captcha, выдачу доступа, admin
+  approval, direct onboarding/подключение, notifications toggle, изменение
+  risk percent, итоговое inline-меню, а также полный живой resume/copy trading
+  cycle на Telegram-follower.
+- Все аккаунты (`main`, `tg-8264892202`, `copyc1`–`copyc3`) после цикла находятся
+  в чистом `flat` (0 позиций, 0 открытых ордеров).
 - Движок работает на futures testnet (`fapi.asterdex-testnet.com`), HEDGE-режим;
   ONE_WAY официально поддержан и покрыт signed E2E через ядро (см. ниже).
 - Аккаунты (wallet.txt): `main test` (0x235E…5176, мастер) + copyc1–copyc3.
   copyc4 удалён: его API-кошельки на стороне биржи вели на счёт мейна
   (пересечение 49/50 ордеров подтверждено allOrders).
-- Актуальный offline gate: **284 passed / 2 skipped / 16 deselected**,
-  coverage **88.41%** при пороге 87%; ruff check/format и diff-check clean.
-  Signed testnet gate: **15 passed / 1 skipped**; единственный skip — Builder
-  Stage 3.
+- **Leverage control-plane ПРИНЯТ (2026-08-25, внешний acceptance `69fa148`):**
+  баги #25/#26 и весь leverage-этап закрыты цепочкой
+  `86a51ec → 6f01917 → 54279d8 → 69fa148`: P0 dependency gating, flat-leverage,
+  hot path без leverage REST, unknown-outcome без blind retry, crash recovery
+  SET через authoritative positionRisk, ambiguous → fail-closed, boot-порядок
+  catalog→reconcile, lifecycle worker'а. Дословные ревью:
+  `docs/reviews/review_leverage_control_plane.md`; счётчики гейтов выше.
+- Актуальный offline gate после внедрения leverage control-plane и финального acceptance (баги #25–26,
+  `trading/leverage.py`, `69fa148`): **666 passed / 2 skipped / 21 deselected**, coverage
+  **87.29%** при пороге 87%; ruff check/format clean. Signed testnet gate
+  после изменений плеча (2026-08-25, `CT_TESTNET=1`): **16 passed / 1 skipped**
+  (skip — Builder Stage 3). E2E ONE_WAY прошёл полный цикл через новый
+  leverage-путь: fixture подтвердил candidate BTCUSDT=200 подписанным bracket
+  GET + `POST /leverage` на copyc1, вход исполнился без холодного SET; первый
+  прогон упал на транзитном `-1007 transport timeout` в polling-хелпере фазы 5
+  (флак тестнета, ретрай не предусмотрен харнессом) — повторный прогон чистый
+  за 178s.
+- Ревью-гейт leverage control-plane (2026-08-25, независимый review `6f01917`):
+  закрыты четыре находки. (1) `_prepare_locked`: unknown-outcome POST
+  (`-1000/-1006/-1007`, 503/504 и любые не-биржевые ошибки) больше не
+  триггерит слепой fallback — сначала авторитетный positionRisk: совпало с
+  target → confirm без записей; доказуемо не применено → безопасный
+  account-maximum fallback; чтение не удалось → fail closed. (2) Boot
+  recovery для journaled SET_LEVERAGE без coid: исход разрешается через
+  positionRisk — совпадение → CONFIRMED, расхождение → FAILED (reconcile
+  переподготовит), нечитаемо → остаётся in-flight fail-closed. (3)
+  Account-specific readiness после fallback: проверено воспроизведением —
+  observe() УЖЕ сохраняет подтверждение той же revision (early-continue);
+  несогласие с ревью зафиксировано, контракт заморожен регрессионными
+  тестами (global=200/follower=100 → prepare → observe(100) → still ready;
+  бамп ревизии инвалидирует). (4) Lifecycle: убран дубль task_names,
+  выбрасывавший `_leverage_task`; shutdown-test с живым worker'ом
+  доказывает остановку до закрытия HTTP/DB; initial refresh_catalog()
+  переставлен ДО startup reconciliation (ARCHITECTURE §12 обновлён), чтобы
+  рестарт-реконструкция из positionRisk валидировалась против живой
+  генерации без лишних POST. Offline gate: **665 passed / 2 skipped**,
+  coverage 87%; signed gate: **20 passed / 1 skipped** за 579s.
+- Live-дополнение (2026-08-25, `tests/testnet/test_leverage_control_plane_live.py`,
+  `CT_TESTNET=1`, 4 passed): закрыты лайв-дыры, недоказуемые офлайн-фейками —
+  (1) завышенный candidate отвергается биржей (-4028) и fallback подтверждает
+  подписанный максимум аккаунта; (2) неготовый control-plane режет вход
+  LEVERAGE_NOT_READY без единого ордера, живой worker-цикл доводит готовность;
+  (3) реально отклонённый SET блокирует зависимый MARKET_OPEN в executor'е,
+  риск-снижающий MARKET_CLOSE при том же провале исполняется (P0-контракт на
+  реальном -4028); (4) реальный дауншифт 200→20 держит пару durably-unready:
+  закрытие мастера течёт, повторный вход скипается с enqueue подготовки и
+  после prepare_account исполняется. Изоляция: торговые репо во временной БД
+  на тест, общая локальная БД — только ключи/nonce. Полный signed gate после
+  добавления: **20 passed / 1 skipped** за 571s. Вывод пробы: через полный
+  coordinator-пайплайн отказной SET недостижим по конструкции — авторитетный
+  снапшот лечит RAM-дивергенс до планирования; поэтому P0 доказан на границе
+  executor'а с настоящим отказом биржи.
 - Независимый signed REST-аудит после полного набора и двухчасового soak:
   `main` и `copyc1`–`copyc3` в HEDGE, позиции 0, открытых ордеров 0.
+- Runtime leverage follower — RAM control-plane (`LeverageManager`,
+  `trading/leverage.py`): глобальный кандидатный каталог по symbol
+  stale-while-revalidate + account-specific подтверждённое плечо,
+  подтверждаемое `POST /fapi/v3/leverage` (reject → account bracket GET →
+  POST максимума аккаунта). Подготовка — на onboarding/resume/boot-recovery и
+  в bounded background worker; hot path сделки читает только RAM. Рестарт
+  восстанавливает состояние из authoritative positionRisk
+  (`AccountState.symbol_leverages`, flat symbols включительно). Смена
+  максимума биржей инвалидирует готовность нового входа до переподготовки;
+  закрытие/сокращение/защита не зависят от плеча. Stage 2 по-прежнему не
+  меняет `marginType`; isolated enforcement отложен.
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -44,6 +183,11 @@
 | 19 | **Boot мог дать READY при неизвестном финансовом исходе** | query-error оставлял in-flight, но startup не проверял остаток | структурированный boot report, bounded retry, unresolved блокирует READY и новые mutations |
 | 20 | **READY переживал kill как ложный живой статус** | SQLite-флаг сбрасывался только graceful stop | runtime UUID + heartbeat; CLI считает старый heartbeat stale; kill/recovery доказан реальным SIGKILL |
 | 21 | **Fake/Shadow скрывали exchange semantics защиты** | doubles допускали flip/oversize и не моделировали closePosition/fixed remainder | строгие ONE_WAY/HEDGE reduce rules, conditional expiration, closePosition и partial-fill hooks |
+| 22 | **Direct onboarding скрывал причину preflight failure** | application service схлопывал `OnboardingError` в generic `ValidationError`, Telegram терял replacement context и показывал только restart copy | typed `OnboardingApplicationError.code`, enum-based Telegram remediation/error screen, revision-safe connect/replace retry и сохранённые secret/FSM invariants |
+| 23 | **Onboarding-карточки наслаивались после повторного ввода** | старый prompt сохранялся рядом с новым, expiry отправлял отдельный ответ, а удалённый anchor оставался в FSM до replacement send | все три input-сообщения удаляются до проверки; valid step transitions используют fresh cards с edit-fallback без дублей; expiry заменяет текущую карточку recovery-экраном; retired anchor инвалидируется и удаляется из FSM до send |
+| 24 | **Сырые системные логи в Telegram-уведомлениях** | движок слал внутренние имена RPC-команд (`MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `NO_STOP`) напрямую в пользовательский чат | выделен модуль `notifications/formatter.py` (`format_confirmed_action`, `format_skip_reason`); уведомления форматируются в чистые трейдерские карточки (🟢 Открыта позиция, 🛡 Защитный стоп, 🎯 Тейк-профит, 🔴 Закрыта позиция, 🗑 Снят ордер, ⏳ Ожидание стопа), технический шум убран |
+| 25 | **FAILED `SET_LEVERAGE` не блокировал `MARKET_OPEN`** | priority в плане — только порядок, а не зависимость: исполнитель продолжал план после FAILED prerequisite и отправлял вход с неподтверждённым плечом (fail-closed для плеча фактически отсутствовал) | generic dependency-модель плана: `ExecutionAction.action_id` / `depends_on_action_id`; planner связывает SET_LEVERAGE → вход/защиту, executor блокирует (`BLOCKED`) зависимые действия при FAILED/UNKNOWN prerequisite; закрытия/отмены зависимости не получают |
+| 26 | **Движок терял известное плечо flat-symbol** | `_snapshot()` выбрасывал строки positionRisk с `positionAmt==0`, а planner трактовал «нет позиции» как «плечо неизвестно» — каждая новая сделка платила холодный `SET_LEVERAGE` (+TTL bracket GET) даже при годами стоящих на бирже 200x | `AccountState.symbol_leverages` из всех строк positionRisk (включая flat; неоднозначные per-side значения → unknown/fail-closed); planner сравнивает known vs target и эмитит SET только при расхождении; hot path сделки — ноль leverage REST-запросов |
 
 ## Известные ограничения (осознанные решения этапа 1)
 
@@ -263,3 +407,328 @@ post-fill recompute видел «мастер открыт + follower flat» и 
 
 Verdict: **Stage 1 CLOSED, push approved for the testnet trading core.**
 Builder остаётся Stage 3; mainnet не разрешён этим verdict.
+
+## Stage 2 automated acceptance — 2026-08-24
+
+Реализован минимальный Stage 2 для одного master и 10–30, с проверенным
+контуром до 100 Telegram users/followers:
+
+- aiogram 3.30.0 long polling в том же управляемом процессе, что и `App`;
+- современный inline-first dashboard: один редактируемый anchor message,
+  typed callbacks и slash-команды только для входа/recovery;
+- общий transport-neutral application service для Telegram и будущей Mini App;
+- direct V3 onboarding/replacement/removal: проверка address/key pair,
+  подписанный `GET /fapi/v3/agent`, permissions/expiry/IP preflight,
+  зашифрованное atomic storage и activation только в paused state;
+- owner-scoped risk/status/pause/resume/emergency с короткоживущими
+  confirmations, account-version guard и сериализованными barriers;
+- durable recipient-specific SQLite outbox с lease/retry/backoff и изоляцией
+  Telegram 403;
+- hot-add/recovery runtime через публичный registry, без переписывания Stage 1
+  projector/coordinator/planner/executor/reconciler.
+
+`Scenes Wizard` отдельно проверен по stable aiogram documentation. В Stage 2
+он намеренно не используется: Scenes остаются experimental и предназначены
+для ветвящихся wizard flows, а не для постоянного меню. Dashboard stateless;
+короткие линейные формы используют обычный `StatesGroup`. В source tree нет
+production-import `Scene`, `SceneRegistry` или `SceneWizard`; это закреплено
+регрессионным тестом.
+
+Автоматические доказательства:
+
+- offline: **541 passed / 2 skipped / 17 deselected за 15.37 s**;
+- coverage: **87.88%** (`8399` statements, `1018` missing), обязательный порог
+  **87%** пройден;
+- отдельный Stage 2 scale gate: **3 passed** — 30 одновременных users и
+  100-user burst/restart/backpressure;
+- signed testnet: **16 passed / 1 skipped за 395.51 s**; skip — Builder Stage 3;
+- реальный Bot API: `getMe`, private command scope и menu button настроены;
+- реальный composition smoke: `App` прошёл recovery/reconciliation/WS/READY,
+  затем aiogram polling запустился и завершился по `SIGINT` с exit code 0;
+- package gate: `uv build` успешно создал sdist и wheel;
+- static gate: `ruff check`, `ruff format --check`, `git diff --check` — clean;
+- независимый signed REST после suite: `main`, `copyc1`, `copyc2`, `copyc3`
+  в HEDGE, nonzero positions 0, open orders 0.
+
+Fail-closed Agent check с production-default выявил внешний prerequisite:
+`ipWhitelist` у всех трёх текущих follower Agent пуст. Поэтому автоматический
+signed-run использовал только явный `CT_TESTNET_IP_WHITELIST_OVERRIDE=true`;
+этот override конфигурационно запрещён вне testnet. Для ручной приёмки владелец
+должен либо настроить статический egress IP в Aster и `CT_ASTER_EGRESS_IPS`,
+либо временно оставить testnet-only override.
+
+Verdict: **автоматическая часть Stage 2 принята; code/static/signed blockers
+не найдены.** Следующая полезная проверка требует действий владельца в private
+Telegram chat и отдельного flat testnet follower account. До её результата
+WP9b и общий Stage 2 остаются открытыми.
+
+### Owner correction: admin UX — 2026-08-24
+
+После замечания владельца устранено избыточное разделение `ADMIN`/`USER`:
+
+- immutable Telegram ID владельца настроен локально как единственный admin и
+  записан в рабочую SQLite (`role=ADMIN`, `access=on`); сам ID остаётся только
+  в git-ignored `.env`/рабочей БД;
+- admin — capability из env, а не отдельный человек: тот же ID при
+  необходимости может владеть одним follower account;
+- inline-админка показывает master summary, пользователей и счета подписчиков;
+- доступ новому пользователю выдаётся и отзывается кнопками; неизвестный private
+  user проходит inline captcha, после чего durable заявка сама уходит configured
+  admin; ручной numeric Telegram ID оставлен только recovery;
+- revoke закрывает только вход в UI, не бросает торговый account и не смешан с
+  отдельной настройкой доставки уведомлений;
+- users/followers листаются страницами по 10; 30-account pagination покрыта;
+- targeted reconcile привязан к stable opaque SHA-256 account key, поэтому
+  изменение списка между render/click не перенаправляет действие соседу;
+- `authorize()` проверяет совпадение Telegram user/chat ID; legacy case-only
+  duplicate Aster addresses дают диагностируемый `MigrationConflictError` до
+  unique-index migration;
+- owner+admin получает ровно одну outbox row на critical event;
+- user-facing статусы и onboarding copy переведены на обычный русский:
+  «счёт-источник», «права подключения», «закрытый ключ подключения».
+
+Независимые Luna Max-аудиты: первоначально найдены три P1 (exclusive role,
+index-based targeted reconcile, legacy migration crash) и P2 UX/auth; после
+доработки P0/P1 не осталось. Финальный offline/static gate указан выше.
+
+Реальный post-correction запуск в 10:41 MSK дошёл до App READY и Telegram
+polling, затем штатно остановлен (снимок запуска на 10:41 MSK). Два более поздних
+повтора в 10:57 MSK
+fail-closed завершились до READY на внешнем Aster testnet `-1007 transport
+timeout`; Telegram mutations не принимались. После отдельной проверки public
+Aster health заключительный запуск в 11:05 MSK снова прошёл startup и
+post-stream reconciliation, достиг READY и запустил polling, затем также был
+штатно остановлен (снимок запуска на 11:05 MSK). Для ручной owner acceptance
+процесс запускается отдельно.
+
+### Access approval hardening — 2026-08-24
+
+По дополнительному owner flow «второй аккаунт → подтверждение админом» закрыт
+первичный доступ без ручной пересылки ID:
+
+- неизвестному разрешены только private `/start` и typed guest captcha callbacks;
+  ошибка authorization backend остаётся fail-closed, forged menu callback не
+  достигает dashboard/application facts;
+- captcha single-use с TTL/attempt limit передаёт проверенного пользователя в
+  durable `telegram_access_requests`; один `PENDING` на user защищён SQLite
+  transaction;
+- карточка approve/reject отправляется только immutable configured admin IDs из
+  env; резервный inline экран `Админка → Заявки` остаётся доступным, manual ID —
+  recovery-only;
+- approval/reject повторяемы: только первый click меняет `PENDING`, approval
+  атомарно выдаёт `access_enabled` и сохраняет account/role/notifications;
+  Bot API вызывается после commit;
+- ошибка direct delivery не откатывает durable state; после approval бот пытается
+  отправить первое меню с V3 connect CTA, а `/start` остаётся recovery;
+- `AccessRequestDTO.created` и `create_pending_result()` подавляют duplicate
+  admin cards при гонке captcha callback;
+- Scenes не добавлялись: menu stateless, credential/risk input остаются обычными
+  `StatesGroup`.
+
+Regression evidence (без реального бота и без рабочей DB): access/storage/
+application/telegram subset — **162 passed за 2.88 s**; ранее зависавший exact
+набор engine/service/adapters/storage/notifications — **105 passed за 2.51 s**;
+полный offline — **554 passed / 2 skipped / 17 deselected**, coverage **87.07%**.
+Полный `ruff check .`, `ruff format --check .` и `git diff --check` — clean.
+Детальный журнал: `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md`.
+
+Источник прошлого зависания не воспроизведён: адресный старый pytest-процесс
+остановлен SIGTERM, после чего тот же точный набор завершался штатно под shell
+timeout 120 s. В наборе есть bounded notification-worker sleeps/stop timeouts,
+но текущий прогон доказал их завершение; отдельный детерминированный blocker не
+найден.
+
+### Onboarding UX и typed-error corrective gate — 2026-08-24
+
+По live owner feedback исправлен direct onboarding path без доступа к live
+процессу и рабочей SQLite:
+
+- application boundary сохраняет только `OnboardingErrorCode` через
+  `OnboardingApplicationError`; raw exchange errors, addresses и key material
+  не попадают в Telegram/Mini App contract;
+- introductory/prompt copy использует фактические названия Aster UI и коротко
+  объясняет prerequisites: окончательная authorization API wallet подписью
+  обычного wallet, read/perpetual permissions, withdrawal off, пустой account и
+  Hedge;
+- все предусмотренные preflight/permission/account/identity/commit/activation
+  classifications имеют безопасный renderer с remediation, а unknown получает
+  временный retry;
+- private-key message удаляется до application call, FSM очищается в `finally`,
+  replacement retry сохраняет branch через typed callback key, preflight failure
+  не достигает commit;
+- parameterized application/renderer/Telegram tests покрывают enum mapping,
+  отсутствие raw key/address/error, recovery buttons, deletion и replacement
+  retry.
+
+Acceptance evidence:
+
+- focused application + Telegram onboarding/rendering: **151 passed**;
+- offline gate: **597 passed / 2 skipped / 17 deselected**, coverage **87.13%**
+  при пороге 87%;
+- `ruff check .`, `ruff format --check .`, `git diff --check`: clean;
+- live bot не запускался и не перезапускался.
+
+Вероятные причины исходного live отказа остаются классификацией до повторного
+ввода после этой правки: незавершённая подпись авторизации API wallet (Agent не
+найден), несоответствие API wallet address/private key, либо permission/read
+или signed-read prerequisite. Утверждать одну уже известную причину нельзя,
+поскольку старый generic boundary её намеренно потерял.
+
+### Persistent safe-logging corrective gate — 2026-08-24
+
+Проверен и доведён logging boundary после замечания, что важное onboarding
+действие нельзя диагностировать только по UI:
+
+- default `data/logs/copytradeaster.log` создаётся при обычном `setup_logging`
+  без изменения env; console остаётся включённым;
+- `RotatingFileHandler` ограничен настройками `CT_LOG_MAX_BYTES` /
+  `CT_LOG_BACKUP_COUNT`, повторный setup не дублирует managed handlers и не
+  конфликтует с pytest/caplog handlers;
+- `connect`/`replace` пишут `attempt`, `success`, `recovered`, `rejected` с
+  bounded/sanitized user/account identifiers и typed `code`/safe unexpected
+  category; rejected
+  имеет WARNING, остальные lifecycle events INFO;
+- logging calls не получают wallet/API-wallet addresses, private key, token,
+  signature, signed URL/query или raw exchange/exception payload; handler
+  filter оставлен defense-in-depth и корректно обрабатывает `%`-formatted
+  records;
+- `httpx` и `httpcore` request logging подавлены до WARNING;
+- Settings валидирует log level/rotation limits и `redacted_dump()` не
+  раскрывает encryption key/Telegram token.
+
+Evidence: focused logging/application suite и full offline
+`pytest -q -m 'not testnet' --cov=src/copytradeaster` — **604 passed / 2
+skipped / 17 deselected**, coverage **87.25%**; static gate и diff-check
+запущены после этого журнала. Живой процесс, `.env`, `.botkey`, рабочая DB и
+торговое состояние не менялись. Причина предыдущего live onboarding failure
+этим изменением не восстанавливается и не переименовывается: аудит фиксирует
+только безопасную текущую классификацию.
+
+### Onboarding chat UX corrective gate — 2026-08-24
+
+После owner feedback доведены card/message lifetime и expiry recovery без
+доступа к живому процессу, `.env`, `.botkey`, рабочей SQLite или торговому состоянию:
+
+- intro фиксирует exact Aster path `Aster testnet → Settings → Position mode →
+  Hedge Mode`, prerequisites API wallet (`Perps` + read, withdrawal off),
+  ordinary-wallet authorization и отсутствие позиций/ордеров;
+- каждое из трёх credential-adjacent input-сообщений удаляется best-effort сразу
+  после чтения, до validation/Aster call; outgoing text/FSM/logs не содержат
+  values;
+- valid transitions retire старую карточку и отправляют свежую Step 1/2/3;
+  delete failure редуцируется к in-place edit без duplicate; после успешного
+  delete `MenuSessionStore` и FSM больше не ссылаются на retired anchor до
+  replacement send;
+- Step 3 показывает clean loading, затем typed error/dashboard; replacement и
+  retry сохраняют branch/revision semantics;
+- expired input уже удалён, текущая карточка заменяется clean recovery view без
+  соседнего `message.answer`, после чего FSM очищается.
+
+Acceptance evidence: focused Telegram/onboarding/renderers — **136 passed**;
+offline gate — **610 passed / 2 skipped / 17 deselected**, coverage **87.20%**;
+`ruff check`, `ruff format --check` и `git diff --check` — clean. Живой процесс,
+`.env`, `.botkey`, рабочая SQLite и торговое состояние не изменялись.
+
+### Control audit boundary corrective implementation — 2026-08-24
+
+Для доказуемости пользовательских state-changing действий добавлен bounded
+`control_audit` слой: `attempt`/`success`/`rejected` с INFO/WARNING levels,
+safe identifiers, whitelist state/category и changed field names. На public
+application boundary покрыты notifications, risk, pause/resume, подтверждения
+RESUME/EMERGENCY/DISCONNECT, admin access allow/set/decide, reconcile и
+подтверждённые global pause/resume/emergency operations. Admin decision пишет
+target только из безопасного returned `AccessRequestDTO`; APPROVED сообщает
+`changed_fields=status,access_enabled`, REJECTED — только `status`, а duplicate
+idempotent decision сохраняет state без `changed_fields`. Reconcile сообщает
+`state=account`/`state=all` по наличию входного account ID и не пишет target ID
+или address; request ID, confirmation tokens, risk values и raw exception
+payloads не логируются. Logging failure defensive и не меняет бизнес-результат.
+
+`result` в audit означает terminal outcome application call, а не доставку
+Telegram-презентации. Если post-commit presentation failure произошёл после
+изменения durable state, состояние отдельно читается из DB; rollback этим
+контрактом не обещается. WP9b и общий Stage 2 по-прежнему открыты до ручной
+owner acceptance.
+
+Full offline gate: **615 passed / 2 skipped / 17 deselected**, coverage
+**87.46%**; focused `tests/unit/application/test_service.py`: **75 passed**;
+`ruff check`, `ruff format --check` и `git diff --check` — clean.
+
+### Product-boundary and automatic-leverage correction — 2026-08-24
+
+После сверки product boundary и отдельной signed testnet проверки Stage 2
+зафиксированы следующие текущие факты:
+
+- follower application boundary принимает для изменения только `risk_percent`;
+  forged `max_leverage` и `max_entry_deviation_pct` получают `ValidationError`;
+- coordinator production path читает максимум плеча для каждого account/symbol
+  через signed `leverageBracket`, кэширует небольшой TTL и fail-closed при
+  пустом/некорректном ответе; testnet с реальным follower вернул list и
+  `initialLeverage=200`, поэтому исторический cap 125x не применяется;
+- UI не предлагает редактировать leverage/deviation и не предлагает follower
+  emergency; глобальный emergency остаётся admin-only. Dashboard не показывает
+  ложный cap `20x`;
+- owner вручную подтвердил notifications и изменение risk percent. Полный
+  trading cycle и resume/copy flow остаются непроверенными;
+- Stage 2 намеренно не меняет `marginType`. Isolated enforcement отложен до
+  отдельной реальной проверки Aster testnet; evidence mock/fake не заменяет её.
+
+Signed adapter evidence for connected testnet follower: `max_leverage(force=True)`
+вернул BTCUSDT=200, ETHUSDT=200, SOLUSDT=100; `positionRisk` подтвердил
+leverage `[200]`/`[200]`/`[100]`. Во всех трёх проверках margin остался cross,
+nonzero positions=0 и open orders=0.
+
+Focused regression evidence for this correction: **210 passed** across the
+updated Aster endpoint, coordinator, application and Telegram boundary tests.
+
+### Final Stage 2 state/readiness snapshot — 2026-08-24
+
+Текущий кодовый срез: `b238407` в `codex/stage-2-telegram`. Root повторно
+проверил product boundary, architecture diff, real signed leverage behavior и
+запущенный runtime. Фактический итог подробно записан в
+`reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`.
+
+Runtime после restart:
+
+- `ready=true`, `degraded_active=false`;
+- `allow_new_entries=false`, `emergency_active=true`;
+- Telegram-follower enabled, `risk_percent=0.01`, per-account entries paused;
+- in-flight execution commands = 0;
+- последние `engine.startup`/`engine.ready` outbox events имеют `SENT`.
+
+Четыре ранние `FAILED` startup/ready rows с `telegram_bad_request` остаются
+историей первых запусков и не повторяются в актуальной доставке.
+
+**Final Stage 2 Verdict: CLOSED (принят 24.08.2026).**
+
+### Stage 2 live acceptance and notification formatting refactor — 2026-08-24
+
+Проведён успешный живой приёмочный цикл WP9b на Aster Testnet с участием владельца:
+
+1. **Рефакторинг форматирования уведомлений (`formatter.py`):**
+   - Добавлен модуль `src/copytradeaster/notifications/formatter.py` с функциями `format_confirmed_action` и `format_skip_reason`.
+   - Сырые системные логи заменены на чистые трейдерские карточки с форматированием чисел и разделителями тысяч:
+     - 🟢 `Открыта позиция BTCUSDT (LONG)` / `Объём: 0.038`
+     - 🛡 `Установлен защитный стоп BTCUSDT` / `Уровень стопа: 78 686.24 USDT`
+     - 🎯 `Установлен тейк-профит BTCUSDT` / `Уровень тейка: 79 500 USDT`
+     - 🔴 `Закрыта позиция BTCUSDT (LONG)` / `Объём: 0.038`
+     - 🗑 `Снят ордер BTCUSDT`
+     - ⏳ `Ожидание защитного стопа BTCUSDT (LONG).`
+     - ⚠️ `Пропуск сделки BTCUSDT` с понятным описанием причины (`INSUFFICIENT_MARGIN`, `ENTRY_DEVIATION`, `STALE_MASTER` и др.).
+   - Добавлены модульные тесты в `tests/unit/notifications/test_formatter.py`.
+
+2. **Живой приёмочный прогон WP9b на Aster Testnet:**
+   - Владелец подтвердил снятие паузы (`resume`) через Telegram-интерфейс бота.
+   - Мастер открыл позицию `BTCUSDT LONG 0.002` со стопом `@78686.24`.
+   - Движок скопировал сделку на подписчика `tg-8264892202`: рассчитал риск, выставил плечо 200x, открыл `0.038 BTC` и выставил биржевой `PLACE_STOP`.
+   - Уведомления `🟢 Открыта позиция` и `🛡 Установлен защитный стоп` успешно доставлены в Telegram (статус `SENT`).
+   - Мастер закрыл позицию; движок снял стоп (`CANCEL_ORDER`) и закрыл позицию подписчика (`MARKET_CLOSE 0.038 BTC`).
+   - Уведомления `🗑 Снят ордер` и `🔴 Закрыта позиция` успешно доставлены в Telegram (статус `SENT`).
+   - Прямой REST-аудит биржи подтвердил: `main`, `tg-8264892202`, `copyc1`–`copyc3` находятся в полном **FLAT** (0 позиций, 0 открытых ордеров).
+
+3. **Финальные метрики:**
+   - Офлайн-сьют: **632 passed / 2 skipped / 17 deselected** за 10.51 s;
+   - Покрытие кода: **87.15%** (выше обязательного порога 87.0%);
+   - Статический анализ: `ruff check` и `ruff format --check` — clean.
+
+**Stage 2 официально CLOSED. Код готов к слиянию в main и переходу к Stage 3 (Builder / Aster Code).**

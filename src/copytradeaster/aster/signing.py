@@ -82,10 +82,75 @@ def _field_type(value: Any) -> str:
     return "string"
 
 
-def _stringify(value: Any) -> str:
+def stringify_param_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def registration_typed_data(
+    params: dict[str, Any],
+    primary_type: str,
+    chain_id: int = 56,
+):
+    """Build the exact EIP-712 typed data the user's main wallet must sign.
+
+    Same capitalization/type inference as ``sign_registration``; used by the
+    Builder flow both to hand the payload to a frontend wallet and to recover
+    the signer address from the returned signature.
+    """
+    capitalized = _capitalize_keys(dict(params))
+    return encode_typed_data(
+        domain_data={**EIP712_DOMAIN_BASE, "chainId": chain_id},
+        message_types={
+            primary_type: [
+                {"name": name, "type": _field_type(value)} for name, value in capitalized.items()
+            ]
+        },
+        message_data=dict(capitalized),
+    )
+
+
+def recover_registration(
+    params: dict[str, Any],
+    signature_hex: str,
+    primary_type: str,
+    chain_id: int = 56,
+) -> str:
+    """Recover the signing address from a registration-context signature."""
+    signature = signature_hex if signature_hex.startswith("0x") else f"0x{signature_hex}"
+    typed_data = registration_typed_data(params, primary_type, chain_id)
+    return Account.recover_message(typed_data, signature=signature)
+
+
+def eip712_json_payload(
+    params: dict[str, Any],
+    primary_type: str,
+    chain_id: int = 56,
+) -> dict[str, Any]:
+    """JSON structure for ``eth_signTypedData_v4`` from a browser wallet.
+
+    Must stay byte-consistent with :func:`registration_typed_data`; unit
+    tests assert that signing this payload recovers under the same key.
+    """
+    capitalized = _capitalize_keys(dict(params))
+    message_fields = [
+        {"name": name, "type": _field_type(value)} for name, value in capitalized.items()
+    ]
+    return {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            primary_type: message_fields,
+        },
+        "primaryType": primary_type,
+        "domain": {**EIP712_DOMAIN_BASE, "chainId": chain_id},
+        "message": capitalized,
+    }
 
 
 def sign_registration(
@@ -105,18 +170,10 @@ def sign_registration(
     Returns (params incl. signature+signatureChainId, urlencoded query string).
     """
     capitalized = _capitalize_keys(dict(params))
-    typed_data = encode_typed_data(
-        domain_data={**EIP712_DOMAIN_BASE, "chainId": chain_id},
-        message_types={
-            primary_type: [
-                {"name": name, "type": _field_type(value)} for name, value in capitalized.items()
-            ]
-        },
-        message_data=dict(capitalized),
-    )
+    typed_data = registration_typed_data(params, primary_type, chain_id)
     signed = Account.sign_message(typed_data, main_private_key_hex)
     sig = signed.signature.hex()
-    out = {k: _stringify(v) for k, v in capitalized.items()}
+    out = {k: stringify_param_value(v) for k, v in capitalized.items()}
     out["signature"] = sig
     out["signatureChainId"] = str(chain_id)
     return out, build_query_string(list(out.items()))

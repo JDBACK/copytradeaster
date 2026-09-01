@@ -2,19 +2,127 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
-from datetime import UTC, datetime
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from aiosqlite import Row
 
+from copytradeaster.credentials import crypto
 from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.storage.database import Database
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _as_iso(value: datetime | str | None) -> str:
+    if value is None:
+        return _now_iso()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).isoformat()
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
+
+
+async def _conn_fetchone(conn: Any, sql: str, params: tuple = ()) -> Any | None:
+    """Fetch one row and always close the transaction-local cursor."""
+    cur = await conn.execute(sql, params)
+    try:
+        return await cur.fetchone()
+    finally:
+        await cur.close()
+
+
+async def _conn_fetchall(conn: Any, sql: str, params: tuple = ()) -> list[Any]:
+    """Fetch all rows and always close the transaction-local cursor."""
+    cur = await conn.execute(sql, params)
+    try:
+        return list(await cur.fetchall())
+    finally:
+        await cur.close()
+
+
+async def _conn_execute(conn: Any, sql: str, params: tuple = ()) -> tuple[int, int | None]:
+    """Execute one statement and finalize its cursor before returning."""
+    cur = await conn.execute(sql, params)
+    try:
+        return cur.rowcount, cur.lastrowid
+    finally:
+        await cur.close()
+
+
+class OwnershipConflictError(sqlite3.IntegrityError):
+    """Raised when a Telegram owner/account relation would be stolen."""
+
+
+async def _require_real_follower(conn: Any, account_id: str) -> None:
+    row = await _conn_fetchone(
+        conn,
+        "SELECT role, execution_mode FROM accounts WHERE id=?",
+        (account_id,),
+    )
+    if (
+        row is None
+        or str(row["role"]) != "follower"
+        or str(row["execution_mode"] or "REAL") != "REAL"
+    ):
+        raise OwnershipConflictError(f"account {account_id!r} must be an existing REAL follower")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentValidation:
+    """Safe, persisted snapshot of the last signed Agent permission check."""
+
+    signer_address: str
+    can_read: bool
+    can_perp_trade: bool
+    can_withdraw: bool
+    expired_ms: int
+    ip_whitelist: str
+    status: str
+    checked_at: str
+    last_error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "checked_at", _as_iso(self.checked_at))
+        object.__setattr__(self, "expired_ms", int(self.expired_ms))
+        object.__setattr__(self, "can_read", bool(self.can_read))
+        object.__setattr__(self, "can_perp_trade", bool(self.can_perp_trade))
+        object.__setattr__(self, "can_withdraw", bool(self.can_withdraw))
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> AgentValidation:
+        whitelist = value.get("ip_whitelist", "")
+        if not isinstance(whitelist, str):
+            whitelist = json.dumps(whitelist, separators=(",", ":"), sort_keys=True)
+        return cls(
+            signer_address=str(value["signer_address"]),
+            can_read=bool(value["can_read"]),
+            can_perp_trade=bool(value["can_perp_trade"]),
+            can_withdraw=bool(value["can_withdraw"]),
+            expired_ms=int(value["expired_ms"]),
+            ip_whitelist=whitelist,
+            status=str(value["status"]),
+            checked_at=_as_iso(value.get("checked_at")),
+            last_error_code=(
+                None if value.get("last_error_code") is None else str(value["last_error_code"])
+            ),
+        )
 
 
 class AccountRepo:
@@ -50,6 +158,13 @@ class AccountRepo:
     async def get(self, id_: str) -> Row | None:
         return await self.db.fetchone("SELECT * FROM accounts WHERE id=?", (id_,))
 
+    async def enabled_real(self) -> list[Row]:
+        """Return boot/runtime accounts with live REAL credentials expected."""
+        return await self.db.fetchall(
+            "SELECT * FROM accounts "
+            "WHERE COALESCE(execution_mode, 'REAL')='REAL' AND enabled=1 ORDER BY id"
+        )
+
 
 class CredentialRepo:
     def __init__(self, db: Database) -> None:
@@ -72,6 +187,18 @@ class CredentialRepo:
         if row is None:
             raise KeyError(f"no credentials for account {account_id!r}")
         return bytes(row["encrypted"])
+
+    async def get_optional(self, account_id: str) -> bytes | None:
+        row = await self.db.fetchone(
+            "SELECT encrypted FROM credentials WHERE account_id=?", (account_id,)
+        )
+        return None if row is None else bytes(row["encrypted"])
+
+    async def delete(self, account_id: str) -> bool:
+        rowcount, _ = await self.db.execute_write(
+            "DELETE FROM credentials WHERE account_id=?", (account_id,)
+        )
+        return rowcount > 0
 
 
 class SettingsRepo:
@@ -117,6 +244,79 @@ class SettingsRepo:
                 int(policy.allow_new_entries),
             ),
         )
+
+    async def patch_policy(
+        self,
+        account_id: str,
+        *,
+        risk_percent: Decimal | str | int | None = None,
+        max_leverage: int | None = None,
+        max_entry_deviation_pct: Decimal | str | int | None = None,
+        enabled: bool | None = None,
+        allow_new_entries: bool | None = None,
+        risk_base: str | None = None,
+    ) -> RiskPolicy | None:
+        """Patch selected policy fields without resetting the other fields.
+
+        The read/validate/update sequence is one transaction so a concurrent
+        pause or settings update cannot silently overwrite an unrelated field.
+        ``None`` means "leave this field unchanged"; policy values themselves
+        are never stored as floats.
+        """
+        async with self.db.transaction() as conn:
+            row = await _conn_fetchone(
+                conn, "SELECT * FROM copy_settings WHERE account_id=?", (account_id,)
+            )
+            if row is None:
+                return None
+
+            next_risk = row["risk_percent"] if risk_percent is None else risk_percent
+            next_leverage = row["max_leverage"] if max_leverage is None else max_leverage
+            next_deviation = (
+                row["max_entry_deviation_pct"]
+                if max_entry_deviation_pct is None
+                else max_entry_deviation_pct
+            )
+            next_enabled = bool(row["enabled"]) if enabled is None else bool(enabled)
+            next_allow = (
+                bool(row["allow_new_entries"])
+                if allow_new_entries is None
+                else bool(allow_new_entries)
+            )
+            next_risk_base = row["risk_base"] if risk_base is None else str(risk_base)
+            policy = RiskPolicy(
+                risk_percent=next_risk,
+                max_leverage=int(next_leverage),
+                max_entry_deviation_pct=next_deviation,
+                enabled=next_enabled,
+                allow_new_entries=next_allow,
+            )
+            await _conn_execute(
+                conn,
+                "UPDATE copy_settings SET risk_percent=?, max_leverage=?, "
+                "max_entry_deviation_pct=?, risk_base=?, enabled=?, "
+                "allow_new_entries=? WHERE account_id=?",
+                (
+                    str(policy.risk_percent),
+                    policy.max_leverage,
+                    str(policy.max_entry_deviation_pct),
+                    next_risk_base,
+                    int(policy.enabled),
+                    int(policy.allow_new_entries),
+                    account_id,
+                ),
+            )
+            return policy
+
+    async def patch(self, account_id: str, **changes: Any) -> RiskPolicy | None:
+        """Compatibility alias for callers that prefer a generic patch name."""
+        return await self.patch_policy(account_id, **changes)
+
+    async def set_allow_new_entries(self, account_id: str, allowed: bool) -> RiskPolicy | None:
+        return await self.patch_policy(account_id, allow_new_entries=allowed)
+
+    async def set_enabled(self, account_id: str, enabled: bool) -> RiskPolicy | None:
+        return await self.patch_policy(account_id, enabled=enabled)
 
     async def get_flag(self, key: str) -> str | None:
         row = await self.db.fetchone("SELECT value FROM app_state WHERE key=?", (key,))
@@ -334,6 +534,30 @@ class CommandRepo:
             " WHERE status IN ('UNKNOWN','SENDING','SUBMITTED') ORDER BY created_at"
         )
 
+    async def confirmed(
+        self,
+        *,
+        since: datetime | str,
+        limit: int = 1000,
+    ) -> list[Row]:
+        """Return terminal confirmed commands for notification recovery.
+
+        ``since`` is mandatory so startup recovery cannot replay the entire
+        Stage 1 command history. Only safe routing fields are selected; payload
+        and last_error are not needed by the notification layer and must never
+        reach Telegram.
+        """
+        if since is None:
+            raise ValueError("confirmed recovery since cutoff is required")
+        if limit <= 0:
+            return []
+        return await self.db.fetchall(
+            "SELECT command_key, account_id, kind, status, created_at, updated_at "
+            "FROM execution_commands WHERE status='CONFIRMED' AND updated_at>=? "
+            "ORDER BY updated_at, command_key LIMIT ?",
+            (_as_iso(since), int(limit)),
+        )
+
     async def recent(self, limit: int) -> list[Row]:
         return await self.db.fetchall(
             "SELECT * FROM execution_commands ORDER BY created_at DESC, command_key LIMIT ?",
@@ -470,3 +694,926 @@ class SyncBasisRepo:
             " WHERE account_id=? AND symbol=? AND pos_side=?",
             (_now_iso(), account_id, symbol, pos_side),
         )
+
+
+class TelegramUserRepo:
+    """Telegram identity and the single-account ownership relation."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def upsert(
+        self,
+        telegram_user_id: int,
+        chat_id: int,
+        *,
+        role: str | None = None,
+        account_id: str | None = None,
+        notifications_enabled: bool | None = None,
+        blocked_at: str | None = None,
+        access_enabled: bool | None = None,
+    ) -> None:
+        now = _now_iso()
+        async with self.db.transaction() as conn:
+            current = await _conn_fetchone(
+                conn,
+                "SELECT * FROM telegram_users WHERE telegram_user_id=?",
+                (int(telegram_user_id),),
+            )
+            if role is None:
+                role = "USER" if current is None else str(current["role"])
+            if role not in {"USER", "ADMIN"}:
+                raise ValueError(f"unsupported Telegram role: {role!r}")
+            current_account = None if current is None else current["account_id"]
+            if current_account is not None and current_account != account_id:
+                if account_id is None:
+                    account_id = str(current_account)
+                else:
+                    old_account = await _conn_fetchone(
+                        conn,
+                        "SELECT enabled FROM accounts WHERE id=?",
+                        (current_account,),
+                    )
+                    if old_account is None or int(old_account["enabled"]):
+                        raise OwnershipConflictError(
+                            f"Telegram user {telegram_user_id} already owns another account"
+                        )
+
+            if account_id is not None:
+                await _require_real_follower(conn, account_id)
+                owner = await _conn_fetchone(
+                    conn,
+                    "SELECT telegram_user_id, role FROM telegram_users WHERE account_id=?",
+                    (account_id,),
+                )
+                if owner is not None and int(owner["telegram_user_id"]) != int(telegram_user_id):
+                    raise OwnershipConflictError(
+                        f"account {account_id!r} already has another Telegram owner"
+                    )
+                # Administrator authority comes from the configured Telegram
+                # ID allow-list, not from an exclusive database role.  The
+                # project owner may administer the runtime and own one normal
+                # follower account from the same private chat.
+
+            if current is None:
+                await _conn_execute(
+                    conn,
+                    "INSERT INTO telegram_users(telegram_user_id, chat_id, account_id, role, "
+                    "notifications_enabled, blocked_at, access_enabled, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        int(telegram_user_id),
+                        int(chat_id),
+                        account_id,
+                        role,
+                        int(True if notifications_enabled is None else notifications_enabled),
+                        blocked_at,
+                        int(True if access_enabled is None else access_enabled),
+                        now,
+                        now,
+                    ),
+                )
+                return
+
+            next_notifications = (
+                bool(current["notifications_enabled"])
+                if notifications_enabled is None
+                else bool(notifications_enabled)
+            )
+            next_blocked_at = current["blocked_at"] if blocked_at is None else blocked_at
+            next_access = (
+                bool(current["access_enabled"]) if access_enabled is None else bool(access_enabled)
+            )
+            await _conn_execute(
+                conn,
+                "UPDATE telegram_users SET chat_id=?, account_id=?, role=?, "
+                "notifications_enabled=?, blocked_at=?, access_enabled=?, updated_at=? "
+                "WHERE telegram_user_id=?",
+                (
+                    int(chat_id),
+                    account_id,
+                    role,
+                    int(next_notifications),
+                    next_blocked_at,
+                    int(next_access),
+                    now,
+                    int(telegram_user_id),
+                ),
+            )
+
+    async def get(self, telegram_user_id: int) -> Row | None:
+        return await self.db.fetchone(
+            "SELECT * FROM telegram_users WHERE telegram_user_id=?",
+            (int(telegram_user_id),),
+        )
+
+    async def get_all(self, *, limit: int = 11, offset: int = 0) -> list[Row]:
+        """Return a bounded safe admin page ordered by immutable Telegram ID."""
+        if isinstance(limit, bool) or not 1 <= int(limit) <= 101:
+            raise ValueError("Telegram user page limit must be between 1 and 101")
+        if isinstance(offset, bool) or int(offset) < 0:
+            raise ValueError("Telegram user page offset must be non-negative")
+        return await self.db.fetchall(
+            "SELECT telegram_user_id, chat_id, account_id, role, "
+            "notifications_enabled, blocked_at, access_enabled, created_at, updated_at "
+            "FROM telegram_users ORDER BY telegram_user_id LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+
+    async def by_account(self, account_id: str) -> Row | None:
+        return await self.db.fetchone(
+            "SELECT * FROM telegram_users WHERE account_id=?", (account_id,)
+        )
+
+    async def set_account(self, telegram_user_id: int, account_id: str | None) -> bool:
+        now = _now_iso()
+        async with self.db.transaction() as conn:
+            current = await _conn_fetchone(
+                conn,
+                "SELECT account_id, role FROM telegram_users WHERE telegram_user_id=?",
+                (int(telegram_user_id),),
+            )
+            if current is None:
+                raise KeyError(f"unknown Telegram user {telegram_user_id!r}")
+            if account_id is not None:
+                await _require_real_follower(conn, account_id)
+                owner = await _conn_fetchone(
+                    conn,
+                    "SELECT telegram_user_id FROM telegram_users WHERE account_id=?",
+                    (account_id,),
+                )
+                if owner is not None and int(owner["telegram_user_id"]) != int(telegram_user_id):
+                    raise OwnershipConflictError(
+                        f"account {account_id!r} already has another Telegram owner"
+                    )
+            if current["account_id"] not in (None, account_id):
+                old_account = await _conn_fetchone(
+                    conn,
+                    "SELECT enabled FROM accounts WHERE id=?",
+                    (current["account_id"],),
+                )
+                if old_account is None or int(old_account["enabled"]):
+                    raise OwnershipConflictError(
+                        f"Telegram user {telegram_user_id} already owns another account"
+                    )
+            rowcount, _ = await _conn_execute(
+                conn,
+                "UPDATE telegram_users SET account_id=?, updated_at=? WHERE telegram_user_id=?",
+                (account_id, now, int(telegram_user_id)),
+            )
+            return rowcount == 1
+
+    async def clear_account(self, telegram_user_id: int, account_id: str | None = None) -> bool:
+        now = _now_iso()
+        async with self.db.transaction() as conn:
+            if account_id is None:
+                sql = (
+                    "UPDATE telegram_users SET account_id=NULL, updated_at=? "
+                    "WHERE telegram_user_id=?"
+                )
+                params = (now, int(telegram_user_id))
+            else:
+                sql = (
+                    "UPDATE telegram_users SET account_id=NULL, updated_at=? "
+                    "WHERE telegram_user_id=? AND account_id=?"
+                )
+                params = (now, int(telegram_user_id), account_id)
+            rowcount, _ = await _conn_execute(conn, sql, params)
+            return rowcount == 1
+
+    async def set_notifications_enabled(self, telegram_user_id: int, enabled: bool) -> bool:
+        blocked_at = None if enabled else _now_iso()
+        rowcount, _ = await self.db.execute_write(
+            "UPDATE telegram_users SET notifications_enabled=?, updated_at=?, "
+            "blocked_at=? WHERE telegram_user_id=?",
+            (int(enabled), _now_iso(), blocked_at, int(telegram_user_id)),
+        )
+        return rowcount == 1
+
+    async def set_access_enabled(self, telegram_user_id: int, enabled: bool) -> bool:
+        """Grant or revoke Bot UI access without changing trading or notifications."""
+        rowcount, _ = await self.db.execute_write(
+            "UPDATE telegram_users SET access_enabled=?, updated_at=? WHERE telegram_user_id=?",
+            (int(enabled), _now_iso(), int(telegram_user_id)),
+        )
+        return rowcount == 1
+
+    async def disable_notifications(self, telegram_user_id: int) -> bool:
+        """Disable one recipient after a terminal Telegram 403."""
+        now = _now_iso()
+        rowcount, _ = await self.db.execute_write(
+            "UPDATE telegram_users SET notifications_enabled=0, "
+            "blocked_at=COALESCE(blocked_at, ?), updated_at=? "
+            "WHERE telegram_user_id=?",
+            (now, now, int(telegram_user_id)),
+        )
+        return rowcount == 1
+
+    async def notification_recipients(
+        self,
+        *,
+        telegram_user_ids: Iterable[int] | None = None,
+        role: str | None = None,
+    ) -> list[Row]:
+        """Return currently deliverable chat destinations."""
+        clauses = ["notifications_enabled=1", "blocked_at IS NULL"]
+        params: list[Any] = []
+        if role is not None:
+            clauses.append("role=?")
+            params.append(role)
+        if telegram_user_ids is not None:
+            ids = [int(value) for value in telegram_user_ids]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"telegram_user_id IN ({placeholders})")
+            params.extend(ids)
+        return await self.db.fetchall(
+            "SELECT * FROM telegram_users WHERE " + " AND ".join(clauses) + " "
+            "ORDER BY telegram_user_id",
+            tuple(params),
+        )
+
+
+class TelegramAccessRequestRepo:
+    """Durable, auditable Telegram menu-access requests."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, request_id: int) -> Row | None:
+        return await self.db.fetchone(
+            "SELECT * FROM telegram_access_requests WHERE id=?",
+            (int(request_id),),
+        )
+
+    async def latest_for_user(self, telegram_user_id: int) -> Row | None:
+        return await self.db.fetchone(
+            "SELECT * FROM telegram_access_requests WHERE telegram_user_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (int(telegram_user_id),),
+        )
+
+    async def create_pending(
+        self,
+        telegram_user_id: int,
+        chat_id: int,
+        *,
+        username: str | None,
+        display_name: str | None,
+    ) -> Row:
+        """Create one pending request, or return the already-pending request.
+
+        ``create_pending_result`` also exposes whether this call performed the
+        insert.  Keep this small compatibility wrapper for callers that only
+        need the durable row.
+        """
+        row, _ = await self.create_pending_result(
+            telegram_user_id,
+            chat_id,
+            username=username,
+            display_name=display_name,
+        )
+        return row
+
+    async def create_pending_result(
+        self,
+        telegram_user_id: int,
+        chat_id: int,
+        *,
+        username: str | None,
+        display_name: str | None,
+    ) -> tuple[Row, bool]:
+        """Insert one pending request and report whether this call won.
+
+        The decision is made inside the same ``BEGIN IMMEDIATE`` transaction
+        as the uniqueness check.  This lets the Telegram boundary suppress a
+        duplicate direct admin card without relying on process-local FSM
+        isolation.
+        """
+        now = _now_iso()
+        async with self.db.transaction() as conn:
+            current = await _conn_fetchone(
+                conn,
+                "SELECT * FROM telegram_access_requests "
+                "WHERE telegram_user_id=? AND status='PENDING' ORDER BY id DESC LIMIT 1",
+                (int(telegram_user_id),),
+            )
+            if current is not None:
+                return current, False
+            _, request_id = await _conn_execute(
+                conn,
+                "INSERT INTO telegram_access_requests(telegram_user_id, chat_id, username, "
+                "display_name, status, requested_at) VALUES (?, ?, ?, ?, 'PENDING', ?)",
+                (
+                    int(telegram_user_id),
+                    int(chat_id),
+                    username,
+                    display_name,
+                    now,
+                ),
+            )
+            if request_id is None:
+                raise RuntimeError("access request insert did not return an ID")
+            created = await _conn_fetchone(
+                conn,
+                "SELECT * FROM telegram_access_requests WHERE id=?",
+                (int(request_id),),
+            )
+            if created is None:
+                raise RuntimeError("access request disappeared after insert")
+            return created, True
+
+    async def pending(self, *, limit: int = 11, offset: int = 0) -> list[Row]:
+        if isinstance(limit, bool) or not 1 <= int(limit) <= 101:
+            raise ValueError("access request page limit must be between 1 and 101")
+        if isinstance(offset, bool) or int(offset) < 0:
+            raise ValueError("access request page offset must be non-negative")
+        return await self.db.fetchall(
+            "SELECT * FROM telegram_access_requests WHERE status='PENDING' "
+            "ORDER BY id LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+
+    async def pending_count(self) -> int:
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS count FROM telegram_access_requests WHERE status='PENDING'"
+        )
+        return 0 if row is None else int(row["count"])
+
+    async def decide(
+        self, request_id: int, admin_user_id: int, *, approve: bool
+    ) -> tuple[Row, bool]:
+        """Resolve a request once; approval and menu-access grant are atomic."""
+        now = _now_iso()
+        async with self.db.transaction() as conn:
+            request = await _conn_fetchone(
+                conn,
+                "SELECT * FROM telegram_access_requests WHERE id=?",
+                (int(request_id),),
+            )
+            if request is None:
+                raise KeyError(f"unknown Telegram access request {request_id!r}")
+            if str(request["status"]) != "PENDING":
+                return request, False
+
+            if approve:
+                target = int(request["telegram_user_id"])
+                chat_id = int(request["chat_id"])
+                current_user = await _conn_fetchone(
+                    conn,
+                    "SELECT * FROM telegram_users WHERE telegram_user_id=?",
+                    (target,),
+                )
+                chat_owner = await _conn_fetchone(
+                    conn,
+                    "SELECT telegram_user_id FROM telegram_users WHERE chat_id=?",
+                    (chat_id,),
+                )
+                if chat_owner is not None and int(chat_owner["telegram_user_id"]) != target:
+                    raise OwnershipConflictError("private Telegram chat already has another owner")
+                if current_user is None:
+                    await _conn_execute(
+                        conn,
+                        "INSERT INTO telegram_users(telegram_user_id, chat_id, account_id, role, "
+                        "notifications_enabled, blocked_at, access_enabled, created_at, "
+                        "updated_at) "
+                        "VALUES (?, ?, NULL, 'USER', 1, NULL, 1, ?, ?)",
+                        (target, chat_id, now, now),
+                    )
+                else:
+                    if int(current_user["chat_id"]) != chat_id:
+                        raise OwnershipConflictError(
+                            "Telegram access request does not match the stored private chat"
+                        )
+                    await _conn_execute(
+                        conn,
+                        "UPDATE telegram_users SET access_enabled=1, updated_at=? "
+                        "WHERE telegram_user_id=?",
+                        (now, target),
+                    )
+
+            status = "APPROVED" if approve else "REJECTED"
+            await _conn_execute(
+                conn,
+                "UPDATE telegram_access_requests SET status=?, decided_at=?, decided_by=? "
+                "WHERE id=? AND status='PENDING'",
+                (status, now, int(admin_user_id), int(request_id)),
+            )
+            decided = await _conn_fetchone(
+                conn,
+                "SELECT * FROM telegram_access_requests WHERE id=?",
+                (int(request_id),),
+            )
+            if decided is None:
+                raise RuntimeError("access request disappeared after decision")
+            return decided, True
+
+
+class AgentValidationRepo:
+    """Repository for the latest safe Agent permission snapshot."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def upsert(
+        self,
+        account_id: str,
+        validation: AgentValidation | Mapping[str, Any] | None = None,
+        **fields: Any,
+    ) -> None:
+        if validation is None:
+            validation = fields
+        elif fields:
+            raise TypeError("pass validation either as a record or as keyword fields")
+        record = (
+            validation
+            if isinstance(validation, AgentValidation)
+            else AgentValidation.from_mapping(validation)
+        )
+        await self.db.execute_write(
+            "INSERT INTO agent_validations(account_id, signer_address, can_read, "
+            "can_perp_trade, can_withdraw, expired_ms, ip_whitelist, status, checked_at, "
+            "last_error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET signer_address=excluded.signer_address, "
+            "can_read=excluded.can_read, can_perp_trade=excluded.can_perp_trade, "
+            "can_withdraw=excluded.can_withdraw, expired_ms=excluded.expired_ms, "
+            "ip_whitelist=excluded.ip_whitelist, status=excluded.status, "
+            "checked_at=excluded.checked_at, last_error_code=excluded.last_error_code",
+            (
+                account_id,
+                record.signer_address,
+                int(record.can_read),
+                int(record.can_perp_trade),
+                int(record.can_withdraw),
+                record.expired_ms,
+                record.ip_whitelist,
+                record.status,
+                record.checked_at,
+                record.last_error_code,
+            ),
+        )
+
+    async def get(self, account_id: str) -> Row | None:
+        return await self.db.fetchone(
+            "SELECT * FROM agent_validations WHERE account_id=?", (account_id,)
+        )
+
+    async def delete(self, account_id: str) -> bool:
+        rowcount, _ = await self.db.execute_write(
+            "DELETE FROM agent_validations WHERE account_id=?", (account_id,)
+        )
+        return rowcount == 1
+
+
+class NotificationOutboxRepo:
+    """Atomic enqueue and worker lease/retry primitives for Telegram events."""
+
+    _SELECT_COLUMNS = "SELECT * FROM notification_outbox"
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    @staticmethod
+    def _event_values(event: Mapping[str, Any]) -> tuple[Any, ...]:
+        required = ("event_key", "telegram_user_id", "chat_id", "kind", "severity", "text")
+        missing = [key for key in required if key not in event]
+        if missing:
+            raise ValueError(f"missing outbox fields: {', '.join(missing)}")
+        severity = str(event["severity"])
+        if severity not in {"INFO", "WARN", "CRITICAL"}:
+            raise ValueError(f"unsupported outbox severity: {severity!r}")
+        return (
+            str(event["event_key"]),
+            int(event["telegram_user_id"]),
+            int(event["chat_id"]),
+            None if event.get("account_id") is None else str(event["account_id"]),
+            str(event["kind"]),
+            severity,
+            str(event["text"]),
+            str(event.get("status", "PENDING")),
+            int(event.get("attempts", 0)),
+            _as_iso(event.get("available_at")),
+            None if event.get("lease_until") is None else _as_iso(event["lease_until"]),
+            event.get("claimed_by"),
+            event.get("last_error"),
+            _as_iso(event.get("created_at")),
+            _as_iso(event.get("updated_at")),
+            None if event.get("sent_at") is None else _as_iso(event["sent_at"]),
+        )
+
+    async def enqueue(
+        self,
+        event_key: str,
+        telegram_user_id: int,
+        chat_id: int,
+        kind: str,
+        severity: str,
+        text: str,
+        account_id: str | None = None,
+        available_at: datetime | str | None = None,
+    ) -> int:
+        event = {
+            "event_key": event_key,
+            "telegram_user_id": telegram_user_id,
+            "chat_id": chat_id,
+            "account_id": account_id,
+            "kind": kind,
+            "severity": severity,
+            "text": text,
+            "available_at": available_at,
+        }
+        values = self._event_values(event)
+        async with self.db.transaction() as conn:
+            await _conn_execute(
+                conn,
+                "INSERT INTO notification_outbox(event_key, telegram_user_id, chat_id, account_id, "
+                "kind, severity, text, status, attempts, available_at, lease_until, claimed_by, "
+                "last_error, created_at, updated_at, sent_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(event_key, telegram_user_id) DO NOTHING",
+                values,
+            )
+            row = await _conn_fetchone(
+                conn,
+                "SELECT id FROM notification_outbox WHERE event_key=? AND telegram_user_id=?",
+                (event_key, int(telegram_user_id)),
+            )
+            if row is None:
+                raise RuntimeError("outbox enqueue did not return a row")
+            return int(row["id"])
+
+    async def enqueue_many(self, events: Iterable[Mapping[str, Any]]) -> list[int]:
+        event_list = list(events)
+        if not event_list:
+            return []
+        async with self.db.transaction() as conn:
+            ids: list[int] = []
+            for event in event_list:
+                values = self._event_values(event)
+                await _conn_execute(
+                    conn,
+                    "INSERT INTO notification_outbox(event_key, telegram_user_id, chat_id, "
+                    "account_id, "
+                    "kind, severity, text, status, attempts, available_at, lease_until, "
+                    "claimed_by, "
+                    "last_error, created_at, updated_at, sent_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(event_key, telegram_user_id) DO NOTHING",
+                    values,
+                )
+                row = await _conn_fetchone(
+                    conn,
+                    "SELECT id FROM notification_outbox WHERE event_key=? AND telegram_user_id=?",
+                    (values[0], values[1]),
+                )
+                if row is None:
+                    raise RuntimeError("outbox enqueue did not return a row")
+                ids.append(int(row["id"]))
+            return ids
+
+    async def get(self, row_id: int) -> Row | None:
+        return await self.db.fetchone(f"{self._SELECT_COLUMNS} WHERE id=?", (int(row_id),))
+
+    async def has_event(self, event_key: str) -> bool:
+        row = await self.db.fetchone(
+            "SELECT 1 FROM notification_outbox WHERE event_key=? LIMIT 1",
+            (event_key,),
+        )
+        return row is not None
+
+    async def counts(self) -> dict[str, int]:
+        rows = await self.db.fetchall(
+            "SELECT status, COUNT(*) AS count FROM notification_outbox GROUP BY status"
+        )
+        counts = {status: 0 for status in ("PENDING", "SENDING", "SENT", "FAILED")}
+        for row in rows:
+            counts[str(row["status"])] = int(row["count"])
+        counts["TOTAL"] = sum(counts.values())
+        return counts
+
+    async def counts_for_user(self, telegram_user_id: int) -> dict[str, int | str | None]:
+        """Return status counts and last delivery time without message content."""
+        rows = await self.db.fetchall(
+            "SELECT status, COUNT(*) AS count, MAX(sent_at) AS last_sent_at "
+            "FROM notification_outbox WHERE telegram_user_id=? GROUP BY status",
+            (int(telegram_user_id),),
+        )
+        summary: dict[str, int | str | None] = {
+            status: 0 for status in ("PENDING", "SENDING", "SENT", "FAILED")
+        }
+        summary["last_sent_at"] = None
+        for row in rows:
+            status = str(row["status"])
+            summary[status] = int(row["count"])
+            if status == "SENT":
+                summary["last_sent_at"] = row["last_sent_at"]
+        summary["TOTAL"] = sum(
+            int(summary[status]) for status in ("PENDING", "SENDING", "SENT", "FAILED")
+        )
+        return summary
+
+    async def recover_expired(self, now: datetime | str | None = None) -> int:
+        now_iso = _as_iso(now)
+        async with self.db.transaction() as conn:
+            rowcount, _ = await _conn_execute(
+                conn,
+                "UPDATE notification_outbox SET status='PENDING', lease_until=NULL, "
+                "claimed_by=NULL, available_at=?, updated_at=? "
+                "WHERE status='SENDING' AND lease_until IS NOT NULL AND lease_until<=?",
+                (now_iso, now_iso, now_iso),
+            )
+            return rowcount
+
+    async def claim(
+        self,
+        worker_id: str,
+        *,
+        limit: int = 1,
+        now: datetime | str | None = None,
+        lease_seconds: int = 30,
+    ) -> list[Row]:
+        if not worker_id:
+            raise ValueError("worker_id must not be empty")
+        if limit <= 0:
+            return []
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if now is None:
+            now_dt = datetime.now(UTC)
+        else:
+            now_dt = datetime.fromisoformat(str(now))
+            now_dt = now_dt.replace(tzinfo=UTC) if now_dt.tzinfo is None else now_dt.astimezone(UTC)
+        now_iso = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        async with self.db.transaction() as conn:
+            await _conn_execute(
+                conn,
+                "UPDATE notification_outbox SET status='PENDING', lease_until=NULL, "
+                "claimed_by=NULL, available_at=?, updated_at=? "
+                "WHERE status='SENDING' AND lease_until IS NOT NULL AND lease_until<=?",
+                (now_iso, now_iso, now_iso),
+            )
+            rows = await _conn_fetchall(
+                conn,
+                "SELECT id FROM notification_outbox WHERE status='PENDING' "
+                "AND available_at<=? ORDER BY id LIMIT ?",
+                (now_iso, int(limit)),
+            )
+            ids = [int(row["id"]) for row in rows]
+            if not ids:
+                return []
+            for row_id in ids:
+                await _conn_execute(
+                    conn,
+                    "UPDATE notification_outbox SET status='SENDING', attempts=attempts+1, "
+                    "lease_until=?, claimed_by=?, updated_at=? "
+                    "WHERE id=? AND status='PENDING' AND available_at<=?",
+                    (lease_until, worker_id, now_iso, row_id, now_iso),
+                )
+            placeholders = ",".join("?" for _ in ids)
+            return await _conn_fetchall(
+                conn,
+                f"{self._SELECT_COLUMNS} WHERE id IN ({placeholders}) ORDER BY id",
+                tuple(ids),
+            )
+
+    async def claim_one(
+        self,
+        worker_id: str,
+        *,
+        now: datetime | str | None = None,
+        lease_seconds: int = 30,
+    ) -> Row | None:
+        rows = await self.claim(
+            worker_id,
+            limit=1,
+            now=now,
+            lease_seconds=lease_seconds,
+        )
+        return rows[0] if rows else None
+
+    async def mark_sent(self, row_id: int, worker_id: str | None = None) -> bool:
+        now = _now_iso()
+        sql = (
+            "UPDATE notification_outbox SET status='SENT', sent_at=?, lease_until=NULL, "
+            "claimed_by=NULL, updated_at=? WHERE id=? AND status='SENDING'"
+        )
+        params: tuple[Any, ...] = (now, now, int(row_id))
+        if worker_id is not None:
+            sql += " AND claimed_by=?"
+            params += (worker_id,)
+        rowcount, _ = await self.db.execute_write(sql, params)
+        return rowcount == 1
+
+    async def retry(
+        self,
+        row_id: int,
+        error: str,
+        *,
+        available_at: datetime | str | None = None,
+        max_attempts: int = 3,
+        worker_id: str | None = None,
+    ) -> bool:
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        now = _now_iso()
+        next_at = _as_iso(available_at)
+        async with self.db.transaction() as conn:
+            row = await _conn_fetchone(
+                conn,
+                "SELECT attempts, status, claimed_by FROM notification_outbox WHERE id=?",
+                (int(row_id),),
+            )
+            if row is None or row["status"] != "SENDING":
+                return False
+            if worker_id is not None and row["claimed_by"] != worker_id:
+                return False
+            terminal = int(row["attempts"]) >= max_attempts
+            if terminal:
+                sql = (
+                    "UPDATE notification_outbox SET status='FAILED', last_error=?, "
+                    "lease_until=NULL, claimed_by=NULL, updated_at=? "
+                    "WHERE id=? AND status='SENDING'"
+                )
+                params: tuple[Any, ...] = (str(error), now, int(row_id))
+            else:
+                sql = (
+                    "UPDATE notification_outbox SET status='PENDING', available_at=?, "
+                    "last_error=?, lease_until=NULL, claimed_by=NULL, updated_at=? "
+                    "WHERE id=? AND status='SENDING'"
+                )
+                params = (next_at, str(error), now, int(row_id))
+            rowcount, _ = await _conn_execute(conn, sql, params)
+            return rowcount == 1
+
+    async def fail(self, row_id: int, error: str, worker_id: str | None = None) -> bool:
+        now = _now_iso()
+        sql = (
+            "UPDATE notification_outbox SET status='FAILED', last_error=?, lease_until=NULL, "
+            "claimed_by=NULL, updated_at=? WHERE id=? AND status='SENDING'"
+        )
+        params: tuple[Any, ...] = (str(error), now, int(row_id))
+        if worker_id is not None:
+            sql += " AND claimed_by=?"
+            params += (worker_id,)
+        rowcount, _ = await self.db.execute_write(sql, params)
+        return rowcount == 1
+
+    async def pending(self, limit: int = 100) -> list[Row]:
+        return await self.db.fetchall(
+            f"{self._SELECT_COLUMNS} WHERE status='PENDING' ORDER BY available_at, id LIMIT ?",
+            (int(limit),),
+        )
+
+
+@dataclass(slots=True)
+class BuilderOnboardingAttempt:
+    pending_id: str
+    telegram_user_id: int
+    account_id: str
+    user_address: str
+    signer_address: str
+    signer_private_key: str = field(repr=False)
+    params: dict = field(default_factory=dict)
+    state: str = "PREPARED"
+    approval_deadline_ms: int = 0
+    agent_expires_at_ms: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    last_error_code: str | None = None
+
+
+class BuilderOnboardingAttemptsRepo:
+    """Encrypted persistent storage for in-flight Builder onboarding attempts."""
+
+    def __init__(self, db: Database, encryption_key: bytes) -> None:
+        self.db = db
+        self._key = encryption_key
+
+    async def save(self, attempt: BuilderOnboardingAttempt) -> None:
+        payload = json.dumps(
+            {
+                "signer_private_key": attempt.signer_private_key,
+                "params": attempt.params,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        encrypted = crypto.encrypt(self._key, payload)
+        now = _now_iso()
+        created_at = _as_iso(attempt.created_at) if attempt.created_at else now
+        updated_at = now
+        await self.db.execute_write(
+            """
+            INSERT INTO builder_onboarding_attempts(
+              pending_id, telegram_user_id, account_id, user_address, signer_address,
+              encrypted_payload, algo, state, approval_deadline_ms, agent_expires_at_ms,
+              created_at, updated_at, last_error_code
+            ) VALUES (?, ?, ?, ?, ?, ?, 'AESGCM-v1', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+              pending_id=excluded.pending_id,
+              account_id=excluded.account_id,
+              user_address=excluded.user_address,
+              signer_address=excluded.signer_address,
+              encrypted_payload=excluded.encrypted_payload,
+              algo=excluded.algo,
+              state=excluded.state,
+              approval_deadline_ms=excluded.approval_deadline_ms,
+              agent_expires_at_ms=excluded.agent_expires_at_ms,
+              updated_at=excluded.updated_at,
+              last_error_code=excluded.last_error_code
+            """,
+            (
+                attempt.pending_id,
+                int(attempt.telegram_user_id),
+                attempt.account_id,
+                attempt.user_address,
+                attempt.signer_address,
+                encrypted,
+                attempt.state,
+                int(attempt.approval_deadline_ms),
+                int(attempt.agent_expires_at_ms),
+                created_at,
+                updated_at,
+                attempt.last_error_code,
+            ),
+        )
+
+    def _row_to_attempt(self, row: Any) -> BuilderOnboardingAttempt:
+        decrypted_bytes = crypto.decrypt(self._key, bytes(row["encrypted_payload"]))
+        payload = json.loads(decrypted_bytes.decode("utf-8"))
+        return BuilderOnboardingAttempt(
+            pending_id=str(row["pending_id"]),
+            telegram_user_id=int(row["telegram_user_id"]),
+            account_id=str(row["account_id"]),
+            user_address=str(row["user_address"]),
+            signer_address=str(row["signer_address"]),
+            signer_private_key=str(payload["signer_private_key"]),
+            params=dict(payload["params"]),
+            state=str(row["state"]),
+            approval_deadline_ms=int(row["approval_deadline_ms"]),
+            agent_expires_at_ms=int(row["agent_expires_at_ms"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            last_error_code=(
+                str(row["last_error_code"]) if row["last_error_code"] is not None else None
+            ),
+        )
+
+    async def get_by_user_id(self, telegram_user_id: int) -> BuilderOnboardingAttempt | None:
+        row = await self.db.fetchone(
+            "SELECT * FROM builder_onboarding_attempts WHERE telegram_user_id=?",
+            (int(telegram_user_id),),
+        )
+        if row is None:
+            return None
+        return self._row_to_attempt(row)
+
+    async def get_by_pending_id(self, pending_id: str) -> BuilderOnboardingAttempt | None:
+        row = await self.db.fetchone(
+            "SELECT * FROM builder_onboarding_attempts WHERE pending_id=?",
+            (str(pending_id),),
+        )
+        if row is None:
+            return None
+        return self._row_to_attempt(row)
+
+    async def update_state(
+        self,
+        pending_id: str,
+        state: str,
+        *,
+        last_error_code: str | None = None,
+    ) -> bool:
+        now = _now_iso()
+        query = (
+            "UPDATE builder_onboarding_attempts "
+            "SET state=?, updated_at=?, last_error_code=? WHERE pending_id=?"
+        )
+        rowcount, _ = await self.db.execute_write(
+            query,
+            (state, now, last_error_code, str(pending_id)),
+        )
+        return rowcount > 0
+
+    async def delete(self, telegram_user_id: int) -> bool:
+        rowcount, _ = await self.db.execute_write(
+            "DELETE FROM builder_onboarding_attempts WHERE telegram_user_id=?",
+            (int(telegram_user_id),),
+        )
+        return rowcount > 0
+
+    async def delete_by_pending_id(self, pending_id: str) -> bool:
+        rowcount, _ = await self.db.execute_write(
+            "DELETE FROM builder_onboarding_attempts WHERE pending_id=?",
+            (str(pending_id),),
+        )
+        return rowcount > 0
+
+    async def cleanup_expired_prepared(self, now_ms: int) -> int:
+        query = (
+            "DELETE FROM builder_onboarding_attempts "
+            "WHERE state='PREPARED' AND approval_deadline_ms < ?"
+        )
+        rowcount, _ = await self.db.execute_write(query, (int(now_ms),))
+        return rowcount

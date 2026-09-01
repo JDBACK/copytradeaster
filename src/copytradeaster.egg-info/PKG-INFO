@@ -1,8 +1,9 @@
 Metadata-Version: 2.4
 Name: copytradeaster
 Version: 0.1.0
-Summary: AsterDex V3 copy-trade engine (stage 1: backend/testnet)
+Summary: AsterDex V3 copy-trade bot: core engine and Telegram runtime (testnet)
 Requires-Python: <3.13,>=3.12
+Requires-Dist: aiogram==3.30.0
 Requires-Dist: httpx<1,>=0.27
 Requires-Dist: websockets<16,>=13
 Requires-Dist: eth-account<0.14,>=0.13

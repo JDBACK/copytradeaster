@@ -1,0 +1,570 @@
+# Stage 3 Part 1 — итоговый code/UI audit и план обязательной доводки
+
+Дата аудита: 2026-09-01
+
+Ветка: `codex/stage-3-mini-app-part1`
+
+Первично проверенный audit HEAD: `7b5baba71f9684448beabbc3bf6b14984699a759`
+
+База сравнения: `c2a9584f91bb7de5023cbe87bd86f3ad5ac9a762`
+
+Remediation implementation commits: `a9d67a6`, `ed560dd`, `68097ea` и
+финальная правка live-harness/документации этого отчёта.
+
+## 1. Вердикт
+
+Stage 3 Part 1 после remediation принят и закрыт. Исходная оценка
+первичного audit snapshot была **7/10**; итоговая оценка после R1–R9,
+полного live-suite и owner acceptance — **9/10**.
+
+- Архитектура соответствует реальному масштабу 10–30 пользователей, максимум около 100: один async-процесс, SQLite WAL, локальные блокировки и модульный монолит здесь уместны.
+- Основные security-инварианты соблюдены: main private key не передаётся сервису; signer создаётся отдельно и хранится зашифрованно; Telegram `initData` валидируется на сервере; аккаунт коммитится на паузе.
+- Offline-контур сильный и воспроизводимый.
+- Recovery-инварианты закрыты: unknown `approveAgent` остаётся
+  `APPROVAL_SENT`, а Mini App продолжает `APPROVAL_SENT`/`APPROVED` без
+  второй wallet signature.
+- Live-покрытие исправлено: L3 моделирует потерю ответа после
+  реального Testnet POST, L7/L8 делают настоящие signed Aster reads.
+
+На первичном audit HEAD ветка была лишь условно принята; это
+историческое ограничение снято реализованной remediation.
+
+## 2. Что проверено
+
+Полностью прочитаны и сопоставлены:
+
+- `AGENTS.md`;
+- `docs/DEV_PLAN_SKELETON.md`, Stage 3;
+- `docs/ARCHITECTURE.md` в части затронутых инвариантов;
+- `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md`;
+- `docs/reports/STAGE3_BUILDER_MINI_APP_PART1_2026-08.md`;
+- `docs/reports/STAGE3_PART1_REVIEW_GUIDE_2026-08.md`;
+- `docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md` целиком, включая журнал выполнения;
+- история всех 14 коммитов после базы и итоговый cumulative diff: 42 файла, 2807 добавлений, 463 удаления;
+- backend, storage, Mini App transport, React UI, testnet tests и документационные изменения;
+- reference templates в `docs/reports/assets/stage3-mini-app/reference-templates/` и три фактических скриншота Telegram Mini App.
+
+## 3. Подтверждённые quality gates
+
+### Offline backend
+
+```text
+740 passed, 2 skipped, 30 deselected
+TOTAL coverage: 87%
+ruff check: passed
+ruff format --check: passed
+git diff --check: passed
+```
+
+### Frontend
+
+```text
+Vitest: 41 passed
+Oxlint: passed
+TypeScript + Vite production build: passed
+Impeccable mechanical detector: 0 findings
+```
+
+### Signed Aster Testnet, полный запуск 2026-09-01
+
+```text
+29 обязательных live-сценариев passed in 756.35s
+```
+
+Все binding Part 1 assertions прошли в едином запуске против
+настоящего Aster Futures Testnet. Недокументированный
+`/builder/userTrades` остался best-effort diagnostic для Part 2 и не
+подменяет доказанные order+feeRate и over-cap semantics.
+
+## 4. Что сделано хорошо
+
+1. Durable attempt хранит signer key и params в AES-GCM payload; подпись main wallet не сохраняется.
+2. `APPROVAL_SENT` фиксируется до удалённого POST, что является правильной основой для recovery.
+3. Коммит follower-аккаунта создаёт его с `allow_new_entries=False`.
+4. Runtime activation failure не откатывает уже созданный paused account; существует отдельный recovery path.
+5. Resume path выполняет READY/fresh snapshot/permission проверки и повторные проверки под локами. Эта сложность оправдана торговой корректностью и не является enterprise-overengineering.
+6. Сервер не доверяет Telegram user id из тела запроса.
+7. UI визуально близок к утверждённому направлению: почти чёрный canvas, champagne accent, ясная иерархия состояний, крупные touch targets, masked addresses, inline SVG и понятный русский copy.
+8. Отсутствие полноценных Positions/Activity/Settings экранов не является дефектом Part 1: они явно вынесены в следующую часть.
+
+## 5. Реестр обязательных исправлений
+
+> Разделы 5–18 сохраняют исходный audit/план и формулировки дефектов
+> на первичном HEAD. Их актуальный статус и evidence зафиксированы в
+> implementation addendum, разделы 19–20.
+
+| ID | Приоритет | Область | Решение |
+|---|---:|---|---|
+| R1 | P1 | Builder remote uncertainty | Не откатывать неизвестный результат POST в `PREPARED` |
+| R2 | P1 | Mini App recovery | Продолжать `APPROVAL_SENT`/`APPROVED` без новой wallet signature |
+| R3 | P1 | Live evidence | Заменить псевдо-live L3/L7/L8 настоящими проверками или честно переклассифицировать |
+| R4 | P2 | Attempt lifecycle | Реально использовать `COMMITTED` и убрать ложную формулировку об атомарности cleanup |
+| R5 | P2 | Home freshness | Не подменять время snapshot временем изменения account row |
+| R6 | P2 | Resume sheet | Вернуть `.overlay`, Escape и базовое управление фокусом |
+| R7 | P2 | Safe logs | Не писать raw remote/internal exception text |
+| R8 | P2 | Testnet robustness | Повторять idempotent reads и точно проверять fee-cap rejection |
+| R9 | P2 | Docs/evidence | Исправить stale claims, counters и получить скриншоты именно текущего HEAD |
+
+## 6. R1 — корректная семантика неизвестного результата `approveAgent`
+
+### Причина
+
+`BuilderOnboardingService.submit()` сначала сохраняет `APPROVAL_SENT`, но любой `ManagementError` затем переводит попытку обратно в `PREPARED`. `post_signed_registration()` кодирует transport error как `-1006`; HTTP 5xx, malformed response и exchange `-1000` также не доказывают, что удалённая мутация не состоялась.
+
+Сейчас при «биржа приняла Agent, ответ потерян» следующий запрос может повторно отправить `approveAgent`. Это нарушает главный смысл durable recovery.
+
+### Где изменить
+
+- `src/copytradeaster/aster/management_api.py`;
+- `src/copytradeaster/onboarding/builder.py`;
+- `src/copytradeaster/onboarding/errors.py` при необходимости нового typed code;
+- `tests/unit/onboarding/test_builder.py`;
+- `tests/integration/test_miniapp_builder_flow.py`.
+
+### Что изменить
+
+1. Явно разделить результаты user-signed POST на:
+   - success;
+   - definitive business rejection;
+   - unknown remote outcome.
+2. К unknown отнести как минимум transport timeout/error, HTTP 5xx без доказанного business rejection и exchange unknown codes `-1000`, `-1006`, `-1007`.
+3. После unknown оставить durable state `APPROVAL_SENT`; сохранить только безопасный error code/category.
+4. На повторном recovery сначала выполнять подписанный `GET /agent`:
+   - Agent подтверждён — перейти в `APPROVED` и продолжить preflight/commit;
+   - доказанное отсутствие Agent — разрешить переход в `PREPARED`;
+   - timeout/unknown read — оставить `APPROVAL_SENT`, вернуть retryable typed error.
+5. Удалить `-1000` из ветки, которая трактует ответ как доказанное отсутствие Agent.
+6. Не логировать raw `str(exc)`.
+
+### Обязательные тесты
+
+- POST реально меняет fake remote state, затем wrapper бросает `ManagementError(-1006)`; attempt остаётся `APPROVAL_SENT`.
+- Новый экземпляр сервиса находит Agent через GET, не вызывает второй POST, коммитит paused account.
+- `GET /agent` с `-1000`/timeout не переводит attempt в `PREPARED`.
+- Явный business rejection переводит attempt в `PREPARED` и позволяет новую подпись/повтор.
+- Concurrent retry одного Telegram user не создаёт второй POST.
+
+### Acceptance
+
+Ни один ambiguous remote outcome не ведёт к blind re-submit.
+
+## 7. R2 — настоящий transport/UI recovery без второй подписи
+
+### Причина
+
+Domain service уже требует signature только для `PREPARED`. Однако application boundary всегда отвергает пустую signature, session скрывает конкретное attempt state, а React маршрутизирует любой `ONBOARDING` обратно в обычный wizard. В результате после рестарта `APPROVAL_SENT`/`APPROVED` пользователь снова подключает кошелёк и подписывает payload.
+
+### Где изменить
+
+- `src/copytradeaster/application/models.py`;
+- `src/copytradeaster/application/service.py`;
+- `src/copytradeaster/miniapp/server.py`;
+- `miniapp/src/types.ts`;
+- `miniapp/src/api.ts`;
+- `miniapp/src/App.tsx`;
+- `miniapp/src/screens/BuilderWizard.tsx` или отдельный компактный recovery state/component;
+- unit/integration/frontend tests соответствующих модулей.
+
+### Что изменить
+
+1. Добавить server-owned recovery use case, например `builder_resume_attempt(user_id)`.
+2. Endpoint сам получает attempt по authenticated Telegram user id. Клиент не должен выбирать state и не должен иметь возможность обойти signature для `PREPARED`.
+3. Разрешать signature-less продолжение только если серверное состояние равно `APPROVAL_SENT` или `APPROVED`.
+4. Добавить в session DTO минимальный typed признак `onboarding_state`/`onboarding_recoverable`; не отдавать signer private key, params или signature.
+5. На старте Mini App:
+   - `PREPARED` — показать существующий wizard и запросить подпись;
+   - `APPROVAL_SENT`/`APPROVED` — показать «Проверяем ранее отправленное разрешение» и вызвать recovery без wallet prompt;
+   - committed runtime failure — использовать существующий runtime recovery.
+6. Retry после transport/API error должен продолжать тот же pending attempt, а не вызывать новый `prepare`.
+
+### Обязательные тесты
+
+- Application service отклоняет signature-less recovery для `PREPARED`.
+- Application service принимает recovery для `APPROVAL_SENT`/`APPROVED`.
+- HTTP integration: restart между POST и verify, затем `/session` → recoverable → recovery endpoint → connected/paused.
+- Frontend: recoverable session не вызывает wallet adapter и `signTypedData`.
+- Frontend: PREPARED по-прежнему требует подпись.
+
+### Acceptance
+
+После принятой подписи ни restart, ни потерянный HTTP response не требуют второй подписи пользователя.
+
+## 8. R3 — честное и настоящее live-покрытие
+
+### Причина
+
+- `test_builder_resume_live.py` использует `FakeLiveApp`, fake coordinator, fake snapshot и искусственный signer key; сетевых запросов к Aster нет.
+- L3 вручную ставит `APPROVAL_SENT` до удалённого POST, затем подтверждает отсутствие Agent. Это не сценарий «remote accepted, response lost».
+- L4 смешивает real onboarding с fake runtime recovery.
+
+### Где изменить
+
+- `tests/testnet/test_builder_onboarding_recovery_live.py`;
+- `tests/testnet/test_builder_resume_live.py`;
+- `tests/testnet/support/builder_live.py`;
+- при необходимости новый `tests/testnet/test_miniapp_builder_http_live.py`.
+
+### Что изменить
+
+1. L3: выполнить настоящий Testnet `approveAgent`, после успешного remote response искусственно выбросить локальный `-1006` до записи `APPROVED`; после пересоздания сервиса подтвердить Agent настоящим signed GET и завершить без второго POST/signature.
+2. L7: собрать реальный runtime adapter с настоящим signer/account, выполнять fresh signed account snapshot и permission validation; пройти pause → confirmation → resume через aiohttp Mini App API.
+3. HMAC Telegram `initData` в HTTP live test формировать тестовым bot token; user id должен извлекаться только из валидной подписи.
+4. L8 разделить честно:
+   - automated signed backend/HTTP live scenario;
+   - manual Telegram + WalletConnect/TokenPocket acceptance. Ручную проверку не считать автоматическим pytest.
+5. Если тест оставляется полностью fake, перенести его в `tests/integration/` и убрать слова `signed live`.
+
+### Acceptance
+
+Каждый тест, названный live, делает проверяемый network call к Aster Testnet. В отчёте automated и manual evidence указаны отдельно.
+
+## 9. R4 — довести attempt lifecycle без лишней архитектуры
+
+### Причина
+
+Таблица и документы объявляют `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`, но код после account commit сразу удаляет `APPROVED` attempt. `COMMITTED` никогда не записывается, а commit и delete — разные DB-транзакции.
+
+### Правильная для масштаба реализация
+
+Не нужно строить distributed transaction, outbox или отдельный workflow engine.
+
+1. После успешного paused account commit записать attempt state `COMMITTED`.
+2. Runtime activation выполнять после этой записи.
+3. Удалять `COMMITTED` attempt после успешной активации либо лениво при session/boot recovery.
+4. Если crash произошёл между account commit и state update, существующий account является authoritative; recovery должен распознать account и очистить stale `APPROVED` attempt.
+5. В документах не называть account commit + attempt cleanup одной атомарной транзакцией, если это фактически не реализовано.
+
+### Тесты
+
+- После account commit и искусственного activation failure attempt имеет `COMMITTED` или детерминированно очищается recovery path.
+- Crash-window с account + `APPROVED` attempt не создаёт второй account/signer.
+- Повторный session/recovery идемпотентен.
+
+## 10. R5 — честный Home freshness
+
+### Причина
+
+Backend выставляет `snapshot_captured_at` только при `refresh=True`, а UI при его отсутствии показывает `dashboard.updated_at`, то есть время изменения account row. Это не время биржевого snapshot. На первом открытии Home UI может показать свежую минуту рядом с неизвестным количеством позиций.
+
+### Где и как изменить
+
+- `miniapp/src/screens/HomeScreen.tsx`: первый Home load должен запрашивать `dashboard(refresh=true)`. Для 10–100 пользователей один signed read при входе приемлем.
+- Не использовать `updated_at` как fallback для надписи «Снимок».
+- Если snapshot отсутствует, показывать `Снимок: не получен` и `Открытые позиции: —`.
+- `src/copytradeaster/application/service.py`: присваивать `snapshot_captured_at` только фактическому fresh snapshot либо сохранять реальный capture time вместе с cache.
+
+### Тесты
+
+- Первый Home request вызывает fresh snapshot.
+- Без snapshot UI не показывает account `updated_at` как freshness.
+- После ручного refresh timestamp меняется и соответствует fresh read.
+
+## 11. R6 — вернуть bottom-sheet поведение и базовую accessibility
+
+### Причина
+
+В `Sheet` был удалён `className="overlay"`, хотя CSS `.overlay` остался. Dialog теперь находится в обычном document flow вместо fixed dimmed overlay.
+
+### Где и как изменить
+
+- `miniapp/src/components/ui.tsx`: вернуть `className="overlay"` внешнему dialog container.
+- Закрывать по Escape, если передан `onClose`.
+- При открытии переводить фокус внутрь dialog и после закрытия возвращать его на кнопку, открывшую sheet.
+- `miniapp/src/screens/HomeScreen.tsx`: передать `onClose` и не разрешать фоновые действия во время confirmation.
+- Не добавлять тяжёлую modal-библиотеку ради одного sheet.
+
+### Тесты
+
+- Dialog имеет `.overlay`, `role=dialog`, `aria-modal=true` и accessible label.
+- Escape/overlay click закрывают его.
+- Resume не выполняется без явного подтверждения.
+
+## 12. R7 — безопасные логи
+
+### Где изменить
+
+- `src/copytradeaster/onboarding/builder.py`;
+- `src/copytradeaster/application/service.py`;
+- тесты safe logging.
+
+### Что изменить
+
+- Вместо `str(exc)` логировать class, numeric code, typed category и correlation fields.
+- Не писать raw remote `msg`, response body, signature, EIP-712 payload, full user/signer address.
+- Исправить stale module docstring, который всё ещё утверждает, что pending approvals хранятся в памяти.
+
+## 13. R8 — устойчивые и точные Testnet tests
+
+### Что изменить
+
+1. Общий signed-live helper должен ограниченно повторять только idempotent GET/read после timeout/`-1000`/`-1006`/`-1007`, каждый раз с новым nonce.
+2. Для state-changing order POST использовать уникальный client order id и resolve unknown outcome через query; это нужно для детерминизма теста, а не из-за ценности Testnet-средств.
+3. Positive fee-cap test обязан доказать, что order с `feeRate == approved cap` принят и исполнен.
+4. Negative test должен отличаться только `feeRate > cap` и проверять наблюдённый конкретный exchange code/message. Слова `invalid` и широкий набор общих кодов не являются доказательством fee-cap semantics.
+5. Очистку позиции выполнять в `finally` как гигиену повторного запуска. Остаточная Testnet-позиция не является финансовым blocker.
+
+### Live matrix после исправлений
+
+- Fresh Builder onboarding и paused commit.
+- Remote accepted + local response lost + restart recovery без второго POST/signature.
+- Preflight failure и повтор после исправления состояния.
+- At-cap order accepted/executed.
+- Above-cap identical order rejected конкретно по cap.
+- Mini App HTTP pause/resume с fresh real snapshot и confirmation token.
+- Expired/stale confirmation rejection.
+- Manual Telegram + WalletConnect/TokenPocket run на текущем HEAD.
+
+## 14. R9 — документация и UI evidence
+
+### Исправить
+
+- `docs/reports/STAGE3_PART1_REVIEW_GUIDE_2026-08.md`;
+- `docs/reports/STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md` — не переписывать историю, а добавить audit addendum со ссылкой на этот документ;
+- `docs/reports/STAGE3_BUILDER_MINI_APP_PART1_2026-08.md`;
+- `docs/ENGINE_TEST_STATUS_2026-08.md` как единственный источник актуальных counters.
+
+### Фактические несоответствия evidence
+
+- Фактический скриншот Home показывает `0,01%`, а текущий formatter для stored `0.01` показывает `1%`.
+- Фактический paused state содержит emoji/icon variant, отличающийся от текущего inline SVG.
+- Поэтому приложенные скриншоты подтверждают общую UX-концепцию и прежний manual flow, но не являются pixel/behavior evidence для текущего HEAD.
+
+После исправлений получить новые скриншоты текущего deployment:
+
+1. Wallet step;
+2. signing/pending recovery;
+3. connected paused success;
+4. Home paused;
+5. Resume confirmation sheet;
+6. Home active;
+7. error/retry state при временном Testnet timeout.
+
+## 15. UI/UX оценка
+
+Визуальное соответствие intended Part 1: **8/10**.
+
+Сильные стороны:
+
+- идентичность и цветовая система совпадают с reference direction;
+- главный state считывается мгновенно;
+- primary action визуально доминирует;
+- таблица параметров, masked addresses и testnet badge понятны;
+- мобильные размеры и типографическая иерархия в целом удачны.
+
+Обязательная доработка: modal overlay. Желательная доработка: перепроверить safe-area/footer на реальном iPhone после нового build и получить current-HEAD screenshots. Полная навигация и позиции относятся к Part 2 и не должны раздувать этот corrective gate.
+
+## 16. Что не добавлять
+
+Для текущего масштаба не нужны:
+
+- PostgreSQL/Redis/Kafka;
+- distributed locks;
+- event sourcing/Saga/workflow engine;
+- Kubernetes/микросервисы;
+- отдельный design-system package;
+- Playwright-ферма для реального WalletConnect;
+- сложная observability-платформа.
+
+Достаточно текущего modular monolith, SQLite transaction/locks, typed states, настоящих Testnet calls и нескольких точных UI/integration tests.
+
+## 17. Рекомендуемый порядок коммитов
+
+1. `fix: preserve ambiguous builder approval state`
+2. `fix: resume durable builder attempt without resigning`
+3. `fix: finalize builder attempt lifecycle and safe logs`
+4. `fix(miniapp): restore resume sheet and honest freshness`
+5. `test: make builder recovery and resume genuinely live`
+6. `test: harden signed reads and fee cap assertions`
+7. `docs: correct stage 3 part 1 evidence and gate status`
+
+## 18. Финальный Definition of Done
+
+- Все R1–R9 выполнены или явно помечены как non-blocking с техническим основанием.
+- Unknown remote POST никогда не переводится автоматически в `PREPARED`.
+- `APPROVAL_SENT`/`APPROVED` восстанавливаются без второй подписи.
+- Account остаётся paused до явного confirmed Resume.
+- Initial Home использует честный fresh snapshot.
+- Resume sheet снова является настоящим modal bottom sheet.
+- Offline suite, coverage, ruff, frontend tests/lint/build зелёные.
+- Полный `tests/testnet/` зелёный; transient read timeouts обрабатываются bounded retry.
+- Live-тесты действительно делают Aster Testnet calls; fake tests так не называются.
+- Manual Telegram/WalletConnect acceptance выполнен на текущем HEAD.
+- `docs/ENGINE_TEST_STATUS_2026-08.md` содержит фактические counters и timestamp прогона.
+
+## 19. Implementation addendum — 2026-09-01
+
+Этот раздел является актуальным результатом исполнения аудита. Исходные
+находки и обоснования выше сохранены без переписывания истории.
+
+| ID | Статус | Фактическое изменение |
+|---|---|---|
+| R1 | выполнено | unknown POST outcome сохраняет `APPROVAL_SENT`; recovery сначала делает signed GET, blind POST retry отсутствует |
+| R2 | выполнено | добавлены `onboarding_state` и authenticated `resume-attempt`; пустая signature допустима только для server-owned `APPROVAL_SENT`/`APPROVED` |
+| R3 | выполнено в коде harness | L3 реально отправляет Testnet approval и теряет локальный success; L7 использует aiohttp Mini App, stale permission seed и signed Aster account/Agent reads; manual evidence отделён от pytest |
+| R4 | выполнено | paused account commit переводит attempt в `COMMITTED`; activation success очищает, failure восстанавливается лениво |
+| R5 | выполнено | initial Home запрашивает `refresh=true`; account row timestamp больше не используется как snapshot freshness |
+| R6 | выполнено | `Sheet` снова fixed overlay; добавлены Escape, overlay close, focus trap/restore и body scroll lock |
+| R7 | выполнено | Builder/application logs не получают raw exception text; regression tests проверяют отсутствие payload |
+| R8 | выполнено в коде harness | signed GET имеет bounded retries с новым nonce; order POST использует unique client id и query-based unknown resolution; fee assertions сужены до cap semantics |
+| R9 | выполнено | living docs синхронизированы; current-HEAD browser evidence дополнено ручным Telegram Pause/Resume владельца и production-логами |
+
+### 19.1 Verification
+
+Полный offline/backend и frontend gate зелёный; точные counters, coverage и
+duration хранятся только в `../ENGINE_TEST_STATUS_2026-08.md`.
+
+Полный `tests/testnet/` не был сокращён до Builder-модулей: все 29
+обязательных сценариев прошли в одном signed live-запуске. Прежний
+инцидент `-1000` не был замаскирован fake state или ослабленными
+assertions; routes восстановились, после чего тот же harness прошёл.
+
+Current-HEAD local-browser evidence снят штатным `scripts/preview_miniapp.py`
+на изолированной копии SQLite и мобильном viewport 393×852:
+
+- [Wallet step](assets/stage3-mini-app/current-head-a9d67a6/wallet-step.jpg);
+- [recovery + фактический Testnet error state](assets/stage3-mini-app/current-head-a9d67a6/recovery-testnet-error.jpg).
+
+Эти PNG доказывают текущий build/DOM/визуальное состояние, но не заменяют
+Telegram WebView, WalletConnect или подпись TokenPocket. Production SQLite во
+время browser-аудита не изменялась.
+
+### 19.2 Текущий verdict
+
+Кодовая remediation R1–R9, полный signed Testnet suite и ручной
+Telegram owner acceptance завершены. Stage 3 Part 1 gate — **CLOSED**.
+
+## 20. Testnet incident-resilience addendum — 2026-09-01
+
+После первоначального аудита Aster Testnet временно восстановил не все
+signed routes. Матрица ниже — исторический snapshot частичного инцидента,
+а не текущее состояние финального gate.
+Прямые запросы с production credentials доказали, что это не ошибка host,
+подписи или nonce:
+
+| Signed route | Фактический результат |
+|---|---|
+| `GET /fapi/v3/balance` | `200` |
+| `GET /fapi/v3/positionRisk` | `200` |
+| `GET /fapi/v3/allOrders?symbol=...` | `200` |
+| `GET/POST /fapi/v3/positionSide/dual` | `400 / -1000` |
+| `GET /fapi/v3/openOrders` | `400 / -1000` |
+| `POST /fapi/v3/listenKey` | `400 / -1000` |
+| `GET /fapi/v3/leverageBracket` | `400 / -1000` |
+| `GET /fapi/v3/agent` | `400 / -1000` во время Resume refresh |
+
+`fapi.asterdex-testnet.com` здесь является настоящим Aster Futures Testnet API;
+ни один из перечисленных live probes не использовал `MockTransport`,
+`FakeAster` или подменённые credentials.
+
+### 20.1 Реализованные fallback-пути
+
+1. `AsterClient.open_orders(account, symbol)` сначала вызывает официальный
+   `openOrders`; только unknown-класс ошибки переключает его на официальный
+   `allOrders` с `limit=1000` и фильтром `NEW/PARTIALLY_FILLED`. All-symbol
+   запрос никогда не превращается в частичный или пустой snapshot.
+2. Master full rebuild сначала читает `positionRisk` и получает open orders
+   только по реально открытым master symbols. Pending entry orders мастер не
+   копируются по контракту state replication.
+3. Недоступность `positionSide/dual` больше не останавливает весь boot. Aster
+   всё равно отклоняет order с несовместимым `positionSide`, поэтому новый риск
+   остаётся fail-closed.
+4. Недоступность `listenKey` переводит runtime на authoritative REST snapshot
+   каждый reconcile interval; stream продолжает reconnect. После стартового
+   snapshot/reconcile runtime может стать `READY` с временной задержкой реакции
+   до REST interval.
+5. Если `leverageBracket` недоступен, candidate разрешено создать только из
+   unanimous current-boot `positionRisk` всех активных REAL followers. Неполный
+   набор или разные значения не создают candidate. Explicit Resume всё равно
+   делает POST; unknown outcome разрешается повторным authoritative
+   `positionRisk`, без blind второго write.
+6. Если signed `GET /agent` падает именно unknown-классом, Resume может принять
+   cached `VALID_OVERRIDE` только на Testnet, не старше 24 часов, с
+   `read/perp=true`, `withdraw=false`, `whitelist_ok=true` и будущим expiry.
+   Mainnet, старый/неполный snapshot и deterministic permission rejection
+   остаются заблокированы.
+
+### 20.2 Live runtime evidence во время incident
+
+- полный `run-bot` дошёл до `READY`;
+- Mini App слушает production aiohttp server, Cloudflare public URL вернул
+  `HTTP 200`, aiogram polling запущен для production test bot;
+- startup и последующие REST sweep по всем четырём followers создали `0`
+  действий;
+- `positionRisk` подтвердил flat и HEDGE rows для всех пяти аккаунтов;
+- unanimous follower leverage: BTCUSDT=200, ETHUSDT=200, SOLUSDT=100;
+- production Mini App application flow `session -> confirmation -> resume`
+  для `tg-8264892202` завершился `HTTP 200`, `copy_state=active`,
+  `system_state=ready`.
+
+Точные offline counters и coverage после этих изменений хранятся только в
+`../ENGINE_TEST_STATUS_2026-08.md`.
+
+### 20.3 Owner manual acceptance
+
+2026-09-01 владелец вручную открыл production Mini App в Telegram,
+поставил аккаунт `tg-8264892202` на паузу и нажал Resume. Production-лог
+независимо подтверждает весь flow:
+
+- `13:08:42` — `pause result=attempt`;
+- `13:08:44` — account reconcile `0`, `pause result=success`,
+  `allow_new_entries`, `state=paused`;
+- `13:08:49` — `resume result=attempt`;
+- `13:08:53–13:08:55` — leverage BTC=200, ETH=200, SOL=100 подтвержден
+  authoritative `positionRisk` на настоящем Aster Testnet;
+- `13:08:58` — application reconcile `0`, `resume result=success`,
+  `allow_new_entries`, `state=resumed`;
+- последующие sweep — `tg-8264892202: 0`.
+
+Это закрывает ручной Telegram UI-gate. Server-generated
+`session -> confirmation -> resume` хранится отдельно как
+transport/application evidence и не выдаётся за ручную приёмку.
+
+### 20.4 Финальный signed live-gate
+
+После восстановления Aster routes полный `tests/testnet/` повторен
+единым запуском с `CT_TESTNET=1` против effective config:
+
+```text
+rest_base_url=https://fapi.asterdex-testnet.com
+ws_user_base=wss://fstream.asterdex-testnet.com/ws
+allow_mainnet=False
+```
+
+Результат: **29 обязательных live-сценариев passed за 756.35 s**.
+В этот набор входят:
+
+- Builder `prepare -> approveAgent -> verify -> paused commit`;
+- recovery после реального accepted POST и потери локального ответа;
+- Mini App HTTP Pause/Resume с real signed permission/account reads;
+- реальные `builder+feeRate` open/close и flat verification;
+- реальное отклонение `feeRate` выше approved cap;
+- leverage provisioning/downshift gates;
+- полные ONE_WAY и HEDGE engine cycles, protection resize/replace, partial
+  close, TP, emergency, boot recovery, WebSocket reconnect и cleanup.
+
+Во время финального запуска один legacy-тест был skipped, потому что
+требовал main private keys в production `SqliteCredentials`, что прямо
+противоречит key-isolation invariant. Он удалён как мёртвый дубликат:
+его функциональность сильнее и реально покрывает
+`test_builder_mini_app_e2e.py`, где main key живёт только в live-test harness.
+
+Недокументированный `/fapi/v3/builder/userTrades` остался bounded
+best-effort diagnostic для Part 2. Его недоступность не ослабляет
+Part 1 gate: exchange-level order acceptance с `builder+feeRate`, закрытие,
+flat state и over-cap rejection проверяются жёстко на том же Aster
+Testnet.
+
+### 20.5 Финальный runtime после test cleanup
+
+После полного live-suite production-процесс перезапущен с новым
+Cloudflare quick tunnel. Фактическое состояние:
+
+- startup и post-stream reconciliation: `copyc1=0`, `copyc2=0`, `copyc3=0`,
+  `tg-8264892202=0`;
+- master user-stream startup завершён, runtime перешёл в `READY`;
+- production aiohttp Mini App слушает `127.0.0.1:8080/miniapp`;
+- публичный tunnel вернул `HTTP 200`;
+- aiogram polling запущен для `@aster_copytrade_bot`;
+- глобальная пауза, оставленная emergency live-тестом, снята:
+  `allow_new_entries=true`;
+- `ready=true`, `runtime=ready`, `degraded=-`; все пять аккаунтов enabled.

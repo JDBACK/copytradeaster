@@ -1,0 +1,11 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Correct only the contradictory pending event in the supplied Aster Copy activity screen.
+Input images: Image 1 is the edit target.
+Changes within the highlighted synchronization row only:
+1. Change time "11:16" to exactly "12:39".
+2. Change status "Выполняется" to exactly "Выполнено".
+3. Replace the amber pending clock icon with the same green completed check icon used by the other successful rows.
+4. Remove the amber highlighted card background so this row uses the same completed-row treatment as the surrounding entries.
+Keep chronological order 12:41, 12:41, 12:40, 12:39, then yesterday 19:08.
+Constraints: Preserve every other event, filter, title, demo badge, safe-data note, bottom navigation, Telegram chrome, spacing, colors and typography. Do not add new text. No watermark.

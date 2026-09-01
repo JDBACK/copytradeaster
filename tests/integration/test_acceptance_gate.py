@@ -167,8 +167,8 @@ class TestPersistedBasis:
         payload-idempotency swallowed the second one; revision keys must not."""
         projector, _, fake, *_ = env
         await open_master_long(projector)
+        await asyncio.sleep(0)
         closes_before = sum(1 for a, _ in fake.placed_log if a == "copyc1")
-        # master 1.0 -> 0.75 (leg 0.25), then -> 0.5 (identical leg 0.25)
         for E in (1200, 1300):
             await projector.apply_raw(
                 order_trade(
@@ -183,7 +183,7 @@ class TestPersistedBasis:
                     q="0.25",
                 )
             )
-        await asyncio.sleep(0)
+            await asyncio.sleep(0)
         # 0.019*0.75/1.0 -> floor(0.01425)=0.014; then *0.5/0.75 -> floor(0.00933)=0.009
         assert follower_qty(fake, "copyc1") == D("0.009")
         closes_after = sum(1 for a, _ in fake.placed_log if a == "copyc1")

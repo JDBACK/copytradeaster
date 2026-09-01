@@ -1,0 +1,6 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Correct only the unapproved history navigation in the supplied Aster Copy positions screen.
+Input images: Image 1 is the edit target.
+Change: Replace the entire two-segment control containing "Открытые 2" and "История" with one calm full-width non-interactive section header reading exactly "Открытые позиции · 2". It must read as a section label, not as a tab or button. Remove "История" completely. Close the resulting vertical gap so the first BTCUSDT position begins naturally below the section header.
+Constraints: Preserve the title, freshness, both position records, values, read-only note, demo-data badge, bottom navigation, Telegram chrome, icons, colors, typography and every other element unchanged. Do not add controls or new copy. No watermark.

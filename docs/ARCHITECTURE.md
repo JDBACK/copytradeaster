@@ -148,14 +148,41 @@ quantity = функция(entry, stop, fees/slippage, exchange limits)
 
 Risk engine должен возвращать целевое состояние/quantity, а не отправлять ордера.
 
+Runtime leverage follower — это control-plane, а не вычисление на hot path.
+`trading/leverage.py` (`LeverageManager`) держит в RAM два разделённых
+состояния: глобальный *кандидатный* максимум по symbol (signed
+`GET /fapi/v3/leverageBracket`, обновление stale-while-revalidate фоновым
+worker-ом, никогда из торгового пути) и account-specific *подтверждённое*
+плечо `(account_id, symbol)`. Подтверждение — `POST /fapi/v3/leverage`
+(успех = биржа приняла уровень для этого аккаунта; reject → fallback на
+account-specific bracket GET + POST меньшего максимума). Источник правды при
+рестарте — authoritative `positionRisk`: coordinator собирает leverage всех
+строк (включая flat symbol) в `AccountState.symbol_leverages` и через
+`observe()` восстанавливает RAM-модель без единой записи. SQLite для плеча не
+используется. Готовность (`is_ready`) привязана к поколению каталога: смена
+максимума инвалидирует старые подтверждения, новый вход ждёт переподготовки;
+закрытие, сокращение и защита никогда не зависят от готовности. Настройка
+происходит в естественных точках: onboarding/resume (application adapter,
+аккаунт остаётся paused при неудаче), boot recovery и bounded background
+worker (`Semaphore(2)` + pacing, приоритет trading traffic в общем limiter).
+Планировщик эмитит `SET_LEVERAGE` только при расхождении known/confirmed
+значения с таргетом и связывает его generic-зависимостью `action_id →
+depends_on_action_id` с входом и защитой: FAILED prerequisite блокирует
+риск-увеличивающие действия плана, но никогда — закрытие/отмены.
+
+Stage 2 пока не меняет `marginType` перед входом. Isolated enforcement отложен
+до отдельной реальной проверки Aster testnet; текущий режим аккаунта сохраняется
+без скрытой подмены.
+
 ### `trading/`
 
 Главное прикладное ядро.
-
 - `coordinator` — запускает пересчёт для затронутых followers;
 - `planner` — сравнивает actual state с target state и строит минимальный набор действий;
 - `executor` — выполняет подготовленные действия через Aster;
-- `reconciler` — повторно сверяет фактическое состояние и исправляет расхождения.
+- `reconciler` — повторно сверяет фактическое состояние и исправляет расхождения;
+- `leverage` — RAM control-plane плеча: кандидатный каталог + account-confirmed
+  состояние, фоновая сверка и preparation (см. §4 `risk/`).
 
 ### `storage/`
 
@@ -179,24 +206,97 @@ production execution path. Миграции — упорядоченный сп�
 Приватные signer keys в БД хранятся только зашифрованными (AESGCM, ключ вне БД:
 `CT_ENCRYPTION_KEY`). Реализация: `credentials/service.py` + `credentials/crypto.py`.
 
-Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder signer-ключи генерирует и хранит билдер — приватные ключи фолловера в систему не попадают. Для этого пути `credentials/` не используется; торговый core получает builder-идентичность (builderId, feeRate) через тот же TradingIdentity.
+Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder сгенерированный signer-ключ шифруется и персистится в `credentials/` после успешного commit, а главный приватный ключ пользователя в backend никогда не передаётся и не сохраняется. До момента commit промежуточное состояние онбординга хранится в таблице `builder_onboarding_attempts` (состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
+
+`APPROVAL_SENT` является fail-closed состоянием неизвестного результата
+удалённого `approveAgent`: transport/5xx/unknown exchange response не откатывает
+его в `PREPARED` и не разрешает слепой повтор user-signed POST. Recovery сначала
+проверяет Agent идемпотентным signed GET. Mini App может продолжить без второй
+wallet signature только server-owned `APPROVAL_SENT`/`APPROVED`; `PREPARED`
+всегда требует подпись. После paused account commit attempt переводится в
+`COMMITTED`, а затем очищается после runtime activation либо лениво при
+идемпотентном recovery.
 
 ### `onboarding/`
 
 Способ получения `TradingIdentity`. Два независимых адаптера: `direct`
 (прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). В Stage 1
 direct-набор принимается CLI-импортом (`cli/main.py`) и складывается в
-`credentials/`; отдельные пакеты `onboarding/` появятся на этапах 2–3.
+`credentials/`. В Stage 2 появился `onboarding/direct`; независимый
+durable `onboarding/builder` реализован в Stage 3 (часть 1).
 
-Trading core не должен знать, каким способом credentials появились.
+Stage 2 direct-path реализован в `onboarding/direct.py`: локальная проверка
+адресов/key pair, подписанный `GET /fapi/v3/agent`, balance/position/open-order
+preflight и atomic paused commit через `application/adapters.py`. Trading core
+не знает, каким способом credentials появились.
 
 ### `notifications/`
 
-Пользовательские уведомления. В Stage 1 — консольный вывод
-(`notifications/console.py`, logging INFO); Telegram-интерфейс (онбординг,
-настройки риска, enable/disable, статус) — этап 2.
+Структурированные события не отправляются в Telegram из торговой операции.
+`NotificationRouter` быстро и идемпотентно пишет recipient-specific rows в
+SQLite outbox, а bounded `TelegramOutboxWorker` доставляет их независимо с
+lease/retry/backoff и изоляцией Telegram 403. Console sink сохраняется.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.
+
+Direct onboarding остаётся двухфазным: signed preflight обязан завершиться до
+любого credential commit; activation после commit публикует только paused
+account. `UserApplicationService` не сворачивает `OnboardingError` в общий
+`ValidationError`: наружу передаётся только typed
+`OnboardingApplicationError.code` (`OnboardingErrorCode`). Exchange status,
+адреса и private key не переходят через application boundary. Telegram и
+будущая Mini App сами маппят enum в безопасный actionable copy.
+
+### `application/` и `telegram/`
+
+`UserApplicationService` — единая бизнес-граница для Telegram Bot и будущей
+Mini App: authorization/ownership, dashboard/status, direct credentials, risk,
+pause/resume, notifications, account lifecycle и admin controls. Concrete
+`AppStage2RuntimeAdapter` связывает её с готовым Stage 1 core; Telegram handlers
+зависят только от `ApplicationProtocol`.
+
+Follower может менять только `risk_percent`. Leverage caps и entry-deviation
+остаются legacy storage/runtime полями для совместимости, но application
+boundary отвергает их даже при forged Bot/Mini App input. Per-account emergency
+остаётся внутренним control-core; пользовательская confirmation для него
+запрещена, а `GLOBAL_EMERGENCY` доступен только admin.
+
+Telegram UI — один редактируемый inline dashboard с typed `CallbackData` и
+короткими `StatesGroup` только для non-secret input. `Scenes Wizard` изучен, но
+не используется: он experimental и не является menu/navigation engine;
+ветвящихся wizard flows в Stage 2 нет. Slash-команды `/start`, `/menu`,
+`/cancel`, `/help` — только вход и recovery.
+
+Первичный доступ не требует пересылки Telegram ID вручную: неизвестный private
+user допускается middleware только на `/start` и typed `GuestAccessCallback`,
+проходит короткую inline арифметическую captcha, после чего заявка сохраняется в
+`telegram_access_requests`. Карточка с профилем и кнопками approve/reject
+доставляется только configured admin IDs из env. Если Bot API временно недоступен,
+заявка не откатывается и остаётся в резервном экране заявок админки; recovery
+добавление по ID сохраняется только как ручной запасной путь.
+
+Решение администратора повторно проверяет env capability в application service.
+Approval/reject идемпотентны: SQLite transaction переводит только `PENDING`, а
+approval атомарно создаёт/открывает UI identity, сохраняя существующие account,
+role и notification settings. Telegram Bot API вызывается после commit. После
+approval бот пытается сразу отправить первое inline-меню подключения V3; ошибка
+доставки не меняет durable access и оставляет `/start` recovery.
+
+Onboarding copy использует язык Aster UI: адрес обычного testnet-кошелька из
+верхней панели, `API wallet address` со страницы API Wallet и `private key`,
+показанный под этим адресом. Перед сбором данных UI показывает путь
+`Aster testnet → Settings → Position mode → Hedge Mode`, при создании
+`Agent/API wallet` выбрать `Perps`/`canPerpTrade` и чтение, выключить вывод,
+авторизовать API
+wallet подписью обычного кошелька и проверить отсутствие позиций/ордеров.
+Каждое из трёх сообщений с данными удаляется сразу после чтения, до проверки;
+Telegram caveat остаётся явно указанным. Переходы шагов создают свежую карточку,
+а при невозможности удаления используют редактирование без дубликата; истёкшая
+сессия заменяет stale-карточку чистой recovery-карточкой. После удаления
+secret-message любой typed preflight/commit/activation failure получает error
+screen с remediation, `🔄 Попробовать снова` и `⌂ На главную`. Retry callback
+хранит `connect`/`replace` branch, а FSM state и key material очищаются в
+`finally`.
 
 ## 5. Минимальные внутренние модели
 
@@ -204,15 +304,18 @@ Telegram handlers никогда напрямую не вызывают торг
 
 ```text
 PositionKey
+ProtectiveOrder
 PositionState
 AccountState
 RiskPolicy
+TargetPosition
 TargetState
 ExecutionAction
 ExecutionPlan
 TradingIdentity
+SymbolFilters
+QtyDecision
 ```
-
 Отдельно полезна внутренняя сущность `CopyTrade` / `trade_id`, чтобы отличать два последовательных торговых эпизода по одному символу после `close → reopen`.
 
 Для Hedge mode `PositionKey` обязательно различает LONG и SHORT.
@@ -250,6 +353,11 @@ Stop и **ровно один** bot-owned TP. Дубликатные услов�
 `extra_stops/extra_tps`, и planner отменяет их отдельными независимыми
 `CANCEL_ORDER` (priority 1) — в том числе на flat-ноге.
 
+Инвариант блокировки зависимых действий при смене плеча (правило 1 planner, баг #25):
+`SET_LEVERAGE` получает `action_id`, а последующие `MARKET_OPEN` и защитные ордера —
+`depends_on_action_id`. При FAILED/UNKNOWN статусе `SET_LEVERAGE` исполнитель переводит
+зависимые действия в `BLOCKED` (fail-closed), при этом закрытия (`MARKET_CLOSE`) и
+отмены ордеров никогда не зависят от плеча и исполняются безусловно.
 Семантика нулевого таргета (добавлено 2026-08-23, третий проход ревью):
 
 ```text
@@ -377,7 +485,7 @@ Strategy Orders не должны быть фундаментом follower execu
 
 Количество продуктовых политик на старте держим минимальным.
 
-Рекомендуемые defaults:
+Рекомендуемые defaults и внутренние safety gates:
 
 - новая follower-позиция требует известного Stop;
 - при слишком большом entry deviation сделка пропускается;
@@ -386,6 +494,10 @@ Strategy Orders не должны быть фундаментом follower execu
 - Stop мастера не двигается искусственно ради сохранения quantity;
 - если мастер расширил Stop — follower position при необходимости сокращается;
 - если Stop стал ближе — автоматически наращивать позицию не нужно.
+
+`entry deviation` остаётся внутренним safety gate legacy runtime и не является
+настройкой follower в Bot/Mini App. Единственный пользовательский risk control —
+`risk_percent`.
 
 ## 12. Recovery при запуске
 
@@ -402,12 +514,50 @@ follower snapshots
  ↓
 resolve UNKNOWN commands
  ↓
+seed leverage candidate catalog (fail-closed if unavailable)
+ ↓
 reconciliation
  ↓
 READY
 ```
 
 Только после `READY` разрешаются новые follower entries.
+
+Stage 2 process (`application/engine.py`) продолжает этот порядок:
+
+```text
+connect/migrate → bootstrap configured admins/recovery floor
+→ compose durable notifier + App → App READY
+→ start outbox worker → Telegram long polling
+```
+
+Shutdown идёт в обратной зависимости: закрыть admission/drain Telegram
+handlers → остановить и осушить outbox при живых Bot/DB → `App.stop()` → один
+раз закрыть Bot session. Первый Stage 2 запуск ставит notification recovery
+floor и не рассылает исторические Stage 1 confirmations; следующие запуски
+восстанавливают недоставленные confirmed commands после этого floor.
+
+Операционный лог — отдельный локальный durable sink, не SQLite и не outbox:
+`setup_logging()` всегда поднимает console handler и bounded
+`RotatingFileHandler` с default `data/logs/copytradeaster.log` (10 MiB, пять
+backup-файлов); active и rollover-файлы создаются с POSIX mode `0600`.
+Повторный вызов переиспользует managed handlers и не создаёт
+дубликаты даже рядом с pytest/caplog handlers. `CT_LOG_PATH`,
+`CT_LOG_MAX_BYTES` и `CT_LOG_BACKUP_COUNT` задают настройки; путь не требует
+изменения для обычного restart. `httpx`/`httpcore` подняты до WARNING, чтобы
+signed URL/query не попадали в request logs.
+
+Критические onboarding-действия пишутся через `log_onboarding_audit`: только
+стабильные `user_id`/opaque `account_id`, `mode` (`connect`/`replace`),
+`event` (`attempt`/`success`/`recovered`/`rejected`), `result`, `paused` и
+стабильная typed classification. `attempt`/`success`/`recovered` имеют INFO,
+`rejected` — WARNING. Wallet/API-wallet addresses, private keys, token,
+signature, signed URL/query и raw exchange/exception payload не являются
+аргументами этих logging calls. Для `attempt` и `rejected` состояние `paused`
+пишется как `unknown`, потому что replace может обращаться к уже существующему
+account; только `success` и `recovered` подтверждают `paused=true`. Handler
+filter — только defense-in-depth для legacy/third-party records, а не замена
+этому контракту.
 
 ## 13. Минимальное хранение
 
@@ -421,6 +571,10 @@ master_events
 copy_trades
 order_links
 execution_commands
+telegram_users
+telegram_access_requests
+agent_validations
+notification_outbox
 ```
 
 Назначение:
@@ -433,11 +587,20 @@ execution_commands
   эпизода, миграция #13);
 - `order_links` — master ↔ follower order mapping;
 - `execution_commands` — durable execution journal/queue.
+- `telegram_users` — private-chat allowlist и единственный owner account;
+  admin — дополнительная capability immutable ID из env, а не взаимоисключающая
+  роль, поэтому один operator ID может одновременно иметь owner account;
+  `access_enabled` отзывает только вход в UI и не останавливает торговый runtime;
+- `telegram_access_requests` — audit trail заявок первичного доступа; уникальный
+  `PENDING` на Telegram user, idempotent decision и `decided_by` configured admin;
+- `agent_validations` — последняя безопасная signed Agent snapshot;
+- `notification_outbox` — recipient-specific delivery journal без secrets.
 
-(В реализации также есть `sync_basis` — per-follower sizing reference с
+(В реализации также есть `app_state` — персистентные runtime флаги: `ready`,
+`ready_heartbeat_s`, `ready_runtime_uuid`, `allow_new_entries`, `emergency_active`,
+`degraded_error`; `sync_basis` — per-follower sizing reference с
 `zero_target`-маркером намеренного dust-flat и `issued_target` для
 идемпотентности ревизий; `nonce_store` — атомарная выдача nonces.)
-
 Подробная схема появляется только по мере реализации конкретного этапа.
 
 ## 14. Ошибки и safety state
@@ -456,7 +619,21 @@ DEGRADED
 
 `Pause` означает: не открывать и не увеличивать позиции, но не закрывать существующие автоматически.
 
-`Emergency close` — отдельное явное действие, а не побочный эффект pause.
+`Emergency close` — отдельное явное действие admin control-core, а не
+пользовательская операция и не побочный эффект pause.
+
+Stage 2 control publication использует два уровня serialization:
+
+- account mutation lock для risk/resume/replacement/disconnect и internal
+  per-account emergency;
+- global mutation lock для global pause/resume/admin emergency и финальной публикации
+  account resume.
+
+Global pause сначала персистит `allow_new_entries=false`, закрывает и осушает
+generation admission, затем открывает его специальным seam, который никогда
+не записывает `true`: reductions/close/protection продолжаются без окна для
+entry. Destructive confirmation привязано к user/action/account, TTL и версии
+credentials; replacement делает старую кнопку недействительной.
 
 ## 15. Тестовая стратегия
 
@@ -499,15 +676,25 @@ Master + несколько testnet followers, без Telegram.
 
 ### Этап 2 — Telegram
 
-Добавляются:
+Реализованы:
 
 ```text
 telegram
 notifications
 onboarding/direct
+application
 ```
 
-Trading core не меняется.
+Один asyncio process, long polling, SQLite WAL; Redis/webhook и отдельный
+backend не нужны масштабу 10–30 (максимум около 100) пользователей. Bot и
+будущая Mini App переиспользуют application service. Trading core не меняется.
+
+Фактический контур включает captcha + durable access approval, direct V3
+onboarding с typed errors, inline dashboard/status/risk/notifications/account,
+admin controls, follower pause/resume, автоматический symbol leverage и
+notification outbox. Пользователь меняет только риск на Stop; follower
+emergency запрещён, а `marginType` этап не меняет. Актуальный readiness verdict:
+`reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`.
 
 ### Этап 3 — Aster Code / Builder
 
@@ -515,7 +702,19 @@ Trading core не меняется.
 
 ```text
 onboarding/builder
+miniapp             # aiohttp-транспорт Mini App (тот же процесс)
 ```
+
+Часть 1 (реализуется в ветке `codex/stage-3-mini-app-part1`): Telegram
+WebApp-сессия с server-side HMAC-проверкой подписанного initData и TTL по
+`auth_date`, Builder-онбординг по пользовательской подписи кошелька
+(combined `approveAgent`, main-ключ не входит в систему), минимальный home
+с pause/resume на общем `UserApplicationService`. Транспорт
+(`miniapp/server.py`) смонтирован под `/miniapp/`: JSON API + собранный Vite
+бандл; frontend в `miniapp/` (Vite+React+TS, токены UX-плана; wallet-адаптер
+injected EIP-1193 + опциональный WalletConnect за `VITE_WC_PROJECT_ID`).
+Транспортные хендлеры не знают ни Aster, ни storage — только application
+use cases и typed public codes.
 
 и builder metadata в Aster requests.
 
@@ -528,6 +727,11 @@ copytradeaster/
 │
 ├── pyproject.toml
 ├── AGENTS.md                       # правила работы агентов с репо
+├── miniapp/                        # Mini App frontend (Vite+React+TS, Stage 3 part 1)
+│   ├── src/screens/                #   session gate, builder wizard, success, home
+│   ├── src/wallet.ts               #   injected EIP-1193 + WalletConnect adapter
+│   └── dist/                       #   собранный бандл (раздаёт бот, git-ignored)
+├── scripts/                        # operational scripts (tunnel, mini app preview, load tests)
 ├── docs/                           # документация; карта — docs/docs_map.md
 │   ├── docs_map.md                 # что где лежит и когда читать
 │   ├── ARCHITECTURE.md             # этот файл
@@ -571,7 +775,9 @@ copytradeaster/
 │       │   ├── coordinator.py     # master delta -> targets per follower
 │       │   ├── planner.py         # actual vs target -> minimal plan
 │       │   ├── executor.py        # durable command execution + retry/recovery
-│       │   └── reconciler.py      # periodic full sweep
+│       │   ├── reconciler.py      # periodic full sweep
+│       │   ├── leverage.py        # LeverageManager: RAM candidate catalog + confirmed state
+│       │   └── registry.py        # FollowerRegistry: dynamic follower runtime
 │       │
 │       ├── storage/                # SQLite: миграции + репозитории
 │       │   ├── database.py        # aiosqlite, WAL, write_lock, MIGRATIONS
@@ -582,10 +788,39 @@ copytradeaster/
 │       │   └── crypto.py
 │       │
 │       ├── notifications/
-│       │   └── console.py         # Stage-1 console notifier
+│       │   ├── console.py         # локальный structured sink
+│       │   ├── formatter.py       # trader cards formatting (format_confirmed_action, format_skip_reason)
+│       │   ├── models.py          # NotificationEvent, NotificationRecipient, NotificationFilter
+│       │   ├── protocol.py        # NotificationRouter protocol
+│       │   ├── router.py          # owner/admin routing → durable outbox
+│       │   └── worker.py          # bounded Telegram delivery/retry
 │       │
+│       ├── onboarding/
+│       │   ├── direct.py          # signed V3 preflight, testnet-only
+│       │   ├── errors.py          # typed OnboardingErrorCode / OnboardingError
+│       │   ├── models.py          # DirectOnboardingRequest / EphemeralKeyProvider / AgentValidation
+│       │   └── providers.py       # DirectKeyProvider
+│       │
+│       ├── application/
+│       │   ├── service.py         # shared Bot/Mini App use cases
+│       │   ├── adapters.py        # concrete App/SQLite/Aster boundaries
+│       │   ├── control.py         # common emergency workflow
+│       │   ├── engine.py          # Stage 2 process lifecycle
+│       │   └── models.py          # transport-neutral Stage 2 DTO/errors
+│       │
+│       ├── telegram/
+│       │   ├── runtime.py         # aiogram dispatcher/polling lifecycle
+│       │   ├── menu.py            # inline presenters/typed callbacks
+│       │   ├── flow.py            # non-secret onboarding FSM
+│       │   ├── access.py          # captcha challenges and access request store
+│       │   ├── middleware.py      # authorization and activity tracker middleware
+│       │   └── routers/           # navigation/settings/admin handlers (common, settings, access)
+│       ├── miniapp/
+│       │   └── server.py          # Mini App aiohttp transport: HMAC initData сессия,
+│       │                          #   builder/dashboard/pause/resume/confirmation, client-log,
+│       │                          #   static /miniapp/ (Vite bundle)
 │       └── cli/
-│           └── main.py            # import-wallet / admin commands
+│           └── main.py            # run/run-bot/import/admin commands
 │
 ├── tests/
 │   ├── unit/                      # risk/planner/storage/domain
@@ -597,13 +832,10 @@ copytradeaster/
 └── data/                           # SQLite БД и артефакты load-прогонов (git-ignored)
 ```
 
-Плановые пакеты `master/observer`, `onboarding/`, `telegram/` появляются на
-этапах 2–3 (см. §16); в Stage 1 их роли закрыты `aster/user_stream.py`,
-CLI-импортом и `notifications/console.py` соответственно.
-
-Этот tree — фактическая структура Stage 1. Плановые модули (`master/observer`,
-`onboarding/`, `telegram/`) добавляются тогда, когда появляется их реальная
-реализация (этапы 2–3).
+Tree отражает фактическую структуру после Stage 2. Отдельный
+`master/observer.py` не понадобился: рабочая граница `UserStream` +
+`MasterProjector` уже остаётся ясной, а механическое выделение файла не меняет
+архитектуру. `onboarding/builder` и `miniapp/` реализованы в Stage 3 (часть 1).
 
 ## 18. Архитектурные правила проекта
 

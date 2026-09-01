@@ -6,7 +6,7 @@ import pytest
 import respx
 
 from copytradeaster.aster.rate_limits import RateLimits
-from copytradeaster.aster.trading_api import AsterClient
+from copytradeaster.aster.trading_api import AsterClient, AsterError
 from tests.unit.aster.conftest import FakeIdentities, FakeKeys, FakeNonces
 
 BASE = "https://fapi.test"
@@ -31,6 +31,69 @@ async def test_set_leverage_sends_params():
     sent = dict(route.calls[0].request.url.params)
     assert sent["symbol"] == "BTCUSDT"
     assert sent["leverage"] == "20"
+
+
+@respx.mock
+async def test_leverage_bracket_accepts_live_list_shape():
+    route = respx.get(f"{BASE}/fapi/v3/leverageBracket").respond(
+        json=[
+            {
+                "symbol": "BTCUSDT",
+                "brackets": [
+                    {"bracket": 1, "initialLeverage": 50},
+                    {"bracket": 2, "initialLeverage": 200},
+                ],
+            }
+        ]
+    )
+    client = make_client()
+    response = await client.leverage_bracket("copyc1", "BTCUSDT")
+    assert [b.initial_leverage for b in response.brackets] == [50, 200]
+    assert response.symbol == "BTCUSDT"
+    sent = dict(route.calls[0].request.url.params)
+    assert sent["symbol"] == "BTCUSDT"
+
+
+@respx.mock
+async def test_leverage_bracket_accepts_documented_object_shape():
+    route = respx.get(f"{BASE}/fapi/v3/leverageBracket")
+    route.respond(
+        json={
+            "symbol": "ETHUSDT",
+            "brackets": [{"bracket": 1, "initialLeverage": 75}],
+        }
+    )
+    client = make_client()
+    response = await client.leverage_bracket("copyc1", "ETHUSDT")
+    assert [b.initial_leverage for b in response.brackets] == [75]
+
+
+@respx.mock
+async def test_leverage_bracket_empty_brackets_fail_closed_in_manager():
+    """The adapter returns an empty typed collection; the control-plane is the
+    component that refuses it before any sizing can use the value."""
+    respx.get(f"{BASE}/fapi/v3/leverageBracket").respond(json={"symbol": "SOLUSDT", "brackets": []})
+    client = make_client()
+    response = await client.leverage_bracket("copyc1", "SOLUSDT")
+    assert response.brackets == []
+    from copytradeaster.trading.leverage import LeverageError, _max_initial_leverage
+
+    with pytest.raises(LeverageError):
+        _max_initial_leverage(response)
+
+
+@respx.mock
+@pytest.mark.parametrize("value", ["200", True])
+async def test_leverage_bracket_rejects_coerced_initial_leverage(value):
+    respx.get(f"{BASE}/fapi/v3/leverageBracket").respond(
+        json={
+            "symbol": "SOLUSDT",
+            "brackets": [{"bracket": 1, "initialLeverage": value}],
+        }
+    )
+    client = make_client()
+    with pytest.raises(AsterError):
+        await client.leverage_bracket("copyc1", "SOLUSDT")
 
 
 @respx.mock

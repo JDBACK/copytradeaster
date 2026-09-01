@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from pydantic.alias_generators import to_camel
 
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters
@@ -21,6 +21,50 @@ class BalanceDTO(_Camel):
     cross_un_pnl: Decimal
     available_balance: Decimal
     max_withdraw_amount: Decimal
+
+
+class AgentDTO(_Camel):
+    """Aster V3 Agent permission record.
+
+    The Agent endpoint is a USER_DATA endpoint and its response is a list.  A
+    few fields are deliberately nullable here: an omitted/null critical field
+    is a valid wire response but must be rejected by the onboarding validator
+    (fail closed), rather than silently receiving a permissive default.
+    """
+
+    agent_address: str | None = Field(default=None, alias="agentAddress")
+    agent_name: str | None = Field(default=None, alias="agentName")
+    source: str | None = None
+    expired: int | None = None
+    ip_whitelist: str | list[str] | None = Field(default=None, alias="ipWhitelist")
+    can_read: bool | None = Field(default=None, alias="canRead")
+    can_spot_trade: bool | None = Field(default=None, alias="canSpotTrade")
+    can_perp_trade: bool | None = Field(default=None, alias="canPerpTrade")
+    can_withdraw: bool | None = Field(default=None, alias="canWithdraw")
+
+
+class LeverageBracketDTO(_Camel):
+    """One symbol-specific leverage bracket returned by Aster V3.
+
+    Aster testnet currently returns ``initialLeverage`` values above the
+    historical Binance-compatible 125x ceiling (for example 200x).  The
+    adapter therefore validates only that the value is a positive integer and
+    leaves the exchange's actual maximum authoritative.
+    """
+
+    bracket: int | None = None
+    initial_leverage: StrictInt = Field(alias="initialLeverage", gt=0)
+    notional_cap: Decimal | None = Field(default=None, alias="notionalCap")
+    notional_floor: Decimal | None = Field(default=None, alias="notionalFloor")
+    maint_margin_ratio: Decimal | None = Field(default=None, alias="maintMarginRatio")
+    cum: Decimal | None = None
+
+
+class LeverageBracketResponse(_Camel):
+    """Typed response for ``GET /fapi/v3/leverageBracket?symbol=...``."""
+
+    symbol: str
+    brackets: list[LeverageBracketDTO]
 
 
 class PositionDTO(BaseModel):
@@ -113,8 +157,11 @@ class ExchangeInfo(BaseModel):
 
 
 __all__ = [
+    "AgentDTO",
     "BalanceDTO",
     "ExchangeInfo",
+    "LeverageBracketDTO",
+    "LeverageBracketResponse",
     "OrderDTO",
     "PositionDTO",
     "RateLimitDTO",

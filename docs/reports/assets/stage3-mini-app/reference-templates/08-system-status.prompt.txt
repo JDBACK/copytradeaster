@@ -1,0 +1,6 @@
+Use case: precise-object-edit
+Asset type: approved Stage 3 Telegram Mini App reference template
+Primary request: Correct only the false interaction affordances in the supplied Aster Copy system-status screen.
+Input images: Image 1 is the edit target.
+Change: Remove every right-side chevron from all six diagnostic rows: "Система", "Копирование", "Aster", "Разрешения", "Позиции", and "Последняя проверка". These rows are read-only status values. Preserve their right-aligned values and use the recovered horizontal space for clean alignment; do not add replacement icons.
+Constraints: Keep the title, demo badge, overall health block, Wallet/Agent/Builder/Sync rail, diagnostic labels and values, refresh button, stale-data note, bottom navigation, colors, icons, grid, typography and spacing otherwise unchanged. No watermark.

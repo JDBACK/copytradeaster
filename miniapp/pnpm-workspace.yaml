@@ -1,0 +1,5 @@
+# pnpm v11 build-script approval (onlyBuiltDependencies was removed in v11).
+# @reown/appkit postinstall only runs a version-check script (no compilation);
+# it is pulled in by @walletconnect/ethereum-provider for the QR modal.
+allowBuilds:
+  '@reown/appkit': true

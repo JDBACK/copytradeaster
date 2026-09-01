@@ -65,7 +65,7 @@ class TestApproveAgent:
         assert "Nonce" in sent
         assert sent["signatureChainId"] == "56"
         # builder fields included when configured
-        assert sent["Builder"] == "0x" + "bb" * 20
+        assert sent["Builder"].lower() == "0x" + "bb" * 20
         assert sent["MaxFeeRate"] == "0.0001"
         assert sent["BuilderName"] == "copytradeaster"
         # signature recovers main wallet over capitalized message

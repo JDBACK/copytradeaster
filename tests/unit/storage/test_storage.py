@@ -8,6 +8,8 @@ from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
     AccountRepo,
+    BuilderOnboardingAttempt,
+    BuilderOnboardingAttemptsRepo,
     CommandRepo,
     CopyTradeRepo,
     CredentialRepo,
@@ -186,3 +188,56 @@ async def test_nonce_store_concurrent_allocations_are_unique(db):
     allocated = await asyncio.gather(*(nonces.next_nonce("0xconcurrent") for _ in range(32)))
     assert len(set(allocated)) == len(allocated)
     assert sorted(allocated) == list(range(min(allocated), max(allocated) + 1))
+
+
+async def test_builder_onboarding_attempts_repo_lifecycle(db):
+    key = b"\x01" * 32
+    repo = BuilderOnboardingAttemptsRepo(db, key)
+    attempt = BuilderOnboardingAttempt(
+        pending_id="p1234567890abcdef",
+        telegram_user_id=101,
+        account_id="tg-101",
+        user_address="0x1111111111111111111111111111111111111111",
+        signer_address="0x2222222222222222222222222222222222222222",
+        signer_private_key="0xdeadbeef1234567890",
+        params={"agentName": "test", "nonce": 42},
+        state="PREPARED",
+        approval_deadline_ms=2_000_000_000_000,
+        agent_expires_at_ms=2_500_000_000_000,
+    )
+
+    await repo.save(attempt)
+
+    # Raw row inspection confirms key material is encrypted in DB
+    raw_row = await db.fetchone(
+        "SELECT encrypted_payload FROM builder_onboarding_attempts WHERE telegram_user_id=101"
+    )
+    assert raw_row is not None
+    raw_bytes = bytes(raw_row["encrypted_payload"])
+    assert b"0xdeadbeef1234567890" not in raw_bytes
+
+    # Decrypted read by user ID
+    loaded = await repo.get_by_user_id(101)
+    assert loaded is not None
+    assert loaded.pending_id == "p1234567890abcdef"
+    assert loaded.signer_private_key == "0xdeadbeef1234567890"
+    assert loaded.params == {"agentName": "test", "nonce": 42}
+    assert loaded.state == "PREPARED"
+
+    # Decrypted read by pending ID
+    loaded_by_pid = await repo.get_by_pending_id("p1234567890abcdef")
+    assert loaded_by_pid is not None
+    assert loaded_by_pid.telegram_user_id == 101
+
+    # Update state
+    assert await repo.update_state("p1234567890abcdef", "APPROVAL_SENT") is True
+    updated = await repo.get_by_user_id(101)
+    assert updated is not None
+    assert updated.state == "APPROVAL_SENT"
+
+    # Cleanup expired: not expired yet
+    assert await repo.cleanup_expired_prepared(1_000_000_000_000) == 0
+
+    # Delete
+    assert await repo.delete(101) is True
+    assert await repo.get_by_user_id(101) is None
