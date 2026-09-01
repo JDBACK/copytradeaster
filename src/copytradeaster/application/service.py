@@ -980,12 +980,16 @@ class UserApplicationService:
             raise ServiceUnavailableError("account credential version is unavailable")
         return value
 
-    async def _snapshot(self, account_id: str, *, refresh: bool) -> Any:
+    async def _snapshot(self, account_id: str, *, refresh: bool) -> tuple[Any, datetime | None]:
         method = "refresh_snapshot" if refresh else "cached_snapshot"
         result = await self._call_optional(self._runtime, method, account_id)
         if result is _MISSING and refresh:
             raise ServiceUnavailableError("account snapshot is unavailable")
-        return None if result is _MISSING else result
+        if result is _MISSING or result is None:
+            return None, None
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], datetime):
+            return result[0], result[1]
+        return result, self._now() if refresh else None
 
     async def _activity_rows(self, account_id: str, offset: int) -> list[Any]:
         reader = getattr(self._runtime, "read_activity", None)
@@ -1166,13 +1170,26 @@ class UserApplicationService:
         elif len(extra_stops) > 0:
             protection_state = PositionProtectionState.DUPLICATE_STOP
         else:
-            # Check if stop is partial or valid
+            # Validate Stop order properties:
+            # 1. Side must oppose position direction (LONG -> SELL, SHORT -> BUY)
+            stop_side_raw = str(_row_value(stop_obj, "side", "")).upper()
+            expected_stop_side = "SELL" if side == PositionSide.LONG else "BUY"
+            is_opposing_side = stop_side_raw == expected_stop_side or not stop_side_raw
+
+            # 2. Must be reduce_only or close_position
             close_pos = bool(_row_value(stop_obj, "close_position", False))
+            reduce_only = bool(_row_value(stop_obj, "reduce_only", False))
+            is_protective_intent = close_pos or reduce_only
+
+            # 3. Coverage check
             stop_orig_qty = _decimal_or_none(
                 _row_value(stop_obj, "orig_qty", Decimal(0))
             ) or Decimal(0)
             abs_qty = abs(qty_dec)
-            if not close_pos and stop_orig_qty > 0 and stop_orig_qty < abs_qty:
+
+            if not is_opposing_side or not is_protective_intent:
+                protection_state = PositionProtectionState.UNCONFIRMED
+            elif not close_pos and stop_orig_qty > 0 and stop_orig_qty < abs_qty:
                 protection_state = PositionProtectionState.PARTIAL_STOP
             else:
                 # Check that stop price is on protective side of mark (or entry if mark <= 0)
@@ -1237,23 +1254,29 @@ class UserApplicationService:
             snapshot = None
             message = None
             captured_at = None
+            refresh_failed = False
             if refresh:
                 try:
-                    snapshot = await self._snapshot(account_id, refresh=True)
-                    captured_at = self._now()
+                    snapshot, captured_at = await self._snapshot(account_id, refresh=True)
                 except _SAFE_ERRORS:
                     raise
                 except Exception:
+                    refresh_failed = True
                     message = "Aster positions are temporarily unavailable"
+                    # Fall back to cached snapshot
+                    snapshot, captured_at = await self._snapshot(account_id, refresh=False)
             else:
-                snapshot = await self._snapshot(account_id, refresh=False)
+                snapshot, captured_at = await self._snapshot(account_id, refresh=False)
 
-            is_stale = system_state is SystemState.STALE or (
-                snapshot is None and system_state is not SystemState.READY
+            is_stale = (
+                system_state is SystemState.STALE
+                or refresh_failed
+                or snapshot is None
+                or system_state is not SystemState.READY
             )
             is_fresh = (
-                captured_at is not None or not is_stale
-            ) and system_state is SystemState.READY
+                not is_stale and system_state is SystemState.READY and captured_at is not None
+            )
 
             cfg = getattr(self._runtime, "cfg", None)
             fee_buffer_pct = Decimal(str(getattr(cfg, "fee_buffer_pct", "0.001")))
@@ -1306,9 +1329,7 @@ class UserApplicationService:
             snapshot = None
             captured_at = None
             if account_id is not None:
-                snapshot = await self._snapshot(account_id, refresh=refresh)
-                if refresh:
-                    captured_at = self._now()
+                snapshot, captured_at = await self._snapshot(account_id, refresh=refresh)
             return await self._dashboard_for(
                 context,
                 row,
@@ -1340,8 +1361,7 @@ class UserApplicationService:
             refreshed_at = None
             if refresh:
                 try:
-                    snapshot = await self._snapshot(account_id, refresh=True)
-                    refreshed_at = self._now()
+                    snapshot, refreshed_at = await self._snapshot(account_id, refresh=True)
                 except _SAFE_ERRORS:
                     raise
                 except Exception:
@@ -1349,7 +1369,7 @@ class UserApplicationService:
             else:
                 # Default status is a cheap cache read; only the explicit
                 # refresh action crosses the bounded Aster read boundary.
-                snapshot = await self._snapshot(account_id, refresh=False)
+                snapshot, refreshed_at = await self._snapshot(account_id, refresh=False)
             permission, checked_at = await self._permission(account_id, refresh=refresh)
             policy = await self._call_optional(self._settings, "get_policy", account_id)
             connected = _is_true(_row_value(row, "enabled", 0)) and await self._runtime_registered(

@@ -28,29 +28,31 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
   const [error, setError] = useState<string | null>(null)
   const [pendingConfirmation, setPendingConfirmation] = useState<ConfirmationDTO | null>(null)
 
-  const refresh = useCallback(async (isUserTriggered = false) => {
-    if (isUserTriggered) setActing(true)
-    try {
-      const [dashboard, posPage] = await Promise.all([
-        api.dashboard(auth, true),
-        api.positions(auth, true).catch(() => null),
-      ])
-      if (dashboard.copy_state === 'empty') {
-        onNotConnected()
-        return
+  const refresh = useCallback(
+    async (isUserTriggered = false) => {
+      if (isUserTriggered) setActing(true)
+      try {
+        const dashboard = await api.dashboard(auth, true)
+        if (dashboard.copy_state === 'empty') {
+          onNotConnected()
+          return
+        }
+        // Read positions cheaply from cached snapshot refreshed by dashboard
+        const posPage = await api.positions(auth, false).catch(() => null)
+        setLoad({
+          kind: 'ready',
+          dashboard,
+          firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
+        })
+        setError(null)
+      } catch (err) {
+        setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
+      } finally {
+        if (isUserTriggered) setActing(false)
       }
-      setLoad({
-        kind: 'ready',
-        dashboard,
-        firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
-      })
-      setError(null)
-    } catch (err) {
-      setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-    } finally {
-      if (isUserTriggered) setActing(false)
-    }
-  }, [auth, onNotConnected])
+    },
+    [auth, onNotConnected],
+  )
   useEffect(() => {
     // Initial data fetch: refresh() only sets state after await (async), so
     // this is the standard external-system sync, not a cascading render.

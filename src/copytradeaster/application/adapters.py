@@ -461,7 +461,7 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         self.db = app.db
         self.cfg = app.cfg
         self.credentials = app.credentials
-        self._snapshot_cache: dict[str, AccountState] = {}
+        self._snapshot_cache: dict[str, tuple[AccountState, datetime]] = {}
 
     @property
     def testnet(self) -> bool:
@@ -521,13 +521,19 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
             log.warning("leverage prepare deferred for %s: %s", account_id, exc)
         return True
 
-    async def cached_snapshot(self, account_id: str) -> AccountState | None:
-        return self._snapshot_cache.get(account_id)
+    async def cached_snapshot(
+        self, account_id: str
+    ) -> AccountState | tuple[AccountState, datetime] | None:
+        entry = self._snapshot_cache.get(account_id)
+        return entry
 
-    async def refresh_snapshot(self, account_id: str) -> AccountState:
+    async def refresh_snapshot(
+        self, account_id: str
+    ) -> AccountState | tuple[AccountState, datetime]:
         snapshot = await self.app.snapshot_follower(account_id)
-        self._snapshot_cache[account_id] = snapshot
-        return snapshot
+        captured_at = datetime.now(UTC)
+        self._snapshot_cache[account_id] = (snapshot, captured_at)
+        return (snapshot, captured_at)
 
     async def read_activity(self, account_id: str, limit: int, offset: int) -> list[Any]:
         if limit <= 0 or offset < 0:

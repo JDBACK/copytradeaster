@@ -28,6 +28,7 @@ export default function App() {
   const [devMode] = useState(() => !isTelegram() && Boolean(DEV_USER_ID))
   const [gateError, setGateError] = useState<string | undefined>()
   const [isRecovering, setIsRecovering] = useState(false)
+  const [accountMasked, setAccountMasked] = useState<string | null>(null)
   const auth: AuthContext = useMemo(() => {
     const signed = initData()
     if (signed) return { initData: signed }
@@ -36,6 +37,9 @@ export default function App() {
 
   const routeSession = useCallback((session: MiniAppSessionDTO) => {
     setGateError(undefined)
+    if (session.account_masked) {
+      setAccountMasked(session.account_masked)
+    }
     switch (sessionDestination(session)) {
       case 'runtime_recovery':
         setPhase({ kind: 'gate', state: 'recovery_required' })
@@ -140,6 +144,7 @@ export default function App() {
         <AppShell
           auth={auth}
           banner={devBanner}
+          accountMasked={accountMasked}
           onNotConnected={() => setPhase({ kind: 'wizard' })}
         />
       )}

@@ -5,6 +5,7 @@
 :root {
   --canvas: #070707;
   --surface: #121212;
+  --surface-2: #1c1c1c;
   --elevated: #181818;
   --border: #252525;
   --text: #f5f3ef;
@@ -16,6 +17,7 @@
   --warning: #d9a45f;
   --danger: #ff5d63;
 
+  --radius: 12px;
   --radius-panel: 14px;
   --radius-pill: 999px;
   --edge: 16px;

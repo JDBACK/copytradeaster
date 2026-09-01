@@ -231,7 +231,8 @@ async def test_runtime_cache_and_pause_reopens_admission_on_failure(database):
     assert await adapter.cached_snapshot("tg-7") is None
     assert app.snapshot_calls == 0
     refreshed = await adapter.refresh_snapshot("tg-7")
-    assert await adapter.cached_snapshot("tg-7") is refreshed
+    cached = await adapter.cached_snapshot("tg-7")
+    assert cached == refreshed
     assert app.snapshot_calls == 1
 
     await adapter.pause_account("tg-7")

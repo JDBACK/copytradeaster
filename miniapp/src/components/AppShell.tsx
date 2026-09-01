@@ -22,10 +22,12 @@ export function AppShell({
   auth,
   banner,
   onNotConnected,
+  accountMasked,
 }: {
   auth: AuthContext
   banner?: ReactNode
   onNotConnected: () => void
+  accountMasked?: string | null
 }) {
   const [route, setRoute] = useState(initialRoute)
   const nested = currentNested(route)
@@ -49,7 +51,9 @@ export function AppShell({
       {banner}
       <div className="shell-content">
         {route.tab === 'home' && <HomeScreen auth={auth} onNotConnected={onNotConnected} />}
-        {route.tab === 'positions' && <PositionsScreen auth={auth} />}
+        {route.tab === 'positions' && (
+          <PositionsScreen auth={auth} accountMasked={accountMasked} />
+        )}
         {route.tab === 'activity' && (
           <StubScreen title="Активность" note="Безопасный журнал действий без секретов." />
         )}
