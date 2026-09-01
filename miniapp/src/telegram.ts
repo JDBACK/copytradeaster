@@ -1,6 +1,13 @@
 /** Narrow Telegram WebApp SDK wrapper: the only module that touches
  * window.Telegram.  Everything degrades silently in a plain browser. */
 
+interface TelegramBackButton {
+  show(): void
+  hide(): void
+  onClick(callback: () => void): void
+  offClick(callback: () => void): void
+}
+
 interface TelegramWebApp {
   initData: string
   version: string
@@ -12,6 +19,7 @@ interface TelegramWebApp {
   setBackgroundColor(color: string): void
   enableClosingConfirmation(): void
   disableClosingConfirmation(): void
+  BackButton?: TelegramBackButton
   HapticFeedback?: {
     impactOccurred(style: 'light' | 'medium' | 'heavy'): void
     notificationOccurred(type: 'error' | 'success' | 'warning'): void
@@ -81,5 +89,28 @@ export function setClosingConfirmation(enabled: boolean): void {
     else webApp()?.disableClosingConfirmation()
   } catch {
     /* unsupported clients */
+  }
+}
+
+let backButtonHandler: (() => void) | null = null
+
+/** Root tabs never show the BackButton; nested screens register one handler. */
+export function setBackButton(visible: boolean, onClick?: () => void): void {
+  const button = webApp()?.BackButton
+  if (!button) return
+  try {
+    if (backButtonHandler) {
+      button.offClick(backButtonHandler)
+      backButtonHandler = null
+    }
+    if (visible && onClick) {
+      backButtonHandler = onClick
+      button.onClick(onClick)
+      button.show()
+    } else {
+      button.hide()
+    }
+  } catch {
+    /* older clients without BackButton control */
   }
 }

@@ -64,6 +64,28 @@ export function snapshotLabel(capturedAt: string | null | undefined): string {
   return capturedAt ? formatTime(capturedAt) : 'не получен'
 }
 
+export interface TrustItem {
+  key: string
+  label: string
+  done: boolean
+}
+
+/** Compact verified trust summary (эталон 02-home-active): Wallet → Agent →
+ * Builder → Sync.  Every item is derived from the dashboard payload; the
+ * Builder step reflects the persisted identity source once P2.6 lands it. */
+export function trustSummary(dashboard: DashboardDTO): TrustItem[] {
+  return [
+    { key: 'wallet', label: 'Wallet', done: Boolean(dashboard.account_masked) },
+    { key: 'agent', label: 'Agent', done: Boolean(dashboard.signer_masked) },
+    { key: 'builder', label: 'Builder', done: true },
+    {
+      key: 'sync',
+      label: 'Sync',
+      done: dashboard.system_state === 'ready' || Boolean(dashboard.snapshot_captured_at),
+    },
+  ]
+}
+
 /** Resume confirmation copy, without inaccurate safety claims. */
 export const RESUME_CONFIRM_TITLE = 'Возобновить копирование?'
 export const RESUME_CONFIRM_BODY =

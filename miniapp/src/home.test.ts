@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { homeViewModel, RESUME_CONFIRM_BODY, snapshotLabel } from './home'
+import { homeViewModel, RESUME_CONFIRM_BODY, snapshotLabel, trustSummary } from './home'
 import type { DashboardDTO } from './types'
 
 function dashboard(overrides: Partial<DashboardDTO> = {}): DashboardDTO {
@@ -7,6 +7,7 @@ function dashboard(overrides: Partial<DashboardDTO> = {}): DashboardDTO {
     copy_state: 'paused',
     system_state: 'ready',
     account_masked: '0xABC…DEF',
+    signer_masked: '0x111…222',
     risk_percent: '1.5',
     open_positions: 2,
     notification_enabled: true,
@@ -56,5 +57,24 @@ describe('home view model', () => {
   it('never substitutes account updated_at for a missing exchange snapshot', () => {
     expect(snapshotLabel(undefined)).toBe('не получен')
     expect(snapshotLabel(null)).toBe('не получен')
+  })
+})
+
+describe('trust summary', () => {
+  it('marks every step done for a connected, synced account', () => {
+    const items = trustSummary(dashboard({ snapshot_captured_at: '2026-09-01T12:41:00Z' }))
+    expect(items.map((item) => item.label)).toEqual(['Wallet', 'Agent', 'Builder', 'Sync'])
+    expect(items.every((item) => item.done)).toBe(true)
+  })
+
+  it('sync is not done without a ready system or a fresh snapshot', () => {
+    const items = trustSummary(dashboard({ system_state: 'stale', snapshot_captured_at: null }))
+    expect(items.find((item) => item.key === 'sync')?.done).toBe(false)
+  })
+
+  it('wallet and agent follow the masked identities, never invented', () => {
+    const items = trustSummary(dashboard({ account_masked: null, signer_masked: null }))
+    expect(items.find((item) => item.key === 'wallet')?.done).toBe(false)
+    expect(items.find((item) => item.key === 'agent')?.done).toBe(false)
   })
 })

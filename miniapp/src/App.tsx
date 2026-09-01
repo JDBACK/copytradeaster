@@ -1,9 +1,9 @@
-/** ASTER COPY Mini App — part-1 composition:
- * session gate → builder wizard → success → minimal home. */
+/** ASTER COPY Mini App — composition: session gate → builder wizard →
+ * success → follower app shell with four root tabs. */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError, type AuthContext } from './api'
-import { HomeScreen } from './screens/HomeScreen'
+import { AppShell } from './components/AppShell'
 import { BuilderWizard } from './screens/BuilderWizard'
 import { BuilderAttemptRecovery } from './screens/BuilderAttemptRecovery'
 import { SessionGate, type GateState } from './screens/SessionGate'
@@ -106,13 +106,15 @@ export default function App() {
     void loadSession()
   }, [loadSession])
 
+  const devBanner = devMode ? (
+    <div className="dev-banner" role="note">
+      DEV-режим: пользователь {auth.devUserId}, сессия без подписи Telegram
+    </div>
+  ) : undefined
+
   return (
     <>
-      {devMode && (
-        <div className="dev-banner" role="note">
-          DEV-режим: пользователь {auth.devUserId}, сессия без подписи Telegram
-        </div>
-      )}
+      {phase.kind !== 'home' && devBanner}
       {phase.kind === 'gate' && (
         <SessionGate
           state={phase.state}
@@ -134,7 +136,13 @@ export default function App() {
       {phase.kind === 'success' && (
         <SuccessScreen result={phase.result} onHome={() => setPhase({ kind: 'home' })} />
       )}
-      {phase.kind === 'home' && <HomeScreen auth={auth} onNotConnected={() => setPhase({ kind: 'wizard' })} />}
+      {phase.kind === 'home' && (
+        <AppShell
+          auth={auth}
+          banner={devBanner}
+          onNotConnected={() => setPhase({ kind: 'wizard' })}
+        />
+      )}
     </>
   )
 }

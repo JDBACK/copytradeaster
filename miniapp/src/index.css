@@ -546,3 +546,90 @@ body {
   font-size: 13px;
   padding: 6px 0 0;
 }
+
+/* --- app shell (four root tabs) -------------------------------------------- */
+
+.shell {
+  /* Definite own height: inside #root (flex column, min-height) a flex: 1
+     shorthand would set flex-basis: 0% and override height, pushing the
+     bottom navigation below the fold whenever the tab content is taller
+     than the viewport. */
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-content .screen {
+  padding-bottom: 24px;
+}
+
+.bottom-nav {
+  flex: none;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--canvas);
+  padding-bottom: var(--safe-bottom);
+}
+
+.nav-item {
+  flex: 1;
+  appearance: none;
+  background: none;
+  border: none;
+  font-family: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 58px;
+  padding: 8px 0 7px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  position: relative;
+}
+
+.nav-item.active {
+  color: var(--champagne);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 22%;
+  right: 22%;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--champagne);
+}
+
+/* --- home trust strip ------------------------------------------------------- */
+
+.trust-strip {
+  padding: 10px 8px 12px;
+}
+
+.trust-strip::before {
+  top: 33px;
+  left: 42px;
+  right: 42px;
+}
+
+.trust-pending {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.6;
+}
