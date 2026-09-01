@@ -46,10 +46,36 @@ Gates:
 - safe-area/bottom nav на фактическом viewport;
 - финальный screenshot current-HEAD.
 
+## P2.1 — read-only Positions: CLOSED (2026-09-02)
+
+Сделано:
+
+- Backend boundary: `PositionSummaryDTO`, `PositionPageDTO`, `PositionSide`, `PositionProtectionState` в `src/copytradeaster/application/models.py`;
+- `PositionState` в `domain/models.py` расширен безопасным полем `unrealized_profit: Decimal = Decimal(0)` с сохранением строгих decimal инвариантов;
+- `Coordinator._snapshot` и `MasterProjector` заполняют `unrealized_profit` из биржевого `PositionDTO.un_realized_profit`;
+- `UserApplicationService.positions` и `_parse_position_summary`:
+  - исключает нулевые позиции (`qty == 0`);
+  - нормализует направления `LONG`/`SHORT` для `ONE_WAY` и `HEDGE`;
+  - Decimal-логика расчета `risk_to_stop_usdt` выполняется строго по свежему snapshot и полностью подтвержденному Stop (с учетом `fee_buffer_pct`);
+  - при отсутствии, частичном, дублированном или неподтвержденном Stop отдается соответствующий `PositionProtectionState`, а `risk_to_stop_usdt` устанавливается в `None`;
+  - исключены сырые секреты, clientOrderId, account_id и orderId;
+  - позиции сортируются по алфавиту `symbol`;
+- Transport boundary: `POST /miniapp/api/positions` в `src/copytradeaster/miniapp/server.py` с валидацией Telegram `initData` / dev-testnet заголовков;
+- Frontend:
+  - `miniapp/src/types.ts` и `api.ts`: добавлены типы и `api.positions(...)`;
+  - `miniapp/src/format.ts`: хелперы `formatPrice` и `formatPnl`;
+  - `miniapp/src/screens/PositionsScreen.tsx`: полноценный экран по эталону `03-positions.png` (заголовок «Открытые позиции · N», карточки с PnL, входом, текущей ценой, Stop, TP, риском до Stop, плечом «N× авто», предупреждениями защиты, состояниями loading/error/empty/stale);
+  - `miniapp/src/components/AppShell.tsx`: вкладка «Позиции» подключена к `PositionsScreen`;
+  - `miniapp/src/screens/HomeScreen.tsx`: preview первой позиции из того же DTO, удален текст-заглушка «появится в следующей версии»;
+- Gates:
+  - Offline pytest suite: 742 passed, coverage 87%, ruff clean;
+  - Frontend: vitest 54 passed, oxlint clean, pnpm build clean;
+  - Real Aster Testnet live acceptance (`tests/testnet/test_live_positions_acceptance.py`): 8/8 фаз passed (open + stop, positions query, сравнение с positionRisk/openOrders, перестановка Stop/TP, partial close, warning при снятии Stop, cleanup flat).
+
 ## Следующие подчасти
 
-- P2.1 read-only Positions (DTO → API → экран, Home preview из того же DTO).
-- P2.2–P2.7 по адаптированному плану.
+- P2.2 — Activity (`04-activity`).
+- P2.3–P2.7 по адаптированному плану.
 
 Открытые решения владельца (нужны перед соответствующими подчастями):
 

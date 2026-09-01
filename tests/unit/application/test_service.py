@@ -20,6 +20,8 @@ from copytradeaster.application.models import (
     CopyState,
     DirectCredentialsInput,
     OnboardingApplicationError,
+    PositionProtectionState,
+    PositionSide,
     RiskUpdateInput,
     ServiceUnavailableError,
     StaleOperationError,
@@ -432,6 +434,116 @@ async def test_dashboard_status_risk_activity_and_notifications_are_safe(environ
     notifications = await service.notification_settings(7)
     assert notifications.pending == 1
     assert notifications.last_delivery_at is None
+
+
+async def test_positions_service_mapping_and_safety_checks(environment):
+    db, runtime, _, _, service = environment
+    from copytradeaster.domain.models import (
+        PositionKey,
+        PositionState,
+        PosSide,
+        ProtectiveOrder,
+        Side,
+    )
+
+    # Mock snapshot with a variety of positions:
+    # 1. ONE_WAY BTC LONG with valid stop and TP
+    btc_key = PositionKey(symbol="BTCUSDT", pos_side=PosSide.BOTH)
+    btc_pos = PositionState(
+        key=btc_key,
+        qty=Decimal("0.002"),
+        entry_price=Decimal("60000.0"),
+        mark_price=Decimal("61000.0"),
+        liquidation_price=Decimal("50000.0"),
+        leverage=200,
+        stop=ProtectiveOrder(
+            client_order_id="btc-stop-coid",
+            order_id=12345,
+            type="STOP_MARKET",
+            side=Side.SELL,
+            stop_price=Decimal("59000.0"),
+            reduce_only=True,
+            close_position=True,
+            working_type="CONTRACT_PRICE",
+            orig_qty=Decimal("0"),
+        ),
+        take_profit=ProtectiveOrder(
+            client_order_id="btc-tp-coid",
+            order_id=12346,
+            type="TAKE_PROFIT_MARKET",
+            side=Side.SELL,
+            stop_price=Decimal("65000.0"),
+            reduce_only=True,
+            close_position=True,
+            working_type="CONTRACT_PRICE",
+            orig_qty=Decimal("0"),
+        ),
+        unrealized_profit=Decimal("2.0"),
+    )
+
+    # 2. HEDGE ETH SHORT with missing stop
+    eth_key = PositionKey(symbol="ETHUSDT", pos_side=PosSide.SHORT)
+    eth_pos = PositionState(
+        key=eth_key,
+        qty=Decimal("0.05"),
+        entry_price=Decimal("3000.0"),
+        mark_price=Decimal("2950.0"),
+        liquidation_price=Decimal("3500.0"),
+        leverage=100,
+        stop=None,
+        take_profit=None,
+        unrealized_profit=Decimal("2.5"),
+    )
+
+    # 3. SOL with qty=0 (should be excluded)
+    sol_key = PositionKey(symbol="SOLUSDT", pos_side=PosSide.LONG)
+    sol_pos = PositionState(
+        key=sol_key,
+        qty=Decimal("0.0"),
+        entry_price=Decimal("150.0"),
+        mark_price=Decimal("150.0"),
+        liquidation_price=Decimal("0.0"),
+        leverage=50,
+    )
+
+    mock_snapshot = {
+        "positions": {btc_key: btc_pos, eth_key: eth_pos, sol_key: sol_pos},
+        "open_orders": [],
+    }
+    runtime.refresh_snapshot = lambda account_id: mock_snapshot
+    runtime.cached_snapshot = lambda account_id: mock_snapshot
+
+    res = await service.positions(7, refresh=True)
+    assert res.count == 2
+    assert len(res.positions) == 2
+
+    # Sorted by symbol: BTCUSDT, ETHUSDT
+    btc_dto = res.positions[0]
+    assert btc_dto.symbol == "BTCUSDT"
+    assert btc_dto.side == PositionSide.LONG
+    assert btc_dto.qty == Decimal("0.002")
+    assert btc_dto.entry_price == Decimal("60000.0")
+    assert btc_dto.mark_price == Decimal("61000.0")
+    assert btc_dto.unrealized_profit == Decimal("2.0")
+    assert btc_dto.leverage == 200
+    assert btc_dto.protection_state == PositionProtectionState.PROTECTED
+    assert btc_dto.stop_price == Decimal("59000.0")
+    assert btc_dto.take_profit_price == Decimal("65000.0")
+    # Distance = |61000 - 59000| = 2000, per unit loss = 2000 * 1.001 = 2002.
+    # Risk = 0.002 * 2002 = 4.004
+    assert btc_dto.risk_to_stop_usdt == Decimal("4.004")
+
+    # Raw secrets/identifiers check
+    raw_str = repr(res)
+    assert "btc-stop-coid" not in raw_str
+    assert "12345" not in raw_str
+    assert "tg-7" not in raw_str
+
+    eth_dto = res.positions[1]
+    assert eth_dto.symbol == "ETHUSDT"
+    assert eth_dto.side == PositionSide.SHORT
+    assert eth_dto.protection_state == PositionProtectionState.MISSING_STOP
+    assert eth_dto.risk_to_stop_usdt is None
 
 
 async def test_user_views_reflect_global_pause_even_with_active_account_policy(environment):

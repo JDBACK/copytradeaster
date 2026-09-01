@@ -6,6 +6,7 @@ import type {
   ConfirmationDTO,
   DashboardDTO,
   MiniAppSessionDTO,
+  PositionPageDTO,
 } from './types'
 
 export class ApiError extends Error {
@@ -92,6 +93,12 @@ export const api = {
     refresh = false,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<DashboardDTO>('/miniapp/api/dashboard', { refresh }, auth, options),
+
+  positions: (
+    auth: AuthContext,
+    refresh = false,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<PositionPageDTO>('/miniapp/api/positions', { refresh }, auth, options),
   pause: (auth: AuthContext) => post<DashboardDTO>('/miniapp/api/pause', {}, auth),
 
   resume: (auth: AuthContext, confirmation?: ConfirmationDTO) =>

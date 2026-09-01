@@ -109,12 +109,14 @@ class PositionState(_DecimalStrict):
     # mirroring how snapshot code stores `stop`/`take_profit`.
     extra_stops: tuple[ProtectiveOrder, ...] = ()
     extra_tps: tuple[ProtectiveOrder, ...] = ()
+    unrealized_profit: Decimal = Decimal(0)
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = (
         "qty",
         "entry_price",
         "mark_price",
         "liquidation_price",
+        "unrealized_profit",
     )
 
 

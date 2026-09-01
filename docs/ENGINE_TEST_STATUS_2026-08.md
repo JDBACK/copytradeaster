@@ -5,6 +5,11 @@
 
 ## Текущее состояние
 
+- **Stage 3, часть 2 (P2.1 — read-only Positions) — CLOSED (2026-09-02):**
+  1. **Backend Application & Transport:** добавлены `PositionSummaryDTO`, `PositionPageDTO`, `PositionSide`, `PositionProtectionState`; `PositionState` расширен безопасным `unrealized_profit`; метод `service.positions(...)` и эндпоинт `POST /miniapp/api/positions` с защитой Telegram initData и безопасной Decimal-логикой `risk_to_stop_usdt`.
+  2. **Frontend UI (PositionsScreen):** заменена заглушка в AppShell на настоящий `PositionsScreen` по эталону `03-positions.png` (секция «Открытые позиции · N», карточки с PnL, входом, текущей ценой, Stop/TP, риском до Stop, плечом «N× авто», предупреждениями о неполной/отсутствующей защите и stale-статусом). Home получил preview первой активной позиции и лишился текста-заглушки «появится в следующей версии».
+  3. **Offline & Frontend Gates:** offline pytest **742 passed / 2 skipped / 29 deselected**, coverage **87%**; Ruff check/format clean; Frontend Vitest **54 passed**, Oxlint clean, TypeScript + Vite build clean.
+  4. **Signed Aster Testnet Live Gate:** `tests/testnet/test_live_positions_acceptance.py` подтвердил все 8 фаз на реальном `fapi.asterdex-testnet.com` (open + Stop, positions DTO query, сверка с positionRisk/openOrders, замена Stop/TP, partial close, warning при снятии Stop, чистый cleanup flat).
 - **Stage 3, часть 1 — CLOSED (2026-09-01):** все обязательные
   исправления R1–R9 из
   `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` выполнены.

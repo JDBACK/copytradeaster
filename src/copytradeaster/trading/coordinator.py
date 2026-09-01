@@ -828,6 +828,7 @@ class Coordinator:
                 take_profit=tp,
                 extra_stops=extra_stops,
                 extra_tps=extra_tps,
+                unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
             )
         # orphan protection: a conditional resting on the exchange WITHOUT a
         # backing positionRisk row (flat leg). Not surfaced -> never canceled.

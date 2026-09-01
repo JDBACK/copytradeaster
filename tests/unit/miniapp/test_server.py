@@ -26,6 +26,10 @@ from copytradeaster.application.models import (
     MiniAppConnectionState,
     MiniAppSessionDTO,
     OnboardingApplicationError,
+    PositionPageDTO,
+    PositionProtectionState,
+    PositionSide,
+    PositionSummaryDTO,
     SystemState,
 )
 from copytradeaster.config import Settings
@@ -80,10 +84,12 @@ class FakeApplication:
         )
     )
     dashboard_dto: DashboardDTO = field(default_factory=_dashboard_dto)
+    positions_dto: PositionPageDTO = field(default_factory=lambda: PositionPageDTO())
     prepare_calls: list = field(default_factory=list)
     submit_calls: list = field(default_factory=list)
     resume_attempt_calls: list = field(default_factory=list)
     dashboard_calls: list = field(default_factory=list)
+    positions_calls: list = field(default_factory=list)
     pause_calls: list = field(default_factory=list)
     resume_calls: list = field(default_factory=list)
     begin_calls: list = field(default_factory=list)
@@ -113,6 +119,13 @@ class FakeApplication:
         if self.fail_with:
             raise self.fail_with
         return self.dashboard_dto
+
+    async def positions(self, user_id: int, refresh: bool = False) -> PositionPageDTO:
+        self.user_id_seen = user_id
+        self.positions_calls.append(user_id)
+        if self.fail_with:
+            raise self.fail_with
+        return self.positions_dto
 
     async def builder_prepare(self, user_id: int, user_address: str) -> BuilderPrepareDTO:
         self.prepare_calls.append((user_id, user_address))
@@ -394,6 +407,41 @@ async def test_dashboard_serializes_decimal_datetime_and_enum(client, fake_app):
     assert body["copy_state"] == "paused"
     assert body["system_state"] == "ready"
     assert body["updated_at"].startswith("2026-08-31T12:41")
+
+
+async def test_positions_endpoint_serializes_safe_dto(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    fake_app.positions_dto = PositionPageDTO(
+        positions=(
+            PositionSummaryDTO(
+                symbol="BTCUSDT",
+                side=PositionSide.LONG,
+                qty=Decimal("0.002"),
+                entry_price=Decimal("60000.0"),
+                mark_price=Decimal("61000.0"),
+                unrealized_profit=Decimal("2.0"),
+                leverage=200,
+                protection_state=PositionProtectionState.PROTECTED,
+                stop_price=Decimal("59000.0"),
+                take_profit_price=Decimal("65000.0"),
+                risk_to_stop_usdt=Decimal("2.002"),
+            ),
+        ),
+        count=1,
+        system_state=SystemState.READY,
+        snapshot_captured_at=datetime.now(tz=UTC),
+        is_stale=False,
+    )
+    resp = await client.post("/miniapp/api/positions", headers=_auth_header(init_data))
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["count"] == 1
+    assert data["positions"][0]["symbol"] == "BTCUSDT"
+    assert data["positions"][0]["side"] == "LONG"
+    assert data["positions"][0]["qty"] == "0.002"
+    assert data["positions"][0]["protection_state"] == "protected"
+    assert data["positions"][0]["risk_to_stop_usdt"] == "2.002"
+    assert fake_app.positions_calls == [777]
 
 
 async def test_dashboard_requires_auth(client, fake_app):

@@ -48,6 +48,10 @@ from copytradeaster.application.models import (
     OnboardingApplicationError,
     OnboardingResult,
     PermissionSummary,
+    PositionPageDTO,
+    PositionProtectionState,
+    PositionSide,
+    PositionSummaryDTO,
     RiskDTO,
     RiskUpdateInput,
     ServiceUnavailableError,
@@ -1101,6 +1105,192 @@ class UserApplicationService:
         if signer is None:
             return None
         return mask_address(str(signer))
+
+    @staticmethod
+    def _parse_position_summary(
+        position: Any,
+        is_fresh: bool,
+        fee_buffer_pct: Decimal = Decimal("0.001"),
+    ) -> PositionSummaryDTO | None:
+        raw_qty = _row_value(position, "qty", _row_value(position, "position_amt", Decimal(0)))
+        try:
+            qty_dec = Decimal(str(raw_qty))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if qty_dec == Decimal(0):
+            return None
+
+        # Determine side:
+        key = _row_value(position, "key", None)
+        pos_side = getattr(key, "pos_side", None) if key else None
+        if pos_side is None:
+            raw_ps = str(_row_value(position, "position_side", "BOTH")).upper()
+            if raw_ps == "LONG":
+                side = PositionSide.LONG
+            elif raw_ps == "SHORT":
+                side = PositionSide.SHORT
+            else:
+                side = PositionSide.LONG if qty_dec > 0 else PositionSide.SHORT
+        else:
+            if getattr(pos_side, "value", str(pos_side)).upper() == "LONG":
+                side = PositionSide.LONG
+            elif getattr(pos_side, "value", str(pos_side)).upper() == "SHORT":
+                side = PositionSide.SHORT
+            else:
+                side = PositionSide.LONG if qty_dec > 0 else PositionSide.SHORT
+
+        symbol = str(getattr(key, "symbol", None) or _row_value(position, "symbol", ""))
+        entry_price = _decimal_or_none(_row_value(position, "entry_price", Decimal(0))) or Decimal(
+            0
+        )
+        mark_price = _decimal_or_none(_row_value(position, "mark_price", Decimal(0))) or Decimal(0)
+        unrealized_profit = _decimal_or_none(
+            _row_value(
+                position,
+                "unrealized_profit",
+                _row_value(position, "un_realized_profit", Decimal(0)),
+            )
+        ) or Decimal(0)
+        leverage = _int_or_none(_row_value(position, "leverage", 1)) or 1
+
+        stop_obj = _row_value(position, "stop", None)
+        tp_obj = _row_value(position, "take_profit", None)
+        extra_stops = _row_value(position, "extra_stops", ()) or ()
+
+        stop_price = _decimal_or_none(_row_value(stop_obj, "stop_price", None))
+        tp_price = _decimal_or_none(_row_value(tp_obj, "stop_price", None))
+
+        # Protection state evaluation:
+        if stop_obj is None:
+            protection_state = PositionProtectionState.MISSING_STOP
+        elif len(extra_stops) > 0:
+            protection_state = PositionProtectionState.DUPLICATE_STOP
+        else:
+            # Check if stop is partial or valid
+            close_pos = bool(_row_value(stop_obj, "close_position", False))
+            stop_orig_qty = _decimal_or_none(
+                _row_value(stop_obj, "orig_qty", Decimal(0))
+            ) or Decimal(0)
+            abs_qty = abs(qty_dec)
+            if not close_pos and stop_orig_qty > 0 and stop_orig_qty < abs_qty:
+                protection_state = PositionProtectionState.PARTIAL_STOP
+            else:
+                # Check that stop price is on protective side of mark (or entry if mark <= 0)
+                ref_price = mark_price if mark_price > 0 else entry_price
+                if stop_price is not None and ref_price > 0:
+                    if side == PositionSide.LONG and stop_price >= ref_price:
+                        # unconfirmed or invalid stop level
+                        protection_state = PositionProtectionState.UNCONFIRMED
+                    elif side == PositionSide.SHORT and stop_price <= ref_price:
+                        protection_state = PositionProtectionState.UNCONFIRMED
+                    else:
+                        protection_state = PositionProtectionState.PROTECTED
+                elif stop_price is not None:
+                    protection_state = PositionProtectionState.PROTECTED
+                else:
+                    protection_state = PositionProtectionState.MISSING_STOP
+
+        risk_to_stop_usdt: Decimal | None = None
+        if (
+            is_fresh
+            and protection_state == PositionProtectionState.PROTECTED
+            and stop_price is not None
+        ):
+            distance = (
+                abs(mark_price - stop_price) if mark_price > 0 else abs(entry_price - stop_price)
+            )
+            if distance > 0:
+                per_unit_loss = distance * (Decimal(1) + fee_buffer_pct)
+                risk_to_stop_usdt = abs(qty_dec) * per_unit_loss
+
+        return PositionSummaryDTO(
+            symbol=symbol,
+            side=side,
+            qty=abs(qty_dec),
+            entry_price=entry_price,
+            mark_price=mark_price,
+            unrealized_profit=unrealized_profit,
+            leverage=leverage,
+            protection_state=protection_state,
+            stop_price=stop_price,
+            take_profit_price=tp_price,
+            risk_to_stop_usdt=risk_to_stop_usdt,
+        )
+
+    async def positions(self, user_id: int, refresh: bool = False) -> PositionPageDTO:
+        try:
+            context = await self._context(user_id)
+            account_id = str(context.account_id) if context.account_id else None
+            system_state = await self._system_state()
+            if account_id is None:
+                return PositionPageDTO(
+                    positions=(),
+                    count=0,
+                    system_state=system_state,
+                    message="account is not connected",
+                )
+            context, row, _ = await self._owned_account(
+                user_id,
+                account_id,
+                allow_disabled=True,
+            )
+            snapshot = None
+            message = None
+            captured_at = None
+            if refresh:
+                try:
+                    snapshot = await self._snapshot(account_id, refresh=True)
+                    captured_at = self._now()
+                except _SAFE_ERRORS:
+                    raise
+                except Exception:
+                    message = "Aster positions are temporarily unavailable"
+            else:
+                snapshot = await self._snapshot(account_id, refresh=False)
+
+            is_stale = system_state is SystemState.STALE or (
+                snapshot is None and system_state is not SystemState.READY
+            )
+            is_fresh = (
+                captured_at is not None or not is_stale
+            ) and system_state is SystemState.READY
+
+            cfg = getattr(self._runtime, "cfg", None)
+            fee_buffer_pct = Decimal(str(getattr(cfg, "fee_buffer_pct", "0.001")))
+
+            positions_map = _row_value(snapshot, "positions", _MISSING)
+            raw_positions = (
+                (
+                    positions_map.values()
+                    if isinstance(positions_map, Mapping)
+                    else (positions_map or ())
+                )
+                if positions_map is not _MISSING and positions_map is not None
+                else ()
+            )
+
+            parsed_list: list[PositionSummaryDTO] = []
+            for p in raw_positions:
+                summary = self._parse_position_summary(
+                    p, is_fresh=is_fresh, fee_buffer_pct=fee_buffer_pct
+                )
+                if summary is not None:
+                    parsed_list.append(summary)
+
+            parsed_list.sort(key=lambda item: item.symbol)
+
+            return PositionPageDTO(
+                positions=tuple(parsed_list),
+                count=len(parsed_list),
+                system_state=system_state,
+                snapshot_captured_at=captured_at,
+                is_stale=is_stale,
+                message=message,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("positions are unavailable") from None
 
     async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO:
         try:

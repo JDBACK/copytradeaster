@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countdownMinutes, formatFeeRate, formatPercent, formatTime, formatUsdt } from './format'
+import { countdownMinutes, formatFeeRate, formatPercent, formatPnl, formatPrice, formatTime, formatUsdt } from './format'
 
 describe('russian formatting', () => {
   it('renders the builder fee cap as a percent with a decimal comma', () => {
@@ -33,5 +33,15 @@ describe('russian formatting', () => {
     const now = 1_700_000_000_000
     expect(countdownMinutes(now + 5.5 * 60_000, now)).toBe(6)
     expect(countdownMinutes(now - 60_000, now)).toBe(0)
+  })
+
+  it('formats prices and PnL correctly', () => {
+    expect(formatPrice('60120.5')).toMatch(/60\s120,5/)
+    expect(formatPrice(null)).toBe('—')
+
+    expect(formatPnl('124.8')).toEqual({ text: '+124,80 USDT', tone: 'positive' })
+    expect(formatPnl('-18.2')).toEqual({ text: '-18,20 USDT', tone: 'negative' })
+    expect(formatPnl('0')).toEqual({ text: '0,00 USDT', tone: 'neutral' })
+    expect(formatPnl(null)).toEqual({ text: '—', tone: 'neutral' })
   })
 })

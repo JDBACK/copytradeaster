@@ -189,6 +189,20 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
+    async def positions(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        refresh = (bool(body) and bool(body.get("refresh"))) or request.query.get("refresh") in {
+            "1",
+            "true",
+        }
+        try:
+            return _json_dto(await application.positions(user_id, refresh=refresh))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
     async def pause(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -361,6 +375,7 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/session", session)
     app.router.add_post("/miniapp/api/client-log", client_log)
     app.router.add_post("/miniapp/api/dashboard", dashboard)
+    app.router.add_post("/miniapp/api/positions", positions)
     app.router.add_post("/miniapp/api/pause", pause)
     app.router.add_post("/miniapp/api/resume", resume)
     app.router.add_post("/miniapp/api/confirmation/begin", confirmation_begin)

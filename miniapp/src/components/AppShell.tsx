@@ -15,6 +15,7 @@ import {
 } from '../navigation'
 import { hapticImpact, setBackButton } from '../telegram'
 import { HomeScreen } from '../screens/HomeScreen'
+import { PositionsScreen } from '../screens/PositionsScreen'
 import { Brand } from './ui'
 
 export function AppShell({
@@ -48,12 +49,7 @@ export function AppShell({
       {banner}
       <div className="shell-content">
         {route.tab === 'home' && <HomeScreen auth={auth} onNotConnected={onNotConnected} />}
-        {route.tab === 'positions' && (
-          <StubScreen
-            title="Позиции"
-            note="Позиции только для просмотра. Управляет торговое ядро."
-          />
-        )}
+        {route.tab === 'positions' && <PositionsScreen auth={auth} />}
         {route.tab === 'activity' && (
           <StubScreen title="Активность" note="Безопасный журнал действий без секретов." />
         )}

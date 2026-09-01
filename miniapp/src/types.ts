@@ -73,3 +73,35 @@ export interface ConfirmationDTO {
   account_id?: string | null
   expires_at?: string | null
 }
+
+export type PositionSide = 'LONG' | 'SHORT'
+
+export type PositionProtectionState =
+  | 'protected'
+  | 'missing_stop'
+  | 'partial_stop'
+  | 'duplicate_stop'
+  | 'unconfirmed'
+
+export interface PositionSummaryDTO {
+  symbol: string
+  side: PositionSide
+  qty: string | number
+  entry_price: string | number
+  mark_price: string | number
+  unrealized_profit: string | number
+  leverage: number
+  protection_state: PositionProtectionState
+  stop_price?: string | number | null
+  take_profit_price?: string | number | null
+  risk_to_stop_usdt?: string | number | null
+}
+
+export interface PositionPageDTO {
+  positions: PositionSummaryDTO[]
+  count: number
+  system_state: SystemState
+  snapshot_captured_at?: string | null
+  is_stale: boolean
+  message?: string | null
+}

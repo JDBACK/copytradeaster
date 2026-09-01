@@ -195,6 +195,44 @@ class ActivityPage:
     has_next: bool = False
 
 
+class PositionSide(StrEnum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
+class PositionProtectionState(StrEnum):
+    PROTECTED = "protected"
+    MISSING_STOP = "missing_stop"
+    PARTIAL_STOP = "partial_stop"
+    DUPLICATE_STOP = "duplicate_stop"
+    UNCONFIRMED = "unconfirmed"
+
+
+@dataclass(frozen=True, slots=True)
+class PositionSummaryDTO:
+    symbol: str
+    side: PositionSide
+    qty: Decimal
+    entry_price: Decimal
+    mark_price: Decimal
+    unrealized_profit: Decimal
+    leverage: int
+    protection_state: PositionProtectionState
+    stop_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
+    risk_to_stop_usdt: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PositionPageDTO:
+    positions: tuple[PositionSummaryDTO, ...] = ()
+    count: int = 0
+    system_state: SystemState = SystemState.UNKNOWN
+    snapshot_captured_at: datetime | None = None
+    is_stale: bool = False
+    message: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class NotificationSettingsDTO:
     enabled: bool = True
@@ -381,6 +419,7 @@ class ApplicationProtocol(Protocol):
     ) -> AccessRequestDTO: ...
 
     async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO: ...
+    async def positions(self, user_id: int, refresh: bool = False) -> PositionPageDTO: ...
     async def status(self, user_id: int, refresh: bool = False) -> StatusDTO: ...
 
     async def risk(self, user_id: int) -> RiskDTO: ...

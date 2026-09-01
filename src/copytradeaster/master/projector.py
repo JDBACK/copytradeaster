@@ -184,6 +184,7 @@ class MasterProjector:
                 liquidation_price=p.liquidation_price,
                 stop=stop,
                 take_profit=tp,
+                unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
             )
         self.state = MasterState(available_usdt=available, positions=positions)
         self.state.event_time = int(time.time() * 1000)

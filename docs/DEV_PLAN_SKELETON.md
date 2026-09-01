@@ -293,7 +293,7 @@ Stage 2 полностью закрыт для testnet scope.
   boot с реальными testnet-данными; общий owner walkthrough в Telegram WebView
   перенесён в финальный gate всей Part 2 и не блокирует P2.1; журнал:
   [STAGE3_PART2_PROGRESS_2026-09.md](reports/STAGE3_PART2_PROGRESS_2026-09.md)).
-- [ ] P2.1: read-only Positions из authoritative follower state.
+- [x] P2.1: read-only Positions из authoritative follower state (закрыт 2026-09-02; DTO, API, PositionsScreen, live acceptance 8/8 фаз на Aster Testnet).
 - [ ] P2.2: безопасная Activity timeline без внутренних payload/secrets.
 - [ ] P2.3: Settings root и существующие Notifications use cases.
 - [ ] P2.4: единственная числовая настройка Risk on Stop с backend constraints.

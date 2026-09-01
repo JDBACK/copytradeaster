@@ -13,12 +13,13 @@ import {
   trustSummary,
 } from '../home'
 import { hapticImpact, hapticNotify } from '../telegram'
-import type { ConfirmationDTO, DashboardDTO } from '../types'
+import type { ConfirmationDTO, DashboardDTO, PositionSummaryDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
+import { PositionCard } from './PositionsScreen'
 
 type LoadState =
   | { kind: 'loading' }
-  | { kind: 'ready'; dashboard: DashboardDTO }
+  | { kind: 'ready'; dashboard: DashboardDTO; firstPosition: PositionSummaryDTO | null }
   | { kind: 'error'; code: string }
 
 export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotConnected: () => void }) {
@@ -30,12 +31,19 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
   const refresh = useCallback(async (isUserTriggered = false) => {
     if (isUserTriggered) setActing(true)
     try {
-      const dashboard = await api.dashboard(auth, true)
+      const [dashboard, posPage] = await Promise.all([
+        api.dashboard(auth, true),
+        api.positions(auth, true).catch(() => null),
+      ])
       if (dashboard.copy_state === 'empty') {
         onNotConnected()
         return
       }
-      setLoad({ kind: 'ready', dashboard })
+      setLoad({
+        kind: 'ready',
+        dashboard,
+        firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
+      })
       setError(null)
     } catch (err) {
       setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
@@ -56,7 +64,11 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
     try {
       const dashboard = await api.pause(auth)
       hapticImpact('medium')
-      setLoad({ kind: 'ready', dashboard })
+      setLoad((prev) =>
+        prev.kind === 'ready'
+          ? { ...prev, dashboard }
+          : { kind: 'ready', dashboard, firstPosition: null },
+      )
     } catch (err) {
       hapticNotify('error')
       setError(err instanceof ApiError ? err.code : 'network_error')
@@ -91,7 +103,11 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
       const dashboard = await api.resume(auth, confirmation)
       hapticNotify('success')
       setPendingConfirmation(null)
-      setLoad({ kind: 'ready', dashboard })
+      setLoad((prev) =>
+        prev.kind === 'ready'
+          ? { ...prev, dashboard }
+          : { kind: 'ready', dashboard, firstPosition: null },
+      )
     } catch (err) {
       hapticNotify('error')
       setError(err instanceof ApiError ? err.code : 'network_error')
@@ -234,9 +250,14 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
         </div>
       </div>
 
-      <div className="info-box">
-        Позиции видны в боте; полный кабинет позиций и истории появится в следующей версии.
-      </div>
+      {load.firstPosition && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="section-label" style={{ marginTop: 2 }}>
+            Активная позиция
+          </div>
+          <PositionCard position={load.firstPosition} />
+        </div>
+      )}
 
       {view.actionLabel === 'pause' && (
         <div className="btn-stack">
