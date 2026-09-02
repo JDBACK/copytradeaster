@@ -612,8 +612,18 @@ def render_activity(dto: ActivityPage, revision: int = 0) -> MenuView:
         lines.append("Пока нет безопасных событий.")
     else:
         for item in dto.items[:10]:
-            detail = f" — {item.detail}" if item.detail else ""
-            lines.append(f"{_when(item.occurred_at)} · {item.action}: {item.result}{detail}")
+            if item.status.value == "completed":
+                status_text = "Выполнено"
+            elif item.status.value == "pending":
+                if item.pending_age is not None:
+                    status_text = f"Выполняется ({item.pending_age} сек)"
+                else:
+                    status_text = "Выполняется"
+            else:
+                status_text = "Ошибка"
+            lines.append(f"{_when(item.occurred_at)} · {item.title} — {status_text}")
+            if item.remediation:
+                lines.append(f"  ↳ {item.remediation}")
     if dto.has_previous:
         builder.button(
             text="◀", callback_data=_cb(MenuAction.PAGE, revision, page=max(0, dto.page - 1))

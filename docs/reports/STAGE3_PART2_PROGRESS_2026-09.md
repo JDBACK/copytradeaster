@@ -74,10 +74,142 @@ Gates:
   - in-browser walkthrough мобильного viewport: пустой экран и активная карточка с предупреждением;
   - live acceptance на Aster Testnet: 8/8 фаз через реальный production copy engine (master → engine → follower `copyc1` → Mini App API → signed positionRisk/openOrders сверка → Stop/TP перестановка → partial close → warning → flat cleanup).
 
+## P2.2 — safe Activity timeline (Stage 3 part 2): CLOSED (2026-09-02, live acceptance passed)
+
+Backend boundary:
+
+- `ActivityItem` в `application/models.py` расширен безопасными полями
+  `category` (trade/system), `title`, `status` (completed/pending/failed),
+  `symbol`, `occurred_at` и optional `pending_age`/`remediation`; старые
+  `action`/`result`/`detail` удалены, `command_key`, `account_id`, addresses,
+  nonce, `client_order_id`, raw Aster code, payload, traceback и любые
+  внутренние exception-строки фильтруются на backend и никогда не
+  попадают в DTO.
+- `ActivityCategory` / `ActivityStatus` / `ActivityFilter` (all/trade/system)
+  в `application/models.py`; `ApplicationProtocol.activity` принимает
+  `filter`.
+- `_map_activity_item` и `_safe_activity_title` маппят journal kind →
+  safe Russian title (`Открыта позиция BTCUSDT`, `Поставлен защитный Stop · BTCUSDT`,
+  `Плечо подготовлено: 200× · BTCUSDT` и т.д.); `symbol` извлекается
+  строго из `payload.symbol` после JSON-парсинга с верхней границей и
+  whitelist символов; `pending_age` ограничен `now - occurred_at`;
+  `remediation` присутствует только для `failed`/`UNKNOWN` и не
+  содержит raw Aster code или `last_error`.
+- `_activity_rows` (SQL fallback) и `AppStage2RuntimeAdapter.read_activity`
+  выбирают `payload` дополнительно, чтобы backend мог извлечь `symbol` без
+  раскрытия остального JSON.
+- Транспорт: `POST /miniapp/api/activity` с валидацией Telegram initData
+  (или `CT_MINIAPP_DEV_UNSIGNED` для testnet dev session), тело
+  `{"page": N, "filter": "all|trade|system"}`; невалидный `page` или
+  `filter` → 400 с `invalid_input`; `application.activity` бросает
+  типизированный `ValidationError` → 400; прочие `ApplicationError` →
+  соответствующие 4xx/503.
+
+Frontend (`miniapp/`):
+
+- `types.ts`: `ActivityCategory`, `ActivityStatus`, `ActivityFilter`,
+  `ActivityItemDTO`, `ActivityPageDTO`; `api.activity(auth, filter, page)`.
+- `activityView.ts` — pure view-model (`dayBucket`, `groupActivityByDay`,
+  `activityStatusLabel`, `activityStatusTone`, `activityEmptyCopy`,
+  `isActivityStatus`); бакеты day вычисляются в UTC, чтобы
+  идентичный instant группировался одинаково в любой таймзоне.
+- `screens/ActivityScreen.tsx` — заменил interim `StubScreen` в
+  `AppShell.tsx`; заголовок «Активность», подзаголовок «Безопасный
+  журнал действий», три фильтра (Все/Сделки/Система), timeline с
+  группами Сегодня/Вчера/Ранее, глифы для completed/pending/failed
+  (зелёная галка / янтарная точка / красный крестик), русские titles
+  и statuses, pending-age секунды, remediation под failed-строками,
+  loading/error/empty states, кнопка «Показать ещё» с server-side
+  `page`+1, стабильный append без потери уже отображенных строк.
+  Строго read-only: ни торговых кнопок, ни raw-кодов, ни технических
+  payload. Wallet chip / testnet badge — как в `PositionsScreen`.
+- CSS: `.segmented`, `.activity-timeline`, `.activity-row`, `.activity-day-label`,
+  `.activity-marker`/`.activity-connector`, `.activity-status` (tone-*),
+  `.activity-remediation`, `.activity-safe-note`.
+
+Tests:
+
+- Unit (`tests/unit/application/test_service.py`):
+  - `test_activity_safe_mapping_filters_and_sorts` — полный набор journal
+    rows (open/close/stop/tp/cancel/leverage + pending + failed +
+    unknown), проверка safe DTO shape, фильтров trade/system/all,
+    pending_age (40–60s окно), типизированной remediation copy, и
+    недопустимости 17 запрещённых полей (command_key, account_id,
+    address, client_order_id, nonce, private_key, -1003, boom, …);
+  - `test_activity_pagination_boundary` — 25 MARKET_OPEN строк, точная
+    пагинация 10/10/5 через `page=0/1/2`, has_next/has_previous,
+    стабильность фильтра.
+  - `test_activity_paging_validation_and_notification_toggle` —
+    существующий, обновлён под новые поля и filter-валидацию.
+- HTTP (`tests/unit/miniapp/test_server.py`):
+  - `test_activity_endpoint_serializes_safe_dto` — сериализация DTO,
+    проверка отсутствия command_key/client_order_id/account_id/payload/address/nonce/private_key;
+  - `test_activity_endpoint_passes_page_and_filter` — проброс body params;
+  - `test_activity_endpoint_requires_auth` — 401 без initData/dev-header;
+  - `test_activity_endpoint_rejects_invalid_filter` — 400 на неизвестный
+    filter (валидация на HTTP boundary);
+  - `test_activity_endpoint_rejects_invalid_page` — 400 на отрицательную
+    страницу;
+  - `test_activity_endpoint_serializes_pending_age` — pending status
+    корректно сериализуется с `pending_age`.
+- Frontend (`miniapp/src/activity.test.tsx`, 11 tests) — pure view-model
+  + production `ActivityScreen` render:
+  - `activityStatusLabel`, `activityStatusTone`, `dayBucket` (UTC),
+    `groupActivityByDay`, `activityEmptyCopy`, `isActivityStatus`;
+  - `ActivityScreen` render в loading state: title, brand, testnet badge
+    или wallet chip, skeleton «Загрузка журнала»;
+  - рендер не содержит торговых кнопок (`<button` отсутствует), ни
+    close/reverse/buy/sell/закрыть/перевернуть/купить/продать, ни
+    command_key/client_order_id/account_id/private_key/nonce/payload/traceback.
+
+Live gate (Aster Testnet, `tests/testnet/test_live_activity_acceptance.py`):
+
+- Production copy engine: master открыл BTCUSDT LONG + Stop Market →
+  `projector.rebuild_full` + `reconcile_follower("copyc1")` →
+  `execution_commands` journal на `copyc1` (предварительно
+  `DELETE FROM execution_commands WHERE account_id='copyc1'`);
+- `POST /miniapp/api/activity` через production aiohttp path и реальный
+  `UserApplicationService`; Mini App endpoint вернул safe DTO с
+  `category: trade` / `title: "Открыта позиция BTCUSDT"` /
+  `status: completed` / `symbol: "BTCUSDT"` для open и
+  `"Поставлен защитный Stop · BTCUSDT"` для Stop;
+- trade-filter вернул ровно те же записи с `category == "trade"` и
+  `symbol == "BTCUSDT"`; system-filter вернул пустой список (в этом
+  цикле SET_LEVERAGE не пишется в journal, т.к. leverage уже
+  подготовлен через RAM candidate catalog) и при наличии
+  категоризирует как `system` с префиксом «Плечо»;
+- ни в одном item на проводе нет command_key / client_order_id /
+  account_id / payload / address / nonce / private_key или raw Aster
+  code (`MARKET_OPEN`, `PLACE_STOP`, `MARKET_CLOSE`, `SET_LEVERAGE`,
+  `-1003`);
+- partial close от мастера добавил `MARKET_CLOSE` row → Mini App
+  endpoint вернул `"Закрыта позиция BTCUSDT"`;
+- cleanup flat; повторный опрос endpoint подтвердил сохранение safe
+  DTO shape (никаких утечек после flatten).
+
+Gates (точные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
+
+- offline pytest: passed, coverage 87%, ruff check/format clean,
+  `git diff --check` clean;
+- frontend: vitest 75 passed / 9 файлов (11 новых в `activity.test.tsx`),
+  oxlint 0/0, `pnpm build` clean;
+- live: `tests/testnet/test_live_activity_acceptance.py` passed за 42.7s
+  против `https://fapi.asterdex-testnet.com`; `preview_miniapp_engine.py`
+  на порту 8091 подтвердил отдачу safe DTO через тот же endpoint
+  (3 trade items: `Закрыта позиция BTCUSDT`, `Поставлен защитный Stop · BTCUSDT`,
+  `Открыта позиция BTCUSDT`) и HTML `/miniapp/` с собранным bundle.
+
+Владелец не проводил Telegram WebView acceptance на current HEAD —
+скриншоты / Mini App walkthrough владельца остаются P2.2 backlog
+(см. общий Part 2 backlog ниже).
+
 ## Следующие подчасти
 
-- P2.2 — Activity (`04-activity`).
-- P2.3–P2.7 по адаптированному плану.
+- P2.3 — Settings root и Notifications (`06-settings`).
+- P2.4 — Risk on Stop (`05-risk-settings`).
+- P2.5 — System Status (`08-system-status`).
+- P2.6 — Account + Builder attestation (`07-account-builder`).
+- P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3.
 
 Открытые решения владельца (нужны перед соответствующими подчастями):
 
@@ -85,3 +217,10 @@ Gates:
 2. disconnect semantics: только локальный или + отдельный remote revoke
    (перед P2.6);
 3. auth-модель `/builder/userTrades` — bounded live probe (перед P2.7).
+
+Part 2 backlog (мелкая косметика, не блокирует переход к P2.3):
+
+- реальные Pause/Resume из shell Home на фактическом Telegram WebView;
+- safe-area/bottom nav на фактическом viewport владельца;
+- финальный owner screenshot current-HEAD для каждой экранной подчасти;
+- bounded $impeccable detector/browser pass на каждом экране.

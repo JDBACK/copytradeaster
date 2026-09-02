@@ -14,6 +14,7 @@ import {
   type RootTab,
 } from '../navigation'
 import { hapticImpact, setBackButton } from '../telegram'
+import { ActivityScreen } from '../screens/ActivityScreen'
 import { HomeScreen } from '../screens/HomeScreen'
 import { PositionsScreen } from '../screens/PositionsScreen'
 import { Brand } from './ui'
@@ -55,7 +56,7 @@ export function AppShell({
           <PositionsScreen auth={auth} accountMasked={accountMasked} />
         )}
         {route.tab === 'activity' && (
-          <StubScreen title="Активность" note="Безопасный журнал действий без секретов." />
+          <ActivityScreen auth={auth} accountMasked={accountMasked} />
         )}
         {route.tab === 'settings' && (
           <StubScreen title="Настройки" note="Настройки копирования и подключения." />

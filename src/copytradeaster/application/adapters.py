@@ -543,7 +543,7 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         if limit <= 0 or offset < 0:
             raise ValueError("activity bounds are invalid")
         return await self.db.fetchall(
-            "SELECT command_key, kind, status, created_at, updated_at "
+            "SELECT command_key, kind, status, payload, created_at, updated_at "
             "FROM execution_commands WHERE account_id=? "
             "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
             (account_id, int(limit), int(offset)),

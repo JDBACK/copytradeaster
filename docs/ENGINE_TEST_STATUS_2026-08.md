@@ -5,6 +5,79 @@
 
 ## Текущее состояние
 
+- **Stage 3, часть 2 (P2.2 — read-only Activity) — CLOSED (2026-09-02,
+  live acceptance на Aster Testnet через production copy engine):**
+  1. **Backend Application & Transport:** `ActivityCategory` (trade/system),
+     `ActivityStatus` (completed/pending/failed), `ActivityFilter`
+     (all/trade/system) и `ActivityItem` (category / title / status /
+     symbol / occurred_at + optional pending_age / remediation) в
+     `application/models.py`; старые `action`/`result`/`detail`
+     удалены, `command_key`, `account_id`, addresses, nonce,
+     `client_order_id`, raw Aster code, payload, traceback и внутренние
+     exception-строки фильтруются server-side и никогда не попадают в
+     DTO; `_activity_rows` и `AppStage2RuntimeAdapter.read_activity`
+     выбирают `payload` дополнительно, чтобы backend извлекал `symbol`
+     без раскрытия остального JSON; `POST /miniapp/api/activity` с
+     валидацией Telegram initData (или testnet dev-header), body
+     `{"page": N, "filter": "all|trade|system"}`, невалидный page/filter →
+     400, прочие `ApplicationError` → соответствующие коды.
+  2. **Frontend (`miniapp/`):** `types.ts` (`ActivityItemDTO`,
+     `ActivityPageDTO`); `api.activity(auth, filter, page)`; pure
+     view-model `activityView.ts` (`dayBucket` в UTC,
+     `groupActivityByDay`, `activityStatusLabel`/`Tone`,
+     `activityEmptyCopy`); `ActivityScreen` заменил interim
+     `StubScreen` в `AppShell.tsx`; заголовок «Активность», подзаголовок
+     «Безопасный журнал действий», фильтры Все/Сделки/Система, timeline
+     с группами Сегодня/Вчера/Ранее, глифы completed/pending/failed,
+     pending-age секунды, remediation под failed-строками, loading /
+     error / empty / pending states, стабильная пагинация «Показать ещё»
+     через `page+1` без потери уже отрисованных строк. Строго read-only:
+     ни торговых кнопок, ни raw-кодов, ни технических payload.
+     CSS: `.segmented`, `.activity-timeline`, `.activity-row`,
+     `.activity-day-label`, `.activity-marker`/`.activity-connector`,
+     `.activity-status` (tone-*), `.activity-remediation`,
+     `.activity-safe-note`.
+  3. **Offline gate (после P2.2):** offline pytest **757 passed / 2
+     skipped / 30 deselected** за ~31s, coverage **87%**; новые кейсы:
+     `test_activity_safe_mapping_filters_and_sorts` (полный набор
+     journal rows: open/close/stop/tp/cancel/leverage + pending + failed
+     + unknown; safe DTO shape; trade/system/all filters;
+     pending_age 40–60s окно; типизированная remediation copy;
+     проверка отсутствия 17 запрещённых полей, в т.ч. command_key,
+     account_id, address, client_order_id, nonce, private_key, -1003,
+     boom), `test_activity_pagination_boundary` (25 строк, точная
+     пагинация 10/10/5 через `page=0/1/2`, has_next/has_previous);
+     `test_activity_paging_validation_and_notification_toggle` дополнен
+     `ValidationError` на невалидный filter. Ruff check/format и
+     `git diff --check` clean.
+  4. **Frontend gate (после P2.2):** Vitest **75 passed / 9 файлов** (11
+     новых в `activity.test.tsx` — pure view-model + production
+     `ActivityScreen` render: title, brand, testnet badge / wallet chip,
+     loading state, отсутствие `<button` и торговых строк, отсутствие
+     command_key/client_order_id/account_id/private_key/nonce/payload/
+     traceback), oxlint 0/0, `tsc -b && vite build` clean.
+  5. **Live gate (Aster Testnet):** `tests/testnet/
+     test_live_activity_acceptance.py` — production copy engine: master
+     открыл BTCUSDT LONG + Stop Market, `rebuild_full` +
+     `reconcile_follower("copyc1")`, journal на `copyc1` через
+     production `Executor`/`SQLite`, `POST /miniapp/api/activity` через
+     production aiohttp path вернул safe DTO с
+     `category: trade` / `title: "Открыта позиция BTCUSDT"` /
+     `title: "Поставлен защитный Stop · BTCUSDT"` / `status: completed`
+     / `symbol: BTCUSDT`; trade-filter показал те же записи с
+     `category == "trade"` и `symbol == "BTCUSDT"`; system-filter
+     вернул пустой список (в этом цикле SET_LEVERAGE не пишется в
+     journal, leverage уже подготовлен через RAM candidate catalog);
+     partial close от мастера добавил `MARKET_CLOSE` row → Mini App
+     endpoint вернул `"Закрыта позиция BTCUSDT"`; ни в одном item на
+     проводе нет command_key / client_order_id / account_id / payload /
+     address / nonce / private_key или raw Aster code; cleanup flat
+     подтвердил сохранение safe DTO shape. `preview_miniapp_engine.py`
+     на порту 8091 подтвердил отдачу safe DTO через тот же endpoint и
+     HTML `/miniapp/` с собранным bundle. **passed за 42.7s.**
+     Владелец не проводил Telegram WebView acceptance на current HEAD —
+     owner-acceptance P2.2 остаётся P2.2 backlog.
+
 - **Stage 3, часть 2 (P2.1 — read-only Positions) — CORRECTIVE ROUND 2
   (2026-09-02, commit `111d2e5` под внешним ревью):**
   1. **Backend Application & Transport:** `PositionSummaryDTO`,

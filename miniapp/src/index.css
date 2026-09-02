@@ -774,3 +774,138 @@ body {
   align-items: center;
   gap: 8px;
 }
+
+/* --- segmented filter ----------------------------------------------------- */
+
+.segmented {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  padding: 4px;
+  gap: 2px;
+}
+
+.segmented-item {
+  flex: 1;
+  appearance: none;
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  font-size: 14px;
+  min-height: 36px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.segmented-item:hover {
+  color: var(--text);
+}
+
+.segmented-item.active {
+  background: color-mix(in srgb, var(--champagne) 18%, transparent);
+  color: var(--champagne);
+  font-weight: 600;
+}
+
+/* --- activity screen (эталон 04-activity) ------------------------------- */
+
+.activity-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.activity-day-label {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 6px 4px 0;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 44px 28px 1fr;
+  column-gap: 12px;
+  align-items: flex-start;
+  padding: 12px 12px 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-row:last-child {
+  border-bottom: none;
+}
+
+.activity-time {
+  color: var(--text-muted);
+  font-size: 13.5px;
+  padding-top: 1px;
+}
+
+.activity-marker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  align-self: stretch;
+  min-height: 28px;
+}
+
+.activity-connector {
+  position: absolute;
+  top: 28px;
+  bottom: -13px;
+  width: 1.5px;
+  background: var(--champagne);
+  opacity: 0.55;
+  z-index: 0;
+}
+
+.activity-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.activity-title {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.activity-status {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.activity-status.tone-success {
+  color: var(--success);
+}
+
+.activity-status.tone-warning {
+  color: var(--warning);
+}
+
+.activity-status.tone-danger {
+  color: var(--danger);
+}
+
+.activity-remediation {
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+.activity-safe-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}

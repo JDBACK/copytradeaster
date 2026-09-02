@@ -428,8 +428,11 @@ async def test_dashboard_status_risk_activity_and_notifications_are_safe(environ
     risk = await service.risk(7)
     assert risk.max_leverage == 3
     activity = await service.activity(7)
-    assert activity.items[0].action == "MARKET_OPEN"
-    assert activity.items[0].detail is None
+    assert activity.items[0].title == "Открыта позиция"
+    assert activity.items[0].category.value == "trade"
+    assert activity.items[0].status.value == "completed"
+    assert activity.items[0].remediation is None
+    assert activity.filter.value == "all"
 
     notifications = await service.notification_settings(7)
     assert notifications.pending == 1
@@ -1686,17 +1689,281 @@ async def test_activity_paging_validation_and_notification_toggle(environment):
     assert first.has_next is True
     assert second.has_previous is True
     assert second.page == 1
-    assert first.items[0].action == "KIND"
+    # The last inserted command (page-10) is `KIND!`; after the safe-code
+    # filter it surfaces as a system event with the generic safe title.
+    # The freshly inserted commands stay in the default PENDING journal
+    # state, so the status surface is the unified "pending" view-model.
+    assert first.items[0].category.value == "system"
+    assert first.items[0].title == "Действие выполнено"
+    assert first.items[0].status.value == "pending"
+    assert first.items[0].symbol is None
     with pytest.raises(ValidationError):
         await service.activity(7, page=-1)
     with pytest.raises(ValidationError):
         await service.activity(7, page=True)
+    with pytest.raises(ValidationError):
+        await service.activity(7, filter="invalid_filter")  # type: ignore[arg-type]
 
     disabled = await service.set_notifications(7, False)
     assert disabled.enabled is False
     assert (await service.notification_settings(7)).enabled is False
     with pytest.raises(ValidationError):
         await service.set_notifications(7, "false")  # type: ignore[arg-type]
+
+
+async def test_activity_safe_mapping_filters_and_sorts(environment):
+    """The activity view-model never leaks journal internals to the UI.
+
+    We populate a representative mix of journal rows: trade kinds (open /
+    close / stop / tp / cancel), the system SET_LEVERAGE row, a
+    PENDING/SENDING/SUBMITTED in-flight entry, a FAILED entry, and an
+    UNKNOWN entry.  The test then asserts:
+
+    * all forbidden fields stay out of the DTO;
+    * categories split cleanly into trade / system;
+    * filtering by ``ActivityFilter`` returns exactly the expected subset;
+    * pagination + sort remain stable (latest ``updated_at`` first,
+      ``command_key`` tiebreak);
+    * the pending entry carries a bounded ``pending_age`` and no remediation;
+    * failed / unknown entries carry typed remediation copy.
+    """
+    import json
+
+    from copytradeaster.application.models import ActivityCategory
+
+    db, runtime, _, clock, service = environment
+    commands = CommandRepo(db)
+    now = clock()
+    # Stagger updated_at so the ordering assertion is unambiguous.
+    base = now - timedelta(minutes=30)
+    rows = [
+        {
+            "command_key": "k-trade-open",
+            "kind": "MARKET_OPEN",
+            "status": "CONFIRMED",
+            "payload": {"symbol": "BTCUSDT", "side": "BUY"},
+            "updated_at": (base + timedelta(minutes=2)).isoformat(),
+        },
+        {
+            "command_key": "k-trade-stop",
+            "kind": "PLACE_STOP",
+            "status": "CONFIRMED",
+            "payload": {"symbol": "BTCUSDT", "type": "STOP_MARKET"},
+            "updated_at": (base + timedelta(minutes=3)).isoformat(),
+        },
+        {
+            "command_key": "k-trade-close",
+            "kind": "MARKET_CLOSE",
+            "status": "CONFIRMED",
+            "payload": {"symbol": "ETHUSDT", "side": "SELL"},
+            "updated_at": (base + timedelta(minutes=4)).isoformat(),
+        },
+        {
+            "command_key": "k-sys-leverage",
+            "kind": "SET_LEVERAGE",
+            "status": "CONFIRMED",
+            "payload": {"symbol": "BTCUSDT", "leverage": "200"},
+            "updated_at": (base + timedelta(minutes=5)).isoformat(),
+        },
+        {
+            "command_key": "k-trade-cancel",
+            "kind": "CANCEL_ORDER",
+            "status": "CONFIRMED",
+            "payload": {"symbol": "BTCUSDT"},
+            "updated_at": (base + timedelta(minutes=6)).isoformat(),
+        },
+        {
+            "command_key": "k-trade-pending",
+            "kind": "MARKET_OPEN",
+            "status": "SUBMITTED",
+            "payload": {"symbol": "SOLUSDT", "side": "BUY"},
+            # 42 seconds in-flight when the service reads the row.
+            "updated_at": (now - timedelta(seconds=42)).isoformat(),
+        },
+        {
+            "command_key": "k-trade-failed",
+            "kind": "MARKET_OPEN",
+            "status": "FAILED",
+            "last_error": "exchange error -1003 boom",
+            "payload": {"symbol": "BTCUSDT", "side": "BUY"},
+            "updated_at": (base + timedelta(minutes=7)).isoformat(),
+        },
+        {
+            "command_key": "k-trade-unknown",
+            "kind": "MARKET_CLOSE",
+            "status": "UNKNOWN",
+            "payload": {"symbol": "ETHUSDT", "side": "SELL"},
+            "updated_at": (base + timedelta(minutes=8)).isoformat(),
+        },
+    ]
+    for row in rows:
+        payload_json = json.dumps(row["payload"], sort_keys=True)
+        await commands.insert(
+            row["command_key"],
+            "tg-7",
+            None,
+            row["kind"],
+            payload_json,
+            1,
+            f"ct-{row['command_key']}",
+        )
+        if row["status"] != "PENDING":
+            await db.execute_write(
+                "UPDATE execution_commands SET status=?, updated_at=?, "
+                "last_error=? WHERE command_key=?",
+                (row["status"], row["updated_at"], row.get("last_error"), row["command_key"]),
+            )
+
+    # --- default (all) -------------------------------------------------------
+    all_page = await service.activity(7)
+    assert all_page.filter.value == "all"
+    assert all_page.page == 0
+    assert all_page.has_next is False
+    titles = [item.title for item in all_page.items]
+    # Newest first by ``updated_at`` (then ``command_key`` tiebreak).  The
+    # pending row is the most recent (now − 42s), the unknown row is the
+    # second newest (base + 8m), and so on.  Both open rows fall into
+    # ascending order, with ``k-trade-open`` sorting after ``k-trade-failed``
+    # because they share the same kind and the tiebreak is the command_key.
+    assert titles == [
+        "Открыта позиция SOLUSDT",
+        "Закрыта позиция ETHUSDT",
+        "Открыта позиция BTCUSDT",
+        "Отменён ордер · BTCUSDT",
+        "Плечо подготовлено: 200× · BTCUSDT",
+        "Закрыта позиция ETHUSDT",
+        "Поставлен защитный Stop · BTCUSDT",
+        "Открыта позиция BTCUSDT",
+    ]
+
+    # --- filter trade --------------------------------------------------------
+    trade_page = await service.activity(7, filter="trade")
+    trade_categories = {item.category for item in trade_page.items}
+    assert trade_categories == {ActivityCategory.TRADE}
+    assert all(item.symbol for item in trade_page.items)
+    assert trade_page.filter.value == "trade"
+
+    # --- filter system -------------------------------------------------------
+    system_page = await service.activity(7, filter="system")
+    assert {item.category for item in system_page.items} == {ActivityCategory.SYSTEM}
+    assert all(item.title.startswith("Плечо") for item in system_page.items)
+
+    # --- filter=str variants -------------------------------------------------
+    by_string = await service.activity(7, filter="trade")
+    assert [item.title for item in by_string.items] == [item.title for item in trade_page.items]
+
+    # --- pending entry -------------------------------------------------------
+    pending = next(item for item in all_page.items if item.status.value == "pending")
+    assert pending.symbol == "SOLUSDT"
+    assert pending.pending_age is not None and 40 <= pending.pending_age <= 60
+    assert pending.remediation is None
+
+    # --- failed entry: remediation present, safe text only ------------------
+    failed = next(
+        item
+        for item in all_page.items
+        if item.status.value == "failed"
+        and item.title == "Открыта позиция BTCUSDT"
+        and item.remediation is not None
+        and "Повторите" in item.remediation
+    )
+    assert "-1003" not in failed.remediation  # raw exchange code is filtered
+    assert "boom" not in failed.remediation  # raw exception text is filtered
+
+    # --- unknown entry: distinct remediation copy ----------------------------
+    unknown = next(
+        item
+        for item in all_page.items
+        if item.status.value == "failed" and item.title == "Закрыта позиция ETHUSDT"
+    )
+    assert "Проверьте" in unknown.remediation
+    assert "Повторите" not in unknown.remediation
+
+    # --- forbidden fields never appear on the DTO ----------------------------
+    for item in all_page.items:
+        for forbidden in (
+            "command_key",
+            "k-trade-open",
+            "k-trade-stop",
+            "k-trade-close",
+            "k-sys-leverage",
+            "k-trade-pending",
+            "k-trade-failed",
+            "k-trade-unknown",
+            "k-trade-cancel",
+            "tg-7",
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "ct-k-trade-open",
+            "client_order_id",
+            "nonce",
+            "-1003",
+            "boom",
+        ):
+            assert forbidden not in (item.title or "")
+
+
+def _as_iso_datetime(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+async def test_activity_pagination_boundary(environment):
+    """Pagination is stable: pages slice the same SELECT in order."""
+    from copytradeaster.application.models import ActivityCategory
+
+    db, _, _, _, service = environment
+    commands = CommandRepo(db)
+    for index in range(25):
+        await commands.insert(
+            f"pg-{index:02d}",
+            "tg-7",
+            None,
+            "MARKET_OPEN",
+            '{"symbol":"BTCUSDT"}',
+            1,
+            f"ct-pg-{index:02d}",
+        )
+        await db.execute_write(
+            "UPDATE execution_commands SET status='CONFIRMED' WHERE command_key=?",
+            (f"pg-{index:02d}",),
+        )
+
+    page0 = await service.activity(7)
+    page1 = await service.activity(7, page=1)
+    page2 = await service.activity(7, page=2)
+    page3 = await service.activity(7, page=3)
+
+    assert page0.has_next is True
+    assert page1.has_next is True
+    assert page2.has_next is False
+    assert page3.has_next is False
+    assert page0.has_previous is False
+    assert page1.has_previous is True
+    assert page2.has_previous is True
+    assert page3.has_previous is True
+
+    assert len(page0.items) == 10
+    assert len(page1.items) == 10
+    assert len(page2.items) == 5
+    assert page3.items == ()
+
+    # Each item is a trade event with the expected safe title.
+    seen_symbols = []
+    for page in (page0, page1, page2):
+        for item in page.items:
+            assert item.category is ActivityCategory.TRADE
+            assert item.status.value == "completed"
+            assert item.symbol == "BTCUSDT"
+            assert item.title == "Открыта позиция BTCUSDT"
+            seen_symbols.append(item.symbol)
+    assert seen_symbols == ["BTCUSDT"] * 25
 
 
 async def test_permission_refresh_failures_and_expiry_fail_closed(environment):

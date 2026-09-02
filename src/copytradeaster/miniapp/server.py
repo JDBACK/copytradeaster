@@ -32,6 +32,7 @@ from aiogram.utils.web_app import safe_parse_webapp_init_data
 from aiohttp import web
 
 from copytradeaster.application.models import (
+    ActivityFilter,
     ApplicationError,
     ApplicationProtocol,
     AuthorizationError,
@@ -200,6 +201,24 @@ def create_miniapp_app(
         }
         try:
             return _json_dto(await application.positions(user_id, refresh=refresh))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def activity(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request) or {}
+        page_raw = body.get("page", 0)
+        if isinstance(page_raw, bool) or not isinstance(page_raw, int) or page_raw < 0:
+            return _json_error(400, "invalid_input", "Некорректный номер страницы журнала.")
+        filter_raw = body.get("filter", "all")
+        if not isinstance(filter_raw, str) or filter_raw not in {
+            value.value for value in ActivityFilter
+        }:
+            return _json_error(400, "invalid_input", "Некорректный фильтр журнала.")
+        try:
+            return _json_dto(await application.activity(user_id, page=page_raw, filter=filter_raw))
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
@@ -376,6 +395,7 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/client-log", client_log)
     app.router.add_post("/miniapp/api/dashboard", dashboard)
     app.router.add_post("/miniapp/api/positions", positions)
+    app.router.add_post("/miniapp/api/activity", activity)
     app.router.add_post("/miniapp/api/pause", pause)
     app.router.add_post("/miniapp/api/resume", resume)
     app.router.add_post("/miniapp/api/confirmation/begin", confirmation_begin)

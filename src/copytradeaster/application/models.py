@@ -179,12 +179,57 @@ class RiskDTO:
     risk_base: str = "available_balance"
 
 
+class ActivityCategory(StrEnum):
+    """High-level grouping for the read-only Activity timeline.
+
+    ``system`` covers preparation and engine state changes (e.g. leverage
+    control plane); ``trade`` covers order-affecting actions such as entries,
+    closes, and protective orders.
+    """
+
+    TRADE = "trade"
+    SYSTEM = "system"
+
+
+class ActivityStatus(StrEnum):
+    """Terminal or in-flight state exposed to the Mini App.
+
+    No raw ``execution_commands.status`` code is ever surfaced; the backend
+    collapses PENDING/SENDING/SUBMITTED into ``pending`` (with a bounded
+    ``pending_age``), CONFIRMED into ``completed``, and UNKNOWN/FAILED into
+    ``failed`` (with a typed remediation copy).
+    """
+
+    COMPLETED = "completed"
+    PENDING = "pending"
+    FAILED = "failed"
+
+
+class ActivityFilter(StrEnum):
+    """Filter values accepted by the activity use case and HTTP endpoint."""
+
+    ALL = "all"
+    TRADE = "trade"
+    SYSTEM = "system"
+
+
 @dataclass(frozen=True, slots=True)
 class ActivityItem:
-    occurred_at: datetime | None
-    action: str
-    result: str
-    detail: str | None = None
+    """Safe Activity DTO shown in the Mini App timeline.
+
+    Only normalized values reach the UI.  ``command_key``, ``account_id``,
+    addresses, nonces, ``client_order_id``, raw Aster codes, the journal
+    ``payload`` JSON, and any internal exception text are filtered server-side
+    and never serialized into a Mini App response.
+    """
+
+    category: ActivityCategory
+    title: str
+    status: ActivityStatus
+    symbol: str | None = None
+    occurred_at: datetime | None = None
+    pending_age: int | None = None
+    remediation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +238,7 @@ class ActivityPage:
     page: int = 0
     has_previous: bool = False
     has_next: bool = False
+    filter: ActivityFilter = ActivityFilter.ALL
 
 
 class PositionSide(StrEnum):
@@ -424,7 +470,9 @@ class ApplicationProtocol(Protocol):
 
     async def risk(self, user_id: int) -> RiskDTO: ...
 
-    async def activity(self, user_id: int, page: int = 0) -> ActivityPage: ...
+    async def activity(
+        self, user_id: int, page: int = 0, filter: ActivityFilter = ActivityFilter.ALL
+    ) -> ActivityPage: ...
 
     async def notification_settings(self, user_id: int) -> NotificationSettingsDTO: ...
 

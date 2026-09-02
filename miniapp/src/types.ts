@@ -105,3 +105,27 @@ export interface PositionPageDTO {
   is_stale: boolean
   message?: string | null
 }
+
+export type ActivityCategory = 'trade' | 'system'
+
+export type ActivityStatus = 'completed' | 'pending' | 'failed'
+
+export type ActivityFilter = 'all' | 'trade' | 'system'
+
+export interface ActivityItemDTO {
+  category: ActivityCategory
+  title: string
+  status: ActivityStatus
+  symbol?: string | null
+  occurred_at?: string | null
+  pending_age?: number | null
+  remediation?: string | null
+}
+
+export interface ActivityPageDTO {
+  items: ActivityItemDTO[]
+  page: number
+  has_previous: boolean
+  has_next: boolean
+  filter: ActivityFilter
+}

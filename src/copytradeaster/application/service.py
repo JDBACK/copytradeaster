@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 import secrets
 import time
@@ -24,8 +25,11 @@ from typing import Any, Protocol
 from copytradeaster.application.models import (
     AccessRequestDTO,
     AccessRequestStatus,
+    ActivityCategory,
+    ActivityFilter,
     ActivityItem,
     ActivityPage,
+    ActivityStatus,
     AdminAccessRequestPage,
     AdminDashboardDTO,
     AdminFollowerItem,
@@ -265,6 +269,141 @@ def _as_datetime(value: Any) -> datetime | None:
 def _safe_code(value: Any, fallback: str = "unknown", limit: int = 64) -> str:
     text = _SAFE_CODE.sub("_", str(value or ""))[:limit].strip("_")
     return text or fallback
+
+
+_TRADE_KINDS = frozenset(
+    {
+        "MARKET_OPEN",
+        "MARKET_CLOSE",
+        "PLACE_STOP",
+        "PLACE_TP",
+        "CANCEL_ORDER",
+    }
+)
+_SYSTEM_KINDS = frozenset({"SET_LEVERAGE"})
+
+
+def _safe_activity_category(kind: str) -> ActivityCategory:
+    if kind in _TRADE_KINDS:
+        return ActivityCategory.TRADE
+    if kind in _SYSTEM_KINDS:
+        return ActivityCategory.SYSTEM
+    return ActivityCategory.SYSTEM
+
+
+def _parse_activity_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, Mapping):
+        return {str(key): value for key, value in payload.items()}
+    if not isinstance(payload, str) or not payload:
+        return {}
+    try:
+        parsed = json.loads(payload)
+    except (TypeError, ValueError):
+        return {}
+    if isinstance(parsed, Mapping):
+        return {str(key): value for key, value in parsed.items()}
+    return {}
+
+
+def _safe_activity_symbol(payload: Mapping[str, Any]) -> str | None:
+    raw = payload.get("symbol")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip().upper()
+    if not text or len(text) > 24 or not all(ch.isalnum() or ch in "-_/" for ch in text):
+        return None
+    return text
+
+
+def _safe_activity_leverage(payload: Mapping[str, Any]) -> int | None:
+    raw = payload.get("leverage")
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value > 1000:
+        return None
+    return value
+
+
+def _safe_activity_title(kind: str, payload: Mapping[str, Any], symbol: str | None) -> str:
+    if kind == "MARKET_OPEN":
+        if symbol:
+            return f"Открыта позиция {symbol}"
+        return "Открыта позиция"
+    if kind == "MARKET_CLOSE":
+        if symbol:
+            return f"Закрыта позиция {symbol}"
+        return "Закрыта позиция"
+    if kind == "PLACE_STOP":
+        if symbol:
+            return f"Поставлен защитный Stop · {symbol}"
+        return "Поставлен защитный Stop"
+    if kind == "PLACE_TP":
+        if symbol:
+            return f"Поставлен Take Profit · {symbol}"
+        return "Поставлен Take Profit"
+    if kind == "CANCEL_ORDER":
+        if symbol:
+            return f"Отменён ордер · {symbol}"
+        return "Отменён ордер"
+    if kind == "SET_LEVERAGE":
+        leverage = _safe_activity_leverage(payload)
+        if leverage is not None and symbol:
+            return f"Плечо подготовлено: {leverage}× · {symbol}"
+        if leverage is not None:
+            return f"Плечо подготовлено: {leverage}×"
+        if symbol:
+            return f"Плечо обновлено · {symbol}"
+        return "Плечо обновлено"
+    return "Действие выполнено"
+
+
+def _safe_activity_status(
+    raw_status: Any,
+    occurred_at: datetime | None,
+    now: datetime,
+) -> tuple[ActivityStatus, int | None, str | None]:
+    status = _safe_code(raw_status, "UNKNOWN").upper()
+    if status in {"PENDING", "SENDING", "SUBMITTED"}:
+        age: int | None = None
+        if occurred_at is not None:
+            try:
+                age = max(int((now - occurred_at).total_seconds()), 0)
+            except (TypeError, ValueError, OverflowError):
+                age = None
+        return ActivityStatus.PENDING, age, None
+    if status == "CONFIRMED":
+        return ActivityStatus.COMPLETED, None, None
+    if status in {"UNKNOWN", "FAILED"}:
+        remediation = (
+            "Проверьте фактические позиции и при необходимости нажмите «Обновить»."
+            if status == "UNKNOWN"
+            else "Действие не выполнено. Повторите позже или обновите страницу."
+        )
+        return ActivityStatus.FAILED, None, remediation
+    return ActivityStatus.FAILED, None, "Действие в неизвестном состоянии."
+
+
+def _coerce_activity_filter(value: Any) -> ActivityFilter:
+    if isinstance(value, ActivityFilter):
+        return value
+    if isinstance(value, str):
+        try:
+            return ActivityFilter(value.strip().lower())
+        except ValueError:
+            pass
+    raise ValidationError("activity filter is invalid")
+
+
+def _matches_activity_filter(category: ActivityCategory, activity_filter: ActivityFilter) -> bool:
+    if activity_filter is ActivityFilter.ALL:
+        return True
+    if activity_filter is ActivityFilter.TRADE:
+        return category is ActivityCategory.TRADE
+    if activity_filter is ActivityFilter.SYSTEM:
+        return category is ActivityCategory.SYSTEM
+    return False
 
 
 def _is_true(value: Any) -> bool:
@@ -1018,11 +1157,41 @@ class UserApplicationService:
             raise ServiceUnavailableError("activity read is unavailable")
         return list(
             await fetchall(
-                "SELECT command_key, kind, status, created_at, updated_at "
+                "SELECT command_key, kind, status, payload, created_at, updated_at "
                 "FROM execution_commands WHERE account_id=? "
                 "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
                 (account_id, self._activity_page_size + 1, offset),
             )
+        )
+
+    @staticmethod
+    def _map_activity_item(row: Any, now: datetime) -> ActivityItem:
+        """Map a raw ``execution_commands`` row into the safe Activity DTO.
+
+        The mapping is deliberately the only place that knows about journal
+        payload internals.  No ``command_key``, ``account_id``,
+        ``client_order_id``, raw Aster code, payload JSON, address, nonce, or
+        internal exception text ever leaves this helper.
+        """
+        kind = _safe_code(_row_value(row, "kind"), "command")
+        raw_status = _row_value(row, "status")
+        payload = _row_value(row, "payload")
+        parsed_payload = _parse_activity_payload(payload)
+        symbol = _safe_activity_symbol(parsed_payload)
+        occurred_at = _as_datetime(_row_value(row, "updated_at")) or _as_datetime(
+            _row_value(row, "created_at")
+        )
+        category = _safe_activity_category(kind)
+        title = _safe_activity_title(kind, parsed_payload, symbol)
+        status, pending_age, remediation = _safe_activity_status(raw_status, occurred_at, now)
+        return ActivityItem(
+            category=category,
+            title=title,
+            status=status,
+            symbol=symbol,
+            occurred_at=occurred_at,
+            pending_age=pending_age,
+            remediation=remediation,
         )
 
     @staticmethod
@@ -1469,32 +1638,34 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("risk settings are unavailable") from None
 
-    async def activity(self, user_id: int, page: int = 0) -> ActivityPage:
+    async def activity(
+        self,
+        user_id: int,
+        page: int = 0,
+        filter: ActivityFilter | str = ActivityFilter.ALL,
+    ) -> ActivityPage:
         try:
             _, _, _ = await self._owned_account(user_id, allow_disabled=True)
             if isinstance(page, bool) or not isinstance(page, int) or page < 0:
                 raise ValidationError("activity page is invalid")
+            activity_filter = _coerce_activity_filter(filter)
             context = await self._context(user_id)
             rows = await self._activity_rows(
                 str(context.account_id), page * self._activity_page_size
             )
-            has_next = len(rows) > self._activity_page_size
-            items = tuple(
-                ActivityItem(
-                    occurred_at=_as_datetime(
-                        _row_value(row, "updated_at", _row_value(row, "created_at"))
-                    ),
-                    action=_safe_code(_row_value(row, "kind"), "command"),
-                    result=_safe_code(_row_value(row, "status"), "UNKNOWN"),
-                    detail=None,
-                )
-                for row in rows[: self._activity_page_size]
-            )
+            now = self._now()
+            items: list[ActivityItem] = []
+            for row in rows:
+                item = self._map_activity_item(row, now)
+                if _matches_activity_filter(item.category, activity_filter):
+                    items.append(item)
+            has_next = len(items) > self._activity_page_size
             return ActivityPage(
-                items=items,
+                items=tuple(items[: self._activity_page_size]),
                 page=page,
                 has_previous=page > 0,
                 has_next=has_next,
+                filter=activity_filter,
             )
         except _SAFE_ERRORS:
             raise

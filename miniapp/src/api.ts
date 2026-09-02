@@ -1,6 +1,8 @@
 /** Typed API client: every call carries the signed Telegram initData header. */
 
 import type {
+  ActivityFilter,
+  ActivityPageDTO,
   BuilderOnboardedDTO,
   BuilderPrepareDTO,
   ConfirmationDTO,
@@ -99,6 +101,13 @@ export const api = {
     refresh = false,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<PositionPageDTO>('/miniapp/api/positions', { refresh }, auth, options),
+
+  activity: (
+    auth: AuthContext,
+    filter: ActivityFilter = 'all',
+    page = 0,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<ActivityPageDTO>('/miniapp/api/activity', { filter, page }, auth, options),
   pause: (auth: AuthContext) => post<DashboardDTO>('/miniapp/api/pause', {}, auth),
 
   resume: (auth: AuthContext, confirmation?: ConfirmationDTO) =>

@@ -14,6 +14,11 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from copytradeaster.application.models import (
+    ActivityCategory,
+    ActivityFilter,
+    ActivityItem,
+    ActivityPage,
+    ActivityStatus,
     AuthorizationError,
     BuilderOnboardedDTO,
     BuilderPrepareDTO,
@@ -85,11 +90,31 @@ class FakeApplication:
     )
     dashboard_dto: DashboardDTO = field(default_factory=_dashboard_dto)
     positions_dto: PositionPageDTO = field(default_factory=lambda: PositionPageDTO())
+    activity_dto: ActivityPage = field(
+        default_factory=lambda: ActivityPage(
+            items=(
+                ActivityItem(
+                    category=ActivityCategory.TRADE,
+                    title="Открыта позиция BTCUSDT",
+                    status=ActivityStatus.COMPLETED,
+                    symbol="BTCUSDT",
+                    occurred_at=datetime(2026, 8, 31, 12, 41, tzinfo=UTC),
+                    pending_age=None,
+                    remediation=None,
+                ),
+            ),
+            page=0,
+            has_previous=False,
+            has_next=True,
+            filter=ActivityFilter.ALL,
+        )
+    )
     prepare_calls: list = field(default_factory=list)
     submit_calls: list = field(default_factory=list)
     resume_attempt_calls: list = field(default_factory=list)
     dashboard_calls: list = field(default_factory=list)
     positions_calls: list = field(default_factory=list)
+    activity_calls: list = field(default_factory=list)
     pause_calls: list = field(default_factory=list)
     resume_calls: list = field(default_factory=list)
     begin_calls: list = field(default_factory=list)
@@ -126,6 +151,18 @@ class FakeApplication:
         if self.fail_with:
             raise self.fail_with
         return self.positions_dto
+
+    async def activity(
+        self,
+        user_id: int,
+        page: int = 0,
+        filter: ActivityFilter = ActivityFilter.ALL,
+    ) -> ActivityPage:
+        self.user_id_seen = user_id
+        self.activity_calls.append((user_id, page, filter))
+        if self.fail_with:
+            raise self.fail_with
+        return self.activity_dto
 
     async def builder_prepare(self, user_id: int, user_address: str) -> BuilderPrepareDTO:
         self.prepare_calls.append((user_id, user_address))
@@ -625,3 +662,131 @@ async def test_client_log_sanitizes_input(client):
     )
     assert resp.status == 200
     assert (await resp.json())["ok"] is True
+
+
+# --- activity surface --------------------------------------------------------
+
+
+async def test_activity_endpoint_serializes_safe_dto(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    fake_app.activity_dto = ActivityPage(
+        items=(
+            ActivityItem(
+                category=ActivityCategory.TRADE,
+                title="Открыта позиция BTCUSDT",
+                status=ActivityStatus.COMPLETED,
+                symbol="BTCUSDT",
+                occurred_at=datetime(2026, 8, 31, 12, 41, tzinfo=UTC),
+                pending_age=None,
+                remediation=None,
+            ),
+            ActivityItem(
+                category=ActivityCategory.SYSTEM,
+                title="Плечо подготовлено: 200× · BTCUSDT",
+                status=ActivityStatus.FAILED,
+                symbol="BTCUSDT",
+                occurred_at=datetime(2026, 8, 31, 12, 40, tzinfo=UTC),
+                pending_age=None,
+                remediation="Проверьте фактические позиции.",
+            ),
+        ),
+        page=0,
+        has_previous=False,
+        has_next=False,
+        filter=ActivityFilter.ALL,
+    )
+    resp = await client.post("/miniapp/api/activity", headers=_auth_header(init_data))
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["filter"] == "all"
+    assert data["has_next"] is False
+    assert len(data["items"]) == 2
+    assert data["items"][0]["title"] == "Открыта позиция BTCUSDT"
+    assert data["items"][0]["status"] == "completed"
+    assert data["items"][0]["category"] == "trade"
+    assert data["items"][0]["symbol"] == "BTCUSDT"
+    assert data["items"][1]["status"] == "failed"
+    assert data["items"][1]["remediation"] == "Проверьте фактические позиции."
+    # No forbidden internal fields ever reach the wire.
+    for item in data["items"]:
+        for forbidden in (
+            "command_key",
+            "client_order_id",
+            "account_id",
+            "payload",
+            "address",
+            "nonce",
+            "private_key",
+        ):
+            assert forbidden not in item
+    assert fake_app.activity_calls == [(777, 0, "all")]
+
+
+async def test_activity_endpoint_passes_page_and_filter(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/activity",
+        json={"page": 2, "filter": "trade"},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 200
+    assert fake_app.activity_calls == [(777, 2, "trade")]
+
+
+async def test_activity_endpoint_requires_auth(client, fake_app):
+    resp = await client.post("/miniapp/api/activity", json={"filter": "trade"})
+    assert resp.status == 401
+    assert fake_app.activity_calls == []
+
+
+async def test_activity_endpoint_rejects_invalid_filter(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/activity",
+        json={"filter": "bogus"},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 400
+    assert fake_app.activity_calls == []
+
+
+async def test_activity_endpoint_rejects_invalid_page(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/activity",
+        json={"page": -3},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 400
+    assert fake_app.activity_calls == []
+
+
+async def test_activity_endpoint_serializes_pending_age(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    fake_app.activity_dto = ActivityPage(
+        items=(
+            ActivityItem(
+                category=ActivityCategory.TRADE,
+                title="Открыта позиция SOLUSDT",
+                status=ActivityStatus.PENDING,
+                symbol="SOLUSDT",
+                occurred_at=datetime(2026, 8, 31, 12, 39, tzinfo=UTC),
+                pending_age=42,
+                remediation=None,
+            ),
+        ),
+        page=0,
+        has_previous=False,
+        has_next=False,
+        filter=ActivityFilter.TRADE,
+    )
+    resp = await client.post(
+        "/miniapp/api/activity",
+        json={"filter": "trade"},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["items"][0]["status"] == "pending"
+    assert data["items"][0]["pending_age"] == 42
+    assert data["filter"] == "trade"

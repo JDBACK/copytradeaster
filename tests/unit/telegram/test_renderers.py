@@ -6,8 +6,10 @@ from decimal import Decimal
 import pytest
 
 from copytradeaster.application.models import (
+    ActivityCategory,
     ActivityItem,
     ActivityPage,
+    ActivityStatus,
     AdminDashboardDTO,
     AdminFollowerItem,
     AdminFollowerPage,
@@ -227,9 +229,11 @@ def test_renderers_cover_degraded_activity_notifications_help_and_admin_resume()
             items=(
                 ActivityItem(
                     occurred_at=datetime(2026, 8, 24, 9, 0, tzinfo=UTC),
-                    action="pause",
-                    result="ok",
-                    detail="safe detail",
+                    category=ActivityCategory.TRADE,
+                    title="Открыта позиция BTCUSDT",
+                    status=ActivityStatus.FAILED,
+                    symbol="BTCUSDT",
+                    remediation="Действие не выполнено. Повторите позже.",
                 ),
             ),
             page=2,
@@ -238,7 +242,9 @@ def test_renderers_cover_degraded_activity_notifications_help_and_admin_resume()
         ),
         revision=2,
     )
-    assert "safe detail" in activity.text
+    assert "Открыта позиция BTCUSDT" in activity.text
+    assert "Ошибка" in activity.text
+    assert "Действие не выполнено" in activity.text
     assert MenuAction.PAGE in _actions(activity)
 
     empty_activity = render_activity(ActivityPage())
