@@ -32,7 +32,14 @@ from copytradeaster.application.adapters import AppStage2RuntimeAdapter
 from copytradeaster.application.service import UserApplicationService
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
 from copytradeaster.config import Settings
-from copytradeaster.domain.models import PosSide, RiskPolicy, Side
+from copytradeaster.domain.models import (
+    ActionKind,
+    ExecutionAction,
+    ExecutionPlan,
+    PosSide,
+    RiskPolicy,
+    Side,
+)
 from copytradeaster.miniapp.server import create_miniapp_app
 from copytradeaster.storage.repositories import (
     SettingsRepo,
@@ -164,6 +171,10 @@ async def live_app_stack():
     # served by the activity endpoint).
     await app.db.execute_write("DELETE FROM execution_commands WHERE account_id=?", ("copyc1",))
 
+    # Baseline exchange leverage: Phase 2b drifts it via a journaled
+    # SET_LEVERAGE; restore it in teardown for cross-test repeatability.
+    baseline_leverage = app.leverage.confirmed("copyc1", SYMBOL)
+
     yield {
         "app": app,
         "client": app.master_client,
@@ -172,6 +183,9 @@ async def live_app_stack():
         "hedge_follower": hedge_follower,
     }
 
+    if baseline_leverage is not None:
+        with contextlib.suppress(Exception):
+            await app.master_client.set_leverage("copyc1", SYMBOL, int(baseline_leverage))
     with contextlib.suppress(Exception):
         await _flatten(app.master_client, "main", hedge_master, "post-m")
     with contextlib.suppress(Exception):
@@ -225,6 +239,7 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     order_qty = D("0.002")
 
     ts = int(time.time() * 1000)
+
     await _place(
         client,
         "main",
@@ -255,6 +270,44 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     await app.projector.rebuild_full(client, "main")
     await app.reconcile_follower("copyc1", reason="test_live_activity_open")
 
+    # Phase 2b: create a real system (SET_LEVERAGE) journal event.
+    #
+    # The coordinator entry path can never journal SET_LEVERAGE by itself:
+    # a drifted exchange leverage is folded into the control plane by
+    # `observe()` on the very snapshot that reveals it, which fail-closes the
+    # entry with LEVERAGE_NOT_READY and re-provisions outside the journal.
+    # The production path for journaled leverage transitions is the Executor
+    # (same as tests/testnet/test_leverage_control_plane_live.py): submit a
+    # real SET_LEVERAGE plan, which signs a live POST /leverage against the
+    # testnet and persists the command into the same execution_commands
+    # journal the activity endpoint reads.
+    #
+    # It runs AFTER the open cycle on purpose: the resulting exchange-side
+    # leverage drift must not block the trade events (and reductions/protection
+    # never consult the leverage control plane anyway).
+    prepared_leverage = app.leverage.confirmed("copyc1", SYMBOL)
+    assert prepared_leverage is not None, "control plane must confirm leverage first"
+    current_leverage = int(prepared_leverage)
+    target_leverage = current_leverage - 1 if current_leverage > 1 else current_leverage + 1
+    leverage_plan = ExecutionPlan(
+        account_id="copyc1",
+        trade_id=None,
+        actions=[
+            ExecutionAction(
+                kind=ActionKind.SET_LEVERAGE,
+                symbol=SYMBOL,
+                payload={"symbol": SYMBOL, "leverage": str(target_leverage)},
+                client_order_id=None,
+                replaces_client_order_id=None,
+                priority=0,
+                action_id="leverage:BTCUSDT",
+            ),
+        ],
+    )
+    leverage_results = await app.executor.submit(leverage_plan)
+    assert leverage_results, "executor must return a result per action"
+    assert leverage_results[0].status == "CONFIRMED", leverage_results
+
     # Phase 3: Query Mini App activity endpoint through production Application
     resp1 = await http_client.post(
         "/miniapp/api/activity",
@@ -268,13 +321,15 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
 
     titles = [item["title"] for item in items]
     # Trade timeline: at minimum the open (BTCUSDT) and the protective stop.
-    # The leverage prep for this symbol happens through the RAM candidate
-    # catalog in the fixture, so a SET_LEVERAGE journal row is not required
-    # for the open cycle.
+    # System timeline: the leverage row produced by Phase 2b.
     assert any(t == "Открыта позиция BTCUSDT" for t in titles), titles
     assert any(t == "Поставлен защитный Stop · BTCUSDT" for t in titles), titles
+    assert any(t.startswith("Плечо") for t in titles), titles
 
-    # Phase 4: Trade/system filters split cleanly
+    # Phase 4: Trade/system filters split cleanly.
+    # Both branches are asserted on a NON-EMPTY result: an empty page proves
+    # nothing about the predicate, and an empty `system` page in particular is
+    # exactly what the post-LIMIT filtering bug produced.
     trade_resp = await http_client.post(
         "/miniapp/api/activity",
         headers=auth_headers,
@@ -283,8 +338,13 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     assert trade_resp.status == 200
     trade_data = await trade_resp.json()
     assert trade_data["filter"] == "trade"
+    assert trade_data["items"], "trade filter must not be empty after the open + stop cycle"
     assert all(item["category"] == "trade" for item in trade_data["items"])
     assert all(item["symbol"] == SYMBOL for item in trade_data["items"])
+    assert any(t == "Открыта позиция BTCUSDT" for t in (i["title"] for i in trade_data["items"]))
+    assert any(
+        t == "Поставлен защитный Stop · BTCUSDT" for t in (i["title"] for i in trade_data["items"])
+    )
 
     system_resp = await http_client.post(
         "/miniapp/api/activity",
@@ -294,14 +354,20 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     assert system_resp.status == 200
     system_data = await system_resp.json()
     assert system_data["filter"] == "system"
+    # Positive branch: the real SET_LEVERAGE row must survive the filter even
+    # though trade rows are newer and fill the first general page.
+    assert system_data["items"], "system filter must return the real SET_LEVERAGE row"
     assert all(item["category"] == "system" for item in system_data["items"])
-    # The system filter may be empty in this cycle (no SET_LEVERAGE row was
-    # written by the executor — leverage was already prepared through the
-    # RAM candidate catalog).  If anything does appear, it must keep the
-    # safe DTO shape.
-    for item in system_data["items"]:
-        assert item["title"].startswith("Плечо")
-        assert item["symbol"] == SYMBOL
+    system_titles = [item["title"] for item in system_data["items"]]
+    assert any(t.startswith("Плечо") for t in system_titles), system_titles
+    assert all(item["symbol"] == SYMBOL for item in system_data["items"])
+    assert all(
+        item["status"] in {"completed", "pending", "failed"} for item in system_data["items"]
+    )
+
+    # trade + system must not overlap, and both must come from the same journal.
+    trade_titles = [item["title"] for item in trade_data["items"]]
+    assert not (set(trade_titles) & set(system_titles)), "categories must partition the journal"
 
     # Phase 5: Each item maps to a safe DTO surface, no internal codes leak.
     for item in items:

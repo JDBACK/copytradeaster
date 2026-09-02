@@ -1966,6 +1966,120 @@ async def test_activity_pagination_boundary(environment):
     assert seen_symbols == ["BTCUSDT"] * 25
 
 
+async def test_activity_category_filter_paginates_the_filtered_set(environment):
+    """The trade/system filter must run in SQL, before LIMIT/OFFSET.
+
+    Regression for a P1 pagination bug: the category predicate used to be
+    applied in Python *after* the database had already truncated the journal
+    to ``page_size + 1`` rows.  Consequences were:
+
+    * a ``system`` page could come back **empty** with ``has_next=False``
+      although matching rows existed further down the journal;
+    * page N offset the **general** journal, so rows were silently skipped.
+
+    The journal here is laid out so every system row sits outside the first
+    11 general rows: 14 trade rows (newest) followed by 14 system rows
+    (older), each with a unique strictly-ordered ``updated_at``.
+    """
+    from copytradeaster.application.models import ActivityCategory
+
+    db, _, _, clock, service = environment
+    commands = CommandRepo(db)
+    base = clock() - timedelta(hours=2)
+
+    # Oldest -> newest: system rows first, then trade rows on top.
+    specs: list[tuple[str, str]] = [(f"sys-{i:02d}", "SET_LEVERAGE") for i in range(14)]
+    specs += [(f"trd-{i:02d}", "MARKET_OPEN") for i in range(14)]
+
+    for position, (command_key, kind) in enumerate(specs):
+        import json
+
+        payload: dict[str, object] = {"symbol": "BTCUSDT"}
+        if kind == "SET_LEVERAGE":
+            # Distinct leverage values keep every system title unique.
+            payload["leverage"] = str(10 + position)
+        await commands.insert(
+            command_key,
+            "tg-7",
+            None,
+            kind,
+            json.dumps(payload, sort_keys=True),
+            1,
+            f"ct-{command_key}",
+        )
+        await db.execute_write(
+            "UPDATE execution_commands SET status='CONFIRMED', updated_at=? WHERE command_key=?",
+            ((base + timedelta(minutes=position)).isoformat(), command_key),
+        )
+
+    def identity(item: object) -> tuple[str, object]:
+        return (item.title, item.occurred_at)  # type: ignore[attr-defined]
+
+    async def collect(flt: str) -> list[object]:
+        collected: list[object] = []
+        page = 0
+        while True:
+            result = await service.activity(7, page=page, filter=flt)
+            if flt == "trade":
+                assert {i.category for i in result.items} <= {ActivityCategory.TRADE}
+            elif flt == "system":
+                assert {i.category for i in result.items} <= {ActivityCategory.SYSTEM}
+            collected.extend(result.items)
+            if not result.has_next:
+                return collected
+            page += 1
+            assert page < 20, "pagination did not terminate"
+
+    all_items = await collect("all")
+    trade_items = await collect("trade")
+    system_items = await collect("system")
+
+    # --- the exact failure the old code produced ----------------------------
+    # The first 11 general rows were all trade, so a Python-side filter left
+    # the first system page empty and reported has_next=False.
+    first_system = await service.activity(7, page=0, filter="system")
+    assert len(first_system.items) == 10
+    assert first_system.has_next is True
+    second_system = await service.activity(7, page=1, filter="system")
+    assert len(second_system.items) == 4
+    assert second_system.has_next is False
+    assert second_system.has_previous is True
+
+    first_trade = await service.activity(7, page=0, filter="trade")
+    assert len(first_trade.items) == 10
+    assert first_trade.has_next is True
+    second_trade = await service.activity(7, page=1, filter="trade")
+    assert len(second_trade.items) == 4
+    assert second_trade.has_next is False
+
+    # --- completeness: no gaps, no duplicates -------------------------------
+    assert len(all_items) == 28
+    assert len(trade_items) == 14
+    assert len(system_items) == 14
+
+    all_keys = [identity(i) for i in all_items]
+    trade_keys = {identity(i) for i in trade_items}
+    system_keys = {identity(i) for i in system_items}
+    assert len(set(all_keys)) == 28, "duplicate rows across pages"
+    assert len(trade_keys) == 14, "duplicate trade rows across pages"
+    assert len(system_keys) == 14, "duplicate system rows across pages"
+
+    # trade + system is an exact partition of the unfiltered journal.
+    assert trade_keys | system_keys == set(all_keys)
+    assert not trade_keys & system_keys
+
+    # --- category purity ----------------------------------------------------
+    assert {i.category for i in trade_items} == {ActivityCategory.TRADE}
+    assert {i.category for i in system_items} == {ActivityCategory.SYSTEM}
+    assert all(i.title == "Открыта позиция BTCUSDT" for i in trade_items)
+    assert all(i.title.startswith("Плечо подготовлено") for i in system_items)
+
+    # --- ordering holds across page boundaries ------------------------------
+    for items in (all_items, trade_items, system_items):
+        stamps = [i.occurred_at for i in items]  # type: ignore[attr-defined]
+        assert stamps == sorted(stamps, reverse=True), "order broken across pages"
+
+
 async def test_permission_refresh_failures_and_expiry_fail_closed(environment):
     db, runtime, _, _, service = environment
     await service.pause(7)

@@ -20,6 +20,7 @@ from copytradeaster.app import App
 from copytradeaster.application.control import EmergencyController, EmergencyReport
 from copytradeaster.application.models import ServiceUnavailableError
 from copytradeaster.application.service import (
+    ActivityKindFilter,
     OnboardingPort,
     Stage2AccountLifecycle,
     Stage2RuntimeAdapter,
@@ -539,14 +540,25 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         self._snapshot_cache[account_id] = (snapshot, captured_at)
         return (snapshot, captured_at)
 
-    async def read_activity(self, account_id: str, limit: int, offset: int) -> list[Any]:
+    async def read_activity(
+        self,
+        account_id: str,
+        limit: int,
+        offset: int,
+        kind_filter: ActivityKindFilter | None = None,
+    ) -> list[Any]:
         if limit <= 0 or offset < 0:
             raise ValueError("activity bounds are invalid")
+        # The category predicate belongs in the WHERE clause: applying it after
+        # LIMIT/OFFSET would truncate the general journal first and hide every
+        # matching row beyond that window.
+        clause, params = kind_filter.clause() if kind_filter is not None else ("", ())
         return await self.db.fetchall(
             "SELECT command_key, kind, status, payload, created_at, updated_at "
-            "FROM execution_commands WHERE account_id=? "
+            "FROM execution_commands WHERE account_id=?"
+            f"{clause} "
             "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
-            (account_id, int(limit), int(offset)),
+            (account_id, *params, int(limit), int(offset)),
         )
 
     async def pause_account(self, account_id: str) -> None:

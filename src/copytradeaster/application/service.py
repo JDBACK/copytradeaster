@@ -155,7 +155,13 @@ class Stage2RuntimeAdapter(Protocol):
 
     async def refresh_snapshot(self, account_id: str) -> Any: ...
 
-    async def read_activity(self, account_id: str, limit: int, offset: int) -> Sequence[Any]: ...
+    async def read_activity(
+        self,
+        account_id: str,
+        limit: int,
+        offset: int,
+        kind_filter: ActivityKindFilter | None = None,
+    ) -> Sequence[Any]: ...
 
     async def pause_account(self, account_id: str) -> None:
         """Drain admitted work after the application persisted account pause."""
@@ -281,6 +287,48 @@ _TRADE_KINDS = frozenset(
     }
 )
 _SYSTEM_KINDS = frozenset({"SET_LEVERAGE"})
+# Deterministic ordering keeps the generated SQL and its bound parameters
+# stable between the two code paths that build the same predicate.
+_TRADE_KINDS_ORDERED: tuple[str, ...] = tuple(sorted(_TRADE_KINDS))
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityKindFilter:
+    """Category predicate pushed down into the activity SQL.
+
+    The predicate must be applied **before** ``ORDER BY/LIMIT/OFFSET``.
+    Filtering in Python after the database already truncated the journal to
+    ``page_size + 1`` rows hides every matching row that sits further down the
+    journal and makes ``has_next`` report ``False`` for a page that is merely
+    empty because its slice contained no matching category.  Page N also has
+    to offset the *filtered* set, otherwise rows are skipped.
+
+    ``system`` is expressed as the exact complement of the trade allow-list so
+    an unrecognised journal kind keeps landing in the system bucket exactly as
+    ``_safe_activity_category`` classifies it, instead of silently vanishing
+    from both filters.
+    """
+
+    included: tuple[str, ...] = ()
+    excluded: tuple[str, ...] = ()
+
+    def clause(self) -> tuple[str, tuple[str, ...]]:
+        """Return a ``(sql_fragment, bound_params)`` pair for the WHERE clause."""
+        if self.included:
+            placeholders = ", ".join("?" for _ in self.included)
+            return f" AND kind IN ({placeholders})", self.included
+        if self.excluded:
+            placeholders = ", ".join("?" for _ in self.excluded)
+            return f" AND kind NOT IN ({placeholders})", self.excluded
+        return "", ()
+
+
+def _activity_kind_filter(activity_filter: ActivityFilter) -> ActivityKindFilter:
+    if activity_filter is ActivityFilter.TRADE:
+        return ActivityKindFilter(included=_TRADE_KINDS_ORDERED)
+    if activity_filter is ActivityFilter.SYSTEM:
+        return ActivityKindFilter(excluded=_TRADE_KINDS_ORDERED)
+    return ActivityKindFilter()
 
 
 def _safe_activity_category(kind: str) -> ActivityCategory:
@@ -394,16 +442,6 @@ def _coerce_activity_filter(value: Any) -> ActivityFilter:
         except ValueError:
             pass
     raise ValidationError("activity filter is invalid")
-
-
-def _matches_activity_filter(category: ActivityCategory, activity_filter: ActivityFilter) -> bool:
-    if activity_filter is ActivityFilter.ALL:
-        return True
-    if activity_filter is ActivityFilter.TRADE:
-        return category is ActivityCategory.TRADE
-    if activity_filter is ActivityFilter.SYSTEM:
-        return category is ActivityCategory.SYSTEM
-    return False
 
 
 def _is_true(value: Any) -> bool:
@@ -1146,21 +1184,26 @@ class UserApplicationService:
             reconcile_value = 15
         return float(max(reconcile_value * 2, 30))
 
-    async def _activity_rows(self, account_id: str, offset: int) -> list[Any]:
+    async def _activity_rows(
+        self, account_id: str, offset: int, kind_filter: ActivityKindFilter
+    ) -> list[Any]:
+        limit = self._activity_page_size + 1
         reader = getattr(self._runtime, "read_activity", None)
         if callable(reader):
-            result = await _maybe_await(reader(account_id, self._activity_page_size + 1, offset))
+            result = await _maybe_await(reader(account_id, limit, offset, kind_filter=kind_filter))
             return list(result or ())
         db = getattr(self._runtime, "db", None)
         fetchall = getattr(db, "fetchall", None)
         if fetchall is None:
             raise ServiceUnavailableError("activity read is unavailable")
+        clause, params = kind_filter.clause()
         return list(
             await fetchall(
                 "SELECT command_key, kind, status, payload, created_at, updated_at "
-                "FROM execution_commands WHERE account_id=? "
+                "FROM execution_commands WHERE account_id=?"
+                f"{clause} "
                 "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
-                (account_id, self._activity_page_size + 1, offset),
+                (account_id, *params, limit, offset),
             )
         )
 
@@ -1650,15 +1693,15 @@ class UserApplicationService:
                 raise ValidationError("activity page is invalid")
             activity_filter = _coerce_activity_filter(filter)
             context = await self._context(user_id)
+            # The category predicate is applied inside the SQL query, so the
+            # LIMIT/OFFSET window and has_next describe the *filtered* set.
             rows = await self._activity_rows(
-                str(context.account_id), page * self._activity_page_size
+                str(context.account_id),
+                page * self._activity_page_size,
+                _activity_kind_filter(activity_filter),
             )
             now = self._now()
-            items: list[ActivityItem] = []
-            for row in rows:
-                item = self._map_activity_item(row, now)
-                if _matches_activity_filter(item.category, activity_filter):
-                    items.append(item)
+            items = [self._map_activity_item(row, now) for row in rows]
             has_next = len(items) > self._activity_page_size
             return ActivityPage(
                 items=tuple(items[: self._activity_page_size]),

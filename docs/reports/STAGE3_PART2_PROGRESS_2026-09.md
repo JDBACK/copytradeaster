@@ -97,7 +97,10 @@ Backend boundary:
   содержит raw Aster code или `last_error`.
 - `_activity_rows` (SQL fallback) и `AppStage2RuntimeAdapter.read_activity`
   выбирают `payload` дополнительно, чтобы backend мог извлечь `symbol` без
-  раскрытия остального JSON.
+  раскрытия остального JSON. Category predicate применяется в SQL до
+  `ORDER BY/LIMIT/OFFSET`: страницы и `has_next` считаются по выбранной
+  категории, а неизвестные journal kinds сохраняются в fail-safe категории
+  `system`.
 - Транспорт: `POST /miniapp/api/activity` с валидацией Telegram initData
   (или `CT_MINIAPP_DEV_UNSIGNED` для testnet dev session), тело
   `{"page": N, "filter": "all|trade|system"}`; невалидный `page` или
@@ -139,6 +142,9 @@ Tests:
   - `test_activity_pagination_boundary` — 25 MARKET_OPEN строк, точная
     пагинация 10/10/5 через `page=0/1/2`, has_next/has_previous,
     стабильность фильтра.
+  - `test_activity_category_filter_paginates_the_filtered_set` — смешанный
+    journal trade/system, страницы 10/4 для каждой категории, без пропусков
+    и дубликатов.
   - `test_activity_paging_validation_and_notification_toggle` —
     существующий, обновлён под новые поля и filter-валидацию.
 - HTTP (`tests/unit/miniapp/test_server.py`):
@@ -174,10 +180,10 @@ Live gate (Aster Testnet, `tests/testnet/test_live_activity_acceptance.py`):
   `status: completed` / `symbol: "BTCUSDT"` для open и
   `"Поставлен защитный Stop · BTCUSDT"` для Stop;
 - trade-filter вернул ровно те же записи с `category == "trade"` и
-  `symbol == "BTCUSDT"`; system-filter вернул пустой список (в этом
-  цикле SET_LEVERAGE не пишется в journal, т.к. leverage уже
-  подготовлен через RAM candidate catalog) и при наличии
-  категоризирует как `system` с префиксом «Плечо»;
+  `symbol == "BTCUSDT"`; production `Executor` выполнил реальный
+  `SET_LEVERAGE` на Aster Testnet и записал его в journal; system-filter
+  вернул непустую отдельную выборку с `category == "system"`,
+  `symbol == "BTCUSDT"` и заголовком с префиксом «Плечо»;
 - ни в одном item на проводе нет command_key / client_order_id /
   account_id / payload / address / nonce / private_key или raw Aster
   code (`MARKET_OPEN`, `PLACE_STOP`, `MARKET_CLOSE`, `SET_LEVERAGE`,
@@ -189,11 +195,12 @@ Live gate (Aster Testnet, `tests/testnet/test_live_activity_acceptance.py`):
 
 Gates (точные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
 
-- offline pytest: passed, coverage 87%, ruff check/format clean,
+- offline pytest: 759 passed / 2 skipped / 31 deselected, coverage 87%,
+  ruff check/format clean,
   `git diff --check` clean;
 - frontend: vitest 75 passed / 9 файлов (11 новых в `activity.test.tsx`),
   oxlint 0/0, `pnpm build` clean;
-- live: `tests/testnet/test_live_activity_acceptance.py` passed за 42.7s
+- live: corrective `tests/testnet/test_live_activity_acceptance.py` passed за 27.15s
   против `https://fapi.asterdex-testnet.com`; `preview_miniapp_engine.py`
   на порту 8091 подтвердил отдачу safe DTO через тот же endpoint
   (3 trade items: `Закрыта позиция BTCUSDT`, `Поставлен защитный Stop · BTCUSDT`,

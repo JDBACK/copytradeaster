@@ -17,7 +17,11 @@
      exception-строки фильтруются server-side и никогда не попадают в
      DTO; `_activity_rows` и `AppStage2RuntimeAdapter.read_activity`
      выбирают `payload` дополнительно, чтобы backend извлекал `symbol`
-     без раскрытия остального JSON; `POST /miniapp/api/activity` с
+     без раскрытия остального JSON; category predicate выполняется в
+     SQL до `ORDER BY/LIMIT/OFFSET`, поэтому `trade`/`system` пагинация
+     работает по отфильтрованному множеству и не теряет старые строки;
+     неизвестные journal kinds остаются в fail-safe категории `system`;
+     `POST /miniapp/api/activity` с
      валидацией Telegram initData (или testnet dev-header), body
      `{"page": N, "filter": "all|trade|system"}`, невалидный page/filter →
      400, прочие `ApplicationError` → соответствующие коды.
@@ -37,8 +41,9 @@
      `.activity-day-label`, `.activity-marker`/`.activity-connector`,
      `.activity-status` (tone-*), `.activity-remediation`,
      `.activity-safe-note`.
-  3. **Offline gate (после P2.2):** offline pytest **757 passed / 2
-     skipped / 30 deselected** за ~31s, coverage **87%**; новые кейсы:
+  3. **Offline gate (после P2.2 corrective pagination):** offline pytest
+     **759 passed / 2 skipped / 31 deselected** за 11.96s, coverage
+     **87%**; новые кейсы:
      `test_activity_safe_mapping_filters_and_sorts` (полный набор
      journal rows: open/close/stop/tp/cancel/leverage + pending + failed
      + unknown; safe DTO shape; trade/system/all filters;
@@ -47,6 +52,10 @@
      account_id, address, client_order_id, nonce, private_key, -1003,
      boom), `test_activity_pagination_boundary` (25 строк, точная
      пагинация 10/10/5 через `page=0/1/2`, has_next/has_previous);
+     `test_activity_category_filter_paginates_the_filtered_set` и
+     `test_real_adapter_pushes_activity_category_filter_into_sql`
+     фиксируют смешанный journal, непустые страницы обеих категорий,
+     отсутствие пропусков/дубликатов и SQL pushdown на реальном SQLite;
      `test_activity_paging_validation_and_notification_toggle` дополнен
      `ValidationError` на невалидный filter. Ruff check/format и
      `git diff --check` clean.
@@ -65,16 +74,18 @@
      `category: trade` / `title: "Открыта позиция BTCUSDT"` /
      `title: "Поставлен защитный Stop · BTCUSDT"` / `status: completed`
      / `symbol: BTCUSDT`; trade-filter показал те же записи с
-     `category == "trade"` и `symbol == "BTCUSDT"`; system-filter
-     вернул пустой список (в этом цикле SET_LEVERAGE не пишется в
-     journal, leverage уже подготовлен через RAM candidate catalog);
+     `category == "trade"` и `symbol == "BTCUSDT"`; production
+     `Executor` выполнил реальный `SET_LEVERAGE` на testnet и записал
+     его в journal, после чего system-filter вернул непустую отдельную
+     выборку с `category == "system"` и заголовком `Плечо…`;
      partial close от мастера добавил `MARKET_CLOSE` row → Mini App
      endpoint вернул `"Закрыта позиция BTCUSDT"`; ни в одном item на
      проводе нет command_key / client_order_id / account_id / payload /
      address / nonce / private_key или raw Aster code; cleanup flat
      подтвердил сохранение safe DTO shape. `preview_miniapp_engine.py`
      на порту 8091 подтвердил отдачу safe DTO через тот же endpoint и
-     HTML `/miniapp/` с собранным bundle. **passed за 42.7s.**
+     HTML `/miniapp/` с собранным bundle. Corrective live gate
+     **passed за 27.15s.**
      Владелец не проводил Telegram WebView acceptance на current HEAD —
      owner-acceptance P2.2 остаётся P2.2 backlog.
 
