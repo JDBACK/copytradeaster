@@ -40,11 +40,10 @@ Gates:
   session; Home показывает реальные данные (`Всё работает`, система готова,
   риск 1%, позиций 0, свежий snapshot). Скриншоты: `/tmp/p2-shots/01..04`.
 
-Отложено в общий финальный gate Part 2 и не блокирует переход к P2.1:
-
-- реальные Pause/Resume из shell Home;
-- safe-area/bottom nav на фактическом viewport;
-- финальный screenshot current-HEAD.
+Owner gate закрыт 2026-09-02 в фактическом Telegram WebView: Home и четыре
+root tabs работают на current HEAD, safe-area/bottom nav проверены на
+мобильном viewport. Реальные Pause/Resume ранее подтверждены владельцем на
+том же Builder-follower и остаются действующим evidence Part 1/P2.0.
 
 ## P2.1 — read-only Positions: CLOSED (2026-09-02, corrective gate passed)
 
@@ -73,6 +72,9 @@ Gates:
   - frontend: vitest passed (включая `positions.test.tsx` — renderToStaticMarkup UI-контракт: warning copy, read-only, скрытие риска при null), oxlint clean, build clean;
   - in-browser walkthrough мобильного viewport: пустой экран и активная карточка с предупреждением;
   - live acceptance на Aster Testnet: 8/8 фаз через реальный production copy engine (master → engine → follower `copyc1` → Mini App API → signed positionRisk/openOrders сверка → Stop/TP перестановка → partial close → warning → flat cleanup).
+  - owner Telegram WebView acceptance 2026-09-02: Builder-follower
+    `0x3c45…F975` показал реальную BTCUSDT LONG карточку с Entry/Mark/PnL,
+    Stop, `risk_to_stop_usdt` и leverage.
 
 ## P2.2 — safe Activity timeline (Stage 3 part 2): CLOSED (2026-09-02, live acceptance passed)
 
@@ -206,9 +208,13 @@ Gates (точные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
   (3 trade items: `Закрыта позиция BTCUSDT`, `Поставлен защитный Stop · BTCUSDT`,
   `Открыта позиция BTCUSDT`) и HTML `/miniapp/` с собранным bundle.
 
-Владелец не проводил Telegram WebView acceptance на current HEAD —
-скриншоты / Mini App walkthrough владельца остаются P2.2 backlog
-(см. общий Part 2 backlog ниже).
+Owner Telegram WebView acceptance закрыт 2026-09-02 на current HEAD:
+production engine скопировал master BTCUSDT LONG + Stop на
+`copyc1`/`copyc2`/`copyc3`/`tg-8264892202`; владелец на Builder-follower
+`0x3c45…F975` подтвердил Positions и Activity screenshots. Activity показал
+safe записи «Открыта позиция BTCUSDT» и «Поставлен защитный Stop · BTCUSDT».
+После приёмки live-сценарий закрыт через master; все followers подтвердили
+cancel + close и вернулись в flat с reconciliation 0 действий.
 
 ## Следующие подчасти
 
@@ -225,9 +231,9 @@ Gates (точные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
    (перед P2.6);
 3. auth-модель `/builder/userTrades` — bounded live probe (перед P2.7).
 
-Part 2 backlog (мелкая косметика, не блокирует переход к P2.3):
+Part 2 backlog (не блокирует переход к P2.3):
 
-- реальные Pause/Resume из shell Home на фактическом Telegram WebView;
-- safe-area/bottom nav на фактическом viewport владельца;
-- финальный owner screenshot current-HEAD для каждой экранной подчасти;
-- bounded $impeccable detector/browser pass на каждом экране.
+- owner screenshots и Telegram WebView acceptance для P2.0–P2.2 закрыты
+  2026-09-02; повторять их без UI-изменений не требуется;
+- bounded $impeccable detector/browser pass выполнять только для новых или
+  изменённых экранов P2.3+.

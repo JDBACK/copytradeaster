@@ -290,11 +290,11 @@ Stage 2 полностью закрыт для testnet scope.
 
 - [x] P2.0: app shell с четырьмя root tabs и завершённый Home (2026-09-01;
   implementation и automated browser acceptance завершены на полном engine
-  boot с реальными testnet-данными; общий owner walkthrough в Telegram WebView
-  перенесён в финальный gate всей Part 2 и не блокирует P2.1; журнал:
+  boot с реальными testnet-данными; owner walkthrough в Telegram WebView
+  закрыт 2026-09-02 на current HEAD; журнал:
   [STAGE3_PART2_PROGRESS_2026-09.md](reports/STAGE3_PART2_PROGRESS_2026-09.md)).
-- [x] P2.1: read-only Positions из authoritative follower state (закрыт 2026-09-02; DTO, API, PositionsScreen, live acceptance 8/8 фаз через реальный production copy engine на Aster Testnet, corrective freshness/protection gates закрыты).
-- [x] P2.2: безопасная Activity timeline без внутренних payload/secrets (закрыт 2026-09-02; safe DTO `category/title/status/symbol/occurred_at` + optional `pending_age`/`remediation`, `POST /miniapp/api/activity` с Telegram initData boundary, `ActivityScreen` по `04-activity.png` с фильтрами Все/Сделки/Система, server-side category predicate до `LIMIT/OFFSET`, стабильной пагинацией и read-only состояниями; targeted unit + HTTP + frontend tests, live acceptance на Aster Testnet через production copy engine — open / Stop / close / partial close и реальный `SET_LEVERAGE` отражены в Mini App с safe DTO shape и непустыми trade/system filters; live evidence — `tests/testnet/test_live_activity_acceptance.py`; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
+- [x] P2.1: read-only Positions из authoritative follower state (закрыт 2026-09-02; DTO, API, PositionsScreen, live acceptance 8/8 фаз через реальный production copy engine на Aster Testnet, corrective freshness/protection gates и owner Telegram WebView screenshot реальной позиции на Builder-follower закрыты).
+- [x] P2.2: безопасная Activity timeline без внутренних payload/secrets (закрыт 2026-09-02; safe DTO `category/title/status/symbol/occurred_at` + optional `pending_age`/`remediation`, `POST /miniapp/api/activity` с Telegram initData boundary, `ActivityScreen` по `04-activity.png` с фильтрами Все/Сделки/Система, server-side category predicate до `LIMIT/OFFSET`, стабильной пагинацией и read-only состояниями; targeted unit + HTTP + frontend tests, live acceptance на Aster Testnet через production copy engine — open / Stop / close / partial close и реальный `SET_LEVERAGE` отражены в Mini App с safe DTO shape и непустыми trade/system filters; owner Telegram WebView screenshot safe Open/Stop timeline на Builder-follower закрыт; live evidence — `tests/testnet/test_live_activity_acceptance.py`; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [ ] P2.3: Settings root и существующие Notifications use cases.
 - [ ] P2.4: единственная числовая настройка Risk on Stop с backend constraints.
 - [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.

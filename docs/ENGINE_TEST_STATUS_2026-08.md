@@ -86,8 +86,16 @@
      на порту 8091 подтвердил отдачу safe DTO через тот же endpoint и
      HTML `/miniapp/` с собранным bundle. Corrective live gate
      **passed за 27.15s.**
-     Владелец не проводил Telegram WebView acceptance на current HEAD —
-     owner-acceptance P2.2 остаётся P2.2 backlog.
+     **Owner Telegram WebView acceptance закрыт 2026-09-02:** владелец
+     проверил current HEAD на Builder-follower `0x3c45…F975` во время
+     реального production copy-cycle. Экран Positions показал BTCUSDT
+     LONG, актуальные Entry/Mark/PnL, подтверждённый Stop, риск до Stop
+     и leverage; Activity показал подтверждённые `MARKET_OPEN` и
+     `PLACE_STOP` в safe timeline без внутренних payload/secrets.
+     После приёмки master был закрыт, production engine подтвердил
+     `CANCEL_ORDER` + `MARKET_CLOSE` для `copyc1`/`copyc2`/`copyc3` и
+     `tg-8264892202`; последующий reconciliation вернул 0 действий по
+     всем четырём followers.
 
 - **Stage 3, часть 2 (P2.1 — read-only Positions) — CORRECTIVE ROUND 2
   (2026-09-02, commit `111d2e5` под внешним ревью):**
