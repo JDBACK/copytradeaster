@@ -123,7 +123,7 @@ export function SettingsView({
   onOpen: (screen: NestedScreen) => void
 }) {
   const copy = copySummary(dashboard.copy_state)
-  const status = systemStatusValue(dashboard.system_state)
+  const status = systemStatusValue(dashboard.system_state, dashboard.snapshot_captured_at)
   const notif = notificationsValue(dashboard.notification_enabled)
   const account = dashboard.account_masked ?? accountMasked ?? null
 

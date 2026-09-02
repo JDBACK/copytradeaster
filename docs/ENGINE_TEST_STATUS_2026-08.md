@@ -30,20 +30,25 @@
      (Уведомления, Безопасность, Помощь); Риск/Статус/Аккаунт+Builder
      (P2.4/P2.5/P2.6) и статическая Среда — read-only строки без chevron.
      Значения из authoritative `DashboardDTO` (`risk_percent`,
-     `system_state`, `notification_enabled`, `account_masked`);
-     stale/degraded никогда не подписаны «Всё работает»; Builder —
-     нейтральный masked wallet без «Проверено» до attestation (P2.6).
+     `system_state`, `snapshot_captured_at`, `notification_enabled`,
+     `account_masked`); stale/degraded никогда не подписаны «Всё
+     работает», а «Статус Aster» читает «Всё работает» только при
+     `ready` **и** непустом `snapshot_captured_at` — ready без snapshot
+     показывает «Ожидание данных»; Builder — нейтральный masked wallet
+     без «Проверено» до attestation (P2.6).
      Вложенный `NotificationsScreen` через существующий typed route stack +
      Telegram BackButton (новый nested kind `security`); toggle — button
      `role="switch"` с `aria-checked`/`aria-busy`, UI меняется только по
      DTO, возвращённому сервером; при ошибке сохраняется последнее
      подтверждённое состояние + error box; double tap заблокирован
-     (disabled во время сохранения + reducer игнорирует повторный
-     `save_requested`). Безопасные delivery-факты: последняя доставка,
+     синхронным in-flight lock `createToggleGate()` до запуска API
+     (disabled во время сохранения и reducer-гейт `save_requested` —
+     render-бэкстопы). Безопасные delivery-факты: последняя доставка,
      в очереди, не доставлено. Pure view-models `settingsView.ts`
      (copySummary/systemStatusValue/notificationsValue) и
-     `notificationsView.ts` (toggle state machine). AppShell рендерит
-     nested screens (`notifications`/`security`/`help`) через `NestedRoute`.
+     `notificationsView.ts` (toggle state machine + toggle gate).
+     AppShell рендерит nested screens (`notifications`/`security`/`help`)
+     через `NestedRoute`.
   3. **Offline gate:** offline pytest **773 passed / 2 skipped / 32
      deselected** за 17.78s, coverage **87%**; ruff check/format clean,
      `git diff --check` clean. Новые HTTP-кейсы
@@ -91,6 +96,42 @@
      application → SQLite. В `control_audit` подтверждены три ручные mutation
      `disabled → enabled → disabled` в 21:08:51–21:08:53. Владелец явно принял
      P2.3; отдельный screenshot как дополнительный артефакт не требуется.
+  8. **Corrective pass (2026-09-02, ревью P2.3 — три замечания):**
+     1. *Storage-изоляция live-гейта:* `test_live_notifications_acceptance.py`
+        работает на throwaway-копии реальной БД (`sqlite3.Connection.backup`
+        в pytest `tmp_path` + `Settings.model_copy` для `db_path`/`log_path`):
+        флаги, RiskPolicy, удаление execution_commands, telegram_users и
+        outbox мутируются только в копии. Реальные Aster Testnet сделки и
+        реальный Telegram Bot API сохранены. Re-run: **1 passed за 28.92s**
+        (боевой экземпляр на время теста остановлен и поднят обратно через
+        `scripts/dev-up.sh` — иначе прод-бот по WS дублировал бы копирование
+        и перехватил phase-5 close); изоляция подтверждена: row 8264892202
+        в прод-БД (`notifications_enabled`, `updated_at`) не изменился,
+        контрольных `set_notifications` записей тест не оставил.
+     2. *Синхронный double-tap lock:* `createToggleGate()` в
+        `notificationsView.ts` закрывается до запуска `api.setNotifications`
+        и открывается в `finally` после settle; render-проверки
+        (`state.saving`, reducer `save_requested`) остаются бэкстопом.
+        Regression-тесты (2): два одновременных тапа → ровно один admitted,
+        лишний `end()` не ломает lock. Browser-проверка на новом бандле
+        (`preview_miniapp_engine.py`, порт 8094): два `click()` по switch в
+        одном синхронном тике → ровно **1** POST
+        `/miniapp/api/notifications/enabled`, `aria-checked` перевернулся
+        один раз (true→false), hint обновился по серверному DTO.
+     3. *Статус требует snapshot:* `systemStatusValue(state,
+        snapshotCapturedAt)` — «Всё работает» только при `ready` +
+        непустом `snapshot_captured_at`; ready без snapshot
+        (missing/null/`''`) → «Ожидание данных» (muted). Тесты: ready со
+        snapshot → «Всё работает»/success; ready без snapshot →
+        «Ожидание данных» (unit + render-контракт SettingsView);
+        stale со snapshot → «Данные устарели»/warning (не «Всё работает»).
+     4. *Corrective gate:* targeted frontend tests **26 passed**
+        (notifications 12 + settings 14); полный frontend — **Vitest 102
+        passed / 11 файлов** (было 97), oxlint 0/0, `tsc -b && vite build`
+        clean; ruff check/format по изменённому Python-файлу clean;
+        `git diff --check` clean. Полный offline suite не перезапускался —
+        scope ревью ограничен изменёнными файлами; счётчики offline suite
+        и live gate из пунктов 3/5 относятся к commit `fe84d2c`.
 
 - **Stage 3, часть 2 (P2.2 — read-only Activity) — CLOSED (2026-09-02,
   live acceptance на Aster Testnet через production copy engine):**

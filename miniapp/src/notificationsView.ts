@@ -44,6 +44,32 @@ export function reduceNotifications(
   }
 }
 
+/** Synchronous in-flight lock for the toggle.  React state (`saving`) exists
+ * only after the next render, so two taps landing in the same tick would both
+ * pass a state-only check and both reach the API.  The gate closes before the
+ * API call starts and reopens when the mutation settles: exactly one mutation
+ * per tap burst. */
+export interface ToggleGate {
+  /** Admits the click that starts a mutation; rejects the rest until end(). */
+  tryBegin: () => boolean
+  /** Reopens the gate when the in-flight mutation settles. */
+  end: () => void
+}
+
+export function createToggleGate(): ToggleGate {
+  let inFlight = false
+  return {
+    tryBegin: () => {
+      if (inFlight) return false
+      inFlight = true
+      return true
+    },
+    end: () => {
+      inFlight = false
+    },
+  }
+}
+
 /** Safe delivery lines: counts as-is, timestamps rendered by formatTime. */
 export function failedCountTone(failed: number): 'muted' | 'danger' {
   return failed > 0 ? 'danger' : 'muted'

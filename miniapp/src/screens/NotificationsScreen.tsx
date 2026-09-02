@@ -6,12 +6,14 @@
  * Delivery facts (last delivery, pending, failed counts) come from the
  * same safe DTO — no outbox internals ever reach this screen. */
 
-import { useCallback, useEffect, useReducer, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import {
+  createToggleGate,
   failedCountTone,
   initialNotificationsState,
   reduceNotifications,
+  type ToggleGate,
 } from '../notificationsView'
 import { hapticImpact, hapticNotify } from '../telegram'
 import { Brand, ErrorBox, Row } from '../components/ui'
@@ -27,6 +29,10 @@ export function NotificationsScreen({
 }) {
   const [state, dispatch] = useReducer(reduceNotifications, undefined, initialNotificationsState)
   const [initError, setInitError] = useState<string | null>(null)
+  // Synchronous double-tap lock, created once per screen lifetime: state.saving
+  // only exists after a re-render, so two taps in one tick must be gated here.
+  const gate = useRef<ToggleGate | null>(null)
+  if (gate.current === null) gate.current = createToggleGate()
 
   const loadInitial = useCallback(async () => {
     setInitError(null)
@@ -56,13 +62,19 @@ export function NotificationsScreen({
           code: err instanceof ApiError ? err.code : 'network_error',
         })
         hapticNotify('error')
+      } finally {
+        // The mutation settled: reopen the synchronous lock.
+        gate.current?.end()
       }
     },
     [auth],
   )
 
   const handleToggle = useCallback(() => {
-    if (state.saving || state.confirmed === null) return
+    if (state.confirmed === null) return
+    // Gate first: two taps in the same tick (before React re-renders saving)
+    // must admit exactly one mutation; state.saving is only a render backstop.
+    if (!gate.current?.tryBegin()) return
     dispatch({ type: 'save_requested' })
     void save(!state.confirmed.enabled)
   }, [state, save])

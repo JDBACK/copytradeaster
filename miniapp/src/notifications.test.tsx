@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { NotificationToggle, NotificationsScreen } from './screens/NotificationsScreen'
 import {
+  createToggleGate,
   failedCountTone,
   initialNotificationsState,
   reduceNotifications,
@@ -21,6 +22,30 @@ function dto(overrides: Partial<NotificationSettingsDTO> = {}): NotificationSett
     ...overrides,
   }
 }
+
+describe('createToggleGate (synchronous double-tap lock)', () => {
+  it('admits exactly one of two taps landing before a re-render', () => {
+    const gate = createToggleGate()
+    // Two clicks in the same tick: only the first may start a mutation —
+    // the second reaches the API only if the gate already reopened.
+    expect(gate.tryBegin()).toBe(true)
+    expect(gate.tryBegin()).toBe(false)
+    expect(gate.tryBegin()).toBe(false)
+    // The gate reopens only when the in-flight mutation settles.
+    gate.end()
+    expect(gate.tryBegin()).toBe(true)
+  })
+
+  it('stays closed after end() is called once per settled mutation', () => {
+    const gate = createToggleGate()
+    expect(gate.tryBegin()).toBe(true)
+    gate.end()
+    gate.end()
+    // Extra end() calls must not corrupt the lock for the next tap.
+    expect(gate.tryBegin()).toBe(true)
+    expect(gate.tryBegin()).toBe(false)
+  })
+})
 
 describe('reduceNotifications (toggle state machine)', () => {
   it('starts empty and enters saving on the first request', () => {

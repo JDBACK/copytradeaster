@@ -307,7 +307,12 @@ Stage 2 полностью закрыт для testnet scope.
   acceptance на Aster Testnet: реальный trade скопирован при
   отключённых уведомлениях без пользовательской доставки, после
   включения — durable outbox row доставлена настоящим Telegram Bot API
-  до SENT; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
+  до SENT; corrective pass 2026-09-02: live-гейт на throwaway-копии БД
+  (`sqlite3.backup`, прод-БД нетронута), синхронный `createToggleGate`
+  double-tap lock с regression-тестом и browser-проверкой (ровно 1 POST
+  на два клика), «Всё работает» только при ready + snapshot_captured_at
+  («Ожидание данных» без snapshot); журнал —
+  `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [ ] P2.4: единственная числовая настройка Risk on Stop с backend constraints.
 - [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.
 - [ ] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle.

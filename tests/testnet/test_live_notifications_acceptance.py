@@ -15,6 +15,11 @@ Telegram Bot API:
    Telegram Bot API (row reaches terminal SENT).
 4. Cleanup: master and follower are flattened, the original toggle value is
    restored, so re-runs are repeatable.
+
+Storage isolation: the whole test runs on a throwaway ``sqlite3.backup``
+copy of the real database (flags, RiskPolicy, execution_commands,
+telegram_users, outbox are mutated in the copy only).  Real Aster Testnet
+orders and the real Telegram Bot API stay live.
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sqlite3
 import time
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 from aiogram import Bot
@@ -123,13 +130,37 @@ async def _user_outbox_rows(db: Database, after_id: int = 0) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _copy_sqlite(src: Path, dst: Path) -> None:
+    """Consistent online copy; safe while the source is in WAL use."""
+    src_conn = sqlite3.connect(src)
+    try:
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
 @pytest.fixture
-async def live_app_stack():
-    settings = Settings(miniapp_dev_unsigned=True, miniapp_dev_user_id=TEST_USER_ID)
-    if "testnet" not in settings.rest_base_url.lower():
-        pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
-    if settings.telegram_bot_token is None:
+async def live_app_stack(tmp_path):
+    base_settings = Settings(miniapp_dev_unsigned=True, miniapp_dev_user_id=TEST_USER_ID)
+    if "testnet" not in base_settings.rest_base_url.lower():
+        pytest.fail(f"signed tests are restricted to testnet, got {base_settings.rest_base_url!r}")
+    if base_settings.telegram_bot_token is None:
         pytest.skip("real Telegram bot token required for outbox delivery (.botkey)")
+    if not base_settings.db_path.exists():
+        pytest.skip(f"source database required for the isolated copy: {base_settings.db_path}")
+
+    # Storage isolation: every DB mutation of this test (flags, RiskPolicy,
+    # execution_commands, telegram_users, outbox) lands in a throwaway copy;
+    # the live database itself is never written.
+    db_copy = tmp_path / "live-notifications.sqlite3"
+    _copy_sqlite(base_settings.db_path, db_copy)
+    settings = base_settings.model_copy(
+        update={"db_path": db_copy, "log_path": tmp_path / "live-notifications.log"}
+    )
 
     db = Database(settings.db_path)
     await db.connect()

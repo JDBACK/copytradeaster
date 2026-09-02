@@ -307,6 +307,35 @@ Owner acceptance закрыта владельцем в реальном Telegra
 21:08:51–21:08:53. Владелец явно принял результат; отдельный screenshot как
 дополнительный артефакт не требуется. P2.3 полностью закрыт, P2.4 не начат.
 
+Corrective pass по ревью P2.3 (2026-09-02, три замечания, отдельный коммит):
+
+1. Storage-изоляция live-гейта: тест работает на throwaway-копии реальной
+   БД (`sqlite3.Connection.backup` → pytest `tmp_path`, `Settings.model_copy`
+   для `db_path`/`log_path`). Все тестовые мутации — флаги, RiskPolicy,
+   удаление execution_commands, telegram_users, outbox — только в копии;
+   реальные Aster Testnet сделки и реальный Telegram Bot API сохранены.
+   Re-run: 1 passed за 28.92s. Прод-БД не изменилась (row 8264892202
+   `notifications_enabled`/`updated_at` нетронуты); боевой экземпляр на
+   время теста остановлен (иначе прод-бот по WS дублировал бы копирование
+   и перехватил phase-5 close) и поднят обратно через `scripts/dev-up.sh`.
+2. Double-tap: синхронный in-flight lock `createToggleGate()` в
+   `notificationsView.ts` закрывается до запуска `api.setNotifications` и
+   открывается в `finally`; render-проверки остаются бэкстопом. Два
+   regression-теста (два одновременных тапа → ровно один mutation; лишний
+   `end()` безвреден). Browser-проверка на новом бандле (preview :8094):
+   два `click()` в одном синхронном тике → ровно 1 POST
+   `/miniapp/api/notifications/enabled`, `aria-checked` true→false один раз.
+3. «Статус Aster»: `systemStatusValue(state, snapshotCapturedAt)` —
+   «Всё работает» только при `ready` + непустом `snapshot_captured_at`;
+   ready без snapshot → «Ожидание данных» (muted). Тесты ровно по кейсам
+   ревью: ready без snapshot, ready со snapshot, stale со snapshot.
+4. Corrective gate: targeted frontend tests 26 passed (notifications 12 +
+   settings 14); Vitest 102 passed / 11 файлов (было 97), oxlint 0/0,
+   `tsc -b && vite build` clean; ruff check/format и `git diff --check`
+   clean по изменённому Python-файлу и дереву; полный offline suite не
+   перезапускался (scope ревью), счётчики пунктов offline/live выше
+   относятся к `fe84d2c`.
+
 ## Следующие подчасти
 
 - P2.4 — Risk on Stop (`05-risk-settings`) — перед стартом нужны

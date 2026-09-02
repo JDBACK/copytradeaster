@@ -32,11 +32,18 @@ export function copySummary(state: CopyState): SettingValue {
   }
 }
 
-/** «Статус Aster» row value: only a ready system may read «Всё работает». */
-export function systemStatusValue(state: SystemState): SettingValue {
+/** «Статус Aster» row value: «Всё работает» requires a ready system AND a
+ * captured snapshot.  Ready without a snapshot has not proven end-to-end
+ * freshness yet and reads «Ожидание данных» instead. */
+export function systemStatusValue(
+  state: SystemState,
+  snapshotCapturedAt?: string | null,
+): SettingValue {
   switch (state) {
     case 'ready':
-      return { label: 'Всё работает', tone: 'success' }
+      return snapshotCapturedAt
+        ? { label: 'Всё работает', tone: 'success' }
+        : { label: 'Ожидание данных', tone: 'muted' }
     case 'stale':
       return { label: 'Данные устарели', tone: 'warning' }
     case 'degraded':

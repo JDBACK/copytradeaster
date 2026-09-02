@@ -19,6 +19,7 @@ function makeDashboard(overrides: Partial<DashboardDTO> = {}): DashboardDTO {
     account_masked: '0x3c45…F975',
     risk_percent: '0.01',
     open_positions: 0,
+    snapshot_captured_at: '2026-09-02T12:00:00+00:00',
     notification_enabled: true,
     is_admin: false,
     ...overrides,
@@ -36,14 +37,27 @@ describe('copySummary', () => {
 })
 
 describe('systemStatusValue', () => {
-  it('reserves «Всё работает» for a ready system only', () => {
-    expect(systemStatusValue('ready')).toEqual({ label: 'Всё работает', tone: 'success' })
-    const stale = systemStatusValue('stale')
-    expect(stale.label).not.toBe('Всё работает')
-    expect(stale.tone).toBe('warning')
-    expect(systemStatusValue('degraded').tone).toBe('danger')
-    expect(systemStatusValue('blocked').tone).toBe('danger')
-    expect(systemStatusValue('unknown').tone).toBe('muted')
+  const SNAPSHOT = '2026-09-02T12:00:00+00:00'
+
+  it('reads «Всё работает» only for ready with a captured snapshot', () => {
+    expect(systemStatusValue('ready', SNAPSHOT)).toEqual({ label: 'Всё работает', tone: 'success' })
+  })
+
+  it('shows «Ожидание данных» for ready without a snapshot (missing/null/empty)', () => {
+    for (const snapshot of [undefined, null, '']) {
+      const waiting = systemStatusValue('ready', snapshot)
+      expect(waiting.label).toBe('Ожидание данных')
+      expect(waiting.tone).toBe('muted')
+      expect(waiting.label).not.toBe('Всё работает')
+    }
+  })
+
+  it('keeps stale honest even when a snapshot exists', () => {
+    const stale = systemStatusValue('stale', SNAPSHOT)
+    expect(stale).toEqual({ label: 'Данные устарели', tone: 'warning' })
+    expect(systemStatusValue('degraded', SNAPSHOT).tone).toBe('danger')
+    expect(systemStatusValue('blocked', SNAPSHOT).tone).toBe('danger')
+    expect(systemStatusValue('unknown', SNAPSHOT).tone).toBe('muted')
   })
 })
 
@@ -96,6 +110,18 @@ describe('SettingsView render (эталон 06-settings)', () => {
       />,
     )
     expect(html).toContain('Данные устарели')
+    expect(html).not.toContain('Всё работает')
+  })
+
+  it('never claims «Всё работает» for ready without a captured snapshot', () => {
+    const html = renderToStaticMarkup(
+      <SettingsView
+        dashboard={makeDashboard({ snapshot_captured_at: null })}
+        accountMasked={null}
+        onOpen={onOpen}
+      />,
+    )
+    expect(html).toContain('Ожидание данных')
     expect(html).not.toContain('Всё работает')
   })
 
