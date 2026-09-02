@@ -5,8 +5,8 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 2 (P2.3 — Settings root и Notifications) — implementation/
-  live complete (2026-09-02, owner acceptance pending):**
+- **Stage 3, часть 2 (P2.3 — Settings root и Notifications) — CLOSED
+  (2026-09-02, implementation/live/owner acceptance complete):**
   1. **Backend Transport:** `POST /miniapp/api/notifications` (чтение) и
      `POST /miniapp/api/notifications/enabled` (mutation) в
      `miniapp/server.py` поверх существующих `NotificationSettingsDTO`,
@@ -85,9 +85,12 @@
      toggle-цикл вкл→выкл→вкл с обновлением UI по серверному DTO
      (подтверждено и в preview SQLite), Help/Security static screens,
      tab-switch сбрасывает nested stack. Corrective pass не потребовался.
-  7. **Owner acceptance:** pending — требуется Telegram WebView screenshot
-     текущего HEAD: Settings root, Notifications toggle (вкл/выкл),
-     BackButton для nested screens.
+  7. **Owner acceptance:** закрыта владельцем в реальном Telegram WebView на
+     commit `fe84d2c`: Settings root и Notifications открываются штатно,
+     переключатель фактически изменяет durable state через production HTTP →
+     application → SQLite. В `control_audit` подтверждены три ручные mutation
+     `disabled → enabled → disabled` в 21:08:51–21:08:53. Владелец явно принял
+     P2.3; отдельный screenshot как дополнительный артефакт не требуется.
 
 - **Stage 3, часть 2 (P2.2 — read-only Activity) — CLOSED (2026-09-02,
   live acceptance на Aster Testnet через production copy engine):**

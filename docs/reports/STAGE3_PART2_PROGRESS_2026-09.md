@@ -216,7 +216,7 @@ safe записи «Открыта позиция BTCUSDT» и «Поставл�
 После приёмки live-сценарий закрыт через master; все followers подтвердили
 cancel + close и вернулись в flat с reconciliation 0 действий.
 
-## P2.3 — Settings root и Notifications: implementation/live complete (2026-09-02, owner acceptance pending)
+## P2.3 — Settings root и Notifications: CLOSED (2026-09-02)
 
 Backend (переиспользование, без новых service/repository/таблиц):
 
@@ -300,9 +300,12 @@ Gates (точные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
   серверному DTO (подтверждён в preview SQLite), Help/Security,
   tab-switch сбрасывает stack; corrective pass не потребовался.
 
-Осталось владельцу: Telegram WebView screenshot текущего HEAD — Settings
-root, Notifications toggle вкл/выкл, Telegram BackButton на nested
-screens. Статус: implementation/live complete; owner acceptance pending.
+Owner acceptance закрыта владельцем в реальном Telegram WebView на commit
+`fe84d2c`: Settings root и Notifications работают штатно. Три ручных
+переключения прошли через production HTTP → общий application layer → SQLite;
+`control_audit` зафиксировал `disabled → enabled → disabled` в
+21:08:51–21:08:53. Владелец явно принял результат; отдельный screenshot как
+дополнительный артефакт не требуется. P2.3 полностью закрыт, P2.4 не начат.
 
 ## Следующие подчасти
 
