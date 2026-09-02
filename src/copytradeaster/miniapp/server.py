@@ -22,7 +22,7 @@ import json
 import time
 from dataclasses import asdict
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,7 @@ from copytradeaster.application.models import (
     ConfirmationAction,
     ConfirmationExpiredError,
     NotReadyError,
+    RiskUpdateInput,
     ServiceUnavailableError,
 )
 from copytradeaster.config import Settings
@@ -245,6 +246,47 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_ACTION_FAILED)
 
+    async def risk(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        try:
+            return _json_dto(await application.risk(user_id))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def risk_set(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        if body is None:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        # Strict single-key boundary: legacy max_leverage /
+        # max_entry_deviation_pct and any other mutation field are
+        # rejected, never silently ignored (fail closed on forgery).
+        if set(body.keys()) != {"risk_percent"}:
+            return _json_error(400, "invalid_input", "Некорректный формат запроса.")
+        raw = body.get("risk_percent")
+        # Decimals travel as strings; bool/None/object/array/numbers are invalid.
+        if isinstance(raw, bool) or not isinstance(raw, str):
+            return _json_error(400, "invalid_input", "Некорректное значение риска.")
+        text = raw.strip()
+        if not text:
+            return _json_error(400, "invalid_input", "Некорректное значение риска.")
+        try:
+            value = Decimal(text)
+        except (InvalidOperation, ValueError, AttributeError):
+            return _json_error(400, "invalid_input", "Некорректное значение риска.")
+        if not value.is_finite():
+            return _json_error(400, "invalid_input", "Некорректное значение риска.")
+        try:
+            return _json_dto(
+                await application.update_risk(user_id, RiskUpdateInput(risk_percent=value))
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_ACTION_FAILED)
+
     async def pause(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -421,6 +463,8 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/activity", activity)
     app.router.add_post("/miniapp/api/notifications", notifications)
     app.router.add_post("/miniapp/api/notifications/enabled", notifications_set)
+    app.router.add_post("/miniapp/api/risk", risk)
+    app.router.add_post("/miniapp/api/risk/percent", risk_set)
     app.router.add_post("/miniapp/api/pause", pause)
     app.router.add_post("/miniapp/api/resume", resume)
     app.router.add_post("/miniapp/api/confirmation/begin", confirmation_begin)

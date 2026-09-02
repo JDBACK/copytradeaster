@@ -21,6 +21,7 @@ import { HelpScreen, SecurityScreen } from '../screens/InfoScreens'
 import { HomeScreen } from '../screens/HomeScreen'
 import { NotificationsScreen } from '../screens/NotificationsScreen'
 import { PositionsScreen } from '../screens/PositionsScreen'
+import { RiskScreen } from '../screens/RiskScreen'
 import { SettingsScreen } from '../screens/SettingsScreen'
 
 export function AppShell({
@@ -101,7 +102,7 @@ export function AppShell({
 
 /** Nested screens live on the typed stack; unimplemented kinds render nothing
  * and are only reachable through their own future part. */
-function NestedRoute({
+export function NestedRoute({
   nested,
   auth,
   accountMasked,
@@ -111,6 +112,8 @@ function NestedRoute({
   accountMasked?: string | null
 }) {
   switch (nested.kind) {
+    case 'risk':
+      return <RiskScreen auth={auth} accountMasked={accountMasked} />
     case 'notifications':
       return <NotificationsScreen auth={auth} accountMasked={accountMasked} />
     case 'security':

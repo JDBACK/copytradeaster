@@ -128,8 +128,6 @@ def test_follower_ui_exposes_only_risk_and_exchange_managed_leverage() -> None:
     risk = render_risk(
         RiskDTO(
             risk_percent=Decimal("0.01"),
-            max_leverage=20,
-            max_entry_deviation_pct=Decimal("0.02"),
         )
     )
     account = render_account(

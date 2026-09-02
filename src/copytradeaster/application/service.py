@@ -23,6 +23,11 @@ from functools import wraps
 from typing import Any, Protocol
 
 from copytradeaster.application.models import (
+    RISK_BASE,
+    RISK_MAX,
+    RISK_MIN,
+    RISK_PRESETS,
+    RISK_STEP,
     AccessRequestDTO,
     AccessRequestStatus,
     ActivityCategory,
@@ -2587,17 +2592,13 @@ class UserApplicationService:
             raise ServiceUnavailableError("risk policy is unavailable")
         try:
             risk = cls._decimal_input(_row_value(policy, "risk_percent"), "risk_percent")
-            deviation = cls._decimal_input(
-                _row_value(policy, "max_entry_deviation_pct"), "max_entry_deviation_pct"
-            )
-            leverage = _row_value(policy, "max_leverage")
-            if isinstance(leverage, bool) or not isinstance(leverage, int) or leverage <= 0:
-                raise ValidationError("risk values are invalid")
             return RiskDTO(
                 risk_percent=risk,
-                max_leverage=int(leverage),
-                max_entry_deviation_pct=deviation,
-                risk_base=str(_row_value(policy, "risk_base", "available_balance")),
+                min=RISK_MIN,
+                max=RISK_MAX,
+                step=RISK_STEP,
+                presets=RISK_PRESETS,
+                risk_base=str(_row_value(policy, "risk_base", RISK_BASE)),
             )
         except _SAFE_ERRORS:
             raise
@@ -2616,14 +2617,14 @@ class UserApplicationService:
             # including forged callers that bypass Telegram rendering.
             if values.max_leverage is not None or values.max_entry_deviation_pct is not None:
                 raise ValidationError("only risk_percent can be changed")
-            changes: dict[str, Any] = {}
-            if values.risk_percent is not None:
-                value = self._decimal_input(values.risk_percent, "risk_percent")
-                if not Decimal(0) < value <= Decimal(1):
-                    raise ValidationError("risk values are invalid")
-                changes["risk_percent"] = value
-            if not changes:
-                return await self.risk(context.user_id)
+            if values.risk_percent is None:
+                raise ValidationError("risk values are invalid")
+            value = self._decimal_input(values.risk_percent, "risk_percent")
+            if value < RISK_MIN or value > RISK_MAX:
+                raise ValidationError("risk values are invalid")
+            if (value - RISK_MIN) % RISK_STEP != 0:
+                raise ValidationError("risk values are invalid")
+            changes: dict[str, Any] = {"risk_percent": value}
             async with self._account_lock(str(context.account_id)):
                 policy = await self._call_required(
                     self._settings, "patch_policy", str(context.account_id), **changes

@@ -426,7 +426,19 @@ async def test_dashboard_status_risk_activity_and_notifications_are_safe(environ
     assert any(action[0] == "refresh_snapshot" for action in runtime.actions)
 
     risk = await service.risk(7)
-    assert risk.max_leverage == 3
+    assert risk.risk_percent == Decimal("0.01")
+    assert risk.min == Decimal("0.005")
+    assert risk.max == Decimal("0.05")
+    assert risk.step == Decimal("0.005")
+    assert risk.presets == (
+        Decimal("0.01"),
+        Decimal("0.02"),
+        Decimal("0.03"),
+        Decimal("0.05"),
+    )
+    assert risk.risk_base == "available_balance"
+    assert not hasattr(risk, "max_leverage")
+    assert not hasattr(risk, "max_entry_deviation_pct")
     activity = await service.activity(7)
     assert activity.items[0].title == "Открыта позиция"
     assert activity.items[0].category.value == "trade"
@@ -1609,6 +1621,9 @@ async def test_connect_and_replace_validate_inputs_and_authority(environment):
     [
         RiskUpdateInput(risk_percent=Decimal("0")),
         RiskUpdateInput(risk_percent=Decimal("1.01")),
+        RiskUpdateInput(risk_percent=Decimal("0.004")),
+        RiskUpdateInput(risk_percent=Decimal("0.06")),
+        RiskUpdateInput(risk_percent=Decimal("0.012")),
         RiskUpdateInput(max_leverage=True),  # type: ignore[arg-type]
         RiskUpdateInput(max_leverage=0),
         RiskUpdateInput(max_entry_deviation_pct=Decimal("-0.1")),
@@ -1624,8 +1639,8 @@ async def test_risk_update_rejects_invalid_values(environment, values):
 
 async def test_risk_update_empty_patch_and_missing_policy_are_safe(environment):
     db, _, _, _, service = environment
-    result = await service.update_risk(7, RiskUpdateInput())
-    assert result.max_leverage == 3
+    with pytest.raises(ValidationError):
+        await service.update_risk(7, RiskUpdateInput())
     await db.execute_write("DELETE FROM copy_settings WHERE account_id=?", ("tg-7",))
     with pytest.raises(ServiceUnavailableError, match="risk"):
         await service.risk(7)
@@ -2449,8 +2464,20 @@ async def test_risk_success_updates_each_field_and_invalid_storage_is_typed(envi
         )
     result = await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02")))
     assert result.risk_percent == Decimal("0.02")
-    assert result.max_leverage == 3
-    assert result.max_entry_deviation_pct == Decimal("0.02")
+    assert result.min == Decimal("0.005")
+    assert result.max == Decimal("0.05")
+    assert result.step == Decimal("0.005")
+    assert result.presets == (
+        Decimal("0.01"),
+        Decimal("0.02"),
+        Decimal("0.03"),
+        Decimal("0.05"),
+    )
+    assert result.risk_base == "available_balance"
+    assert not hasattr(result, "max_leverage")
+    assert not hasattr(result, "max_entry_deviation_pct")
+    # The save is durable: the next read sees the new value.
+    assert (await service.risk(7)).risk_percent == Decimal("0.02")
 
     class InvalidSettings:
         async def get_policy(self, account_id: str):
@@ -2581,3 +2608,89 @@ def test_service_public_surface_matches_application_protocol():
     assert not hasattr(UserApplicationService, "emergency")
     assert not hasattr(UserApplicationService, "start_emergency")
     assert not hasattr(UserApplicationService, "disconnect")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        Decimal("0.004"),  # below min
+        Decimal("0.055"),  # above max
+        Decimal("0.06"),  # above max
+        Decimal("0.012"),  # off-step
+        Decimal("0.007"),  # off-step
+        Decimal("0.011"),  # off-step
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+    ],
+)
+async def test_risk_p24_rejects_out_of_policy_values(environment, raw):
+    _, _, _, _, service = environment
+    with pytest.raises(ValidationError):
+        await service.update_risk(7, RiskUpdateInput(risk_percent=raw))
+
+
+@pytest.mark.parametrize("raw", [0.02, True, False, None, [0.02], {"v": 1}])
+async def test_risk_p24_rejects_non_decimal_inputs(environment, raw):
+    _, _, _, _, service = environment
+    with pytest.raises((ValidationError, ServiceUnavailableError)):
+        await service.update_risk(7, RiskUpdateInput(risk_percent=raw))  # type: ignore[arg-type]
+
+
+async def test_risk_p24_policy_round_trip_and_audit(environment, caplog):
+    db, _, _, _, service = environment
+    # Public DTO carries only the safe contract with backend-owned constraints.
+    current = await service.risk(7)
+    assert current.risk_percent == Decimal("0.01")
+    assert current.min == Decimal("0.005")
+    assert current.max == Decimal("0.05")
+    assert current.step == Decimal("0.005")
+    assert current.presets == (
+        Decimal("0.01"),
+        Decimal("0.02"),
+        Decimal("0.03"),
+        Decimal("0.05"),
+    )
+    assert current.risk_base == "available_balance"
+    assert not hasattr(current, "max_leverage")
+    assert not hasattr(current, "max_entry_deviation_pct")
+
+    # Forged legacy fields stay fail-closed.
+    with pytest.raises(ValidationError):
+        await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02"), max_leverage=10))
+    with pytest.raises(ValidationError):
+        await service.update_risk(
+            7,
+            RiskUpdateInput(
+                risk_percent=Decimal("0.02"),
+                max_entry_deviation_pct=Decimal("0.01"),
+            ),
+        )
+
+    # Grid edges and a mid-grid step are accepted (exact Decimal checks).
+    for raw in ("0.005", "0.05", "0.015", "0.03"):
+        updated = await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal(raw)))
+        assert updated.risk_percent == Decimal(raw)
+        assert (await service.risk(7)).risk_percent == Decimal(raw)
+
+    # Internal engine semantics are untouched: legacy storage columns keep
+    # serving the trading core with their pre-existing values.
+    row = await db.fetchone("SELECT * FROM copy_settings WHERE account_id=?", ("tg-7",))
+    assert row is not None
+    assert Decimal(row["risk_percent"]) == Decimal("0.03")
+    assert int(row["max_leverage"]) == 3
+    assert Decimal(row["max_entry_deviation_pct"]) == Decimal("0.02")
+
+    # Control audit keeps attempt/success semantics for the new policy.
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02")))
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("control_audit action=update_risk result=attempt" in message for message in messages)
+    success = [
+        message
+        for message in messages
+        if "control_audit action=update_risk result=success" in message
+    ]
+    assert len(success) == 1
+    assert "changed_fields=risk_percent" in success[0]

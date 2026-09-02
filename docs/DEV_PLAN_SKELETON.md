@@ -313,7 +313,14 @@ Stage 2 полностью закрыт для testnet scope.
   на два клика), «Всё работает» только при ready + snapshot_captured_at
   («Ожидание данных» без snapshot); журнал —
   `STAGE3_PART2_PROGRESS_2026-09.md`).
-- [ ] P2.4: единственная числовая настройка Risk on Stop с backend constraints.
+- [x] P2.4: единственная числовая настройка Risk on Stop с backend constraints
+  (закрыт 2026-09-03: implementation/live complete; policy утверждена
+  владельцем: min 0,5% / max 5% / step 0,5% / presets 1/2/3/5%;
+  `POST /miniapp/api/risk` + `/risk/percent`, RiskScreen по `05-risk-settings`,
+  live acceptance на Aster Testnet через production path на `sqlite3.backup`
+  копии БД — follower qty 0.004 @1% и 0.012 @3% точно по Decimal-расчёту,
+  прод-БД нетронута; owner Telegram acceptance pending; журнал —
+  `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.
 - [ ] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle.
 - [ ] P2.7: account-specific `builder + feeRate` в обычном copy-engine и

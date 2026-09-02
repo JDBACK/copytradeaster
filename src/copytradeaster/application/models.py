@@ -171,12 +171,36 @@ class StatusDTO:
     message: str | None = None
 
 
+RISK_MIN = Decimal("0.005")
+RISK_MAX = Decimal("0.05")
+RISK_STEP = Decimal("0.005")
+RISK_PRESETS: tuple[Decimal, ...] = (
+    Decimal("0.01"),
+    Decimal("0.02"),
+    Decimal("0.03"),
+    Decimal("0.05"),
+)
+RISK_BASE = "available_balance"
+
+
 @dataclass(frozen=True, slots=True)
 class RiskDTO:
+    """Public Mini App risk contract (P2.4 — Risk on Stop).
+
+    The only follower-controlled numeric setting is ``risk_percent``.
+    ``min``/``max``/``step``/``presets`` are backend authority: the
+    frontend renders them but never defines policy.  Legacy
+    ``max_leverage``/``max_entry_deviation_pct`` stay in the internal
+    ``RiskPolicy``/storage/engine but are no longer part of this public DTO.
+    All values are Decimals; the transport serializes them as strings.
+    """
+
     risk_percent: Decimal
-    max_leverage: int
-    max_entry_deviation_pct: Decimal
-    risk_base: str = "available_balance"
+    min: Decimal = RISK_MIN
+    max: Decimal = RISK_MAX
+    step: Decimal = RISK_STEP
+    presets: tuple[Decimal, ...] = RISK_PRESETS
+    risk_base: str = RISK_BASE
 
 
 class ActivityCategory(StrEnum):

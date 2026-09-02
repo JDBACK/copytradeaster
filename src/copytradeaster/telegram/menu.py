@@ -222,11 +222,7 @@ class MenuEngine:
         return render_status(dto, revision)
 
     async def risk(self, user_id: int, revision: int = 0) -> MenuView:
-        dto = RiskDTO(
-            risk_percent=Decimal("0.01"),
-            max_leverage=3,
-            max_entry_deviation_pct=Decimal("0.02"),
-        )
+        dto = RiskDTO(risk_percent=Decimal("0.01"))
         if self.application is not None:
             dto = await self.application.risk(user_id)
         return render_risk(dto, revision)

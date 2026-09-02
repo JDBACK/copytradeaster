@@ -229,11 +229,7 @@ class FakeApplication:
         )
 
     async def risk(self, user_id: int) -> RiskDTO:
-        return RiskDTO(
-            Decimal("0.01"),
-            3,
-            Decimal("0.02"),
-        )
+        return RiskDTO(Decimal("0.01"))
 
     async def activity(self, user_id: int, page: int = 0) -> ActivityPage:
         return ActivityPage(page=page)

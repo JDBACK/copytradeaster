@@ -1,8 +1,8 @@
-/** Settings root (эталон 06-settings, Stage 3 part 2 P2.3).
+/** Settings root (эталон 06-settings, Stage 3 part 2 P2.3–P2.4).
  *
  * A capability list with sections, not a card grid.  Only rows that really
- * navigate in P2.3 (Notifications, Security, Help) get a chevron; Risk,
- * Status, Account+Builder and the static Environment are read-only rows.
+ * navigate (Risk, Notifications, Security, Help) get a chevron; Status,
+ * Account+Builder and the static Environment are read-only rows.
  * Values come from the authoritative DashboardDTO — nothing is hardcoded
  * and stale/degraded never reads «Всё работает». */
 
@@ -178,6 +178,7 @@ export function SettingsView({
           icon={<RiskIcon />}
           label="Риск на Stop"
           value={formatPercent(dashboard.risk_percent)}
+          onClick={() => open({ kind: 'risk' })}
         />
         <SettingsRow
           icon={<BellIcon />}

@@ -136,3 +136,12 @@ export interface NotificationSettingsDTO {
   pending: number
   failed: number
 }
+
+export interface RiskDTO {
+  risk_percent: string
+  min: string
+  max: string
+  step: string
+  presets: string[]
+  risk_base: string
+}

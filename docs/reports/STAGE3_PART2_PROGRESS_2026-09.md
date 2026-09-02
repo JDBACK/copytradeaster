@@ -336,17 +336,105 @@ Corrective pass по ревью P2.3 (2026-09-02, три замечания, о�
    перезапускался (scope ревью), счётчики пунктов offline/live выше
    относятся к `fe84d2c`.
 
+## P2.4 — Risk on Stop: CLOSED (2026-09-03, implementation/live complete)
+
+Policy утверждена владельцем как developer (отклонение от чернового
+`min 0.001/step 0.001/presets 0.005-0.01-0.02-0.05`): **min 0,5% / max 5% /
+step 0,5% / presets 1%, 2%, 3%, 5%** — «от 1 до 5 с шагом 0.5, 0.5 тоже
+оставить, пресеты 1 2 3 5».
+
+Backend (переиспользование, без новых repository/service/engine слоёв):
+
+- `RiskDTO` в `application/models.py`: только `risk_percent`, `min`,
+  `max`, `step`, `presets`, `risk_base`; module-константы `RISK_MIN` /
+  `RISK_MAX` / `RISK_STEP` / `RISK_PRESETS` / `RISK_BASE` — backend authority.
+  Legacy `max_leverage`/`max_entry_deviation_pct` остались только во
+  внутреннем `RiskPolicy`/storage/engine.
+- `UserApplicationService._risk_dto` / `update_risk`: только `risk_percent`,
+  `>= min`, `<= max`, `(value - min) % step == 0` — всё через `Decimal`;
+  invalid/off-step/out-of-range/NaN/Infinity/float/bool/None → typed
+  `ValidationError`; forged leverage/deviation fail closed; пустой patch
+  теперь тоже `ValidationError` (раньше был read-through); persistence через
+  существующий `patch_policy`; control audit (`attempt/success/rejected`,
+  `changed_fields=risk_percent`) сохранён.
+- Telegram `menu.risk` fallback-конструктор обновлён (рендер и так использовал
+  только `risk_percent`); Telegram-пресеты 1%/2%/5% остаются валидными.
+
+Transport (`miniapp/server.py`, существующий HMAC/initData boundary):
+
+- `POST /miniapp/api/risk` → authoritative DTO;
+  `POST /miniapp/api/risk/percent` с strict single-key границей
+  (`{"risk_percent": "<decimal-string>"}`; legacy/extra/account_id →
+  `400 invalid_input`, не-строки/NaN/Infinity/malformed → 400;
+  application `ValidationError` → safe 400 без exception text).
+
+Frontend (`miniapp/`):
+
+- `RiskDTO` в `types.ts`; `api.risk` / `api.setRiskPercent` (fraction строкой).
+- `riskView.ts`: `parseRiskInput` (`1,5`/`1.5`/`2%` → `"0.015"`, exact
+  string-math), `formatRiskPercent`, `isRiskAllowed` (по DTO, backend
+  перепроверяет), `isRiskDirty`, `demoLossUsdt` (demo balance 1240 USDT).
+- `screens/RiskScreen.tsx` по `05-risk-settings.png`: heading, `Текущее
+  значение` + крупное confirmed, scale-ticks, `Сейчас → После` только в
+  dirty, 4 пресета из DTO (active = selected), `Другое значение` + custom
+  input с русской подсказкой, `Что это значит` + badge `Демо-расчёт`,
+  leverage-note, primary save с синхронным `createToggleGate`
+  (переиспользован из notifications) + `aria-busy`; success принимает
+  server DTO + haptic, failure хранит confirmed + safe error.
+- Settings: строка «Риск на Stop» кликабельна с chevron (теперь 4
+  chevron-кнопки); `AppShell.NestedRoute` (`export` для контракта) рендерит
+  `risk` → `RiskScreen`; BackButton/tab-reset — существующий стек.
+- CSS: `risk-*` классы на существующих токенах.
+
+Tests:
+
+- Application (`test_service.py`): обновлены 3 старых теста под новую
+  policy + новый matrix `test_risk_p24_*` (exact constraints, min/max/step
+  accepted, below/above/off-step/NaN/±Infinity/float/bool/None/list/dict
+  rejected, forged rejected, durability read-after-write, storage legacy
+  columns intact, audit attempt+success).
+- HTTP (`tests/unit/miniapp/test_risk_server.py`, новый): auth, exact
+  contract без legacy/internal полей, round-trip, 19 forged/malformed
+  payloads + non-object body → 400 без вызова application,
+  ValidationError → safe 400.
+- Frontend (`risk.test.tsx`, новый, 11 тестов): parse/format/policy-gate/
+  dirty/demo/loading/leak/nested route; `settings.test.tsx` — 4 chevrons.
+
+Gates:
+
+- offline pytest: 816 passed / 2 skipped / 32 deselected (coverage — см.
+  `ENGINE_TEST_STATUS_2026-08.md`); ruff check/format clean; mypy
+  недоступен в текущем venv (не входит в offline gate этого окружения).
+- frontend: Vitest 113 passed / 12 файлов, oxlint 0/0, `tsc -b &&
+  vite build` clean (финальный билд без `VITE_DEV_USER_ID`; dev-билд
+  использовался только для browser walkthrough, `dist/` git-ignored).
+- live: `tests/testnet/test_live_risk_acceptance.py` — 1 passed за 33.97s
+  (`fapi.asterdex-testnet.com`, production App + control-audited
+  application + production aiohttp на `sqlite3.backup`-копии прод-БД):
+  read policy → set A `0.01` → master BTCUSDT LONG 0.002 + Stop 73296.8 →
+  reconcile → signed follower qty **0.004 == Decimal-расчёт** (equity
+  1573.02, entry 77119.7) → cleanup → set B `0.03` → эквивалентная сделка →
+  qty **0.012 == расчёт** (ratio 3.0x) → realized stop-loss обоих legs в
+  пределах одного lot step → forged bodies → 400 → cleanup flat →
+  fingerprint + `copy_settings` прод-БД до/после совпали.
+- browser walkthrough (preview engine на копии прод-БД, `copyc1`, :8095,
+  desktop + 390×844): Settings chevron → Risk clean (save disabled) →
+  preset 2% (`Сейчас 1,0% После 2,0%`, active только 2%) → custom `1,2`
+  rejected с подсказкой (selected остался 2%) → `1,5` dirty → double-tap
+  save → single mutation, current `1,5%`, Settings `1,5%`; иерархия по макету.
+
+P2.4 полностью закрыт кроме owner acceptance в реальном Telegram WebView.
+
 ## Следующие подчасти
 
-- P2.4 — Risk on Stop (`05-risk-settings`) — перед стартом нужны
-  утверждённые владельцем `risk min/max/step/presets`.
 - P2.5 — System Status (`08-system-status`).
 - P2.6 — Account + Builder attestation (`07-account-builder`).
 - P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3.
 
-Открытые решения владельца (нужны перед соответствующими подчастями):
+Открытые решения владельца (остались перед соответствующими подчастями):
 
-1. точные `risk min/max/step/presets` (перед P2.4);
+1. ~~точные `risk min/max/step/presets` (перед P2.4)~~ — утверждены
+   2026-09-03: min 0,5% / max 5% / step 0,5% / presets 1/2/3/5.
 2. disconnect semantics: только локальный или + отдельный remote revoke
    (перед P2.6);
 3. auth-модель `/builder/userTrades` — bounded live probe (перед P2.7).

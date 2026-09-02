@@ -5,6 +5,61 @@
 
 ## Текущее состояние
 
+- **Stage 3, часть 2 (P2.4 — Risk on Stop) — CLOSED
+  (2026-09-03, implementation/live complete; owner Telegram acceptance pending):**
+  1. **Backend Application:** public `RiskDTO` больше не содержит
+     `max_leverage`/`max_entry_deviation_pct` — только `risk_percent`,
+     `min`/`max`/`step`/`presets`, `risk_base` (backend authority, все
+     проверки через `Decimal`). Policy утверждена владельцем как developer
+     (отклонение от чернового плана: min `0.005` = 0,5%, max `0.05` = 5%,
+     step `0.005` = 0,5%, presets `0.01/0.02/0.03/0.05` = 1/2/3/5%).
+     `update_risk()` меняет только `risk_percent`: range + step enforced,
+     invalid/off-step/out-of-range/NaN/Infinity/float/bool → typed
+     `ValidationError`, forged leverage/deviation fail closed, persistence
+     через существующий `SettingsRepo`, control audit сохранён. Legacy
+     `RiskPolicy`/storage/engine для торгового ядра нетронуты.
+  2. **Transport:** `POST /miniapp/api/risk` (чтение) и
+     `POST /miniapp/api/risk/percent` (mutation) поверх существующего
+     HMAC/initData boundary. Строгая single-key граница: только
+     `risk_percent` строкой; missing/bool/null/number/object/array/NaN/
+     Infinity/malformed и любые лишние поля (legacy/forged/account_id) →
+     `400 invalid_input`; в ответе только safe DTO, без exception text.
+  3. **Frontend (`miniapp/`):** `RiskDTO` в `types.ts`;
+     `api.risk`/`api.setRiskPercent`; Settings-строка «Риск на Stop»
+     кликабельна с chevron; `{ kind: 'risk' }` рендерит новый `RiskScreen`
+     по `05-risk-settings.png` (Текущее значение, пресеты из DTO, custom
+     comma/dot/% ввод `1,5%`→`"0.015"`, `Сейчас → После`, `Демо-расчёт`
+     от 1240 USDT, leverage-note, primary save с double-tap gate).
+     Pure `riskView.ts` (string-math, без float); confirmed меняется
+     только по server response.
+  4. **Offline gate:** offline pytest **816 passed / 2 skipped / 32
+     deselected**, coverage **87%** (порог >= 87%);
+     ruff check/format clean. Новые кейсы:
+     application policy matrix (min/max/step accepted, below/above/
+     off-step/NaN/Infinity/non-Decimal/forged rejected, durability,
+     audit) и HTTP boundary (auth/read/round-trip/19 malformed-forged
+     payloads/non-object/ValidationError→safe 400, no legacy fields).
+  5. **Frontend gate:** Vitest **113 passed / 12 файлов** (новый
+     `risk.test.tsx`: parse/format/policy-gate/dirty/demo/loading-leak/
+     nested route; `settings.test.tsx` — 4 chevron-кнопки), oxlint 0/0,
+     `tsc -b && vite build` clean.
+  6. **Live gate (Aster Testnet):**
+     `tests/testnet/test_live_risk_acceptance.py` — **1 passed за
+     33.97s** на throwaway `sqlite3.backup`-копии прод-БД (рабочая БД
+     доказано не изменилась: fingerprint + `copy_settings` до/после).
+     Production path: HTTP read policy → set A=`0.01` → master LONG
+     0.002 + Stop 73296.8 → reconcile → signed follower qty **0.004**
+     == Decimal-расчёт; cleanup → set B=`0.03` → эквивалентная сделка →
+     qty **0.012** == расчёт (ratio 3.0x); realized stop-loss обоих legs
+     в пределах одного lot step от configured; forged `max_leverage`/
+     `max_entry_deviation_pct` → 400. Cleanup flat best-effort.
+  7. **Browser walkthrough:** preview engine на копии прод-БД
+     (`copyc1`, порт 8095): Settings chevron у Риска, Risk clean
+     (save disabled) → preset 2% (dirty `Сейчас 1,0% После 2,0%`) →
+     custom `1,2` rejected с подсказкой → `1,5` dirty → double-tap save →
+     single mutation, current `1,5%`, Settings показывает `1,5%`; mobile
+     390×844 — иерархия по макету. Журнал —
+     `STAGE3_PART2_PROGRESS_2026-09.md`.
 - **Stage 3, часть 2 (P2.3 — Settings root и Notifications) — CLOSED
   (2026-09-02, implementation/live/owner acceptance complete):**
   1. **Backend Transport:** `POST /miniapp/api/notifications` (чтение) и

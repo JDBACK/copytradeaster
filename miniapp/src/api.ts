@@ -10,6 +10,7 @@ import type {
   MiniAppSessionDTO,
   NotificationSettingsDTO,
   PositionPageDTO,
+  RiskDTO,
 } from './types'
 
 export class ApiError extends Error {
@@ -120,6 +121,16 @@ export const api = {
     enabled: boolean,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<NotificationSettingsDTO>('/miniapp/api/notifications/enabled', { enabled }, auth, options),
+
+  risk: (auth: AuthContext, options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+    post<RiskDTO>('/miniapp/api/risk', {}, auth, options),
+
+  /** riskPercent travels as a fraction string, e.g. "0.02" for 2,0%. */
+  setRiskPercent: (
+    auth: AuthContext,
+    riskPercent: string,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<RiskDTO>('/miniapp/api/risk/percent', { risk_percent: riskPercent }, auth, options),
   pause: (auth: AuthContext) => post<DashboardDTO>('/miniapp/api/pause', {}, auth),
 
   resume: (auth: AuthContext, confirmation?: ConfirmationDTO) =>
