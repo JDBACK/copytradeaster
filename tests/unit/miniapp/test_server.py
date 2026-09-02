@@ -30,12 +30,15 @@ from copytradeaster.application.models import (
     MiniAppAccessState,
     MiniAppConnectionState,
     MiniAppSessionDTO,
+    NotificationSettingsDTO,
     OnboardingApplicationError,
     PositionPageDTO,
     PositionProtectionState,
     PositionSide,
     PositionSummaryDTO,
+    ServiceUnavailableError,
     SystemState,
+    ValidationError,
 )
 from copytradeaster.config import Settings
 from copytradeaster.miniapp.server import create_miniapp_app
@@ -115,6 +118,10 @@ class FakeApplication:
     dashboard_calls: list = field(default_factory=list)
     positions_calls: list = field(default_factory=list)
     activity_calls: list = field(default_factory=list)
+    notifications_dto: NotificationSettingsDTO = field(default_factory=NotificationSettingsDTO)
+    notifications_calls: list = field(default_factory=list)
+    set_notifications_calls: list = field(default_factory=list)
+    set_notifications_fail_with: Exception | None = None
     pause_calls: list = field(default_factory=list)
     resume_calls: list = field(default_factory=list)
     begin_calls: list = field(default_factory=list)
@@ -163,6 +170,25 @@ class FakeApplication:
         if self.fail_with:
             raise self.fail_with
         return self.activity_dto
+
+    async def notification_settings(self, user_id: int) -> NotificationSettingsDTO:
+        self.user_id_seen = user_id
+        self.notifications_calls.append(user_id)
+        if self.fail_with:
+            raise self.fail_with
+        return self.notifications_dto
+
+    async def set_notifications(self, user_id: int, enabled: bool) -> NotificationSettingsDTO:
+        self.user_id_seen = user_id
+        self.set_notifications_calls.append((user_id, enabled))
+        if self.set_notifications_fail_with:
+            raise self.set_notifications_fail_with
+        return NotificationSettingsDTO(
+            enabled=enabled,
+            last_delivery_at=self.notifications_dto.last_delivery_at,
+            pending=self.notifications_dto.pending,
+            failed=self.notifications_dto.failed,
+        )
 
     async def builder_prepare(self, user_id: int, user_address: str) -> BuilderPrepareDTO:
         self.prepare_calls.append((user_id, user_address))
@@ -790,3 +816,135 @@ async def test_activity_endpoint_serializes_pending_age(client, fake_app):
     assert data["items"][0]["status"] == "pending"
     assert data["items"][0]["pending_age"] == 42
     assert data["filter"] == "trade"
+
+
+# --- notifications surface ----------------------------------------------------
+
+
+async def test_notifications_endpoint_requires_auth(client, fake_app):
+    resp = await client.post("/miniapp/api/notifications")
+    assert resp.status == 401
+    assert fake_app.notifications_calls == []
+
+    resp = await client.post("/miniapp/api/notifications/enabled", json={"enabled": True})
+    assert resp.status == 401
+    assert fake_app.set_notifications_calls == []
+
+
+async def test_notifications_endpoint_serializes_safe_dto(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    fake_app.notifications_dto = NotificationSettingsDTO(
+        enabled=True,
+        last_delivery_at=datetime(2026, 9, 1, 21, 5, tzinfo=UTC),
+        pending=2,
+        failed=1,
+    )
+    resp = await client.post("/miniapp/api/notifications", headers=_auth_header(init_data))
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["enabled"] is True
+    assert data["last_delivery_at"].startswith("2026-09-01T21:05")
+    assert data["pending"] == 2
+    assert data["failed"] == 1
+    assert fake_app.notifications_calls == [777]
+    # Only the safe DTO surface reaches the wire: no outbox internals.
+    for forbidden in (
+        "chat_id",
+        "account_id",
+        "payload",
+        "last_error",
+        "text",
+        "event_key",
+        "attempts",
+        "lease",
+        "worker",
+    ):
+        assert forbidden not in data
+
+
+async def test_notifications_set_passes_real_boolean_and_returns_fresh_dto(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/notifications/enabled",
+        json={"enabled": True},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 200
+    assert fake_app.set_notifications_calls == [(777, True)]
+    body = await resp.json()
+    assert body["enabled"] is True
+
+    resp = await client.post(
+        "/miniapp/api/notifications/enabled",
+        json={"enabled": False},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 200
+    assert fake_app.set_notifications_calls == [(777, True), (777, False)]
+    body = await resp.json()
+    assert body["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"enabled": None},
+        {"enabled": "true"},
+        {"enabled": "false"},
+        {"enabled": 1},
+        {"enabled": 0},
+        {"enabled": [True]},
+        {"enabled": {"value": True}},
+    ],
+)
+async def test_notifications_set_rejects_non_boolean_input(client, fake_app, payload):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/notifications/enabled",
+        json=payload,
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert body["error"] == "invalid_input"
+    assert fake_app.set_notifications_calls == []
+
+
+async def test_notifications_set_rejects_malformed_body(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    resp = await client.post(
+        "/miniapp/api/notifications/enabled",
+        data="not-json",
+        headers={**_auth_header(init_data), "Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+    assert fake_app.set_notifications_calls == []
+
+
+async def test_notifications_set_maps_typed_application_errors(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    fake_app.set_notifications_fail_with = ValidationError("notification setting is invalid")
+    resp = await client.post(
+        "/miniapp/api/notifications/enabled",
+        json={"enabled": True},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 400
+    assert (await resp.json())["error"] == "invalid_input"
+
+    fake_app.set_notifications_fail_with = ServiceUnavailableError("db down")
+    resp = await client.post(
+        "/miniapp/api/notifications/enabled",
+        json={"enabled": True},
+        headers=_auth_header(init_data),
+    )
+    assert resp.status == 503
+    assert (await resp.json())["error"] == "service_unavailable"
+
+
+async def test_notifications_read_maps_service_unavailable(client, fake_app):
+    init_data = _make_init_data(BOT_TOKEN, 777)
+    fake_app.fail_with = ServiceUnavailableError("db down")
+    resp = await client.post("/miniapp/api/notifications", headers=_auth_header(init_data))
+    assert resp.status == 503

@@ -8,6 +8,7 @@ import type {
   ConfirmationDTO,
   DashboardDTO,
   MiniAppSessionDTO,
+  NotificationSettingsDTO,
   PositionPageDTO,
 } from './types'
 
@@ -108,6 +109,17 @@ export const api = {
     page = 0,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<ActivityPageDTO>('/miniapp/api/activity', { filter, page }, auth, options),
+
+  notifications: (
+    auth: AuthContext,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<NotificationSettingsDTO>('/miniapp/api/notifications', {}, auth, options),
+
+  setNotifications: (
+    auth: AuthContext,
+    enabled: boolean,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<NotificationSettingsDTO>('/miniapp/api/notifications/enabled', { enabled }, auth, options),
   pause: (auth: AuthContext) => post<DashboardDTO>('/miniapp/api/pause', {}, auth),
 
   resume: (auth: AuthContext, confirmation?: ConfirmationDTO) =>

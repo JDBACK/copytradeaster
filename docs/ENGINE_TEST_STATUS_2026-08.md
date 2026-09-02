@@ -5,6 +5,90 @@
 
 ## Текущее состояние
 
+- **Stage 3, часть 2 (P2.3 — Settings root и Notifications) — implementation/
+  live complete (2026-09-02, owner acceptance pending):**
+  1. **Backend Transport:** `POST /miniapp/api/notifications` (чтение) и
+     `POST /miniapp/api/notifications/enabled` (mutation) в
+     `miniapp/server.py` поверх существующих `NotificationSettingsDTO`,
+     `notification_settings()` и `set_notifications()` — новый
+     service/repository/таблицы не создавались. На HTTP boundary принимается
+     только настоящий boolean: missing/string/number/list/object →
+     `400 invalid_input`; application-level strict-bool check и существующий
+     control-audit boundary `set_notifications` сохранены. user_id только из
+     проверенного initData (или testnet dev-header). Проводной DTO-сурфейс:
+     `enabled`, `last_delivery_at`, `pending`, `failed`; chat_id,
+     account_id, payload, last_error и другие outbox-internal поля никогда
+     не покидают backend. Отключение уведомлений меняет только
+     `telegram_users.notifications_enabled` (router-гейт доставки) и не
+     затрагивает торговый путь.
+  2. **Frontend (`miniapp/`):** interim `StubScreen` заменён настоящим
+     `SettingsScreen` по эталону `06-settings.png`: статус-панель
+     «Копирование» и capability-список с секциями (Настройки копирования /
+     Подключение и безопасность / Поддержка): Риск на Stop, Уведомления,
+     Статус Aster, Аккаунт и Builder, Безопасность, Помощь, Среда=Aster
+     testnet. Chevron только у реально открывающихся в P2.3 строк
+     (Уведомления, Безопасность, Помощь); Риск/Статус/Аккаунт+Builder
+     (P2.4/P2.5/P2.6) и статическая Среда — read-only строки без chevron.
+     Значения из authoritative `DashboardDTO` (`risk_percent`,
+     `system_state`, `notification_enabled`, `account_masked`);
+     stale/degraded никогда не подписаны «Всё работает»; Builder —
+     нейтральный masked wallet без «Проверено» до attestation (P2.6).
+     Вложенный `NotificationsScreen` через существующий typed route stack +
+     Telegram BackButton (новый nested kind `security`); toggle — button
+     `role="switch"` с `aria-checked`/`aria-busy`, UI меняется только по
+     DTO, возвращённому сервером; при ошибке сохраняется последнее
+     подтверждённое состояние + error box; double tap заблокирован
+     (disabled во время сохранения + reducer игнорирует повторный
+     `save_requested`). Безопасные delivery-факты: последняя доставка,
+     в очереди, не доставлено. Pure view-models `settingsView.ts`
+     (copySummary/systemStatusValue/notificationsValue) и
+     `notificationsView.ts` (toggle state machine). AppShell рендерит
+     nested screens (`notifications`/`security`/`help`) через `NestedRoute`.
+  3. **Offline gate:** offline pytest **773 passed / 2 skipped / 32
+     deselected** за 17.78s, coverage **87%**; ruff check/format clean,
+     `git diff --check` clean. Новые HTTP-кейсы
+     (`tests/unit/miniapp/test_server.py`): auth для обоих endpoint'ов,
+     safe-DTO сериализация без outbox-internal полей, strict boolean
+     (8 вариантов невалидного payload → 400 invalid_input), malformed
+     body → 400, проброс реального boolean в application, typed errors
+     (ValidationError→400 invalid_input, ServiceUnavailableError→503).
+  4. **Frontend gate:** Vitest **97 passed / 11 файлов** — новые
+     `settings.test.tsx` (11: view-model маппинги, honest tones для
+     stale/degraded, порядок секций и строк, ровно 3 кнопки-chevron,
+     отсутствие «Проверено» и внутренних идентификаторов, aria-label
+     статус-панели) и `notifications.test.tsx` (10: toggle state machine —
+     double-tap reference-равенство, серверный DTO как источник истины,
+     сохранение confirmed при ошибке; a11y switch; loading frame),
+     `navigation.test.ts` +1 (notifications/security/help на стеке);
+     oxlint 0/0, `tsc -b && vite build` clean.
+  5. **Live gate (Aster Testnet + реальный Telegram Bot API):**
+     `tests/testnet/test_live_notifications_acceptance.py` — **1 passed за
+     26.99s**. Production-композиция: `NotificationRouter` + App +
+     `build_stage2_composition().application` (общий application layer с
+     control audit) + production aiohttp transport + настоящий
+     `TelegramOutboxWorker` с реальным ботом из `.botkey`; follower
+     `tg-8264892202` (реальная пара user/chat 8264892202). Фазы: чтение
+     через production HTTP → disable через HTTP (DB row=0) → реальный
+     master BTCUSDT LONG + STOP_MARKET → production copy engine
+     скопировал позицию (signed `positionRisk` follower ≠ 0) при
+     **ноле новых outbox rows для пользователя** → enable через HTTP
+     (DB row=1) → реальный partial close мастера → durable outbox row
+     (id=130, PENDING) → `worker.process_once()` доставил через настоящий
+     Telegram Bot API → **SENT** («Закрыта позиция BTCUSDT…», chat
+     8264892202) → read endpoint вернул `enabled=true` и
+     `last_delivery_at`. Cleanup: оба счёта flat, toggle восстановлен.
+     FakeAster/MockTransport/fake sender не использовались.
+  6. **Bounded impeccable + browser walkthrough:** detector по изменённым
+     UI-файлам — 0 findings; один walkthrough мобильного viewport
+     (390×844) на `preview_miniapp_engine.py` (копия prod-БД, порт 8093,
+     production application + реальные DTO): секции/строки/chevrons,
+     toggle-цикл вкл→выкл→вкл с обновлением UI по серверному DTO
+     (подтверждено и в preview SQLite), Help/Security static screens,
+     tab-switch сбрасывает nested stack. Corrective pass не потребовался.
+  7. **Owner acceptance:** pending — требуется Telegram WebView screenshot
+     текущего HEAD: Settings root, Notifications toggle (вкл/выкл),
+     BackButton для nested screens.
+
 - **Stage 3, часть 2 (P2.2 — read-only Activity) — CLOSED (2026-09-02,
   live acceptance на Aster Testnet через production copy engine):**
   1. **Backend Application & Transport:** `ActivityCategory` (trade/system),

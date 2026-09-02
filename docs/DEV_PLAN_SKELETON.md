@@ -295,7 +295,18 @@ Stage 2 полностью закрыт для testnet scope.
   [STAGE3_PART2_PROGRESS_2026-09.md](reports/STAGE3_PART2_PROGRESS_2026-09.md)).
 - [x] P2.1: read-only Positions из authoritative follower state (закрыт 2026-09-02; DTO, API, PositionsScreen, live acceptance 8/8 фаз через реальный production copy engine на Aster Testnet, corrective freshness/protection gates и owner Telegram WebView screenshot реальной позиции на Builder-follower закрыты).
 - [x] P2.2: безопасная Activity timeline без внутренних payload/secrets (закрыт 2026-09-02; safe DTO `category/title/status/symbol/occurred_at` + optional `pending_age`/`remediation`, `POST /miniapp/api/activity` с Telegram initData boundary, `ActivityScreen` по `04-activity.png` с фильтрами Все/Сделки/Система, server-side category predicate до `LIMIT/OFFSET`, стабильной пагинацией и read-only состояниями; targeted unit + HTTP + frontend tests, live acceptance на Aster Testnet через production copy engine — open / Stop / close / partial close и реальный `SET_LEVERAGE` отражены в Mini App с safe DTO shape и непустыми trade/system filters; owner Telegram WebView screenshot safe Open/Stop timeline на Builder-follower закрыт; live evidence — `tests/testnet/test_live_activity_acceptance.py`; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
-- [ ] P2.3: Settings root и существующие Notifications use cases.
+- [x] P2.3: Settings root и существующие Notifications use cases
+  (implementation/live complete 2026-09-02, owner acceptance pending;
+  `POST /miniapp/api/notifications` + `/notifications/enabled` поверх
+  существующих application use cases со строгим boolean на HTTP boundary;
+  SettingsScreen по `06-settings.png` — capability-список с секциями,
+  chevron только у реально открывающихся строк, нейтральный Builder до
+  attestation; вложенный NotificationsScreen с role=switch,
+  серверным DTO как источником UI и блокировкой double-tap; live
+  acceptance на Aster Testnet: реальный trade скопирован при
+  отключённых уведомлениях без пользовательской доставки, после
+  включения — durable outbox row доставлена настоящим Telegram Bot API
+  до SENT; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [ ] P2.4: единственная числовая настройка Risk on Stop с backend constraints.
 - [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.
 - [ ] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle.

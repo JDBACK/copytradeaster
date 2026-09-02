@@ -909,3 +909,214 @@ body {
   gap: 8px;
   font-size: 13.5px;
 }
+
+/* --- settings screen (эталон 06-settings) ---------------------------------- */
+
+.settings-summary {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.settings-summary-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.settings-summary-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-summary-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.settings-summary-state {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.settings-summary > .dot {
+  margin-left: auto;
+  margin-right: 4px;
+}
+
+.settings-section-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 2px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--champagne);
+}
+
+.settings-section-rule {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--champagne) 28%, transparent);
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 0;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.settings-list .settings-row:last-child {
+  border-bottom: none;
+}
+
+button.settings-row {
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.settings-row-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.settings-row-label {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.settings-row-value {
+  margin-left: auto;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: right;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.settings-row-value.tone-success {
+  color: var(--success);
+}
+
+.settings-row-value.tone-warning {
+  color: var(--warning);
+}
+
+.settings-row-value.tone-danger {
+  color: var(--danger);
+}
+
+.settings-chevron {
+  color: var(--text-muted);
+  flex: none;
+}
+
+.settings-safe-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+/* --- notifications screen ---------------------------------------------------- */
+
+.notifications-toggle-panel {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.notifications-toggle-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.notifications-toggle-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.notifications-toggle-hint {
+  font-size: 13.5px;
+}
+
+.switch {
+  appearance: none;
+  border: 1px solid var(--border);
+  width: 50px;
+  height: 30px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch .switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.switch.on {
+  background: color-mix(in srgb, var(--champagne) 24%, transparent);
+  border-color: color-mix(in srgb, var(--champagne) 45%, transparent);
+}
+
+.switch.on .switch-knob {
+  transform: translateX(20px);
+  background: var(--champagne);
+}
+
+.switch:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch .switch-knob {
+    transition: none;
+  }
+}

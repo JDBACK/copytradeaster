@@ -222,6 +222,29 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
+    async def notifications(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        try:
+            return _json_dto(await application.notification_settings(user_id))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def notifications_set(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        enabled = body.get("enabled") if body else None
+        # Strict real-boolean boundary: missing/string/number are all invalid.
+        if not isinstance(enabled, bool):
+            return _json_error(400, "invalid_input", "Некорректное значение переключателя.")
+        try:
+            return _json_dto(await application.set_notifications(user_id, enabled))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_ACTION_FAILED)
+
     async def pause(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -396,6 +419,8 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/dashboard", dashboard)
     app.router.add_post("/miniapp/api/positions", positions)
     app.router.add_post("/miniapp/api/activity", activity)
+    app.router.add_post("/miniapp/api/notifications", notifications)
+    app.router.add_post("/miniapp/api/notifications/enabled", notifications_set)
     app.router.add_post("/miniapp/api/pause", pause)
     app.router.add_post("/miniapp/api/resume", resume)
     app.router.add_post("/miniapp/api/confirmation/begin", confirmation_begin)

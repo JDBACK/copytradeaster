@@ -12,6 +12,7 @@ export type NestedScreen =
   | { kind: 'notifications' }
   | { kind: 'system-status' }
   | { kind: 'account-builder' }
+  | { kind: 'security' }
   | { kind: 'help' }
 
 export interface RouteState {

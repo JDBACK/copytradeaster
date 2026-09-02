@@ -10,14 +10,18 @@ import {
   currentNested,
   initialRoute,
   popNested,
+  pushNested,
   selectTab,
+  type NestedScreen,
   type RootTab,
 } from '../navigation'
 import { hapticImpact, setBackButton } from '../telegram'
 import { ActivityScreen } from '../screens/ActivityScreen'
+import { HelpScreen, SecurityScreen } from '../screens/InfoScreens'
 import { HomeScreen } from '../screens/HomeScreen'
+import { NotificationsScreen } from '../screens/NotificationsScreen'
 import { PositionsScreen } from '../screens/PositionsScreen'
-import { Brand } from './ui'
+import { SettingsScreen } from '../screens/SettingsScreen'
 
 export function AppShell({
   auth,
@@ -47,19 +51,34 @@ export function AppShell({
     hapticImpact('light')
   }, [])
 
+  const openNested = useCallback((screen: NestedScreen) => {
+    setRoute((current) => pushNested(current, screen))
+  }, [])
+
   return (
     <div className="shell">
       {banner}
       <div className="shell-content">
-        {route.tab === 'home' && <HomeScreen auth={auth} onNotConnected={onNotConnected} />}
-        {route.tab === 'positions' && (
-          <PositionsScreen auth={auth} accountMasked={accountMasked} />
-        )}
-        {route.tab === 'activity' && (
-          <ActivityScreen auth={auth} accountMasked={accountMasked} />
-        )}
-        {route.tab === 'settings' && (
-          <StubScreen title="Настройки" note="Настройки копирования и подключения." />
+        {nested ? (
+          <NestedRoute nested={nested} auth={auth} accountMasked={accountMasked} />
+        ) : (
+          <>
+            {route.tab === 'home' && <HomeScreen auth={auth} onNotConnected={onNotConnected} />}
+            {route.tab === 'positions' && (
+              <PositionsScreen auth={auth} accountMasked={accountMasked} />
+            )}
+            {route.tab === 'activity' && (
+              <ActivityScreen auth={auth} accountMasked={accountMasked} />
+            )}
+            {route.tab === 'settings' && (
+              <SettingsScreen
+                auth={auth}
+                accountMasked={accountMasked}
+                onOpen={openNested}
+                onNotConnected={onNotConnected}
+              />
+            )}
+          </>
         )}
       </div>
       <nav className="bottom-nav" aria-label="Основная навигация">
@@ -80,17 +99,27 @@ export function AppShell({
   )
 }
 
-/** Interim tab body until its own part wires the real data (P2.1–P2.3). */
-function StubScreen({ title, note }: { title: string; note: string }) {
-  return (
-    <div className="screen">
-      <Brand right={<span className="badge-testnet">Aster testnet</span>} />
-      <h1 className="h1" style={{ marginTop: 4 }}>
-        {title}
-      </h1>
-      <div className="info-box">{note}</div>
-    </div>
-  )
+/** Nested screens live on the typed stack; unimplemented kinds render nothing
+ * and are only reachable through their own future part. */
+function NestedRoute({
+  nested,
+  auth,
+  accountMasked,
+}: {
+  nested: NestedScreen
+  auth: AuthContext
+  accountMasked?: string | null
+}) {
+  switch (nested.kind) {
+    case 'notifications':
+      return <NotificationsScreen auth={auth} accountMasked={accountMasked} />
+    case 'security':
+      return <SecurityScreen accountMasked={accountMasked} />
+    case 'help':
+      return <HelpScreen accountMasked={accountMasked} />
+    default:
+      return null
+  }
 }
 
 function NavIcon({ tab }: { tab: RootTab }) {

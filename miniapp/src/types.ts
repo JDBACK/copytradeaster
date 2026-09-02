@@ -129,3 +129,10 @@ export interface ActivityPageDTO {
   has_next: boolean
   filter: ActivityFilter
 }
+
+export interface NotificationSettingsDTO {
+  enabled: boolean
+  last_delivery_at?: string | null
+  pending: number
+  failed: number
+}

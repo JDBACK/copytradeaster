@@ -216,10 +216,98 @@ safe записи «Открыта позиция BTCUSDT» и «Поставл�
 После приёмки live-сценарий закрыт через master; все followers подтвердили
 cancel + close и вернулись в flat с reconciliation 0 действий.
 
+## P2.3 — Settings root и Notifications: implementation/live complete (2026-09-02, owner acceptance pending)
+
+Backend (переиспользование, без новых service/repository/таблиц):
+
+- `POST /miniapp/api/notifications` — чтение `NotificationSettingsDTO`
+  (enabled, last_delivery_at, pending, failed) для user_id из проверенного
+  initData (или testnet dev-header);
+- `POST /miniapp/api/notifications/enabled` — mutation через существующие
+  `application.set_notifications` (control-audit boundary сохранён); на
+  HTTP boundary принимается только настоящий boolean: missing, строки,
+  числа, списки и объекты → `400 invalid_input`; прочие typed ошибки →
+  400/503 по общей карте;
+- проводной сурфейс ограничен safe-полями DTO: chat_id, account_id,
+  payload, last_error, event_key и прочие outbox-internal поля не
+  отдаются; отключение уведомлений меняет только router-гейт доставки и
+  не влияет на торговлю.
+
+Frontend (`miniapp/`):
+
+- `screens/SettingsScreen.tsx` по эталону `06-settings.png`: панель
+  «Копирование» (tone по copy_state) + секции
+  Настройки копирования / Подключение и безопасность / Поддержка со
+  строками Риск на Stop, Уведомления, Статус Aster, Аккаунт и Builder,
+  Безопасность, Помощь, Среда=Aster testnet. Chevron только у строк,
+  реально открывающихся в P2.3 (Уведомления, Безопасность, Помощь);
+  Риск/Статус/Аккаунт+Builder и Среда — read-only без притворной
+  навигации. Значения из authoritative `DashboardDTO`; stale/degraded
+  никогда не подписаны «Всё работает»; Builder — нейтральный masked
+  wallet («Проверено» запрещено до P2.6 attestation).
+- `screens/NotificationsScreen.tsx` (nested): switch `role="switch"` +
+  `aria-checked`/`aria-busy`; UI меняется только по DTO сервера, при
+  ошибке сохраняется последнее подтверждённое состояние, double tap
+  заблокирован (disabled + reducer-гвардия); safe delivery-факты
+  (последняя доставка / в очереди / не доставлено); явный copy
+  «отключение не влияет на торговлю».
+- `screens/InfoScreens.tsx` — короткие статические Help (как работает
+  копирование, пауза-semantics, уведомления) и Security (модель
+  разрешений без утверждений о текущем состоянии Agent).
+- Pure view-models: `settingsView.ts` (copySummary, systemStatusValue,
+  notificationsValue), `notificationsView.ts` (toggle state machine);
+  `navigation.ts` + nested kind `security`; AppShell рендерит
+  notifications/security/help через `NestedRoute` и typed stack +
+  Telegram BackButton; CSS: settings-list/rows/section-label, switch.
+
+Tests:
+
+- HTTP (`tests/unit/miniapp/test_server.py`): auth обоих endpoint'ов,
+  safe-сериализация (запрещённые outbox-поля), strict boolean ×8
+  (missing/None/"true"/"false"/1/0/list/object → 400 invalid_input),
+  malformed body, проброс boolean, typed errors (ValidationError →
+  400 invalid_input, ServiceUnavailableError → 503), read-503.
+- Frontend: `settings.test.tsx` (11) — view-model маппинги (включая
+  honest tones: только ready → «Всё работает»), порядок секций/строк,
+  ровно 3 кнопки-chevron, отсутствие «Проверено» и внутренних
+  идентификаторов, aria-label статус-панели; `notifications.test.tsx`
+  (10) — reducer: double-tap (reference-равенство), серверный DTO как
+  источник истины, сохранение confirmed при ошибке; a11y switch
+  (aria-checked/disabled/aria-busy); loading frame без switch;
+  `navigation.test.ts` +1 (notifications/security/help на стеке).
+
+Gates (точные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
+
+- offline pytest: 773 passed / 2 skipped / 32 deselected, coverage 87%,
+  ruff check/format clean, `git diff --check` clean;
+- frontend: vitest 97 passed / 11 файлов, oxlint 0/0, build clean;
+- live: `tests/testnet/test_live_notifications_acceptance.py` — 1 passed
+  за 26.99s на `fapi.asterdex-testnet.com` через production composition
+  (NotificationRouter + `build_stage2_composition().application` +
+  production aiohttp + настоящий `TelegramOutboxWorker`/Bot API) на
+  реальной паре user/follower `tg-8264892202`:
+  disable через HTTP → реальный master open + Stop → production engine
+  скопировал позицию (signed positionRisk ≠ 0) при нуле новых
+  пользовательских outbox rows; enable через HTTP → реальный partial
+  close → durable outbox row (id=130) доставлена настоящим Telegram Bot
+  API до статуса SENT (chat 8264892202); read endpoint подтвердил
+  enabled=true и last_delivery_at; cleanup flat + исходный toggle
+  восстановлены. Fake sender/FakeAster/MockTransport не использовались.
+- bounded impeccable: detector по изменённым UI-файлам — 0 findings;
+  один browser walkthrough (390×844, `preview_miniapp_engine.py` на
+  копии prod-БД, порт 8093): settings rows/sections/chevrons на
+  реальных данных, toggle-цикл вкл→выкл→вкл с обновлением UI по
+  серверному DTO (подтверждён в preview SQLite), Help/Security,
+  tab-switch сбрасывает stack; corrective pass не потребовался.
+
+Осталось владельцу: Telegram WebView screenshot текущего HEAD — Settings
+root, Notifications toggle вкл/выкл, Telegram BackButton на nested
+screens. Статус: implementation/live complete; owner acceptance pending.
+
 ## Следующие подчасти
 
-- P2.3 — Settings root и Notifications (`06-settings`).
-- P2.4 — Risk on Stop (`05-risk-settings`).
+- P2.4 — Risk on Stop (`05-risk-settings`) — перед стартом нужны
+  утверждённые владельцем `risk min/max/step/presets`.
 - P2.5 — System Status (`08-system-status`).
 - P2.6 — Account + Builder attestation (`07-account-builder`).
 - P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3.

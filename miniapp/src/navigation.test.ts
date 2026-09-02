@@ -51,4 +51,18 @@ describe('app shell navigation', () => {
     expect(route.tab).toBe('settings')
     expect(popNested(route)).toBe(route)
   })
+
+  it('P2.3 settings opens notifications/security/help on the stack', () => {
+    let route = selectTab(initialRoute(), 'settings')
+    route = pushNested(route, { kind: 'notifications' })
+    expect(currentNested(route)).toEqual({ kind: 'notifications' })
+    route = popNested(route)
+    route = pushNested(route, { kind: 'security' })
+    expect(currentNested(route)).toEqual({ kind: 'security' })
+    route = popNested(route)
+    route = pushNested(route, { kind: 'help' })
+    expect(currentNested(route)).toEqual({ kind: 'help' })
+    route = popNested(route)
+    expect(route.tab).toBe('settings')
+  })
 })
