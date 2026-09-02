@@ -1,15 +1,56 @@
 # Статус работ — copytradeaster (этапы 1–3)
 
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Актуальная рабочая
-ветка Stage 3, часть 1: `codex/stage-3-mini-app-part1`.
+ветка Stage 3, часть 2: `codex/stage-3-mini-app-part2`.
 
 ## Текущее состояние
 
-- **Stage 3, часть 2 (P2.1 — read-only Positions) — CLOSED (2026-09-02):**
-  1. **Backend Application & Transport:** добавлены `PositionSummaryDTO`, `PositionPageDTO`, `PositionSide`, `PositionProtectionState`; `PositionState` расширен безопасным `unrealized_profit`; метод `service.positions(...)` и эндпоинт `POST /miniapp/api/positions` с защитой Telegram initData и безопасной Decimal-логикой `risk_to_stop_usdt`.
-  2. **Frontend UI (PositionsScreen):** заменена заглушка в AppShell на настоящий `PositionsScreen` по эталону `03-positions.png` (секция «Открытые позиции · N», карточки с PnL, входом, текущей ценой, Stop/TP, риском до Stop, плечом «N× авто», предупреждениями о неполной/отсутствующей защите и stale-статусом). Home получил preview первой активной позиции и лишился текста-заглушки «появится в следующей версии».
-  3. **Offline & Frontend Gates:** offline pytest **742 passed / 2 skipped / 29 deselected**, coverage **87%**; Ruff check/format clean; Frontend Vitest **54 passed**, Oxlint clean, TypeScript + Vite build clean.
-  4. **Signed Aster Testnet Live Gate:** `tests/testnet/test_live_positions_acceptance.py` подтвердил все 8 фаз на реальном `fapi.asterdex-testnet.com` (open + Stop, positions DTO query, сверка с positionRisk/openOrders, замена Stop/TP, partial close, warning при снятии Stop, чистый cleanup flat).
+- **Stage 3, часть 2 (P2.1 — read-only Positions) — CORRECTIVE ROUND 2
+  (2026-09-02, commit `111d2e5` под внешним ревью):**
+  1. **Backend Application & Transport:** `PositionSummaryDTO`,
+     `PositionPageDTO`, `PositionSide`, `PositionProtectionState`;
+     `PositionState` расширен безопасным `unrealized_profit`; метод
+     `service.positions(...)` и эндпоинт `POST /miniapp/api/positions` с
+     Telegram initData защитой и Decimal-логикой `risk_to_stop_usdt` только
+     по свежему snapshot и полностью подтверждённому Stop.
+  2. **Freshness (corrective):** `AppStage2RuntimeAdapter` кэширует
+     `(AccountState, captured_at)` с injectable clock; `positions()` бондирует
+     свежесть TTL `max(2 × reconcile_interval_s, 30s)` — просроченный кэш
+     помечается `is_stale=True` с `risk_to_stop_usdt=None`; при неудачном
+     refresh выполняется fallback на кэш как stale с human-readable message.
+  3. **Stop validation (corrective):** сторона Stop строго противоположна
+     позиции (missing/unknown side → `UNCONFIRMED`); требуется
+     `reduce_only`/`close_position`; quantity-based Stop обязан покрывать
+     `orig_qty >= abs(qty)` — нулевой/невалидный объём → `UNCONFIRMED`,
+     неполный положительный → `PARTIAL_STOP`.
+  4. **Frontend UI (PositionsScreen):** настоящий `PositionsScreen` по
+     эталону `03-positions.png` (секция «Открытые позиции · N», карточки с
+     PnL, входом, текущей ценой, Stop/TP, риском до Stop, плечом «N× авто»,
+     warning-блоками и stale-статусом); `accountMasked` пробрасывается в
+     PositionsScreen и сохраняется сразу после onboarding (wallet chip);
+     Home делает последовательный fetch (dashboard refresh → positions из
+     кэша) без двойного signed snapshot.
+  5. **Offline & Frontend Gates (после corrective):** offline pytest **749
+     passed / 2 skipped / 30 deselected** за 36.7s, coverage **87%** (вкл.
+     integration `test_resume_snapshot_tuple_contract.py` — P0-регресс с
+     настоящим `AppStage2RuntimeAdapter`, TTL fresh/expired и
+     refresh-failure fallback unit-тесты, строгие Stop validation кейсы);
+     Frontend Vitest **64 passed / 8 файлов** (новый
+     `positions.test.tsx` — `renderToStaticMarkup(PositionCard)`: рендер
+     карточки, warning copy всех protection states, отсутствие торговых
+     кнопок, скрытие риска при null); Oxlint clean; tsc + Vite build clean;
+     Ruff check/format и `git diff --check` clean.
+  6. **Signed Aster Testnet Live Gate:** `tests/testnet/
+     test_live_positions_acceptance.py` — 8/8 фаз через реальный production
+     copy engine (master `App`/`MasterProjector`/`Coordinator`/`Executor` →
+     follower `copyc1` → Mini App aiohttp API → сверка с signed
+     positionRisk/openOrders): master open + Stop, engine copy, positions DTO
+     query, перестановка Stop + добавление TP, partial close, warning при
+     снятии Stop, cleanup flat) — **повторно прогнан после corrective-коммита
+     (2026-09-02): PASSED за 68.0s**. Production Pause/Resume через реальный
+     Mini App HTTP (`test_builder_resume_live.py`: L7 pause→resume,
+     L8 diagnostic snapshot) — **2 passed за 17.7s** после P0-фикса tuple
+     unpacking в `_resume_account`.
 - **Stage 3, часть 1 — CLOSED (2026-09-01):** все обязательные
   исправления R1–R9 из
   `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` выполнены.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -456,12 +457,15 @@ class BuilderOnboardingAdapter:
 class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
     """Concrete Stage 2 runtime port backed by one composed :class:`App`."""
 
-    def __init__(self, app: App) -> None:
+    def __init__(self, app: App, *, clock: Callable[[], datetime] | None = None) -> None:
         self.app = app
         self.db = app.db
         self.cfg = app.cfg
         self.credentials = app.credentials
         self._snapshot_cache: dict[str, tuple[AccountState, datetime]] = {}
+        # Injectable for deterministic snapshot-TTL tests; production keeps
+        # wall-clock time so captured_at reflects the true exchange read.
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     @property
     def testnet(self) -> bool:
@@ -531,7 +535,7 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         self, account_id: str
     ) -> AccountState | tuple[AccountState, datetime]:
         snapshot = await self.app.snapshot_follower(account_id)
-        captured_at = datetime.now(UTC)
+        captured_at = self._clock()
         self._snapshot_cache[account_id] = (snapshot, captured_at)
         return (snapshot, captured_at)
 

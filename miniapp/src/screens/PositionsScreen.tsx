@@ -8,7 +8,15 @@ import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { formatPnl, formatPrice, formatUsdt } from '../format'
 import { snapshotLabel } from '../home'
+import { PROTECTION_WARNING } from '../protectionWarning'
 import type { PositionPageDTO, PositionSummaryDTO } from '../types'
+
+const WarningIcon = ({ size }: { size: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+    <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+  </svg>
+)
 
 type LoadState =
   | { kind: 'loading' }
@@ -189,43 +197,10 @@ export function PositionCard({ position }: { position: PositionSummaryDTO }) {
         </div>
       </div>
 
-      {position.protection_state === 'missing_stop' && (
+      {PROTECTION_WARNING[position.protection_state] && (
         <div className="position-warning" role="alert">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          <span>Защита отсутствует (Stop не установлен)</span>
-        </div>
-      )}
-
-      {position.protection_state === 'partial_stop' && (
-        <div className="position-warning" role="alert">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          <span>Частичная защита (Stop покрывает не весь объем)</span>
-        </div>
-      )}
-
-      {position.protection_state === 'duplicate_stop' && (
-        <div className="position-warning" role="alert">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          <span>Дублированный Stop (сходимость в процессе)</span>
-        </div>
-      )}
-
-      {position.protection_state === 'unconfirmed' && (
-        <div className="position-warning" role="alert">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          <span>Защита требует проверки</span>
+          <WarningIcon size={16} />
+          <span>{PROTECTION_WARNING[position.protection_state]}</span>
         </div>
       )}
 

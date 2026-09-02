@@ -546,6 +546,174 @@ async def test_positions_service_mapping_and_safety_checks(environment):
     assert eth_dto.risk_to_stop_usdt is None
 
 
+async def test_positions_freshness_ttl_and_refresh_failure_fallback(environment):
+    """Fresh / expired TTL / refresh-failure fallback coverage for positions().
+
+    - A refresh read (fresh capture) is not stale and may expose risk.
+    - The same cached snapshot served after the TTL window must flip stale
+      and suppress risk_to_stop_usdt even while the system stays READY.
+    - A failed refresh falls back to the cached snapshot as stale data with
+      risk_to_stop_usdt=None and a human-readable message.
+    """
+    from datetime import timedelta
+
+    from copytradeaster.domain.models import (
+        PositionKey,
+        PositionState,
+        PosSide,
+        ProtectiveOrder,
+        Side,
+    )
+
+    _, runtime, _, clock, service = environment
+
+    btc_key = PositionKey(symbol="BTCUSDT", pos_side=PosSide.BOTH)
+    btc_pos = PositionState(
+        key=btc_key,
+        qty=Decimal("0.002"),
+        entry_price=Decimal("60000.0"),
+        mark_price=Decimal("61000.0"),
+        liquidation_price=Decimal("50000.0"),
+        leverage=200,
+        stop=ProtectiveOrder(
+            client_order_id="btc-stop-coid",
+            order_id=12345,
+            type="STOP_MARKET",
+            side=Side.SELL,
+            stop_price=Decimal("59000.0"),
+            reduce_only=True,
+            close_position=True,
+            working_type="CONTRACT_PRICE",
+            orig_qty=Decimal("0"),
+        ),
+        unrealized_profit=Decimal("2.0"),
+    )
+    mock_snapshot = {"positions": {btc_key: btc_pos}, "open_orders": []}
+
+    state: dict[str, object] = {"snapshot": mock_snapshot, "captured_at": None}
+
+    async def refresh_snapshot(account_id):
+        del account_id
+        captured = clock()
+        state["captured_at"] = captured
+        return state["snapshot"], captured
+
+    async def cached_snapshot(account_id):
+        del account_id
+        return (state["snapshot"], state["captured_at"])
+
+    runtime.refresh_snapshot = refresh_snapshot
+    runtime.cached_snapshot = cached_snapshot
+
+    # Fresh: refresh returns a just-captured snapshot.
+    fresh = await service.positions(7, refresh=True)
+    assert fresh.is_stale is False
+    assert fresh.positions[0].risk_to_stop_usdt == Decimal("4.004")
+
+    # Expired: the same cache served past the TTL window must be stale.
+    clock.value = clock.value + timedelta(seconds=45)
+    expired = await service.positions(7, refresh=False)
+    assert expired.is_stale is True
+    assert expired.snapshot_captured_at is not None
+    assert expired.positions[0].risk_to_stop_usdt is None
+
+    # Refresh failure falls back to the cached snapshot as stale with no risk.
+    clock.value = clock.value - timedelta(seconds=45)
+
+    async def failing_refresh(account_id):
+        del account_id
+        raise RuntimeError("aster transport is down")
+
+    runtime.refresh_snapshot = failing_refresh
+    fallback = await service.positions(7, refresh=True)
+    assert fallback.is_stale is True
+    assert fallback.message is not None
+    assert fallback.positions[0].risk_to_stop_usdt is None
+    # The fallback page still exposes the position itself for context.
+    assert fallback.positions[0].symbol == "BTCUSDT"
+
+
+async def test_positions_stop_validation_strict_side_and_coverage(environment):
+    """Stop orders that do not strictly oppose the position, or carry an
+    invalid quantity for a quantity-based stop, must never be PROTECTED."""
+    from copytradeaster.domain.models import (
+        PositionKey,
+        PositionState,
+        PosSide,
+        ProtectiveOrder,
+        Side,
+    )
+
+    _, runtime, _, _, service = environment
+    btc_key = PositionKey(symbol="BTCUSDT", pos_side=PosSide.BOTH)
+
+    def make_position(stop: ProtectiveOrder) -> PositionState:
+        return PositionState(
+            key=btc_key,
+            qty=Decimal("0.002"),
+            entry_price=Decimal("60000.0"),
+            mark_price=Decimal("61000.0"),
+            liquidation_price=Decimal("50000.0"),
+            leverage=200,
+            stop=stop,
+            unrealized_profit=Decimal("0"),
+        )
+
+    def make_stop(
+        *,
+        side=Side.SELL,
+        reduce_only=True,
+        close_position=False,
+        orig_qty=Decimal("0.002"),
+        stop_price=Decimal("59000.0"),
+    ) -> ProtectiveOrder:
+        return ProtectiveOrder(
+            client_order_id="stop-coid",
+            order_id=1,
+            type="STOP_MARKET",
+            side=side,
+            stop_price=stop_price,
+            reduce_only=reduce_only,
+            close_position=close_position,
+            working_type="CONTRACT_PRICE",
+            orig_qty=orig_qty,
+        )
+
+    # Same-direction stop (LONG protected by a BUY stop) must be UNCONFIRMED.
+    wrong_side = make_position(make_stop(side=Side.BUY))
+
+    cases = [
+        (wrong_side, PositionProtectionState.UNCONFIRMED),
+        # Quantity-based stop with zero qty: UNCONFIRMED (not full protection).
+        (
+            make_position(make_stop(close_position=False, orig_qty=Decimal("0"))),
+            PositionProtectionState.UNCONFIRMED,
+        ),
+        # Quantity-based stop covering only part of the position: PARTIAL_STOP.
+        (
+            make_position(make_stop(close_position=False, orig_qty=Decimal("0.001"))),
+            PositionProtectionState.PARTIAL_STOP,
+        ),
+        # Quantity-based stop covering the whole position: PROTECTED.
+        (
+            make_position(make_stop(close_position=False, orig_qty=Decimal("0.002"))),
+            PositionProtectionState.PROTECTED,
+        ),
+    ]
+
+    for position, expected in cases:
+        snap = {"positions": {btc_key: position}, "open_orders": []}
+        runtime.refresh_snapshot = lambda account_id, snap=snap: snap
+        runtime.cached_snapshot = lambda account_id, snap=snap: snap
+        page = await service.positions(7, refresh=True)
+        dto = page.positions[0]
+        assert dto.protection_state is expected, (
+            f"expected {expected}, got {dto.protection_state} for stop={position.stop}"
+        )
+        if expected is not PositionProtectionState.PROTECTED:
+            assert dto.risk_to_stop_usdt is None
+
+
 async def test_user_views_reflect_global_pause_even_with_active_account_policy(environment):
     db, _, _, _, service = environment
     await SettingsRepo(db).patch_policy("tg-7", allow_new_entries=True)

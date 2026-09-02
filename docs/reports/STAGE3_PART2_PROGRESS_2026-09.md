@@ -53,27 +53,26 @@ Gates:
 - Backend boundary: `PositionSummaryDTO`, `PositionPageDTO`, `PositionSide`, `PositionProtectionState` в `src/copytradeaster/application/models.py`;
 - `PositionState` в `domain/models.py` расширен безопасным полем `unrealized_profit: Decimal = Decimal(0)` с сохранением строгих decimal инвариантов;
 - `Coordinator._snapshot` и `MasterProjector` заполняют `unrealized_profit` из биржевого `PositionDTO.un_realized_profit`;
-- `AppStage2RuntimeAdapter` сохраняет точные `(AccountState, captured_at: datetime)` timestamps для кэша снепшотов; при сбое `refresh=True` происходит fallback на кэш с обязательным `is_stale=True` и `risk_to_stop_usdt=None`;
+- `AppStage2RuntimeAdapter` сохраняет точные `(AccountState, captured_at: datetime)` timestamps (injectable clock) для кэша снепшотов; свежесть bounded TTL `max(2 × reconcile_interval_s, 30s)`: просроченный кэш → `is_stale=True` + `risk_to_stop_usdt=None`; при сбое `refresh=True` — fallback на кэш как stale с сообщением;
 - `UserApplicationService.positions` и `_parse_position_summary`:
   - исключает нулевые позиции (`qty == 0`);
   - нормализует направления `LONG`/`SHORT` для `ONE_WAY` и `HEDGE`;
-  - строгая валидация Stop-ордера: противоположная сторона позиции, флаги `reduce_only`/`close_position`, достаточность объема покрытия; при несоблюдении — статус `UNCONFIRMED` или `PARTIAL_STOP` и `risk_to_stop_usdt=None`;
-  - Decimal-логика расчета `risk_to_stop_usdt` выполняется строго по свежему snapshot (`is_fresh=True`) и полностью подтвержденному Stop (с учетом `fee_buffer_pct`);
+  - строгая валидация Stop: противоположная сторона (missing/unknown → `UNCONFIRMED`), флаги `reduce_only`/`close_position`, quantity-based покрытие `orig_qty >= abs(qty)` (нулевой → `UNCONFIRMED`, неполный → `PARTIAL_STOP`);
+  - Decimal-расчёт `risk_to_stop_usdt` строго по свежему snapshot (`is_fresh=True`) и полностью подтверждённому Stop (с учётом `fee_buffer_pct`);
   - исключены сырые секреты, clientOrderId, account_id и orderId;
-  - позиции сортируются по алфавиту `symbol`;
-- Transport boundary: `POST /miniapp/api/positions` в `src/copytradeaster/miniapp/server.py` с валидацией Telegram `initData` / dev-testnet заголовков;
+  - сортировка по алфавиту `symbol`;
+- Transport boundary: `POST /miniapp/api/positions` с валидацией Telegram `initData` / dev-testnet заголовков;
 - Frontend:
-  - `miniapp/src/types.ts` и `api.ts`: добавлены типы и `api.positions(...)`;
-  - `miniapp/src/format.ts`: хелперы `formatPrice` и `formatPnl`;
-  - `miniapp/src/index.css`: добавлены недостающие токены `--radius: 12px;` и `--surface-2: #1c1c1c;`;
-  - `miniapp/src/screens/PositionsScreen.tsx`: полноценный экран по эталону `03-positions.png` (заголовок «Открытые позиции · N», карточки с PnL, входом, текущей ценой, Stop, TP, риском до Stop, плечом «N× авто», предупреждениями защиты, состояниями loading/error/empty/stale);
-  - `miniapp/src/components/AppShell.tsx`: вкладка «Позиции» подключена к `PositionsScreen` с пробросом `accountMasked` (wallet chip);
-  - `miniapp/src/screens/HomeScreen.tsx`: последовательный fetch (dashboard refresh -> positions cache read) без двойного signed snapshot, preview первой позиции из того же DTO, удален текст-заглушка «появится в следующей версии»;
-- Gates:
-  - Offline pytest suite: 742 passed, coverage 87%, ruff clean;
-  - Frontend: vitest 58 passed (включая `positions.test.ts`), oxlint clean, pnpm build clean;
-  - In-browser walkthrough: в mobile viewport проверены пустой экран и реальная карточка открытой позиции с предупреждением;
-  - Real Aster Testnet live acceptance (`tests/testnet/test_live_positions_acceptance.py`): 8/8 фаз passed через **реальный production copy engine** (`App`, `MasterProjector`, `Coordinator`, `Executor`, `AppStage2RuntimeAdapter`, `create_miniapp_app`) (open + stop, engine copy, positions query, сравнение с positionRisk/openOrders, перестановка Stop/TP, partial close, warning при снятии Stop, cleanup flat).
+  - типы и `api.positions(...)`; хелперы `formatPrice`/`formatPnl`;
+  - токены `--radius`/`--surface-2` в `index.css`;
+  - `PositionsScreen` по эталону `03-positions.png` (warning copy вынесен в тестируемый `PROTECTION_WARNING`);
+  - `accountMasked` пробрасывается в `PositionsScreen` и фиксируется сразу после onboarding;
+  - Home: последовательный fetch (dashboard refresh → positions из кэша);
+- Gates (актуальные счётчики — в `ENGINE_TEST_STATUS_2026-08.md`):
+  - offline pytest: passed, coverage ≥ 87%, ruff clean (включая integration-регресс resume/tuple с настоящим `AppStage2RuntimeAdapter`);
+  - frontend: vitest passed (включая `positions.test.tsx` — renderToStaticMarkup UI-контракт: warning copy, read-only, скрытие риска при null), oxlint clean, build clean;
+  - in-browser walkthrough мобильного viewport: пустой экран и активная карточка с предупреждением;
+  - live acceptance на Aster Testnet: 8/8 фаз через реальный production copy engine (master → engine → follower `copyc1` → Mini App API → signed positionRisk/openOrders сверка → Stop/TP перестановка → partial close → warning → flat cleanup).
 
 ## Следующие подчасти
 

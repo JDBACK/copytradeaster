@@ -991,6 +991,22 @@ class UserApplicationService:
             return result[0], result[1]
         return result, self._now() if refresh else None
 
+    def _snapshot_ttl_seconds(self) -> float:
+        """Bounded freshness window for cached snapshots.
+
+        A cached snapshot counts as fresh only within
+        ``max(2 x reconcile_interval_s, 30)`` seconds of capture; an older
+        cache must surface as stale instead of silently serving outdated
+        risk figures while the system heartbeat stays READY.
+        """
+        cfg = getattr(self._runtime, "cfg", None)
+        reconcile = getattr(cfg, "reconcile_interval_s", None)
+        try:
+            reconcile_value = int(reconcile) if reconcile is not None else 15
+        except (TypeError, ValueError):
+            reconcile_value = 15
+        return float(max(reconcile_value * 2, 30))
+
     async def _activity_rows(self, account_id: str, offset: int) -> list[Any]:
         reader = getattr(self._runtime, "read_activity", None)
         if callable(reader):
@@ -1076,7 +1092,7 @@ class UserApplicationService:
             copy_state = CopyState.ACTIVE
             message = None
         if snapshot is None:
-            snapshot = await self._snapshot(account_id, refresh=False)
+            snapshot, _ = await self._snapshot(account_id, refresh=False)
         identity = await self._identity(account_id)
         return DashboardDTO(
             copy_state=copy_state,
@@ -1171,17 +1187,24 @@ class UserApplicationService:
             protection_state = PositionProtectionState.DUPLICATE_STOP
         else:
             # Validate Stop order properties:
-            # 1. Side must oppose position direction (LONG -> SELL, SHORT -> BUY)
+            # 1. Side must exactly oppose position direction (LONG -> SELL,
+            #    SHORT -> BUY).  A missing or unknown side cannot be trusted
+            #    as protective intent and stays UNCONFIRMED.
             stop_side_raw = str(_row_value(stop_obj, "side", "")).upper()
             expected_stop_side = "SELL" if side == PositionSide.LONG else "BUY"
-            is_opposing_side = stop_side_raw == expected_stop_side or not stop_side_raw
+            is_opposing_side = stop_side_raw == expected_stop_side
 
             # 2. Must be reduce_only or close_position
             close_pos = bool(_row_value(stop_obj, "close_position", False))
             reduce_only = bool(_row_value(stop_obj, "reduce_only", False))
             is_protective_intent = close_pos or reduce_only
 
-            # 3. Coverage check
+            # 3. Coverage check: a close_position order covers the whole live
+            #    position at trigger time (exchange reports orig_qty=0 for
+            #    such orders), while a quantity-based (reduce_only) stop must
+            #    carry orig_qty >= abs(position qty).  Zero or invalid quantity
+            #    on a quantity-based stop is UNCONFIRMED; a positive but
+            #    insufficient quantity is PARTIAL_STOP.
             stop_orig_qty = _decimal_or_none(
                 _row_value(stop_obj, "orig_qty", Decimal(0))
             ) or Decimal(0)
@@ -1189,10 +1212,21 @@ class UserApplicationService:
 
             if not is_opposing_side or not is_protective_intent:
                 protection_state = PositionProtectionState.UNCONFIRMED
-            elif not close_pos and stop_orig_qty > 0 and stop_orig_qty < abs_qty:
+            elif not close_pos and (stop_orig_qty <= 0 or stop_orig_qty < abs_qty):
+                # A quantity-based stop without a valid quantity covering the
+                # whole position cannot be trusted as full protection.
+                protection_state = (
+                    PositionProtectionState.PARTIAL_STOP
+                    if stop_orig_qty > 0
+                    else PositionProtectionState.UNCONFIRMED
+                )
+            elif close_pos and stop_orig_qty > 0 and stop_orig_qty < abs_qty:
+                # Defensive: a close_position flag with an explicit fixed
+                # quantity smaller than the position is treated as partial.
                 protection_state = PositionProtectionState.PARTIAL_STOP
             else:
-                # Check that stop price is on protective side of mark (or entry if mark <= 0)
+                # Coverage holds; check that stop price is on the protective
+                # side of mark (or entry if mark <= 0).
                 ref_price = mark_price if mark_price > 0 else entry_price
                 if stop_price is not None and ref_price > 0:
                     if side == PositionSide.LONG and stop_price >= ref_price:
@@ -1268,14 +1302,27 @@ class UserApplicationService:
             else:
                 snapshot, captured_at = await self._snapshot(account_id, refresh=False)
 
+            # Bounded freshness TTL: a cached snapshot is only considered
+            # fresh while its capture time is within max(2 x reconcile
+            # interval, 30s).  Without this bound a live heartbeat would
+            # keep serving arbitrary old cached risk figures as fresh.
+            snapshot_ttl_s = self._snapshot_ttl_seconds()
+            cache_expired = captured_at is not None and (
+                (self._now() - captured_at).total_seconds() > snapshot_ttl_s
+            )
+
             is_stale = (
                 system_state is SystemState.STALE
                 or refresh_failed
                 or snapshot is None
                 or system_state is not SystemState.READY
+                or cache_expired
             )
             is_fresh = (
-                not is_stale and system_state is SystemState.READY and captured_at is not None
+                not is_stale
+                and system_state is SystemState.READY
+                and captured_at is not None
+                and not cache_expired
             )
 
             cfg = getattr(self._runtime, "cfg", None)
@@ -2506,7 +2553,7 @@ class UserApplicationService:
             or permission.whitelist_ok is not True
         ):
             raise StaleOperationError("permission validation is not sufficient")
-        snapshot = await self._snapshot(account_id, refresh=True)
+        snapshot, _ = await self._snapshot(account_id, refresh=True)
         # The adapter owns the distinction between managed bot state and
         # manual/external positions/orders.  A flatness-only count would reject
         # safe managed state and could accidentally adopt external exposure.

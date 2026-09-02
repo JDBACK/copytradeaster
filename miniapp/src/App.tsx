@@ -129,12 +129,25 @@ export default function App() {
         />
       )}
       {phase.kind === 'wizard' && (
-        <BuilderWizard auth={auth} onConnected={(result) => setPhase({ kind: 'success', result })} />
+        <BuilderWizard
+          auth={auth}
+          onConnected={(result) => {
+            if (result.account_masked) {
+              setAccountMasked(result.account_masked)
+            }
+            setPhase({ kind: 'success', result })
+          }}
+        />
       )}
       {phase.kind === 'attempt_recovery' && (
         <BuilderAttemptRecovery
           auth={auth}
-          onConnected={(result) => setPhase({ kind: 'success', result })}
+          onConnected={(result) => {
+            if (result.account_masked) {
+              setAccountMasked(result.account_masked)
+            }
+            setPhase({ kind: 'success', result })
+          }}
         />
       )}
       {phase.kind === 'success' && (
