@@ -26,9 +26,9 @@ Telegram Mini App для входа в копитрейд через Builder-а�
 pnpm install
 pnpm build                                # соберёт dist/ для раздачи бэкендом
 
-# 2) Публичный HTTPS (Telegram требует https):
-../scripts/dev-miniapp-tunnel.sh 8080
-
+# 2) Публичный HTTPS туннель (Telegram требует https):
+#    Либо полный запуск всего стека: ./scripts/dev-up.sh
+#    Либо ручной cloudflared: cloudflared tunnel --url http://127.0.0.1:8080
 # 3) Dev-сервер фронтенда с hot-reload (проксирует /miniapp/api на :8080):
 VITE_DEV_USER_ID=<ваш telegram id> pnpm dev
 ```

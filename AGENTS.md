@@ -2,62 +2,39 @@
 
 ## Project Overview
 
-**copytradeaster** is an async-first copy-trading system built for AsterDex (Futures V3 API). It mirrors positions from a single master trader account onto multiple follower accounts (target scale: 10–30 users, maximum ~100) using a state-reconciliation model.
-
-The system features:
-- Core trading engine with durable SQLite execution journal, automated symbol leverage control-plane, and protective order convergence (SL/TP).
-- Telegram control plane (aiogram 3.30) with captcha-gated access requests and admin approvals.
-- Onboarding via direct V3 API credentials or Telegram Mini App (Vite + React 19 + TypeScript) using Aster Code / Builder authorization (EIP-712 `ApproveAgent` with builder fee cap).
-- Recipient-specific notification outbox delivered asynchronously via SQLite queue.
+**copytradeaster** is an async-first copy-trading system for AsterDex (Futures V3 API), mirroring a single master trader onto multiple followers (10–30 target, max ~100) via state reconciliation.
+- **Trading Engine**: Durable SQLite execution journal (`execution_commands`), RAM leverage control plane (`LeverageManager`), protective SL/TP order convergence.
+- **Control Plane**: Telegram bot (aiogram 3.30) with captcha-gated access requests and admin approvals.
+- **Onboarding**: Direct V3 credentials or Telegram Mini App (Vite 8 + React 19 + TypeScript) with EIP-712 `ApproveAgent` / `approveBuilder` on chain 56 (max fee rate cap 0.001).
+- **Follower Mini App (Stage 3 Part 2)**: 4-tab AppShell (`Главная`, `Позиции`, `Активность`, `Настройки`), read-only positions with SL coverage/risk USDT, redacted activity timeline, honest settings, notifications double-tap toggle gate (`createToggleGate`), native BackButton/Haptics.
+- **Outbox & Shadow Engine**: Async SQLite notification delivery (`TelegramOutboxWorker`); in-memory `ShadowExchange` for 30–100 follower load tests (`CT_SHADOW_ACCOUNTS_ENABLED=true` / `CT_LOAD=1`).
 
 ---
 
 ## Architecture & Data Flow
 
-The project follows a **modular monolith + state reconciliation + durable execution journal** architecture:
-
 ```text
-ASTER MASTER (User-Data WebSocket: ORDER_TRADE_UPDATE, ACCOUNT_UPDATE)
-    │
-    ▼
-MasterProjector (deduplication, event ordering, trading episode tracking)
-    │ normalized master state delta
-    ▼
-Coordinator (fans out to followers via FollowerRegistry immutable snapshots)
-    │
-    ├─► RiskEngine (pure math: equity_base × risk_percent / stop_distance)
-    │
-    ├─► LeverageManager (RAM candidate catalog + confirmed account leverage)
-    │
-    └─► Planner (actual vs target diff -> minimal prioritized ExecutionPlan)
-            │
-            ▼
-        Executor (persists commands to SQLite journal, mutation-locked per follower)
-            │
-            ▼
-        AsterClient (EIP-712 signed REST requests, error classification)
-            │
-            ▼
-        ASTER FOLLOWERS
-            │
-            ▼
-        Reconciler (periodic sweep & boot recovery; actual == target -> 0 actions)
+Master WS (ORDER_TRADE/ACCOUNT/CONFIG_UPDATE) -> MasterProjector (copy_trades)
+  -> Coordinator (FollowerRegistry) -> RiskEngine (80% margin cap) -> LeverageManager
+  -> Planner (diff -> ExecutionPlan DAG) -> Executor (journal -> AsterClient / ShadowExchange)
+  -> Followers -> Reconciler (REST sweep every 15s)
 ```
 
-### Key Architectural Invariants
-1. **State Replication, Not Command Mirroring**: WebSocket is a low-latency trigger, but REST snapshots and reconciliations are the authoritative source of truth.
+### Key Invariants
+1. **State Replication, Not Command Mirroring**: WebSocket is a low-latency trigger; REST snapshots and reconciliations are authoritative.
 2. **Fail-Closed Safety**:
-   - New accounts start in `allow_new_entries=False` (`PAUSED`).
-   - Resuming copying requires `SystemState.READY`, a fresh snapshot, and an explicit one-shot confirmation token.
-   - Missing or unknown leverage blocks risk-increasing actions (`MARKET_OPEN`) while allowing risk-reducing actions (`MARKET_CLOSE`, cancellations).
+   - New accounts start `PAUSED` (`allow_new_entries=False`).
+   - Resuming requires `SystemState.READY`, fresh snapshot, and single-use confirmation token.
+   - Unknown leverage blocks `MARKET_OPEN` (`LEVERAGE_NOT_READY`) while allowing `MARKET_CLOSE` and cancellations.
+   - ExecutionPlan supports DAG dependencies (`depends_on_action_id`): `SET_LEVERAGE` must succeed before `MARKET_OPEN` (Bug #25).
 3. **Key Isolation & Security**:
-   - Master wallet private keys and user wallet signatures are never stored in SQLite, backend memory, or logs.
-   - Signer private keys are encrypted using AES-256-GCM (`credentials/crypto.py`) with `CT_ENCRYPTION_KEY`.
-   - Temporary builder onboarding attempts use a 4-state durable lifecycle (`PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`) in `builder_onboarding_attempts` and are purged immediately upon commit.
+   - Private keys and user signatures are never logged or stored in plaintext. Signer keys use AES-256-GCM (`CT_ENCRYPTION_KEY`).
+   - Builder onboarding uses a 4-state lifecycle (`PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`) in `builder_onboarding_attempts`, purged on commit.
+   - Uncommitted credentials in memory are isolated via `EphemeralIdentityProvider` and `EphemeralKeyProvider`.
 4. **Concurrency & Storage**:
-   - Single Python process with `asyncio`.
-   - SQLite in WAL mode with `PRAGMA busy_timeout=30000` and a process-local `Database.write_lock` serializing transactions.
-   - Per-account `asyncio.Lock` for mutation pipelines (nonces, orders, leverage).
+   - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, and MiniApp.
+   - SQLite WAL mode with `PRAGMA busy_timeout=30000` and process-local `Database.write_lock` serializing transactions across 27 migrations (indices 0..26).
+   - Per-account `asyncio.Lock` serializes order/nonce/leverage pipelines.
 
 ---
 
@@ -66,233 +43,171 @@ Coordinator (fans out to followers via FollowerRegistry immutable snapshots)
 ```text
 copytradeaster/
 ├── src/copytradeaster/
-│   ├── app.py                 # Composition root, boot recovery sequence & background loops
-│   ├── config.py              # Pydantic V2 settings (CT_* env vars) and fail-closed guards
-│   ├── logging_utils.py       # Rotating logger (0600 permissions) & secret redaction
-│   ├── aster/                 # Aster V3 REST, management API, user-stream WS, EIP-712 signing
-│   ├── master/                # MasterProjector: raw WS -> normalized state deltas & episodes
-│   ├── risk/                  # RiskEngine: deterministic position sizing & protective math
-│   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager
-│   ├── storage/               # SQLite database, MIGRATIONS list, async repositories
-│   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption
-│   ├── notifications/         # NotificationRouter, SQLite outbox & TelegramOutboxWorker
-│   ├── onboarding/            # Direct & Builder onboarding services (4-state lifecycle)
-│   ├── application/           # UserApplicationService (shared use cases), models & control
-│   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, routers
-│   ├── miniapp/               # aiohttp Mini App server (HMAC initData auth, static bundle)
+│   ├── app.py                 # Composition root, boot recovery & background reconciliation
+│   ├── config.py              # Pydantic V2 settings (CT_* env vars) & testnet guards
+│   ├── domain/                # Canonical models (models.py) with _DecimalStrict coercion
+│   ├── aster/                 # REST (trading/management), WS stream, EIP-712, ShadowExchange
+│   ├── master/                # MasterProjector: WS -> normalized state deltas & copy_trades
+│   ├── risk/                  # RiskEngine: deterministic sizing & protective order math
+│   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry
+│   ├── storage/               # SQLite Database, MIGRATIONS (0..26), async repositories
+│   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
+│   ├── notifications/         # NotificationRouter, SQLite outbox, TelegramOutboxWorker
+│   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services
+│   ├── application/           # UserApplicationService, Stage2Process (engine.py), control.py
+│   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, FSM flows
+│   ├── miniapp/               # aiohttp server (HMAC initData auth, 15 API routes, static host)
 │   └── cli/                   # main.py CLI dispatcher and subcommands
-├── miniapp/                   # Frontend SPA (Vite + React 19 + TypeScript + Oxlint + Vitest)
-│   ├── src/screens/           # SessionGate, BuilderWizard, HomeScreen, SuccessScreen
-│   ├── src/components/        # UI components (TrustRail, Sheet dialog, SVG icons)
-│   └── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
-├── tests/
-│   ├── unit/                  # Fast offline unit tests (risk, planner, storage, miniapp, etc.)
-│   ├── integration/           # FakeAster e2e, acceptance gates, full Mini App flow
-│   ├── replay/                # Stream replay fixtures & snapshot regression tests
-│   └── testnet/               # Signed Aster Testnet live tests (CT_TESTNET=1)
-├── scripts/                   # Operational scripts (tunnel, preview, load tests, manual orders)
-├── docs/                      # Living documentation, architecture & test status
-└── data/                      # Local SQLite databases, logs, load test artifacts (git-ignored)
+├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS 6 + Oxlint + Vitest)
+│   ├── src/screens/           # Home, Positions, Activity, Settings, Notifications, Wizard
+│   ├── src/components/        # AppShell, TrustRail, Sheet, PositionCard, SVG icons
+│   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
+│   └── src/api.ts             # Typed API client with 15s AbortController timeout
+├── tests/                     # unit/ (500+ tests), integration/ (FakeAster), replay/, testnet/ (29 live)
+├── scripts/                   # dev-up.sh, preview_miniapp_engine.py, manual_master_order.py, etc.
+├── docs/                      # docs_map.md, ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md
+└── data/                      # Local SQLite databases, logs, test artifacts (git-ignored)
 ```
 
 ---
 
 ## Development Commands
 
-### 1. Environment Setup
+### 1. Environment & Configuration
 ```bash
-# Python backend (Python 3.12)
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Frontend Mini App (Node >= 20, pnpm v11+)
-cd miniapp
-pnpm install
-pnpm build               # builds dist bundle served by aiohttp
-cd ..
+# Backend (Python 3.12 strict) & Frontend setup
+python3.12 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+cd miniapp && pnpm install && pnpm build && cd ..
 ```
-
-### 2. Configuration (`.env`)
-Create `.env` from `.env.example`. Key settings:
+Key `.env` settings (`.env.example` has full template):
 ```env
-# Storage & Crypto
 CT_DB_PATH=data/copytrade.sqlite3
-CT_ENCRYPTION_KEY=<64-char-hex-key>   # python -c "import secrets; print(secrets.token_hex(32))"
-
-# Telegram Control Plane
-CT_TELEGRAM_BOT_TOKEN=123456:ABC...
+CT_ENCRYPTION_KEY=<64-hex>        # python -c "import secrets; print(secrets.token_hex(32))"
+CT_TELEGRAM_BOT_TOKEN=123456:ABC # or BOT_KEY in .botkey
 CT_TELEGRAM_ADMIN_IDS=[123456789]
-
-# Mini App Transport (Stage 3)
 CT_MINIAPP_ENABLED=true
 CT_MINIAPP_STATIC_DIR=miniapp/dist
-CT_MINIAPP_PUBLIC_URL=https://<tunnel-hash>.trycloudflare.com
-
-# Testnet Environment (Fail-Closed Guards)
+CT_MINIAPP_PUBLIC_URL=https://<tunnel-hash>.trycloudflare.com # auto-set by dev-up.sh
 CT_REST_BASE_URL=https://fapi.asterdex-testnet.com
-CT_WS_USER_BASE=wss://fstream.asterdex-testnet.com/ws
-CT_ALLOW_MAINNET=false
+CT_ALLOW_MAINNET=false           # strict fail-closed guard
 CT_BUILDER_ADDRESS=0x2576e9E40A9280721CC15c57BA2F2E1C1c536EF8
 CT_BUILDER_NAME=copytradeaster
 CT_MAX_FEE_RATE=0.0001
 ```
 
-### 3. Step-by-Step Launch Flow
-
-#### Step A: Build Frontend Bundle
+### 2. Launch & Previews
 ```bash
-cd miniapp && pnpm build && cd ..
-```
+# 1. Recommended full dev stack (builds bundle, cloudflared tunnel, sets CT_MINIAPP_PUBLIC_URL, runs bot):
+./scripts/dev-up.sh             # stop: ./scripts/dev-up.sh stop
 
-#### Step B: Start HTTPS Tunnel (for Telegram WebApp)
-```bash
-# Runs cloudflared quick tunnel on port 8080 and prints public URL:
-./scripts/dev-miniapp-tunnel.sh 8080
-# Copy the resulting https://<hash>.trycloudflare.com URL to CT_MINIAPP_PUBLIC_URL in .env
-```
+# 2. Manual launch fallback:
+cloudflared tunnel --url http://127.0.0.1:8080   # copy URL to CT_MINIAPP_PUBLIC_URL in .env
+.venv/bin/python -m copytradeaster init-db && copytradeaster run-bot
+# Bot automatically registers MenuButtonWebApp(text="ASTER COPY") to CT_MINIAPP_PUBLIC_URL/miniapp/
 
-#### Step C: Initialize Database & Run the Bot
-```bash
-# Initialize SQLite schema & run migrations
-.venv/bin/python -m copytradeaster init-db
+# 3. P2.0+ Real-data engine visual preview (boots trading engine on SQLite backup copy):
+.venv/bin/python scripts/preview_miniapp_engine.py --account <ACCOUNT_ID> --confirm-engine-preview [--port 8085]
 
-# Run unified process (Telegram Bot + Mini App aiohttp + Trading Core)
-.venv/bin/python -m copytradeaster run-bot
-# or:
-copytradeaster run-bot
-```
-*Note: Upon startup, the bot automatically registers `MenuButtonWebApp(text="ASTER COPY")` pointing to `CT_MINIAPP_PUBLIC_URL/miniapp/` in private chats and for all configured admin IDs.*
-
-### 4. CLI Operations & Health Inspection
-```bash
-# Health & engine diagnostics (heartbeat age, runtime state, active trades, recent commands)
-copytradeaster status
-
-# Run standalone trading core (without Telegram bot)
-copytradeaster run
-
-# Force manual reconciliation sweep across followers
-copytradeaster reconcile
-copytradeaster reconcile --account <account_id>
-
-# Trading pause / resume (safe control-plane)
-copytradeaster pause    # sets allow_new_entries=false
-copytradeaster resume   # sets allow_new_entries=true & clears emergency_active
-
-# Emergency liquidation (flat verification across active followers)
-copytradeaster emergency-close-all --yes
-
-# Telegram user management
-copytradeaster telegram-user add <telegram_user_id>
-copytradeaster telegram-user list
-copytradeaster telegram-user block <telegram_user_id>
-
-# Import credentials from wallet.txt
-copytradeaster import-wallet wallet.txt [--wipe]
-
-# Batch approve builder / agent on-chain
-copytradeaster approve-builder [--accounts all|<id1,id2>] [--max-fee-rate 0.0001]
-```
-
-### 5. Local Dev & Preview Without Telegram
-```bash
-# Isolated standalone browser preview (MetaMask/Rabby, dev session bypassing Telegram initData)
-.venv/bin/python scripts/preview_miniapp.py 8080
-# Open in browser: http://127.0.0.1:8080/miniapp/
-
-# Vite live dev server (with hot reloading & backend proxy)
+# 4. Vite frontend dev server (with hot reload and API proxy to :8080):
 cd miniapp && pnpm dev
 ```
 
-### 6. Testing & Quality Gates
+### 3. CLI Operations
 ```bash
-# Full offline Python test suite (unit + integration + replay)
-pytest -q -m "not testnet"
-
-# With coverage report (threshold >= 87%)
-pytest -q -m "not testnet" --cov=copytradeaster --cov-report=term-missing
-
-# Python lint & formatting checks
-ruff check .
-ruff format --check .
-ruff format .             # auto-format
-
-# Frontend quality checks
-cd miniapp
-pnpm lint                 # oxlint
-pnpm test                 # vitest
-pnpm build                # tsc + vite build
-cd ..
-
-# Signed live Aster Testnet test suite (requires CT_TESTNET=1 and testnet wallet.txt)
-CT_TESTNET=1 pytest tests/testnet/ -v
+copytradeaster status                                    # health, runtime state, active trades
+copytradeaster run                                       # standalone trading core (no Telegram)
+copytradeaster reconcile [--account <id>]                # manual state reconciliation sweep
+copytradeaster pause | resume                            # control-plane pause / resume
+copytradeaster emergency-close-all --yes                 # emergency flat liquidation
+copytradeaster telegram-user add|list|block|unblock <id> # manage authorized Telegram users
+copytradeaster import-wallet wallet.txt [--wipe]         # import credentials from wallet.txt
+copytradeaster approve-builder [--accounts all|<id1..>]  # batch EIP-712 builder approval
 ```
+
+### 4. Testing & QA
+```bash
+pytest -q -m "not testnet"                               # fast offline backend suite (~773 tests)
+pytest -q -m "not testnet" --cov=src/copytradeaster      # backend coverage (threshold >= 87%)
+ruff check . && ruff format --check .                    # Python lint and format (ruff format .)
+cd miniapp && pnpm lint && pnpm test && pnpm build && cd .. # frontend Oxlint + Vitest (102 tests) + build
+CT_TESTNET=1 pytest tests/testnet/ -v                    # signed Aster Testnet suite (29 live scenarios)
+CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30 & 100 follower scale load test
+```
+
 ---
 
 ## Code Conventions & Common Patterns
 
 ### Python Backend
 - **Type Annotations**: Strict typing on all public methods (`from __future__ import annotations`).
+- **Strict Decimals**: Never use `float` for prices/amounts. Enforce `_DecimalStrict` in `domain.models`.
 - **Async First**: `async def`, `httpx.AsyncClient`, `aiosqlite`, `asyncio.Lock`.
-- **Naming**: `snake_case` for functions/variables, `PascalCase` for classes/DTOs, `UPPER_SNAKE` for constants.
-- **DTOs & Schemas**: Pydantic V2 models for exchange/API contracts and config; `dataclass(slots=True)` for domain models and storage rows.
-- **Dependency Injection**: Explicit protocols and factory injection (e.g. `OnboardingStore`, `ApplicationProtocol`, `Notifier`). No service locators or global singletons.
-- **Error Handling**:
-  - Typed exceptions extending domain bases (`CopyTradeError`, `OnboardingError`).
-  - Exchange errors wrapped with numeric codes (e.g. `-1006 transport timeout`, `-2016 fee rate limit`).
-  - Unknown transport outcomes (503/504/-1000/-1006/-1007) are marked `UNKNOWN` and resolved via exchange queries before retrying.
-- **Database Migrations**: Add new SQL schema migrations to the `MIGRATIONS` tuple in `src/copytradeaster/storage/database.py`.
+- **Naming & Models**: `snake_case` functions, `PascalCase` classes/DTOs, `UPPER_SNAKE` constants. Pydantic V2 for API/config; `dataclass(slots=True)` for domain models/DB rows.
+- **Dependency Injection**: Explicit protocols (`typing.Protocol`) and constructor injection. No service locators.
+- **Error Handling**: Typed exceptions (`CopyTradeError`, `OnboardingError`). Transport errors classified; unknown outcomes marked `UNKNOWN` and resolved via exchange queries before retrying (`resolve_boot_unknowns`).
+- **Concurrency & Storage**: `Database.write_lock` serializes SQLite writes. Per-account `asyncio.Lock` serializes execution pipelines. ExecutionPlan uses DAG dependencies (`depends_on_action_id`). New migrations appended to `MIGRATIONS` in `storage/database.py`.
 
 ### Frontend (Mini App)
-- **Framework**: React 19 with strict TypeScript (`tsconfig.app.json`).
-- **Styling**: Vanilla CSS tokens in `src/index.css` (Aster Attestation Console dark theme: `#070707` canvas, `#F2C98D` champagne accent). No heavy UI component libraries.
-- **Networking**: Centralized `api.ts` with 15-second `AbortController` timeout and typed `ApiError` mapping.
-- **Icons & Accessibility**: Inline SVG icons (no system emoji), progress rail connector lines, `:focus-visible`, semantic dialog roles (`role="dialog"`, `aria-modal="true"`).
+- **Framework & Linting**: React 19 + TypeScript (`tsconfig.app.json`). Oxlint for linting (ESLint is NOT used).
+- **Styling**: Vanilla CSS tokens in `src/index.css` (Aster dark theme: `#070707` canvas, `#F2C98D` accent). No heavy UI libraries.
+- **UI Contract Tests**: Vitest in Node environment with React 19 `renderToStaticMarkup` (no browser DOM emulation).
+- **UX & Accessibility**: Inline SVG icons (no emoji), native BackButton/Haptics, synchronous toggle lock (`createToggleGate`), `:focus-visible`, semantic dialog roles.
 
 ---
 
 ## Important Files
 
-| File | Purpose |
+|File|Purpose|
 |---|---|
-| `src/copytradeaster/app.py` | Composition root, boot sequence, clock sync, and startup reconciliation |
-| `src/copytradeaster/config.py` | Application settings, environment loading (`CT_*`), testnet guards |
-| `src/copytradeaster/trading/coordinator.py` | Distributes master deltas to follower target positions |
-| `src/copytradeaster/trading/planner.py` | Pure transition planner generating execution actions |
-| `src/copytradeaster/trading/executor.py` | Journal-driven order execution with persistent command keys |
-| `src/copytradeaster/trading/leverage.py` | RAM control-plane managing candidate & confirmed leverage |
-| `src/copytradeaster/onboarding/builder.py` | 4-state durable Builder onboarding lifecycle & recovery |
-| `src/copytradeaster/application/service.py` | Transport-neutral use cases for Telegram bot, Mini App, and CLI |
-| `src/copytradeaster/miniapp/server.py` | aiohttp server hosting Mini App API & static assets |
-| `src/copytradeaster/cli/main.py` | CLI entry point and subcommands |
-| `miniapp/src/App.tsx` | Mini App routing, session gating, and runtime recovery |
-| `docs/ENGINE_TEST_STATUS_2026-08.md` | Single source of truth for test status, counters, and bug registry (#1–26) |
-| `docs/ARCHITECTURE.md` | Authoritative system architecture reference |
+|`src/copytradeaster/app.py`|Composition root, boot sequence, WS ingest loop, periodic reconciliation|
+|`src/copytradeaster/config.py`|Pydantic V2 settings (`CT_*` env vars), fail-closed testnet guards|
+|`src/copytradeaster/domain/models.py`|Canonical domain models with `_DecimalStrict` coercion & explicit enums|
+|`src/copytradeaster/trading/coordinator.py`|Fans out master deltas to follower target positions|
+|`src/copytradeaster/trading/planner.py`|Pure transition planner generating ExecutionPlan with DAG dependencies|
+|`src/copytradeaster/trading/executor.py`|Durable execution journal (`execution_commands`) with UNKNOWN resolution|
+|`src/copytradeaster/trading/leverage.py`|RAM control-plane for candidate & confirmed leverage generations|
+|`src/copytradeaster/trading/registry.py`|In-memory FollowerRegistry isolating runtime state from storage|
+|`src/copytradeaster/aster/shadow.py`|In-memory ShadowExchange simulating execution for load-testing followers|
+|`src/copytradeaster/onboarding/builder.py`|4-state durable Builder onboarding lifecycle (`PREPARED..COMMITTED`)|
+|`src/copytradeaster/application/service.py`|Transport-neutral use cases for Telegram bot, Mini App, and CLI|
+|`src/copytradeaster/application/engine.py`|`Stage2Process` orchestrator (Database, App, Telegram, Outbox, MiniApp)|
+|`src/copytradeaster/miniapp/server.py`|aiohttp server hosting Mini App API (`/miniapp/api/*`) & static assets|
+|`src/copytradeaster/cli/main.py`|CLI entry point and subcommands|
+|`miniapp/src/App.tsx`|Mini App routing, session gating, 4-tab AppShell, and runtime recovery|
+|`scripts/dev-up.sh`|One-command dev orchestrator: builds bundle, manages tunnel, runs bot|
+|`scripts/preview_miniapp_engine.py`|Visual preview running full engine on point-in-time SQLite backup copy|
+|`docs/docs_map.md`|Central navigation map for all project documentation|
+|`docs/ENGINE_TEST_STATUS_2026-08.md`|Single source of truth for test status, counters, and bug registry (#1–26)|
+|`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§1–§15)|
+|`docs/reports/STAGE3_PART2_PROGRESS_2026-09.md`|Stage 3 Part 2 execution journal (P2.0–P2.3 closed, P2.4–P2.7 pending)|
 
 ---
 
 ## Runtime & Tooling Preferences
 
-- **Python Runtime**: Python `3.12` (strict).
-- **Frontend Tooling**: Node.js `>=20`, package manager `pnpm` (v11+).
-- **Linter / Formatter**: `ruff` for Python (`line-length = 100`), `oxlint` for TypeScript/React.
-- **Test Runners**: `pytest` + `pytest-asyncio` for Python; `vitest` for frontend.
-- **Network Guards**: All development and tests target Aster Testnet (`fapi.asterdex-testnet.com`, trading chain `714`, registration chain `56`). Mainnet access is strictly fail-closed by config guards.
+- **Python Runtime**: Python `3.12` strict (`>=3.12,<3.13`).
+- **Frontend Tooling**: Node.js `>=20`, package manager `pnpm` (v11+, lockfile 9.0; `allowBuilds: {'@reown/appkit': true}`).
+- **Linters / Formatters**: `ruff` (`line-length = 100`, rules `E,F,I,UP,B,SIM`) for Python; `oxlint` for TypeScript/React.
+- **Test Runners**: `pytest` + `pytest-asyncio` + `pytest-cov` + `respx`; `vitest` for frontend.
+- **Network Guards**: Aster Testnet default (`fapi.asterdex-testnet.com`, chains `714`/`56`). Mainnet access is strictly fail-closed (`CT_ALLOW_MAINNET=false`).
 
 ---
 
 ## Testing & QA Guidelines
 
-- **Coverage Requirement**: The offline Python test suite must maintain $\ge 87\%$ statement coverage across `src/copytradeaster`.
-- **Test File Naming**: `test_<module>_<behavior>.py` under `tests/unit/`, `tests/integration/`, or `tests/testnet/`.
-- **Offline Safety**: Default `pytest -q -m "not testnet"` must run hermetically without external network access or real credentials.
-- **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` containing testnet faucet accounts. Always ensure clean flat positions after tests.
-- **Living Documentation**: Update `docs/ENGINE_TEST_STATUS_2026-08.md` after any test suite change. Do not duplicate test counters across other documentation files.
+- **Coverage Requirement**: $\ge 87\%$ statement coverage across `src/copytradeaster`.
+- **Test Status**:
+  - Offline Backend: **773 passed / 2 skipped / 32 deselected** (~18s, 87% coverage).
+  - Frontend Vitest: **102 passed across 11 test files** (clean Oxlint, clean Vite build).
+  - Signed Testnet: **29 state-changing/live scenarios passed** against `fapi.asterdex-testnet.com`.
+- **Authoritative Bug Registry**: Bugs #1–26 are fully closed in `docs/ENGINE_TEST_STATUS_2026-08.md` (no bug #27).
+- **Naming & Isolation**: `test_<module>_<behavior>.py`. Default `pytest -q -m "not testnet"` must run hermetically without network or private keys.
+- **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` with testnet faucet accounts. Always ensure clean flat positions after tests.
+- **Living Documentation**: Update `docs/ENGINE_TEST_STATUS_2026-08.md` after any test suite change. Do not duplicate counters across files.
 
 ---
 
 ## Agent-Specific Instructions
 
 - **Language & Scope**: Keep user communications in Russian, technical, direct, and scoped to API/code facts without marketing filler.
-- **Plan Maintenance**: Maintain stage milestones in `docs/DEV_PLAN_SKELETON.md` and record campaign progress in `docs/reports/`.
+- **Plan Maintenance**: Maintain stage milestones in `docs/DEV_PLAN_SKELETON.md` and record campaign progress in `docs/reports/` (e.g. `STAGE3_PART2_PROGRESS_2026-09.md`). Update `docs/docs_map.md` when introducing new documentation files.
