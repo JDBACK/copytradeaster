@@ -18,6 +18,7 @@ import {
   formatRiskPercent,
   isRiskAllowed,
   isRiskDirty,
+  nearestRiskStep,
 } from '../riskView'
 import type { RiskDTO } from '../types'
 import { createToggleGate, type ToggleGate } from '../notificationsView'
@@ -73,10 +74,14 @@ export function RiskRuler({
   steps,
   active,
   onPick,
+  disabled = false,
 }: {
   steps: string[]
   active: string
   onPick: (fraction: string, opts?: { silent?: boolean }) => void
+  /** Frozen while a save is in flight: no re-pick can land mid-POST and get
+   *  overwritten by the server response. */
+  disabled?: boolean
 }) {
   const stripRef = useRef<HTMLDivElement | null>(null)
   const rafId = useRef<number | null>(null)
@@ -121,7 +126,7 @@ export function RiskRuler({
   // selection silently, so the big value follows the finger with no lag.
   // A trailing settle then acknowledges the landing value with one haptic.
   const handleScroll = useCallback(() => {
-    if (cooling.current) return
+    if (disabled || cooling.current) return
     if (rafId.current !== null) cancelAnimationFrame(rafId.current)
     rafId.current = requestAnimationFrame(() => {
       rafId.current = null
@@ -141,7 +146,7 @@ export function RiskRuler({
         onPick(best)
       }
     }, 90)
-  }, [onPick])
+  }, [disabled, onPick])
 
   useEffect(
     () => () => {
@@ -176,7 +181,7 @@ export function RiskRuler({
   // Desktop wheel: vertical wheel scrolls the strip horizontally.
   useEffect(() => {
     const strip = stripRef.current
-    if (!strip) return
+    if (!strip || disabled) return
     const onWheel = (event: WheelEvent) => {
       if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
       if (strip.scrollWidth <= strip.clientWidth + 1) return
@@ -185,9 +190,10 @@ export function RiskRuler({
     }
     strip.addEventListener('wheel', onWheel, { passive: false })
     return () => strip.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [disabled])
 
   const tap = (fraction: string) => {
+    if (disabled) return
     cooling.current = true
     if (coolTimer.current !== null) window.clearTimeout(coolTimer.current)
     coolTimer.current = window.setTimeout(() => {
@@ -204,7 +210,7 @@ export function RiskRuler({
   }
 
   const onPointerDown = (event: React.PointerEvent) => {
-    if (event.pointerType !== 'mouse' || event.button !== 0) return
+    if (disabled || event.pointerType !== 'mouse' || event.button !== 0) return
     const strip = stripRef.current
     if (!strip) return
     drag.current = { startX: event.clientX, startLeft: strip.scrollLeft, moved: false, pointerId: event.pointerId }
@@ -241,6 +247,7 @@ export function RiskRuler({
   }
 
   const onKeyDown = (event: React.KeyboardEvent) => {
+    if (disabled) return
     const index = steps.indexOf(active)
     let next = -1
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = Math.min(steps.length - 1, index + 1)
@@ -262,6 +269,7 @@ export function RiskRuler({
         className="risk-ruler"
         role="radiogroup"
         aria-label="Выбор риска"
+        aria-disabled={disabled || undefined}
         onScroll={handleScroll}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -279,6 +287,7 @@ export function RiskRuler({
             aria-label={formatRiskPercent(step)}
             data-fraction={step}
             tabIndex={step === active ? 0 : -1}
+            disabled={disabled}
             className={`risk-tick-btn num${step === active ? ' active' : ''}`}
             onClick={() => tap(step)}
           >
@@ -320,8 +329,17 @@ export function RiskScreen({
     setLoad({ kind: 'loading' })
     try {
       const dto = await api.risk(auth)
+      // Legacy guard: a stored value may predate the current grid (policy
+      // change).  Never silently rewrite it — keep it as the confirmed truth
+      // and pre-select the nearest grid step, so the user explicitly picks
+      // and saves.  The banner below explains the situation.
+      const grid = enumerateRiskSteps(dto)
+      const selected =
+        grid.length > 0 && !isRiskAllowed(dto, dto.risk_percent)
+          ? (nearestRiskStep(dto, dto.risk_percent) ?? dto.risk_percent)
+          : dto.risk_percent
       setConfirmed(dto.risk_percent)
-      setSelected(dto.risk_percent)
+      setSelected(selected)
       setSaveError(null)
       setLoad({ kind: 'ready', dto })
     } catch (err) {
@@ -403,6 +421,11 @@ export function RiskScreen({
   const current = confirmed ?? dto.risk_percent
   const active = selected ?? dto.risk_percent
   const steps = enumerateRiskSteps(dto)
+  // Stored value off the current grid (legacy policy): no tick is the truth,
+  // the ruler pre-selects the nearest step, and the banner asks for an
+  // explicit save.  Proven empty on the live DB (all rows on-grid) — this is
+  // pure defence for future policy changes.
+  const legacy = steps.length > 0 && !isRiskAllowed(dto, current)
   const dirty = confirmed !== null && selected !== null && isRiskDirty(current, active)
   const allowed = steps.includes(active) && isRiskAllowed(dto, active)
   const canSave = dirty && allowed && !saving
@@ -446,6 +469,15 @@ export function RiskScreen({
         />
       )}
 
+      {legacy && (
+        <div className="info-box risk-legacy-note">
+          <span>
+            Сохранено {formatRiskPercent(current)} — такое значение больше недоступно. Выберите
+            ближайшее на шкале и нажмите Сохранить.
+          </span>
+        </div>
+      )}
+
       <section
         className="panel risk-current"
         aria-label={
@@ -468,7 +500,7 @@ export function RiskScreen({
             </div>
           </div>
         ) : (
-          <RiskRuler steps={steps} active={active} onPick={pick} />
+          <RiskRuler steps={steps} active={active} onPick={pick} disabled={saving} />
         )}
         <div className="risk-dirty-line num">
           <span>Сейчас {formatRiskPercent(current)}</span>

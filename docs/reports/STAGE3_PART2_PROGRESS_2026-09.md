@@ -411,16 +411,19 @@ Tests:
   contract без legacy/internal полей, round-trip, 19 forged/malformed
   payloads + non-object body → 400 без вызова application,
   ValidationError → safe 400.
-- Frontend (`risk.test.tsx`, 17 тестов после редизайна): enumerate/format/
-  policy-gate/dirty/demo/ruler-render/nested route; `settings.test.tsx` —
-  4 chevrons.
+- Frontend (`risk.test.tsx`, 20 тестов после редизайна): enumerate/format/
+  policy-gate/dirty/demo/`nearestRiskStep`/ruler-render/nested route;
+  новый `riskBehavior.test.tsx` (jsdom + RTL, 4 behavioral: tap→dirty→
+  single POST→confirmed+toast с double-tap gate, failed save держит
+  confirmed без тоста, freeze линейки mid-save, legacy banner с явным
+  сейвом); `settings.test.tsx` — 4 chevrons.
 
 Gates:
 
 - offline pytest: 816 passed / 2 skipped / 32 deselected (coverage — см.
   `ENGINE_TEST_STATUS_2026-08.md`); ruff check/format clean; mypy
   недоступен в текущем venv (не входит в offline gate этого окружения).
-- frontend: Vitest 119 passed / 12 файлов, oxlint 0/0, `tsc -b &&
+- frontend: Vitest 126 passed / 13 файлов, oxlint 0/0, `tsc -b &&
   vite build` clean (финальный билд без `VITE_DEV_USER_ID`; dev-билд
   использовался только для browser walkthrough, `dist/` git-ignored).
 - live: `tests/testnet/test_live_risk_acceptance.py` — 1 passed за 33.97s
@@ -432,13 +435,30 @@ Gates:
   qty **0.012 == расчёт** (ratio 3.0x) → realized stop-loss обоих legs в
   пределах одного lot step → forged bodies → 400 → cleanup flat →
   fingerprint + `copy_settings` прод-БД до/после совпали.
-- browser walkthrough (preview engine на копии прод-БД, `copyc1`, :8095,
-  desktop + 390×844): Settings chevron → Risk clean (save disabled) →
-  preset 2% (`Сейчас 1,0% После 2,0%`, active только 2%) → custom `1,2`
-  rejected с подсказкой (selected остался 2%) → `1,5` dirty → double-tap
-  save → single mutation, current `1,5%`, Settings `1,5%`; иерархия по макету.
+- browser walkthrough (preview engine на копии прод-БД, `copyc1`, :8095/
+  :8096, desktop + 390×844): Settings chevron → Risk clean (save
+  disabled) → тап по линейке (dirty `Сейчас 1,0% После 4,0%`, демо
+  пересчёт) → double-tap save → single mutation → тост `Сохранено`,
+  Settings показывает новое; края `0.005/0.05` и центр — offset 0px;
+  скелетон `role=status`, фокус тика после тапа, тики 64×54. Owner
+  acceptance закрыт 2026-09-03 на iPhone в реальном Telegram WebView
+  (боевой бот + временный cloudflare-туннель): линейка, вибрация,
+  fish-eye, края, тост — «Работает».
 
-P2.4 полностью закрыт кроме owner acceptance в реальном Telegram WebView.
+External review corrective (remote `09a4d74`, 8.8/10, P0/P1 нет) — закрыт
+одним коммитом: (1) legacy P2 — read-only проверка рабочей БД: все 5 строк
+`copy_settings` на новой сетке (`0.01`×4 main/copyc1–3, `0.015`
+tg-8264892202) + UI-страховка `nearestRiskStep` (exact integer math) с
+баннером «такое значение больше недоступно» и явным сейвом, тихой
+перезаписи нет; (2) ruler freeze P2 — `RiskRuler disabled={saving}`
+(кнопки + scroll/wheel/drag/keyboard, `aria-disabled`) + 4 behavioral
+теста в новом `riskBehavior.test.tsx` (jsdom + RTL: single POST +
+confirmed + toast, failed save держит confirmed, freeze mid-save, legacy
+banner); `risk.test.tsx` — 3 теста `nearestRiskStep`; (3) docs P3 —
+PROGRESS/ENGINE_TEST_STATUS/SKELETON/adapted plan приведены к факту
+`09a4d74` + corrective.
+
+P2.4 ACCEPTED / CLOSED (external review + owner acceptance).
 
 ## Следующие подчасти
 

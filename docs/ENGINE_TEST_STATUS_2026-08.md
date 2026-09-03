@@ -6,7 +6,8 @@
 ## Текущее состояние
 
 - **Stage 3, часть 2 (P2.4 — Risk on Stop) — CLOSED
-  (2026-09-03, implementation/live complete; owner Telegram acceptance pending):**
+  (2026-09-03, implementation/live/owner acceptance complete + external
+  review corrective applied):**
   1. **Backend Application:** public `RiskDTO` больше не содержит
      `max_leverage`/`max_entry_deviation_pct` — только `risk_percent`,
      `min`/`max`/`step`/`presets`, `risk_base` (backend authority, все
@@ -27,14 +28,16 @@
   3. **Frontend (`miniapp/`):** `RiskDTO` в `types.ts`;
      `api.risk`/`api.setRiskPercent`; Settings-строка «Риск на Stop»
      кликабельна с chevron; `{ kind: 'risk' }` рендерит новый `RiskScreen`
-     по `05-risk-settings.png` (Текущее значение, пресеты из DTO, custom
-     comma/dot/% ввод `1,5%`→`"0.015"`, `Сейчас → После`, `Демо-расчёт`
-     от 1240 USDT, leverage-note, primary save с double-tap gate).
+     (отклонение от `05-risk-settings.png` по решению владельца 2026-09-03:
+     вместо пресетов и ручного ввода — интерактивная шкала-линейка в панели:
+     `RiskRuler` со свайпом/drag/колесом/стрелками, snap, px-точным
+     центрированием `fitRulerPadding`, живым трекингом rAF, fish-eye
+     чёрточек и фиксированным курсором; крупное значение следует за
+     выбором, `Сейчас` держит confirmed, тост `Сохранено · X` после save,
+     линейка заморожена на время POST, legacy off-grid значение даёт
+     баннер с явным перевыбором вместо молчания).
      Pure `riskView.ts` (string-math, без float); confirmed меняется
-     только по server response. Редизайн 2026-09-03: вместо пресетов и
-     ручного ввода — интерактивная шкала-линейка в панели (`RiskRuler`:
-     свайп/drag/колесо/стрелки, snap, точное центрирование; крупное
-     значение следует за выбором, `Сейчас` держит confirmed).
+     только по server response.
   4. **Offline gate:** offline pytest **816 passed / 2 skipped / 32
      deselected**, coverage **87%** (порог >= 87%);
      ruff check/format clean. Новые кейсы:
@@ -42,10 +45,12 @@
      off-step/NaN/Infinity/non-Decimal/forged rejected, durability,
      audit) и HTTP boundary (auth/read/round-trip/19 malformed-forged
      payloads/non-object/ValidationError→safe 400, no legacy fields).
-  5. **Frontend gate:** Vitest **119 passed / 12 файлов** (обновлённый
-      `risk.test.tsx`: enumerate/format/policy-gate/dirty/demo/ruler/
-     nested route; `settings.test.tsx` — 4 chevron-кнопки), oxlint 0/0,
-     `tsc -b && vite build` clean.
+  5. **Frontend gate:** Vitest **126 passed / 13 файлов** (`risk.test.tsx`,
+     20 тестов: enumerate/format/policy-gate/dirty/demo/nearest/ruler/
+     nested route; новый `riskBehavior.test.tsx`, 4 behavioral: tap→dirty→
+     single POST→confirmed+toast, failed save держит confirmed, freeze
+     линейки mid-save, legacy banner; `settings.test.tsx` — 4 chevron-
+     кнопки), oxlint 0/0, `tsc -b && vite build` clean.
   6. **Live gate (Aster Testnet):**
      `tests/testnet/test_live_risk_acceptance.py` — **1 passed за
      33.97s** на throwaway `sqlite3.backup`-копии прод-БД (рабочая БД
@@ -56,13 +61,23 @@
      qty **0.012** == расчёт (ratio 3.0x); realized stop-loss обоих legs
      в пределах одного lot step от configured; forged `max_leverage`/
      `max_entry_deviation_pct` → 400. Cleanup flat best-effort.
-  7. **Browser walkthrough:** preview engine на копии прод-БД
-     (`copyc1`, порт 8095): Settings chevron у Риска, Risk clean
-     (save disabled) → preset 2% (dirty `Сейчас 1,0% После 2,0%`) →
-     custom `1,2` rejected с подсказкой → `1,5` dirty → double-tap save →
-     single mutation, current `1,5%`, Settings показывает `1,5%`; mobile
-     390×844 — иерархия по макету. Журнал —
+  7. **Browser walkthrough + owner acceptance:** preview engine на копии
+     прод-БД (`copyc1`, порты 8095/8096): Risk clean (save disabled) →
+     тап по линейке (dirty `Сейчас 1,0% После 4,0%`, демо пересчёт) →
+     double-tap save → single mutation → тост `Сохранено`, Settings
+     показывает новое; края `0.005/0.05` и центр `0.03` — offset 0px;
+     mobile 390×844 — иерархия по макету. Owner acceptance закрыт
+     2026-09-03 в реальном Telegram WebView на iPhone (боевой бот +
+     временный туннель, прод-БД): линейка, вибрация, fish-eye, края,
+     тост — «Работает». Журнал —
      `STAGE3_PART2_PROGRESS_2026-09.md`.
+  8. **External review corrective (remote `09a4d74`, оценка 8.8/10, P0/P1
+     нет):** (а) legacy proof — все 5 строк `copy_settings` рабочей БД
+     на новой сетке (`0.01`×4, `0.015`; read-only проверка) + UI-страховка
+     `nearestRiskStep` с баннером и явным сейвом, без тихой перезаписи;
+     (б) линейка `disabled` на время save (кнопки + scroll/wheel/drag/
+     keyboard, `aria-disabled`); (в) living docs приведены к факту
+     (см. пп. 3/5/7, PROGRESS, SKELETON, adapted plan deviation note).
 - **Stage 3, часть 2 (P2.3 — Settings root и Notifications) — CLOSED
   (2026-09-02, implementation/live/owner acceptance complete):**
   1. **Backend Transport:** `POST /miniapp/api/notifications` (чтение) и

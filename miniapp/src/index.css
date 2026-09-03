@@ -1365,3 +1365,13 @@ button.settings-row {
   gap: 8px;
   font-size: 13.5px;
 }
+
+/* Legacy stored value off the current grid: warning tint, never silent. */
+.risk-legacy-note {
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  color: var(--text);
+}
+
+.risk-tick-btn:disabled {
+  cursor: default;
+}

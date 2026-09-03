@@ -319,7 +319,10 @@ Stage 2 полностью закрыт для testnet scope.
   `POST /miniapp/api/risk` + `/risk/percent`, RiskScreen по `05-risk-settings`,
   live acceptance на Aster Testnet через production path на `sqlite3.backup`
   копии БД — follower qty 0.004 @1% и 0.012 @3% точно по Decimal-расчёту,
-  прод-БД нетронута; owner Telegram acceptance pending; журнал —
+  прод-БД нетронута; owner Telegram acceptance закрыт 2026-09-03 (боевой бот
+  + туннель, проверка на iPhone: линейка, fish-eye, края, тост); external
+  review corrective: legacy off-grid proof + banner, ruler freeze mid-save,
+  4 behavioral + 3 `nearestRiskStep` теста; журнал —
   `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.
 - [ ] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle.

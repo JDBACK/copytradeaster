@@ -14,6 +14,7 @@ import {
   formatRiskPercent,
   isRiskAllowed,
   isRiskDirty,
+  nearestRiskStep,
 } from './riskView'
 import type { RiskDTO } from './types'
 
@@ -65,6 +66,27 @@ describe('enumerateRiskSteps (DTO grid → strip positions, no float)', () => {
     for (const step of enumerateRiskSteps(policy)) {
       expect(isRiskAllowed(policy, step)).toBe(true)
     }
+  })
+})
+
+describe('nearestRiskStep (legacy off-grid value → advisory pre-select, exact integer math)', () => {
+  it('rounds to the nearest grid step without float drift', () => {
+    const policy = dto()
+    expect(nearestRiskStep(policy, '0.012')).toBe('0.01')
+    expect(nearestRiskStep(policy, '0.013')).toBe('0.015')
+    expect(nearestRiskStep(policy, '0.0125')).toBe('0.015')
+    expect(nearestRiskStep(policy, '0.03')).toBe('0.03')
+  })
+
+  it('clamps out-of-range values to the grid edges', () => {
+    const policy = dto()
+    expect(nearestRiskStep(policy, '0.001')).toBe('0.005')
+    expect(nearestRiskStep(policy, '0.09')).toBe('0.05')
+  })
+
+  it('returns null on degenerate policy or garbage input', () => {
+    expect(nearestRiskStep(dto({ step: '0' }), '0.012')).toBeNull()
+    expect(nearestRiskStep(dto(), 'abc')).toBeNull()
   })
 })
 

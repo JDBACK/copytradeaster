@@ -67,6 +67,23 @@ export function enumerateRiskSteps(dto: RiskDTO): string[] {
   return out
 }
 
+/** Nearest on-grid step for a stored value that fell off the policy grid
+ *  (legacy DB rows predate the current min/max/step).  Clamp + round-half-up
+ *  in integer units — exact, never float.  Null on degenerate policy or
+ *  garbage input.  Advisory only: the caller must still ask the user to
+ *  confirm, never silently rewrite their saved risk. */
+export function nearestRiskStep(dto: RiskDTO, fraction: string): string | null {
+  const value = fractionToScaled(fraction)
+  const min = fractionToScaled(dto.min)
+  const max = fractionToScaled(dto.max)
+  const step = fractionToScaled(dto.step)
+  if (value === null || min === null || max === null || step === null) return null
+  if (step <= 0 || max < min) return null
+  if ((max - min) % step !== 0) return null
+  const clamped = Math.min(max, Math.max(min, value))
+  return scaledToFraction(min + Math.round((clamped - min) / step) * step)
+}
+
 /** Fraction ("0.02") → Russian percent label ("2,0%"). Never throws. */
 export function formatRiskPercent(fraction: string | null | undefined): string {
   if (fraction === null || fraction === undefined) return '—'
