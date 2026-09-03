@@ -32,9 +32,14 @@
      настоящие signed snapshot + permission reads → `ready/none`.
   4. **Browser walkthrough:** preview engine на копии прод-БД
      (`copyc1`, :8085, 390×844) — fresh + degraded, overflow 390/390.
-  5. **Pending:** owner Telegram WebView acceptance P2.5 (требуется
-     iPhone владельца) + независимое review. Детали — `STAGE3_PART2_PROGRESS_2026-09.md`
-     (раздел P2.5).
+  5. **Owner Telegram WebView acceptance P2.5 — COMPLETE (2026-09-03,
+     iPhone, боевой бот + туннель, прод-БД):** fresh open; offline →
+     transport-stale (данные целы, amber) → online → fresh; degraded
+     («Система требует проверки»); Resume под degraded отклонён, после
+     самоисцеления sweep'ом resume прошёл (аккаунт active, ready).
+     Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.5).
+     Статус P2.5: IMPLEMENTED / AWAITING REVIEW (независимое review
+     corrective-2).
 - **Stage 3, часть 2 (P2.4 — Risk on Stop) — CLOSED
   (2026-09-03, implementation/live/owner acceptance complete + external
   review corrective applied):**

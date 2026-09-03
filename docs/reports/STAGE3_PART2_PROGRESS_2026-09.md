@@ -569,15 +569,21 @@ Gates (факт):
   (флаг на копии, движок честно вернул `degraded/degraded`,
   значения сохранены, amber «Система требует проверки»);
   4 root tabs, safe-area/bottom nav без изменений;
-- pending (честно): owner Telegram WebView acceptance P2.5 (fresh →
-  offline → transport-stale → online → fresh + Resume gate при
-  stale/degraded) — требуется iPhone владельца; P2.5 остаётся
-  IMPLEMENTED / AWAITING REVIEW/ACCEPTANCE до независимого review.
+- owner Telegram WebView acceptance P2.5 — COMPLETE (2026-09-03, iPhone,
+  боевой бот + trycloudflare-туннель, прод-БД, аккаунт tg-8264892202):
+  fresh open («Всё работает», 6 rows); offline → transport-stale (данные
+  целы, amber, зелёный снят) → online → fresh — owner-confirmed ok;
+  degraded по синхронному флагу — дословно «Система требует проверки»;
+  Resume gate: «Возобновить» под degraded отклонён («что-то пошло не так»),
+  через ~20 сек после самоисцеления sweep'ом повторный resume прошёл,
+  аккаунт active, система ready (проверено и серверной стороной:
+  degraded_active=false, copy_state=active). P2.5 остаётся IMPLEMENTED /
+  AWAITING REVIEW до независимого review corrective-2.
 
 ## Следующие подчасти
 
-- P2.5 — System Status: IMPLEMENTED, ждёт независимого review + owner
-  WebView acceptance (см. выше).
+- P2.5 — System Status: IMPLEMENTED, owner WebView acceptance COMPLETE,
+  ждёт независимого review corrective-2 (см. выше).
 - P2.6 — Account + Builder attestation (`07-account-builder`).
 - P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3.
 
