@@ -1,15 +1,19 @@
-/** Pure Risk-screen helpers (эталон 05-risk-settings, P2.4).
+/** Pure Risk-screen helpers (P2.4, snap-strip redesign).
  *
  * The UI works in percents ("1,5%") while the API travels in fraction
- * Decimals ("0.015").  All parsing/validation here is exact string math —
- * never float — but the backend remains the authority and re-validates
- * everything server-side.
+ * Decimals ("0.015").  Positions of the scroll picker are enumerated from
+ * the backend-owned min/max/step — exact string math, never float — so a
+ * picker position is valid by construction.  The backend remains the
+ * authority and re-validates everything server-side.
  */
 
 import type { RiskDTO } from './types'
 
 /** Demo balance for the explicitly labelled demo calculation (USDT). */
 export const RISK_DEMO_BALANCE_USDT = 1240
+
+/** Safety cap so a corrupt policy can never build a giant strip. */
+const MAX_STRIP_STEPS = 200
 
 /** "0.02" → "0.02"; trims noise while keeping exactness. Null on garbage. */
 export function normalizeFraction(raw: string): string | null {
@@ -44,22 +48,23 @@ function fractionToScaled(fraction: string): number | null {
   return Number(head) * 100000 + Number((tail + '00000').slice(0, 5))
 }
 
-/** Parse user-typed percents ("1,5", "1.5", "2%") into a fraction ("0.015").
- *  Returns null for anything that is not a plain non-negative decimal. */
-export function parseRiskInput(raw: string): string | null {
-  let text = raw.trim().replace(',', '.')
-  if (text.endsWith('%')) text = text.slice(0, -1).trim()
-  if (!/^\d+(\.\d+)?$/.test(text)) return null
-  const [head, tail = ''] = text.split('.')
-  if (tail.length > 3) {
-    // Finer than milli-percent can never sit on the 0,5% policy grid.
-    if (!/^0+$/.test(tail.slice(3))) return null
-    return scaledToFraction(Number(head) * 1000 + Number(tail.slice(0, 3)))
+/** Enumerate every selectable strip position from the DTO policy grid.
+ *  Empty array when the policy is degenerate — the screen then shows a
+ *  retryable error instead of inventing positions. */
+export function enumerateRiskSteps(dto: RiskDTO): string[] {
+  const min = fractionToScaled(dto.min)
+  const max = fractionToScaled(dto.max)
+  const step = fractionToScaled(dto.step)
+  if (min === null || max === null || step === null) return []
+  if (step <= 0 || max < min) return []
+  if ((max - min) % step !== 0) return []
+  const count = (max - min) / step
+  if (count > MAX_STRIP_STEPS) return []
+  const out: string[] = []
+  for (let index = 0; index <= count; index++) {
+    out.push(scaledToFraction(min + index * step))
   }
-  const milli = Number(head) * 1000 + Number((tail + '000').slice(0, 3))
-  if (!Number.isSafeInteger(milli)) return null
-  // milli-percent == units of 1e-5 of the fraction (1% → 1000 → "0.01").
-  return scaledToFraction(milli)
+  return out
 }
 
 /** Fraction ("0.02") → Russian percent label ("2,0%"). Never throws. */

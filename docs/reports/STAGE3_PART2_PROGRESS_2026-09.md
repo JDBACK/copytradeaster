@@ -371,16 +371,30 @@ Transport (`miniapp/server.py`, существующий HMAC/initData boundary)
 Frontend (`miniapp/`):
 
 - `RiskDTO` в `types.ts`; `api.risk` / `api.setRiskPercent` (fraction строкой).
-- `riskView.ts`: `parseRiskInput` (`1,5`/`1.5`/`2%` → `"0.015"`, exact
+- `riskView.ts`: `enumerateRiskSteps` (позиции линейки из DTO, exact
   string-math), `formatRiskPercent`, `isRiskAllowed` (по DTO, backend
   перепроверяет), `isRiskDirty`, `demoLossUsdt` (demo balance 1240 USDT).
-- `screens/RiskScreen.tsx` по `05-risk-settings.png`: heading, `Текущее
-  значение` + крупное confirmed, scale-ticks, `Сейчас → После` только в
-  dirty, 4 пресета из DTO (active = selected), `Другое значение` + custom
-  input с русской подсказкой, `Что это значит` + badge `Демо-расчёт`,
-  leverage-note, primary save с синхронным `createToggleGate`
-  (переиспользован из notifications) + `aria-busy`; success принимает
-  server DTO + haptic, failure хранит confirmed + safe error.
+- `screens/RiskScreen.tsx` — интерактивная шкала-линейка вместо пресетов и
+  ручного ввода (редизайн по решению владельца 2026-09-03, Tsukuyomi):
+  отдельный ряд кнопок удалён, тянуть можно саму шкалу в панели
+  (`RiskRuler`: свайп / drag мышью / колесо / стрелки, snap к шагу,
+  точное центрирование через rect-математику — `scrollIntoView smooth`
+  глохнет на mandatory snap; мгновенный jump вместо догоняющей анимации).
+  Крупное значение живьём следует за выбором (`Новое значение`), `Сейчас`
+  держит подтверждённое; `enumerateRiskSteps` перечисляет позиции из DTO
+  (parse ручного ввода удалён — invalid-класс исчез как явление).
+  Второй проход по просьбе владельца: живой трекинг без задержки (rAF,
+  выбор следует за пальцем, вибрация только на тапе и на остановке),
+  «рыбий глаз» чёрточек (`--off` → scale/opacity, только transform,
+  reduced-motion путь) и фиксированный курсор центра — значения идут
+  к центру, а не наоборот. Доводка краёв: px-точный паддинг
+  (`fitRulerPadding` от `clientWidth`, не `%` — WebKit иначе даёт 16px
+  на крайних тиках) + контрольный добор центрирования и refit на resize.
+  Подтверждение сейва: тост `Сохранено · X` (`role=status`, 2,2с,
+  reduced-motion путь) — кнопка после save disabled и молчит без него.
+  Решение по `presets` в контракте: поле остаётся (стабильность API P2.4,
+  тесты на нём), клиент его не читает — шкала перечисляется из
+  min/max/step и покрывает все пресеты; убирать нечего.
 - Settings: строка «Риск на Stop» кликабельна с chevron (теперь 4
   chevron-кнопки); `AppShell.NestedRoute` (`export` для контракта) рендерит
   `risk` → `RiskScreen`; BackButton/tab-reset — существующий стек.
@@ -397,15 +411,16 @@ Tests:
   contract без legacy/internal полей, round-trip, 19 forged/malformed
   payloads + non-object body → 400 без вызова application,
   ValidationError → safe 400.
-- Frontend (`risk.test.tsx`, новый, 11 тестов): parse/format/policy-gate/
-  dirty/demo/loading/leak/nested route; `settings.test.tsx` — 4 chevrons.
+- Frontend (`risk.test.tsx`, 17 тестов после редизайна): enumerate/format/
+  policy-gate/dirty/demo/ruler-render/nested route; `settings.test.tsx` —
+  4 chevrons.
 
 Gates:
 
 - offline pytest: 816 passed / 2 skipped / 32 deselected (coverage — см.
   `ENGINE_TEST_STATUS_2026-08.md`); ruff check/format clean; mypy
   недоступен в текущем venv (не входит в offline gate этого окружения).
-- frontend: Vitest 113 passed / 12 файлов, oxlint 0/0, `tsc -b &&
+- frontend: Vitest 119 passed / 12 файлов, oxlint 0/0, `tsc -b &&
   vite build` clean (финальный билд без `VITE_DEV_USER_ID`; dev-билд
   использовался только для browser walkthrough, `dist/` git-ignored).
 - live: `tests/testnet/test_live_risk_acceptance.py` — 1 passed за 33.97s

@@ -1,10 +1,11 @@
-/** Risk on Stop screen (nested, эталон 05-risk-settings, P2.4).
+/** Risk on Stop screen (nested, P2.4, snap-strip redesign).
  *
- * Single numeric setting backed by the backend-owned policy: min/max/step
- * and presets always come from the server DTO — the frontend never defines
- * them.  The UI works in percents, the API travels in fraction Decimals.
- * The confirmed value on screen only ever changes on a server response;
- * failures keep the last confirmed state for retry. */
+ * Single numeric setting backed by the backend-owned policy: the scroll
+ * picker positions are enumerated from the server DTO (min/max/step), so a
+ * position is valid by construction and there is no manual input.  The UI
+ * works in percents, the API travels in fraction Decimals.  The confirmed
+ * value on screen only ever changes on a server response; failures keep
+ * the last confirmed state for retry. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
@@ -13,10 +14,10 @@ import { describeError } from '../errors'
 import {
   RISK_DEMO_BALANCE_USDT,
   demoLossUsdt,
+  enumerateRiskSteps,
   formatRiskPercent,
   isRiskAllowed,
   isRiskDirty,
-  parseRiskInput,
 } from '../riskView'
 import type { RiskDTO } from '../types'
 import { createToggleGate, type ToggleGate } from '../notificationsView'
@@ -26,6 +27,273 @@ type LoadState =
   | { kind: 'loading' }
   | { kind: 'ready'; dto: RiskDTO }
   | { kind: 'error'; code: string }
+
+/** Width of one ruler cell in px; must match `.risk-tick-btn` in CSS. */
+const RULER_CELL_PX = 64
+
+/** Exact edge padding so the first/last cell centers precisely under the
+ *  fixed cursor.  Percentage CSS padding is unreliable here: it resolves
+ *  against the wrapper while centering needs half of the ruler's own
+ *  (bleed-widened) width — and WebKit does not re-snap programmatic
+ *  scrolls the way Chromium does.  clientWidth is immune to all of that
+ *  (padding never changes it), so compute in px on mount and on resize. */
+function fitRulerPadding(strip: HTMLElement): void {
+  const pad = Math.max(0, strip.clientWidth / 2 - RULER_CELL_PX / 2)
+  strip.style.paddingLeft = `${pad}px`
+  strip.style.paddingRight = `${pad}px`
+}
+
+/** Paint the fish-eye: per-tick `--off` (0 at the strip center → 1 at the
+ *  edge) drives tick scale/label fade in CSS.  Returns the centered
+ *  fraction.  Direct DOM writes under rAF — no React state per frame. */
+function paintRuler(strip: HTMLElement): string | null {
+  const stripRect = strip.getBoundingClientRect()
+  const mid = stripRect.left + stripRect.width / 2
+  const half = Math.max(stripRect.width / 2, 1)
+  let best: string | null = null
+  let bestDist = Number.POSITIVE_INFINITY
+  for (const node of strip.querySelectorAll('[data-fraction]')) {
+    const el = node as HTMLElement
+    const rect = el.getBoundingClientRect()
+    const dist = Math.abs(rect.left + rect.width / 2 - mid)
+    el.style.setProperty('--off', Math.min(1, dist / half).toFixed(3))
+    if (dist < bestDist) {
+      bestDist = dist
+      best = el.dataset.fraction ?? null
+    }
+  }
+  return best
+}
+
+/** Horizontal snap ruler: swipe / mouse drag / wheel / arrow keys.
+ *  Pure: positions and the active value come from props, no fetching.
+ *  One cell per policy step — a tick plus its label; the big value above
+ *  follows the selection live while "Сейчас" keeps the confirmed truth. */
+export function RiskRuler({
+  steps,
+  active,
+  onPick,
+}: {
+  steps: string[]
+  active: string
+  onPick: (fraction: string, opts?: { silent?: boolean }) => void
+}) {
+  const stripRef = useRef<HTMLDivElement | null>(null)
+  const rafId = useRef<number | null>(null)
+  const trailTimer = useRef<number | null>(null)
+  const coolTimer = useRef<number | null>(null)
+  // True briefly after an explicit tap/keyboard pick so the following
+  // programmatic jump never re-picks mid-flight.
+  const cooling = useRef(false)
+  // Last value acknowledged with a landing haptic (tap or scroll settle).
+  const vibrated = useRef(active)
+  const drag = useRef<{ startX: number; startLeft: number; moved: boolean; pointerId: number } | null>(
+    null,
+  )
+  const suppressClick = useRef(false)
+
+  const centerFraction = useCallback((fraction: string) => {
+    const strip = stripRef.current
+    if (!strip) return
+    const jump = (): number | null => {
+      const el = strip.querySelector(`[data-fraction="${CSS.escape(fraction)}"]`) as HTMLElement | null
+      if (!el) return null
+      // Exact jump (not scrollIntoView smooth: smooth + mandatory snap stalls
+      // on multi-cell jumps). Selection state already updated synchronously,
+      // so the ruler must follow instantly, not chase behind.
+      const stripRect = strip.getBoundingClientRect()
+      const elRect = el.getBoundingClientRect()
+      const delta = elRect.left + elRect.width / 2 - (stripRect.left + stripRect.width / 2)
+      strip.scrollTo({ left: strip.scrollLeft + delta, behavior: 'auto' })
+      return delta
+    }
+    jump()
+    // One correction pass: engines that re-snap programmatic scrolls
+    // (WebKit) can leave a residual offset — measure and finish it.
+    requestAnimationFrame(() => {
+      if (stripRef.current !== strip) return
+      const residual = jump()
+      if (residual !== null && Math.abs(residual) > 1) paintRuler(strip)
+    })
+  }, [])
+
+  // Live tracking: every scroll frame repaints the fish-eye and moves the
+  // selection silently, so the big value follows the finger with no lag.
+  // A trailing settle then acknowledges the landing value with one haptic.
+  const handleScroll = useCallback(() => {
+    if (cooling.current) return
+    if (rafId.current !== null) cancelAnimationFrame(rafId.current)
+    rafId.current = requestAnimationFrame(() => {
+      rafId.current = null
+      const strip = stripRef.current
+      if (!strip || cooling.current) return
+      const best = paintRuler(strip)
+      const rendered = strip.querySelector('[aria-checked="true"]')?.getAttribute('data-fraction')
+      if (best !== null && best !== rendered) onPick(best, { silent: true })
+    })
+    if (trailTimer.current !== null) window.clearTimeout(trailTimer.current)
+    trailTimer.current = window.setTimeout(() => {
+      const strip = stripRef.current
+      if (!strip) return
+      const best = paintRuler(strip)
+      if (best !== null && best !== vibrated.current) {
+        vibrated.current = best
+        onPick(best)
+      }
+    }, 90)
+  }, [onPick])
+
+  useEffect(
+    () => () => {
+      if (rafId.current !== null) cancelAnimationFrame(rafId.current)
+      if (trailTimer.current !== null) window.clearTimeout(trailTimer.current)
+      if (coolTimer.current !== null) window.clearTimeout(coolTimer.current)
+    },
+    [],
+  )
+
+  // Center the confirmed position on mount and paint the first frame.
+  // Padding is fitted first (px-exact, see fitRulerPadding) and refitted
+  // on resize (rotation), keeping the checked tick under the cursor.
+  useEffect(() => {
+    const strip = stripRef.current
+    if (!strip) return
+    fitRulerPadding(strip)
+    const checked = strip.querySelector('[aria-checked="true"]')?.getAttribute('data-fraction')
+    if (checked) centerFraction(checked)
+    paintRuler(strip)
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      fitRulerPadding(strip)
+      const current = strip.querySelector('[aria-checked="true"]')?.getAttribute('data-fraction')
+      if (current) centerFraction(current)
+      else paintRuler(strip)
+    })
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [centerFraction])
+
+  // Desktop wheel: vertical wheel scrolls the strip horizontally.
+  useEffect(() => {
+    const strip = stripRef.current
+    if (!strip) return
+    const onWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+      if (strip.scrollWidth <= strip.clientWidth + 1) return
+      event.preventDefault()
+      strip.scrollLeft += event.deltaY
+    }
+    strip.addEventListener('wheel', onWheel, { passive: false })
+    return () => strip.removeEventListener('wheel', onWheel)
+  }, [])
+
+  const tap = (fraction: string) => {
+    cooling.current = true
+    if (coolTimer.current !== null) window.clearTimeout(coolTimer.current)
+    coolTimer.current = window.setTimeout(() => {
+      cooling.current = false
+    }, 150)
+    vibrated.current = fraction
+    onPick(fraction)
+    centerFraction(fraction)
+    // WebKit does not move focus to buttons on mouse/tap click: without
+    // this, arrow keys stay dead until the next Tab.
+    const strip = stripRef.current
+    const el = strip?.querySelector(`[data-fraction="${CSS.escape(fraction)}"]`) as HTMLElement | null
+    el?.focus({ preventScroll: true })
+  }
+
+  const onPointerDown = (event: React.PointerEvent) => {
+    if (event.pointerType !== 'mouse' || event.button !== 0) return
+    const strip = stripRef.current
+    if (!strip) return
+    drag.current = { startX: event.clientX, startLeft: strip.scrollLeft, moved: false, pointerId: event.pointerId }
+    strip.classList.add('dragging')
+  }
+
+  const onPointerMove = (event: React.PointerEvent) => {
+    const state = drag.current
+    const strip = stripRef.current
+    if (!state || !strip || event.pointerId !== state.pointerId) return
+    const dx = event.clientX - state.startX
+    if (Math.abs(dx) > 6) state.moved = true
+    if (state.moved) strip.scrollLeft = state.startLeft - dx
+  }
+
+  const endDrag = (event: React.PointerEvent) => {
+    const state = drag.current
+    if (!state || event.pointerId !== state.pointerId) return
+    drag.current = null
+    stripRef.current?.classList.remove('dragging')
+    if (state.moved) {
+      // Swallow the click that follows a drag so a swipe never selects.
+      suppressClick.current = true
+      handleScroll()
+    }
+  }
+
+  const onClickCapture = (event: React.MouseEvent) => {
+    if (suppressClick.current) {
+      suppressClick.current = false
+      event.stopPropagation()
+      event.preventDefault()
+    }
+  }
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    const index = steps.indexOf(active)
+    let next = -1
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = Math.min(steps.length - 1, index + 1)
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = Math.max(0, index - 1)
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = steps.length - 1
+    else return
+    event.preventDefault()
+    tap(steps[next])
+    const strip = stripRef.current
+    const el = strip?.querySelector(`[data-fraction="${CSS.escape(steps[next])}"]`) as HTMLElement | null
+    el?.focus({ preventScroll: true })
+  }
+
+  return (
+    <div className="risk-ruler-wrap">
+      <div
+        ref={stripRef}
+        className="risk-ruler"
+        role="radiogroup"
+        aria-label="Выбор риска"
+        onScroll={handleScroll}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onClickCapture={onClickCapture}
+        onKeyDown={onKeyDown}
+      >
+        {steps.map((step) => (
+          <button
+            key={step}
+            type="button"
+            role="radio"
+            aria-checked={step === active}
+            aria-label={formatRiskPercent(step)}
+            data-fraction={step}
+            tabIndex={step === active ? 0 : -1}
+            className={`risk-tick-btn num${step === active ? ' active' : ''}`}
+            onClick={() => tap(step)}
+          >
+            <span className="risk-tick-mark" aria-hidden />
+            <span className="risk-tick-label" aria-hidden>
+              {formatRiskPercent(step)}
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="risk-ruler-hint tone-muted">Тяните шкалу, чтобы выбрать значение</div>
+      <div className="risk-ruler-cursor" aria-hidden />
+    </div>
+  )
+}
 
 export function RiskScreen({
   auth,
@@ -37,12 +305,13 @@ export function RiskScreen({
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   // Last server-confirmed fraction; the only save truth.
   const [confirmed, setConfirmed] = useState<string | null>(null)
-  // Currently selected fraction (preset or parsed custom input).
+  // Currently selected fraction (a strip position by construction).
   const [selected, setSelected] = useState<string | null>(null)
-  const [customOpen, setCustomOpen] = useState(false)
-  const [customText, setCustomText] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  // Success toast text ("Сохранено · 4,0%"); null hides it.
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimer = useRef<number | null>(null)
   // Synchronous double-tap lock: state.saving exists only after re-render.
   const gate = useRef<ToggleGate | null>(null)
   if (gate.current === null) gate.current = createToggleGate()
@@ -53,8 +322,6 @@ export function RiskScreen({
       const dto = await api.risk(auth)
       setConfirmed(dto.risk_percent)
       setSelected(dto.risk_percent)
-      setCustomText('')
-      setCustomOpen(false)
       setSaveError(null)
       setLoad({ kind: 'ready', dto })
     } catch (err) {
@@ -67,6 +334,27 @@ export function RiskScreen({
     // oxlint-disable-next-line react/set-state-in-effect
     void loadInitial()
   }, [loadInitial])
+
+  useEffect(
+    () => () => {
+      if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+    },
+    [],
+  )
+
+  const flashToast = (text: string) => {
+    setToast(text)
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+    toastTimer.current = window.setTimeout(() => setToast(null), 2200)
+  }
+
+  // Stable identity: the ruler's scroll callbacks close over it.
+  // Silent scroll tracking never vibrates; taps and landing settles do.
+  const pick = useCallback((fraction: string, opts?: { silent?: boolean }) => {
+    if (opts?.silent !== true) hapticImpact('light')
+    setSelected(fraction)
+    setSaveError(null)
+  }, [])
 
   const brand = (
     <Brand
@@ -87,7 +375,7 @@ export function RiskScreen({
         <h1 className="h1" style={{ marginTop: 4 }}>
           Риск на Stop
         </h1>
-        <div className="skeleton" style={{ minHeight: 132 }} aria-label="Загрузка настроек риска" />
+        <div className="skeleton" style={{ minHeight: 132 }} role="status" aria-label="Загрузка настроек риска" />
         <div className="skeleton" style={{ minHeight: 64 }} />
       </div>
     )
@@ -114,25 +402,10 @@ export function RiskScreen({
   const dto = load.dto
   const current = confirmed ?? dto.risk_percent
   const active = selected ?? dto.risk_percent
+  const steps = enumerateRiskSteps(dto)
   const dirty = confirmed !== null && selected !== null && isRiskDirty(current, active)
-  const allowed = isRiskAllowed(dto, active)
-  const customParsed = customText.trim() ? parseRiskInput(customText) : null
-  const customInvalid =
-    customOpen && customText.trim() !== '' && (customParsed === null || !isRiskAllowed(dto, customParsed))
+  const allowed = steps.includes(active) && isRiskAllowed(dto, active)
   const canSave = dirty && allowed && !saving
-
-  const pick = (fraction: string) => {
-    hapticImpact('light')
-    setSelected(fraction)
-    setSaveError(null)
-  }
-
-  const applyCustom = (text: string) => {
-    setCustomText(text)
-    setSaveError(null)
-    const parsed = text.trim() ? parseRiskInput(text) : null
-    if (parsed !== null && isRiskAllowed(dto, parsed)) setSelected(parsed)
-  }
 
   const save = async () => {
     if (selected === null || !isRiskAllowed(dto, selected)) return
@@ -144,8 +417,8 @@ export function RiskScreen({
       const next = await api.setRiskPercent(auth, selected)
       setConfirmed(next.risk_percent)
       setSelected(next.risk_percent)
-      setCustomText('')
       setLoad({ kind: 'ready', dto: next })
+      flashToast(`Сохранено · ${formatRiskPercent(next.risk_percent)}`)
       hapticNotify('success')
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.code : 'network_error')
@@ -173,95 +446,35 @@ export function RiskScreen({
         />
       )}
 
-      <section className="panel risk-current" aria-label={`Текущее значение: ${formatRiskPercent(current)}`}>
-        <div className="risk-current-label">Текущее значение</div>
-        <div className="risk-current-value num">{formatRiskPercent(current)}</div>
-        <div className="risk-scale" aria-hidden>
-          {Array.from({ length: 25 }, (_, index) => (
-            <span key={index} className="risk-tick" />
-          ))}
+      <section
+        className="panel risk-current"
+        aria-label={
+          dirty
+            ? `Новое значение: ${formatRiskPercent(active)}`
+            : `Текущее значение: ${formatRiskPercent(current)}`
+        }
+      >
+        <div className="risk-current-label">{dirty ? 'Новое значение' : 'Текущее значение'}</div>
+        <div className="risk-current-value num">
+          {formatRiskPercent(dirty ? active : current)}
         </div>
+        {steps.length === 0 ? (
+          <div className="risk-ruler-fallback">
+            <ErrorBox title="Шкала недоступна" hint="Сервер вернул пустую шкалу риска. Попробуйте обновить." />
+            <div className="btn-stack">
+              <button type="button" className="btn btn-secondary" onClick={() => void loadInitial()}>
+                Повторить
+              </button>
+            </div>
+          </div>
+        ) : (
+          <RiskRuler steps={steps} active={active} onPick={pick} />
+        )}
         <div className="risk-dirty-line num">
           <span>Сейчас {formatRiskPercent(current)}</span>
           {dirty && <span>После {formatRiskPercent(active)}</span>}
         </div>
       </section>
-
-      <div className="risk-presets" role="group" aria-label="Готовые значения риска">
-        {dto.presets.map((preset) => (
-          <button
-            key={preset}
-            type="button"
-            className={`risk-preset num${preset === active ? ' active' : ''}`}
-            aria-pressed={preset === active}
-            onClick={() => pick(preset)}
-          >
-            {formatRiskPercent(preset)}
-          </button>
-        ))}
-      </div>
-
-      <button
-        type="button"
-        className="risk-custom-row"
-        aria-expanded={customOpen}
-        onClick={() => {
-          hapticImpact('light')
-          setCustomOpen((open) => !open)
-        }}
-      >
-        <span className="risk-custom-icon" aria-hidden>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path
-              d="m14.5 5.5 4 4L8 20l-4.7.7L4 16 14.5 5.5Z"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </span>
-        <span className="risk-custom-label">Другое значение</span>
-        <svg
-          className="settings-chevron"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          aria-hidden
-        >
-          <path
-            d="m9.5 6.5 5.5 5.5-5.5 5.5"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </button>
-
-      {customOpen && (
-        <div className="panel risk-custom-panel">
-          <label className="risk-custom-field-label" htmlFor="risk-custom-input">
-            Своё значение, %
-          </label>
-          <input
-            id="risk-custom-input"
-            className="risk-custom-input num"
-            inputMode="decimal"
-            autoComplete="off"
-            placeholder="Например: 1,5"
-            value={customText}
-            onChange={(event) => applyCustom(event.target.value)}
-          />
-          {customInvalid ? (
-            <div className="risk-hint tone-danger" role="alert">
-              Введите значение от 0,5% до 5% с шагом 0,5%.
-            </div>
-          ) : (
-            <div className="risk-hint tone-muted">Можно через запятую или точку, знак % необязателен.</div>
-          )}
-        </div>
-      )}
 
       <section className="panel risk-demo">
         <div className="risk-demo-head">
@@ -303,6 +516,22 @@ export function RiskScreen({
       </div>
 
       <span data-risk-saving={String(saving)} hidden />
+
+      {toast && (
+        <div className="risk-toast" role="status">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <circle cx="12" cy="12" r="8.6" stroke="currentColor" strokeWidth="1.8" />
+            <path
+              d="m8.4 12.4 2.5 2.5 4.7-5.3"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <span className="num">{toast}</span>
+        </div>
+      )}
     </div>
   )
 }

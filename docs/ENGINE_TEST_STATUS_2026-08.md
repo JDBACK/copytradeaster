@@ -31,7 +31,10 @@
      comma/dot/% ввод `1,5%`→`"0.015"`, `Сейчас → После`, `Демо-расчёт`
      от 1240 USDT, leverage-note, primary save с double-tap gate).
      Pure `riskView.ts` (string-math, без float); confirmed меняется
-     только по server response.
+     только по server response. Редизайн 2026-09-03: вместо пресетов и
+     ручного ввода — интерактивная шкала-линейка в панели (`RiskRuler`:
+     свайп/drag/колесо/стрелки, snap, точное центрирование; крупное
+     значение следует за выбором, `Сейчас` держит confirmed).
   4. **Offline gate:** offline pytest **816 passed / 2 skipped / 32
      deselected**, coverage **87%** (порог >= 87%);
      ruff check/format clean. Новые кейсы:
@@ -39,8 +42,8 @@
      off-step/NaN/Infinity/non-Decimal/forged rejected, durability,
      audit) и HTTP boundary (auth/read/round-trip/19 malformed-forged
      payloads/non-object/ValidationError→safe 400, no legacy fields).
-  5. **Frontend gate:** Vitest **113 passed / 12 файлов** (новый
-     `risk.test.tsx`: parse/format/policy-gate/dirty/demo/loading-leak/
+  5. **Frontend gate:** Vitest **119 passed / 12 файлов** (обновлённый
+      `risk.test.tsx`: enumerate/format/policy-gate/dirty/demo/ruler/
      nested route; `settings.test.tsx` — 4 chevron-кнопки), oxlint 0/0,
      `tsc -b && vite build` clean.
   6. **Live gate (Aster Testnet):**

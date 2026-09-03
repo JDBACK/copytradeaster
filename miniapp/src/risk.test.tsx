@@ -1,18 +1,19 @@
-/** Tests for the Risk on Stop screen (эталон 05-risk-settings, P2.4):
- * pure percent/fraction helpers over the backend-owned policy plus the
- * static render contract of the production screen. */
+/** Tests for the Risk on Stop screen (P2.4, snap-strip redesign):
+ * policy-grid enumeration over the backend-owned policy plus the static
+ * static render contract of the production ruler.  A ruler position is valid by
+ * construction — there is no manual input and no invalid-input class. */
 
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { NestedRoute } from './components/AppShell'
-import { RiskScreen } from './screens/RiskScreen'
+import { RiskScreen, RiskRuler } from './screens/RiskScreen'
 import {
   RISK_DEMO_BALANCE_USDT,
   demoLossUsdt,
+  enumerateRiskSteps,
   formatRiskPercent,
   isRiskAllowed,
   isRiskDirty,
-  parseRiskInput,
 } from './riskView'
 import type { RiskDTO } from './types'
 
@@ -28,20 +29,41 @@ function dto(overrides: Partial<RiskDTO> = {}): RiskDTO {
   }
 }
 
-describe('parseRiskInput (percent UI → fraction API, no float)', () => {
-  it('accepts Russian comma, dot and an optional percent sign', () => {
-    expect(parseRiskInput('1,5')).toBe('0.015')
-    expect(parseRiskInput('1.5')).toBe('0.015')
-    expect(parseRiskInput('2%')).toBe('0.02')
-    expect(parseRiskInput(' 2,0 % ')).toBe('0.02')
-    expect(parseRiskInput('1')).toBe('0.01')
-    expect(parseRiskInput('5')).toBe('0.05')
-    expect(parseRiskInput('0,5')).toBe('0.005')
+describe('enumerateRiskSteps (DTO grid → strip positions, no float)', () => {
+  it('enumerates the exact current policy grid without float drift', () => {
+    expect(enumerateRiskSteps(dto())).toEqual([
+      '0.005',
+      '0.01',
+      '0.015',
+      '0.02',
+      '0.025',
+      '0.03',
+      '0.035',
+      '0.04',
+      '0.045',
+      '0.05',
+    ])
   })
 
-  it('rejects garbage without throwing', () => {
-    for (const raw of ['', '   ', '%', 'abc', '1..5', '1,5,2', '-1', '1e2', 'NaN', 'Infinity']) {
-      expect(parseRiskInput(raw)).toBeNull()
+  it('derives everything from the DTO, never from a hardcoded policy', () => {
+    const narrow = dto({ min: '0.02', max: '0.04', step: '0.01', presets: ['0.02', '0.03', '0.04'] })
+    expect(enumerateRiskSteps(narrow)).toEqual(['0.02', '0.03', '0.04'])
+  })
+
+  it('refuses degenerate policies instead of inventing positions', () => {
+    expect(enumerateRiskSteps(dto({ step: '0' }))).toEqual([])
+    expect(enumerateRiskSteps(dto({ min: '0.05', max: '0.01' }))).toEqual([])
+    // Off-grid max: (max - min) is not a whole number of steps.
+    expect(enumerateRiskSteps(dto({ max: '0.047' }))).toEqual([])
+    expect(enumerateRiskSteps(dto({ min: 'abc' }))).toEqual([])
+    // Absurd range can never build a giant strip.
+    expect(enumerateRiskSteps(dto({ min: '0', max: '100', step: '0.005' }))).toEqual([])
+  })
+
+  it('every enumerated position passes the local policy gate', () => {
+    const policy = dto()
+    for (const step of enumerateRiskSteps(policy)) {
+      expect(isRiskAllowed(policy, step)).toBe(true)
     }
   })
 })
@@ -95,12 +117,62 @@ describe('demoLossUsdt (labelled demo, never a trade forecast)', () => {
   })
 })
 
+describe('RiskRuler render', () => {
+  const steps = enumerateRiskSteps(dto())
+
+  it('renders one tick per grid position from props, never hardcoded', () => {
+    const html = renderToStaticMarkup(<RiskRuler steps={steps} active="0.01" onPick={() => {}} />)
+    expect(steps).toHaveLength(10)
+    for (const label of ['0,5%', '1,0%', '1,5%', '2,0%', '2,5%', '3,0%', '3,5%', '4,0%', '4,5%', '5,0%']) {
+      expect(html).toContain(label)
+    }
+    // A ruler, not a form: no manual input exists anymore.
+    expect(html).not.toContain('<input')
+  })
+
+  it('marks exactly the active tick as selected', () => {
+    const html = renderToStaticMarkup(<RiskRuler steps={steps} active="0.02" onPick={() => {}} />)
+    expect(html).toContain('radiogroup')
+    const checked = html.match(/aria-checked="true"/g) ?? []
+    expect(checked).toHaveLength(1)
+    expect(html).toContain('risk-tick-btn num active')
+    // The previously confirmed 1% is no longer selected.
+    const activeButton = html.match(/<button[^>]*aria-checked="true"[^>]*>.*?<\/button>/)?.[0] ?? ''
+    expect(activeButton).toContain('2,0%')
+  })
+
+  it('exposes every position as a labelled radio for tap/keyboard handlers', () => {
+    // Static markup cannot fire events; the contract is structural: each
+    // position is a real labelled button carrying its fraction.
+    const html = renderToStaticMarkup(<RiskRuler steps={steps} active="0.01" onPick={() => {}} />)
+    expect(html.match(/data-fraction="0\.0\d5?"/g)).toHaveLength(10)
+    expect(html.match(/role="radio"/g)).toHaveLength(10)
+  })
+
+  it('leaks no internal identifiers into the ruler markup', () => {
+    const html = renderToStaticMarkup(<RiskRuler steps={steps} active="0.01" onPick={() => {}} />).toLowerCase()
+    for (const forbidden of [
+      'account_id',
+      'command_key',
+      'client_order_id',
+      'private_key',
+      'nonce',
+      'payload',
+      'max_leverage',
+      'max_entry_deviation',
+    ]) {
+      expect(html).not.toContain(forbidden)
+    }
+  })
+})
+
 describe('RiskScreen render', () => {
-  it('renders the loading frame with the heading and no presets before data arrives', () => {
+  it('renders the loading frame with the heading and no strip before data arrives', () => {
     const html = renderToStaticMarkup(<RiskScreen auth={{ initData: 'test' }} />)
     expect(html).toContain('Риск на Stop')
     expect(html).toContain('Загрузка настроек риска')
-    expect(html).not.toContain('risk-preset')
+    expect(html).not.toContain('risk-ruler')
+    expect(html).not.toContain('risk-toast')
     expect(html).not.toContain('Сохранить')
   })
 
