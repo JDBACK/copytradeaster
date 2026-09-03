@@ -83,18 +83,35 @@ for _ in $(seq 1 90); do
     tail -40 "$BOT_LOG" >&2
     exit 1
   fi
-  if curl -fsS "http://127.0.0.1:${PORT}/miniapp/" >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/miniapp/" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-if ! curl -fsS "http://127.0.0.1:${PORT}/miniapp/" >/dev/null 2>&1; then
+if ! curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/miniapp/" >/dev/null 2>&1; then
   echo "ERROR: miniapp did not come up — tail of ${BOT_LOG}:" >&2
   tail -40 "$BOT_LOG" >&2
   exit 1
 fi
-if ! curl -fsS "${TUNNEL_URL}/miniapp/" >/dev/null 2>&1; then
-  echo "ERROR: public tunnel URL is not serving the Mini App — tail of ${TUNNEL_LOG}:" >&2
+echo "==> Waiting for public tunnel URL (edge warm-up can take a minute)"
+PUBLIC_OK=""
+for _ in $(seq 1 18); do
+  if curl -fsS --max-time 10 "${TUNNEL_URL}/miniapp/" >/dev/null 2>&1; then
+    PUBLIC_OK=1
+    break
+  fi
+  if ! pgrep -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
+    echo "ERROR: cloudflared died while waiting - tail of ${TUNNEL_LOG}:" >&2
+    tail -20 "$TUNNEL_LOG" >&2
+    exit 1
+  fi
+  sleep 5
+done
+if [ -z "$PUBLIC_OK" ]; then
+  echo "ERROR: public tunnel URL is not serving the Mini App after ~90s." >&2
+  echo "Instance LEFT RUNNING (local Mini App may already work):" >&2
+  echo "  Local:  http://127.0.0.1:${PORT}/miniapp/" >&2
+  echo "  Public: ${TUNNEL_URL}/miniapp/ (retry manually, rerun script if needed)" >&2
   tail -20 "$TUNNEL_LOG" >&2
   exit 1
 fi
