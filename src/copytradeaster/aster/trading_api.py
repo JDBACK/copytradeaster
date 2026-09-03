@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -58,6 +58,40 @@ class PlaceOrderRequest:
     new_client_order_id: str = ""
     new_order_resp_type: str = "ACK"
     working_type: str | None = None  # STOP/TP market and limit flavors
+    builder: str | None = None
+    fee_rate: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        has_builder = self.builder is not None
+        has_fee = self.fee_rate is not None
+        if has_builder != has_fee:
+            raise ValueError("builder and feeRate must be set together")
+        if not has_builder and not has_fee:
+            return
+        if not isinstance(self.builder, str) or not self.builder.strip():
+            raise ValueError("builder address is required")
+        text = self.builder.strip()
+        if len(text) != 42 or not text.startswith("0x"):
+            raise ValueError("invalid builder address")
+        try:
+            int(text[2:], 16)
+        except ValueError:
+            raise ValueError("invalid builder address") from None
+        object.__setattr__(self, "builder", text)
+        raw = self.fee_rate
+        if isinstance(raw, (bool, float)):
+            raise TypeError("fee_rate float/bool is forbidden, use Decimal/str/int")
+        try:
+            fee = raw if isinstance(raw, Decimal) else Decimal(str(raw).strip())
+        except (InvalidOperation, ValueError, TypeError, AttributeError):
+            raise ValueError("invalid feeRate") from None
+        if not fee.is_finite():
+            raise ValueError("invalid feeRate")
+        if fee < Decimal(0):
+            raise ValueError("invalid feeRate")
+        if fee > Decimal("0.001"):
+            raise ValueError("feeRate above Futures cap 0.001")
+        object.__setattr__(self, "fee_rate", fee)
 
     def to_params(self) -> dict[str, str]:
         params: dict[str, str] = {
@@ -87,6 +121,9 @@ class PlaceOrderRequest:
             "TAKE_PROFIT",
         ):
             params["workingType"] = self.working_type
+        if self.builder is not None and self.fee_rate is not None:
+            params["builder"] = self.builder
+            params["feeRate"] = format(self.fee_rate, "f")
         return params
 
 

@@ -31,6 +31,11 @@ from copytradeaster.domain.models import (
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo, SettingsRepo
+from copytradeaster.trading.builder_attribution import (
+    AttributionDecision,
+    AttributionKind,
+    BuilderAttribution,
+)
 
 log = get_logger(__name__)
 
@@ -105,6 +110,16 @@ def _dec_or_none(raw: str | None):
     return Decimal(raw) if raw is not None else None
 
 
+def _apply_attribution(
+    req: PlaceOrderRequest, attribution: BuilderAttribution | None
+) -> PlaceOrderRequest:
+    if attribution is None:
+        return req
+    import dataclasses
+
+    return dataclasses.replace(req, builder=attribution.builder, fee_rate=attribution.fee_rate)
+
+
 def command_key_of(plan: ExecutionPlan, action: ExecutionAction) -> str:
     """Identity of a desired-state TRANSITION, not just the payload.
 
@@ -131,6 +146,7 @@ class Executor:
         locks: dict[str, asyncio.Lock],
         settings: SettingsRepo | None = None,
         on_confirmed: Callable[..., Awaitable[None]] | None = None,
+        attribution_provider: Any | None = None,
     ) -> None:
         self._clients = clients
         self._commands = commands
@@ -138,6 +154,7 @@ class Executor:
         self._locks = locks
         self._settings = settings
         self._on_confirmed = on_confirmed
+        self._attribution_provider = attribution_provider
         self._mutation_owners: dict[str, asyncio.Task] = {}
         self._confirmed_callback_accepts_key = self._callback_accepts_command_key(on_confirmed)
 
@@ -232,6 +249,7 @@ class Executor:
         #     and cancels carry no leverage dependency and always run.
         completed_by_planner_coid: dict[str, CommandResult] = {}
         completed_by_action_id: dict[str, CommandResult] = {}
+        cached_decision: AttributionDecision | None = None
         for action in sorted(plan.actions, key=lambda a: a.priority):
             dependency: CommandResult | None = None
             missing = ""
@@ -260,7 +278,28 @@ class Executor:
             elif action.kind == ActionKind.SET_LEVERAGE:
                 result = await self._submit_leverage(plan, action, client=client)
             else:
-                result = await self._submit_order(plan, action, client=client)
+                if cached_decision is None:
+                    cached_decision = await self._resolve_attribution(plan.account_id)
+                decision = cached_decision
+                if (
+                    decision.kind == AttributionKind.BUILDER_UNAVAILABLE
+                    and action.kind == ActionKind.MARKET_OPEN
+                ):
+                    result = await self._builder_block_entry(plan, action, decision)
+                elif decision.kind == AttributionKind.BUILDER_VALID:
+                    assert decision.attribution is not None
+                    result = await self._submit_order(
+                        plan, action, client=client, attribution=decision.attribution
+                    )
+                else:
+                    is_fallback = decision.kind == AttributionKind.BUILDER_UNAVAILABLE
+                    result = await self._submit_order(plan, action, client=client)
+                    if is_fallback and action.kind in (
+                        ActionKind.MARKET_CLOSE,
+                        ActionKind.PLACE_STOP,
+                        ActionKind.PLACE_TP,
+                    ):
+                        await self._flag_builder_fallback(plan, result.command_key, action)
             results.append(result)
             if action.client_order_id is not None:
                 completed_by_planner_coid[action.client_order_id] = result
@@ -294,6 +333,67 @@ class Executor:
                     self._mutation_owners.pop(account_id, None)
                 else:
                     self._mutation_owners[account_id] = previous
+
+    async def _resolve_attribution(self, account_id: str) -> AttributionDecision:
+        provider = self._attribution_provider
+        if provider is None:
+            return AttributionDecision(kind=AttributionKind.DIRECT)
+        try:
+            resolve = getattr(provider, "resolve", None)
+            if callable(resolve):
+                decision = await resolve(account_id)
+            else:
+                decision = await provider(account_id)
+        except Exception:
+            log.warning("builder attribution resolve failed account_id=%s", account_id)
+            return AttributionDecision(
+                kind=AttributionKind.BUILDER_UNAVAILABLE, reason="lookup-failed"
+            )
+        if not isinstance(decision, AttributionDecision):
+            return AttributionDecision(
+                kind=AttributionKind.BUILDER_UNAVAILABLE, reason="lookup-failed"
+            )
+        return decision
+
+    async def _builder_block_entry(
+        self, plan: ExecutionPlan, action: ExecutionAction, decision: AttributionDecision
+    ) -> CommandResult:
+        key = command_key_of(plan, action)
+        existing = await self._commands.get(key)
+        if existing is not None:
+            status = str(existing["status"])
+            if status in ("CONFIRMED", "SENDING", "UNKNOWN", "SUBMITTED"):
+                if status == "CONFIRMED":
+                    return CommandResult(key, status, None)
+                return CommandResult(key, status, "boot resolution required")
+        reason = "builder-unavailable:entry-blocked"
+        payload_json = json.dumps(action.payload, sort_keys=True)
+        if existing is None:
+            await self._commands.insert(
+                key,
+                plan.account_id,
+                plan.trade_id,
+                action.kind.value,
+                payload_json,
+                action.priority,
+                None,
+                plan.operation_id,
+            )
+        else:
+            await self._commands.set_status(key, "PENDING", client_order_id=None)
+        await self._commands.set_status(key, "FAILED", last_error=reason)
+        if self._settings is not None:
+            await self._settings.set_flag("degraded", f"{plan.account_id}:{key}:{reason}")
+        log.error("command %s blocked: %s", key, reason)
+        return CommandResult(key, "FAILED", reason)
+
+    async def _flag_builder_fallback(
+        self, plan: ExecutionPlan, command_key: str, action: ExecutionAction
+    ) -> None:
+        reason = f"builder-fallback:{action.kind.value}"
+        if self._settings is not None:
+            await self._settings.set_flag("degraded", f"{plan.account_id}:{command_key}:{reason}")
+        log.warning("command %s builder fallback: %s", command_key, reason)
 
     # --- individual command kinds -------------------------------------------------
 
@@ -390,6 +490,7 @@ class Executor:
         action: ExecutionAction,
         *,
         client: AsterClient | None = None,
+        attribution: BuilderAttribution | None = None,
     ) -> CommandResult:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
@@ -427,7 +528,7 @@ class Executor:
         else:
             await self._commands.set_status(key, "PENDING", client_order_id=coid)
 
-        req = _with_coid(_payload_for(action), coid)
+        req = _apply_attribution(_with_coid(_payload_for(action), coid), attribution)
         symbol = action.payload["symbol"]
 
         while True:

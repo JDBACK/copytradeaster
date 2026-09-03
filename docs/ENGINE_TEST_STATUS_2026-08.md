@@ -6,8 +6,8 @@
 ## Текущее состояние
 
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — IMPLEMENTED /
-  AWAITING REVIEW + OWNER ACCEPTANCE (2026-09-03, ветка
-  `codex/stage-3-mini-app-part2`):** nested control screen поверх
+- **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /
+  CLOSED (2026-09-03, ветка `codex/stage-3-mini-app-part2`):** nested control screen поверх
   `UserApplicationService.account_builder()` — persistent `identity_source`
   + Builder snapshot (одна append-only migration, backfill `direct`),
   authoritative verified только одновременными signed `GET /agent` +
@@ -38,6 +38,48 @@
      `-5050 after deposit` / `-1000 No agent found`; self-signed management
      отвергается; env-политика HEDGE.
      Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.6).
+- **Stage 3, часть 2 (P2.7 — Builder fee в copy-engine) — IMPLEMENTED + OWNER ACCEPTED /
+  AWAITING REVIEW (2026-09-03, ветка
+  `codex/stage-3-mini-app-part2`):** account-specific Aster Builder
+  attribution в production copy-engine: `PlaceOrderRequest` + optional
+  `builder`/`feeRate` (wire names, пара-инвариант, Decimal canonical string,
+  NaN/Infinity/negative запрещены, absolute Futures cap `0.001` fail-closed,
+  direct-сериализация byte-compatible), маленький
+  `BuilderAttributionProvider` на composition boundary (DIRECT /
+  BUILDER_VALID / BUILDER_UNAVAILABLE, durable P2.6 proof + current
+  signer + Agent permissions/actual expiry + config match persisted
+  address/fee vs `CT_BUILDER_ADDRESS`/`CT_MAX_FEE_RATE`, UI TTL и
+  EXPIRY-warning не являются execution expiry), Executor применяет snapshot
+  после journal identity под per-account mutation lock (command key и journal
+  payload не зависят от metadata, `_with_coid` сохраняет attribution, retry
+  сохраняет snapshot, UNKNOWN query-before-retry без fallback, boot recovery
+  без Builder metadata), safety fallback (entry fail-closed до HTTP,
+  close/Stop/TP без fields + degraded signal, cancel/leverage не блокируются).
+  Planner/coordinator/reconciler не менялись. Frontend не менялся.
+  1. **Offline gate:** offline pytest **1032 passed / 2 skipped / 43
+     deselected**, coverage **87%** (порог >= 87%); ruff check/format
+     clean. Новые кейсы (30): `test_builder_attribution.py` (17: payload +
+     routing) + `test_builder_executor.py` (13: idempotency/fallback/race/
+     emergency/security).
+  2. **Frontend gate:** Vitest **168 passed / 17 файлов**, oxlint clean,
+     `vite build` clean (без изменений Mini App).
+  3. **Live gate (Aster Testnet, scratch копия прод-БД, прод-БД не
+     тронута):** `test_builder_engine_attribution_live.py` — один
+     production engine доказывает Builder и direct routing
+     (`Projector -> Coordinator -> Planner -> Executor -> journal -> real
+     AsterClient`, typed spy перед реальным `place_order`): Builder MARKET
+     entry + STOP_MARKET + partial reduction + TAKE_PROFIT_MARKET + full
+     close + final flat/no-orders, каждый Builder order с exact approved
+     builder и Decimal-equal fee, direct всегда без fields; journal payload
+     без `builder`/`feeRate`; above-cap diagnostic (far-away LIMIT,
+     Builder identity) отвергнут биржей; `/builder/userTrades` с bare
+     builder identity не queryable — честный non-gating limitation (как в
+     Part 1 e2e). Full testnet suite: **41 passed / 1 skipped / 1 failed**,
+     где единственное падение (`test_live_positions_acceptance`, Phase
+     3/6 количества) воспроизводится на чистом HEAD без P2.7 —
+     pre-existing live-флаки, не регрессия.
+     4. **Owner acceptance (2026-09-03):** Computer Use-driven live-стенд, prod-БД: **9/9 PASS** (Home / Positions read-only / Activity / Risk-линейка без сохранения / Status ready / Account+Builder direct verified / Notifications вкл+выкл / Pause+Resume с confirm / регресс P2.0-P2.6); в прод-БД 0 builder-строк — builder trust покрыт P2.6 acceptance и scratch-live P2.7; стенд возвращён (active, риск 2,0%, уведомления выкл); скриншоты: docs/reports/acceptance-p27/ (12 PNG).
+     Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.7).
 - **Stage 3, часть 2 (P2.5 — System Status) — ACCEPTED / CLOSED
   (2026-09-03):** read-only control-plane slice поверх
   `UserApplicationService.status()` — новый typed `StatusDTO`

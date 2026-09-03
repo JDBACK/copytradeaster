@@ -25,6 +25,8 @@ from copytradeaster.notifications.models import NotificationEvent, NotificationS
 from copytradeaster.notifications.protocol import NotificationCallback, Notifier, as_notifier
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
+    AccountRepo,
+    AgentValidationRepo,
     CommandRepo,
     CopyTradeRepo,
     MasterEventRepo,
@@ -33,6 +35,7 @@ from copytradeaster.storage.repositories import (
     SettingsRepo,
     SyncBasisRepo,
 )
+from copytradeaster.trading.builder_attribution import BuilderAttributionProvider
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.leverage import LeverageManager
@@ -191,6 +194,16 @@ class App:
             hedge=cfg.position_mode == "HEDGE",
             auto_trigger_conditionals=cfg.shadow_auto_trigger_conditionals,
         )
+        self.accounts = AccountRepo(self.db)
+        self.validations = AgentValidationRepo(self.db)
+        self.builder_attribution = BuilderAttributionProvider(
+            accounts=self.accounts,
+            validations=self.validations,
+            credentials=self.credentials,
+            builder_address=cfg.builder_address,
+            builder_name=cfg.builder_name,
+            max_fee_rate=cfg.max_fee_rate,
+        )
         self.executor = Executor(
             self._client_for,
             self.commands,
@@ -198,6 +211,7 @@ class App:
             {},
             settings=self.settings,
             on_confirmed=self._on_confirmed,
+            attribution_provider=self.builder_attribution,
         )
         self.master_client = self._make_client()
         self.projector = MasterProjector(

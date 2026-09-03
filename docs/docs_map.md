@@ -73,6 +73,7 @@
 | `STAGE3_PART1_CORRECTIVE_PLAN_2026-08.md` | Актуальный right-sized corrective plan после независимого code/UI review: REQUEST CHANGES, простая durable Builder recovery, Home/control-plane fixes и signed-live testnet кампания под 10–100 users; отдельный anti-overengineering audit (2026-08-31) |
 | `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` | Финальный независимый аудит, remediation ledger и закрывающие offline/frontend/full Testnet/manual evidence для Stage 3 Part 1 (2026-09-01) |
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Актуальный right-sized implementation plan оставшегося follower Mini App: восемь малых подчастей P2.0–P2.7, конкретные файлы, реальные Testnet acceptance gates и anti-overengineering boundaries (2026-09-01) |
+| `acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 

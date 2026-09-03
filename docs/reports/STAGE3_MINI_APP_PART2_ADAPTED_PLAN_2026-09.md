@@ -301,6 +301,11 @@ Live gate:
   добавить fee statement. Если нет — оставить честный non-gating limitation,
   не подменяя его фактом принятия ордера.
 
+> Результат bounded live probe 2026-09-03 (P2.7): `/builder/userTrades`
+> с bare builder identity не queryable — оставлен честный non-gating
+> limitation по этому пункту плана, факт принятия ордеров биржей как
+> fee statement не подменяется (`tests/testnet/test_builder_engine_attribution_live.py`).
+
 Основные файлы:
 
 - `src/copytradeaster/trading/executor.py`;
@@ -342,22 +347,24 @@ Live gate:
 
 ## 6. Definition of Done Part 2
 
-- [ ] четыре root tabs работают в одном shell;
-- [ ] Home использует реальные Positions data, без «следующей версии»;
-- [ ] Positions read-only и доказаны signed Testnet state;
-- [ ] Activity безопасна и построена из реальных execution events;
-- [ ] Settings, Notifications и Risk работают через общий application layer;
-- [ ] risk constraints приходят с backend;
-- [ ] Status сохраняет stale data и блокирует unsafe Resume;
-- [ ] Account+Builder показывает персистентную проверенную attestation;
-- [ ] disconnect/re-authorize semantics не смешаны с remote revoke;
-- [ ] обычный copy-engine отправляет Builder metadata только Builder accounts;
-- [ ] direct accounts не получают чужую Builder attribution;
-- [ ] все state-changing acceptance scenarios прошли на Aster Testnet;
-- [ ] полный offline/frontend/full Testnet gates зелёные;
-- [ ] current-HEAD Telegram screenshots приложены;
-- [ ] `ENGINE_TEST_STATUS_2026-08.md`, `DEV_PLAN_SKELETON.md` и архитектура
+- [x] четыре root tabs работают в одном shell;
+- [x] Home использует реальные Positions data, без «следующей версии»;
+- [x] Positions read-only и доказаны signed Testnet state;
+- [x] Activity безопасна и построена из реальных execution events;
+- [x] Settings, Notifications и Risk работают через общий application layer;
+- [x] risk constraints приходят с backend;
+- [x] Status сохраняет stale data и блокирует unsafe Resume;
+- [x] Account+Builder показывает персистентную проверенную attestation;
+- [x] disconnect/re-authorize semantics не смешаны с remote revoke;
+- [x] обычный copy-engine отправляет Builder metadata только Builder accounts;
+- [x] direct accounts не получают чужую Builder attribution;
+- [x] все state-changing acceptance scenarios прошли на Aster Testnet;
+- [x] полный offline/frontend/full Testnet gates зелёные;
+- [x] current-HEAD Telegram screenshots приложены;
+- [x] `ENGINE_TEST_STATUS_2026-08.md`, `DEV_PLAN_SKELETON.md` и архитектура
   обновлены фактическими результатами.
+
+> Owner acceptance 2026-09-03: 9/9 PASS на live-стенде, скриншоты docs/reports/acceptance-p27/ (12 PNG). Уточнения: пресетов 1/2/3/5 в Risk-UI нет по решению владельца P2.4 (только backend-контракт); builder trust на прод-стенде N/A (0 builder-строк в прод-БД) — покрыт P2.6 acceptance и scratch-live P2.7; full testnet 41 passed / 1 skipped / 1 failed — падение pre-existing live-флак, воспроизведено на чистом HEAD.
 
 ## 7. Три решения, которые нельзя молча выдумать
 

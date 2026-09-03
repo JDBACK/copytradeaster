@@ -434,6 +434,20 @@ PENDING → SENDING → SUBMITTED → CONFIRMED
 
 Собственный `command_key` является долговременной идемпотентностью сервиса; `newClientOrderId` используется как внешний correlation id, но не заменяет внутренний журнал.
 
+### P2.7 Builder attribution (account-specific `builder + feeRate`)
+
+Outbound Builder-атрибуция применяется после journal identity,
+непосредственно при построении `PlaceOrderRequest` (`builder`/`feeRate`,
+Decimal, cap `0.001`): `command_key`, journal payload и operation ID от
+metadata не зависят. `BuilderAttributionProvider` (composition boundary,
+`App`) различает DIRECT / BUILDER_VALID / BUILDER_UNAVAILABLE по durable
+P2.6 proof + current signer + Agent permissions/actual expiry + config match;
+UI TTL на execution не влияет. Snapshot берётся лениво под per-account
+mutation lock, один на весь `Executor.submit`, сохраняется через
+send→query→retry (`_with_coid`). Safety: entry при UNAVAILABLE fail-closed
+до HTTP, close/Stop/TP — fallback без полей + degraded signal,
+cancel/leverage не блокируются.
+
 ## 8. Конкурентность и масштаб 30–100 followers
 
 Для текущего масштаба достаточно одного asyncio application process.

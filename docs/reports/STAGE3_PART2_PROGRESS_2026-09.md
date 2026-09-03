@@ -579,7 +579,7 @@ Gates (факт):
   аккаунт active, система ready (проверено и серверной стороной:
   degraded_active=false, copy_state=active). P2.5 ACCEPTED / CLOSED.
 
-## P2.6 — Account + Builder attestation: IMPLEMENTED / OWNER ACCEPTANCE COMPLETE, AWAITING RE-REVIEW (2026-09-03)
+## P2.6 — Account + Builder attestation: ACCEPTED / CLOSED (2026-09-03)
 
 Owner Telegram WebView acceptance (iPhone, current HEAD `75f0780`,
 direct account `tg-8264892202`, 4 evidence screenshots): 4 root tabs
@@ -757,20 +757,103 @@ Gates (факт):
 Что НЕ сделано (по плану): P2.7 (fee в ордерах), `/builder/userTrades`,
 fee statement, remote revoke, history/ledger таблица, новый global store,
 legacy auto-promotion, ослабление testnet/mainnet guards.
+P2.7 реализован ниже; из списка остаются `/builder/userTrades` fee
+statement (non-gating limitation, см. P2.7), remote revoke, history/ledger,
+новый global store, legacy auto-promotion, ослабление guards.
 
-P2.6 IMPLEMENTED, ждёт независимого review + owner Telegram WebView
-acceptance на current HEAD. P2.7 NOT STARTED.
+P2.6 ACCEPTED / CLOSED. P2.7 IMPLEMENTED + OWNER ACCEPTANCE COMPLETE (2026-09-03), ждёт независимого review.
+
+## P2.7 — Builder fee в обычном copy-engine: IMPLEMENTED + OWNER ACCEPTED, AWAITING REVIEW (2026-09-03)
+
+Сделано (без рефактора P2.0–P2.6, planner/coordinator/reconciler не тронуты):
+
+- Aster-контракт (`src/copytradeaster/aster/trading_api.py`):
+  `PlaceOrderRequest` + optional `builder: str | None` /
+  `fee_rate: Decimal | None`, wire names строго `builder`/`feeRate`,
+  пара-инвариант (оба или ни одного), Decimal-каноникализация через
+  `format(fee, "f")` без float, NaN/Infinity/negative запрещены, absolute
+  Futures cap `0.001` fail-closed; direct-сериализация byte-compatible.
+- Провайдер (`src/copytradeaster/trading/builder_attribution.py`, новый):
+  `BuilderAttribution` (immutable builder + Decimal fee) +
+  `BuilderAttributionProvider` на composition boundary (только `account_id`
+  + backend state, без новых repository/service/state machine/journal).
+  Три состояния: DIRECT (authoritative `identity_source=direct`, без полей),
+  BUILDER_VALID (durable P2.6 proof + current signer + Agent
+  permissions/actual expiry + persisted address/fee Decimal-equal текущей
+  `CT_BUILDER_ADDRESS`/`CT_MAX_FEE_RATE`), BUILDER_UNAVAILABLE (всё остальное
+  у `identity_source=builder`, молча в DIRECT не превращается).
+  `builder_verified_at` — только provenance, UI TTL и
+  `BUILDER_EXPIRY_WARNING_MS` на execution не влияют. Order `feeRate` =
+  persisted approved `builder_max_fee_rate`; второго fee config нет;
+  frontend builder/fee не задаёт и не считает.
+- Executor (`src/copytradeaster/trading/executor.py`): snapshot лениво перед
+  первым order write под per-account mutation lock, один immutable snapshot
+  на весь submit, применяется после journal identity (`_apply_attribution`),
+  `_with_coid` сохраняет поля, retry сохраняет snapshot при смене COID,
+  UNKNOWN query-before-retry без attributed→unattributed fallback,
+  произвольных fallback по raw Aster-тексту нет, boot recovery без metadata.
+  Safety: MARKET_OPEN fail-closed до HTTP (`builder-unavailable:entry-blocked`
+  + degraded), MARKET_CLOSE/PLACE_STOP/PLACE_TP — explicit fallback без полей
+  + degraded (`builder-fallback:<KIND>`), cancel/leverage не блокируются.
+  Command key и journal payload от metadata не зависят.
+- Композиция (`src/copytradeaster/app.py`): `AccountRepo` +
+  `AgentValidationRepo` + `BuilderAttributionProvider` из `cfg` и
+  `Executor(..., attribution_provider=...)`; без provider — legacy DIRECT.
+
+Gates:
+
+- offline: `pytest -q -m "not testnet"` **1032 passed / 2 skipped / 43
+  deselected**, coverage **87%**, `ruff check` + `ruff format --check` clean.
+  Новые `tests/unit/trading/test_builder_attribution.py` (17) и
+  `tests/unit/trading/test_builder_executor.py` (13): payload (direct/builder
+  MARKET/STOP_MARKET/TAKE_PROFIT_MARKET/limit-флейворы, пара-инвариант,
+  negative/NaN/Infinity/float, cap `0.001`, каноникализация), routing
+  (A/B без cross-leak, missing/corrupt≠direct, config mismatch, expiry/signer
+  mismatch, UI TTL и EXPIRING-window не снимают attribution), executor
+  (command key идентичен, journal чист, `_with_coid`/UNKNOWN-retry сохраняют
+  snapshot, direct retry остаётся direct, fallback close/Stop/TP + degraded,
+  entry-blocked без HTTP, cancel/leverage не блокируются, lifecycle-race,
+  emergency-flatten при UNAVAILABLE, security: journal/degraded/repr без
+  секретов).
+- frontend: `pnpm lint` clean, `pnpm test` **168 passed / 17 файлов**,
+  `pnpm build` clean (Mini App не менялся).
+- live (Aster Testnet, scratch-копия прод-БД, прод-БД не тронута,
+  mainnet-действий нет):
+  `tests/testnet/test_builder_engine_attribution_live.py` — один production
+  engine (`Projector -> Coordinator -> Planner -> Executor -> journal -> real
+  AsterClient`, typed spy перед реальным `place_order`, без чтения signed
+  URL/nonce/signature): live Builder-onboarding copyc2-адреса на scratch,
+  Builder MARKET entry + STOP_MARKET + partial reduction +
+  TAKE_PROFIT_MARKET + full close + final flat/no-orders, каждый Builder
+  order с exact approved builder и Decimal-equal fee, direct — всегда без
+  полей; journal payload без `builder`/`feeRate`; above-cap diagnostic
+  (far-away LIMIT, Builder identity) отвергнут биржей; `/builder/userTrades`
+  с bare builder identity не queryable — честный non-gating limitation (как
+  в Part 1 e2e). `test_above_cap_diagnostic_rejected` green.
+  `test_exchange_rejects_fee_rate_above_approved_cap` (Builder identity,
+  fee cap semantics с сообщением биржи) green.
+- full testnet suite: **41 passed / 1 skipped / 1 failed**, единственное
+  падение `test_live_positions_acceptance` воспроизводится на чистом HEAD
+  без P2.7 (Phase 3/Phase 6 количественные ассёрты при BTC ~81k: follower
+  qty 0.001 не делится на сетке 0.001) — pre-existing live-флаки, не
+  регрессия P2.7. Финальное состояние биржи: main/copyc1/copyc2/copyc3
+  flat, open orders 0.
+
+Owner Telegram WebView acceptance — COMPLETE 2026-09-03 (live-стенд, prod-БД, mainnet-действий нет): **9/9 PASS** — Home (verified trust rail, свежий snapshot, preview совпадает с Positions), Positions (строго read-only, flat + честный stale-баннер), Activity (фильтры Все/Сделки/Система, без секретов), Risk (линейка 0,5-5%/шаг 0,5%, проба 2,0% к 2,5% без сохранения), Status (ready-state; обрыв сети не повторялся — покрыт P2.5 acceptance), Account+Builder direct verified без чужих Builder-данных (в прод-БД 0 строк identity_source=builder; builder trust покрыт P2.6 acceptance source=builder state=verified и scratch-live P2.7), Notifications вкл/выкл подтверждены сервером, Pause/Resume с confirm (resume begin ~6s на testnet — ждать, не кликать повторно). Пресетов 1/2/3/5 в UI нет — так задумано решением владельца P2.4 (presets только в backend-контракте, клиент их не читает). Стенд возвращён в исходное: active, риск 2,0%, уведомления выкл; финальные сверки по нулям. Скриншоты (12 PNG): docs/reports/acceptance-p27/, оригиналы data/acceptance-p27/ (git-ignored).
+
+Stage 3 Part 2 = CLOSED только после независимого review.
 
 ## Следующие подчасти
 
 - P2.5 — System Status: ACCEPTED / CLOSED (implementation/live/review/
   owner acceptance complete).
 - P2.6 — Account + Builder attestation (`07-account-builder`):
-  IMPLEMENTED, live gate complete (attestation + local disconnect +
-  verified-onboarding `source=builder state=verified`), ждёт независимого
-  review + owner Telegram WebView acceptance.
+- P2.6 — Account + Builder attestation (`07-account-builder`):
+  ACCEPTED / CLOSED (live gate complete: attestation + local disconnect +
+  verified-onboarding `source=builder state=verified`).
 - P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3:
-  NOT STARTED.
+  IMPLEMENTED + OWNER ACCEPTANCE COMPLETE (offline/live/frontend gates green + owner smoke 9/9, см. раздел P2.7 выше),
+  ждёт независимого review.
 
 Открытые решения владельца (остались перед соответствующими подчастями):
 
