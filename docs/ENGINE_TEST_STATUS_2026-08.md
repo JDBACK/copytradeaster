@@ -5,6 +5,36 @@
 
 ## Текущее состояние
 
+- **Stage 3, часть 2 (P2.5 — System Status) — IMPLEMENTED /
+  AWAITING REVIEW/ACCEPTANCE (2026-09-03, ветка
+  `codex/stage-3-mini-app-part2`):** read-only control-plane slice поверх
+  `UserApplicationService.status()` — новый typed `StatusDTO`
+  (`state/system_state/copy_state/aster_state/permissions_state/masked
+  identities/positions_count/permissions/snapshot_captured_at/last_check_at/
+  age_seconds/reason/remediation`), precedence
+  blocked → degraded → stale → ready, stale lifecycle на существующем
+  runtime cache без minted timestamps, `POST /miniapp/api/status` со
+  strict boolean boundary, `SystemStatusScreen` с transport-stale honesty
+  и race guard, Telegram presenter на новом контракте. P2.6/P2.7 не
+  начинались, Builder не verified.
+  1. **Offline gate:** offline pytest **850 passed / 2 skipped / 34
+     deselected**, coverage **87%** (порог >= 87%); ruff check/format
+     clean, `git diff --check` clean. Новые кейсы:
+     `tests/unit/application/test_status.py` (14),
+     `tests/unit/miniapp/test_status_server.py` (19).
+  2. **Frontend gate:** Vitest **149 passed / 15 файлов**
+     (`systemStatus.test.ts` 8 unit + `systemStatusBehavior.test.tsx`
+     13 behavioral + `settings.test.tsx` с 5 chevron-кнопками), oxlint
+     clean, `tsc -b && vite build` clean.
+  3. **Live gate (Aster Testnet):**
+     `tests/testnet/test_live_status_acceptance.py` — **1 passed за
+     7.54s** на `sqlite3.backup`-копии прод-БД (прод-БД не тронута):
+     настоящие signed snapshot + permission reads → `ready/none`.
+  4. **Browser walkthrough:** preview engine на копии прод-БД
+     (`copyc1`, :8085, 390×844) — fresh + degraded, overflow 390/390.
+  5. **Pending:** owner Telegram WebView acceptance P2.5 (требуется
+     iPhone владельца) + независимое review. Детали — `STAGE3_PART2_PROGRESS_2026-09.md`
+     (раздел P2.5).
 - **Stage 3, часть 2 (P2.4 — Risk on Stop) — CLOSED
   (2026-09-03, implementation/live/owner acceptance complete + external
   review corrective applied):**

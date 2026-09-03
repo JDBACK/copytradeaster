@@ -23,6 +23,7 @@ import { NotificationsScreen } from '../screens/NotificationsScreen'
 import { PositionsScreen } from '../screens/PositionsScreen'
 import { RiskScreen } from '../screens/RiskScreen'
 import { SettingsScreen } from '../screens/SettingsScreen'
+import { SystemStatusScreen } from '../screens/SystemStatusScreen'
 
 export function AppShell({
   auth,
@@ -116,6 +117,8 @@ export function NestedRoute({
       return <RiskScreen auth={auth} accountMasked={accountMasked} />
     case 'notifications':
       return <NotificationsScreen auth={auth} accountMasked={accountMasked} />
+    case 'system-status':
+      return <SystemStatusScreen auth={auth} accountMasked={accountMasked} />
     case 'security':
       return <SecurityScreen accountMasked={accountMasked} />
     case 'help':

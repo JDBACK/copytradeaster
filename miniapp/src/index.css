@@ -500,6 +500,17 @@ body {
   font-size: 14px;
 }
 
+/* Amber honesty note for stale / transport-stale System Status (P2.5). */
+.stale-note {
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+  padding: 12px 16px;
+  color: var(--warning);
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .skeleton {
   position: relative;
   overflow: hidden;

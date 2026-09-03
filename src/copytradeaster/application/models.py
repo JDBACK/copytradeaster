@@ -101,6 +101,82 @@ class SystemState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class StatusState(StrEnum):
+    """Overall P2.5 System Status verdict (Mini App + Telegram authority).
+
+    Precedence is fixed: ``blocked`` → ``degraded`` → ``stale`` → ``ready``.
+    ``ready`` is only allowed when every backend-authoritative evidence —
+    usable account, READY system, non-blocked copy, fresh Aster snapshot,
+    valid signed permissions — holds at once.
+    """
+
+    READY = "ready"
+    STALE = "stale"
+    DEGRADED = "degraded"
+    BLOCKED = "blocked"
+
+
+class AsterState(StrEnum):
+    """Exchange-link state derived from account binding + snapshot freshness.
+
+    No separate Aster ping exists: ``ok`` requires a provably fresh snapshot,
+    ``stale`` keeps the last cached snapshot after a refresh failure or TTL
+    expiry, ``blocked`` means the account/runtime binding is gone, and
+    ``unknown`` means no provable data exists (never shown as healthy).
+    """
+
+    OK = "ok"
+    STALE = "stale"
+    BLOCKED = "blocked"
+    UNKNOWN = "unknown"
+
+
+class PermissionsState(StrEnum):
+    """Agent-permission state from signed validation evidence.
+
+    A cached permission row is never fresh evidence on its own: only a
+    signed refresh (or a TTL-bounded recent check) counts as ``valid``.
+    A proven rejection is ``blocked``; anything else without proof is
+    ``stale``/``unavailable`` with a ``refresh`` remediation.
+    """
+
+    VALID = "valid"
+    STALE = "stale"
+    BLOCKED = "blocked"
+    UNAVAILABLE = "unavailable"
+
+
+class StatusReason(StrEnum):
+    """Closed typed reason behind a non-ready status (never free-form text)."""
+
+    NONE = "none"
+    ACCOUNT_NOT_CONNECTED = "account_not_connected"
+    ACCOUNT_DISCONNECTED = "account_disconnected"
+    SYSTEM_NOT_READY = "system_not_ready"
+    SYSTEM_STALE = "system_stale"
+    SYSTEM_DEGRADED = "system_degraded"
+    ASTER_UNAVAILABLE = "aster_unavailable"
+    SNAPSHOT_MISSING = "snapshot_missing"
+    SNAPSHOT_STALE = "snapshot_stale"
+    PERMISSION_UNAVAILABLE = "permission_unavailable"
+    PERMISSION_STALE = "permission_stale"
+    PERMISSION_INVALID = "permission_invalid"
+    COPY_BLOCKED = "copy_blocked"
+    COPY_DEGRADED = "copy_degraded"
+
+
+class StatusRemediation(StrEnum):
+    """Executable remediation set for P2.5 (intentionally tiny).
+
+    ``refresh`` means only a repeated ``status(refresh=True)``; ``open_bot``
+    means only the existing ``closeMiniApp()`` return to the Telegram chat.
+    The field is ``None`` when no action is required (fresh ``ready``).
+    """
+
+    REFRESH = "refresh"
+    OPEN_BOT = "open_bot"
+
+
 class ConfirmationAction(StrEnum):
     RESUME = "resume"
     EMERGENCY = "emergency"
@@ -160,15 +236,30 @@ class DashboardDTO:
 
 @dataclass(frozen=True, slots=True)
 class StatusDTO:
+    """Public P2.5 System Status contract (Mini App + Telegram authority).
+
+    Every field is a backend-authoritative fact: the frontend formats time
+    but never decides health from age.  The DTO carries no raw message,
+    no ``aster_connected`` boolean, no ambiguous ``last_refresh_at`` — only
+    typed states, a closed reason, one executable remediation, masked
+    identities, and evidence timestamps.  ``last_check_at`` is the oldest
+    mandatory evidence (conservative), never the time of a failed attempt.
+    """
+
+    state: StatusState = StatusState.BLOCKED
     system_state: SystemState = SystemState.UNKNOWN
     copy_state: CopyState = CopyState.EMPTY
-    aster_connected: bool = False
+    aster_state: AsterState = AsterState.UNKNOWN
+    permissions_state: PermissionsState = PermissionsState.UNAVAILABLE
     account_masked: str | None = None
+    signer_masked: str | None = None
     positions_count: int | None = None
     permissions: PermissionSummary = field(default_factory=PermissionSummary)
-    last_refresh_at: datetime | None = None
+    snapshot_captured_at: datetime | None = None
+    last_check_at: datetime | None = None
     age_seconds: int | None = None
-    message: str | None = None
+    reason: StatusReason = StatusReason.SYSTEM_NOT_READY
+    remediation: StatusRemediation | None = None
 
 
 RISK_MIN = Decimal("0.005")

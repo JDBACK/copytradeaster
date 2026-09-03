@@ -145,3 +145,55 @@ export interface RiskDTO {
   presets: string[]
   risk_base: string
 }
+
+export type StatusState = 'ready' | 'stale' | 'degraded' | 'blocked'
+
+export type AsterState = 'ok' | 'stale' | 'blocked' | 'unknown'
+
+export type PermissionsState = 'valid' | 'stale' | 'blocked' | 'unavailable'
+
+export type StatusReason =
+  | 'none'
+  | 'account_not_connected'
+  | 'account_disconnected'
+  | 'system_not_ready'
+  | 'system_stale'
+  | 'system_degraded'
+  | 'aster_unavailable'
+  | 'snapshot_missing'
+  | 'snapshot_stale'
+  | 'permission_unavailable'
+  | 'permission_stale'
+  | 'permission_invalid'
+  | 'copy_blocked'
+  | 'copy_degraded'
+
+/** Executable remediation set (P2.5): only refresh / open_bot / absent. */
+export type StatusRemediation = 'refresh' | 'open_bot'
+
+export interface StatusPermissionsDTO {
+  can_read?: boolean | null
+  can_perp_trade?: boolean | null
+  can_withdraw?: boolean | null
+  whitelist_ok?: boolean | null
+  checked_at?: string | null
+  warning?: string | null
+}
+
+/** Mirror of the server-side P2.5 StatusDTO (application/models.py). */
+export interface StatusDTO {
+  state: StatusState
+  system_state: SystemState
+  copy_state: CopyState
+  aster_state: AsterState
+  permissions_state: PermissionsState
+  account_masked?: string | null
+  signer_masked?: string | null
+  positions_count?: number | null
+  permissions: StatusPermissionsDTO
+  snapshot_captured_at?: string | null
+  last_check_at?: string | null
+  age_seconds?: number | null
+  reason: StatusReason
+  remediation?: StatusRemediation | null
+}

@@ -1,8 +1,8 @@
 /** Settings root (эталон 06-settings, Stage 3 part 2 P2.3–P2.4).
  *
- * A capability list with sections, not a card grid.  Only rows that really
- * navigate (Risk, Notifications, Security, Help) get a chevron; Status,
- * Account+Builder and the static Environment are read-only rows.
+ * A capability list with sections, not a card grid.  Rows that navigate
+ * (Risk, Notifications, Status, Security, Help) get a chevron; Account+Builder
+ * and the static Environment stay read-only.
  * Values come from the authoritative DashboardDTO — nothing is hardcoded
  * and stale/degraded never reads «Всё работает». */
 
@@ -192,6 +192,7 @@ export function SettingsView({
           label="Статус Aster"
           value={status.label}
           valueTone={status.tone}
+          onClick={() => open({ kind: 'system-status' })}
         />
       </div>
 

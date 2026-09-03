@@ -13,11 +13,15 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import Message, WebhookInfo
 
 from copytradeaster.application.models import (
+    AsterState,
     Confirmation,
     ConfirmationAction,
     CopyState,
     DashboardDTO,
+    PermissionsState,
     StatusDTO,
+    StatusReason,
+    StatusState,
     SystemState,
     UserContext,
     UserRole,
@@ -195,10 +199,14 @@ class ScaleApplication:
             else:
                 await self.release_status.wait()
             return StatusDTO(
+                state=StatusState.READY,
                 system_state=SystemState.READY,
                 copy_state=self.copy_states[user_id],
-                aster_connected=True,
+                aster_state=AsterState.OK,
+                permissions_state=PermissionsState.VALID,
                 account_masked=f"acct-{user_id}",
+                reason=StatusReason.NONE,
+                remediation=None,
             )
         finally:
             self._status_active -= 1

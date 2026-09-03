@@ -41,6 +41,7 @@ from copytradeaster.application.models import (
     AdminFollowerPage,
     AdminUserItem,
     AdminUserPage,
+    AsterState,
     AuthorizationError,
     BuilderOnboardedDTO,
     BuilderPrepareDTO,
@@ -56,6 +57,7 @@ from copytradeaster.application.models import (
     NotificationSettingsDTO,
     OnboardingApplicationError,
     OnboardingResult,
+    PermissionsState,
     PermissionSummary,
     PositionPageDTO,
     PositionProtectionState,
@@ -66,6 +68,9 @@ from copytradeaster.application.models import (
     ServiceUnavailableError,
     StaleOperationError,
     StatusDTO,
+    StatusReason,
+    StatusRemediation,
+    StatusState,
     SystemState,
     UserContext,
     UserRole,
@@ -1258,28 +1263,19 @@ class UserApplicationService:
                 count += 1
         return count
 
-    async def _dashboard_for(
+    async def _copy_state_and_message(
         self,
-        context: UserContext,
-        account_row: Any | None,
-        *,
-        account_id: str | None,
-        snapshot: Any = None,
-        snapshot_captured_at: datetime | None = None,
-    ) -> DashboardDTO:
-        system_state = await self._system_state()
-        user_row = await self._user_row(context.user_id)
-        enabled = bool(_row_value(user_row, "notifications_enabled", 1))
-        if account_id is None or account_row is None:
-            return DashboardDTO(
-                system_state=system_state,
-                account_id=None,
-                notification_enabled=enabled,
-                is_admin=context.role is UserRole.ADMIN,
-                message="account is not connected",
-            )
+        account_id: str,
+        account_row: Any,
+        system_state: SystemState,
+    ) -> tuple[CopyState, str | None]:
+        """Shared Dashboard/Status copy-state semantics (single authority).
+
+        Status and Dashboard must never diverge on BLOCKED / DEGRADED /
+        PAUSED / ACTIVE, so both derive the verdict here; only Dashboard
+        also needs the human message, which stays internal to presenters.
+        """
         policy = await self._call_optional(self._settings, "get_policy", account_id)
-        permission, _ = await self._permission(account_id)
         account_enabled = _is_true(_row_value(account_row, "enabled", 0))
         execution_mode = str(_row_value(account_row, "execution_mode", "REAL") or "REAL")
         degraded = system_state is SystemState.DEGRADED
@@ -1308,6 +1304,33 @@ class UserApplicationService:
         else:
             copy_state = CopyState.ACTIVE
             message = None
+        return copy_state, message
+
+    async def _dashboard_for(
+        self,
+        context: UserContext,
+        account_row: Any | None,
+        *,
+        account_id: str | None,
+        snapshot: Any = None,
+        snapshot_captured_at: datetime | None = None,
+    ) -> DashboardDTO:
+        system_state = await self._system_state()
+        user_row = await self._user_row(context.user_id)
+        enabled = bool(_row_value(user_row, "notifications_enabled", 1))
+        if account_id is None or account_row is None:
+            return DashboardDTO(
+                system_state=system_state,
+                account_id=None,
+                notification_enabled=enabled,
+                is_admin=context.role is UserRole.ADMIN,
+                message="account is not connected",
+            )
+        permission, _ = await self._permission(account_id)
+        policy = await self._call_optional(self._settings, "get_policy", account_id)
+        copy_state, message = await self._copy_state_and_message(
+            account_id, account_row, system_state
+        )
         if snapshot is None:
             snapshot, _ = await self._snapshot(account_id, refresh=False)
         identity = await self._identity(account_id)
@@ -1606,68 +1629,242 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("dashboard is unavailable") from None
 
+    async def _status_permission(
+        self, account_id: str, *, refresh: bool
+    ) -> tuple[PermissionSummary, datetime | None, bool, bool]:
+        """Signed permission evidence for System Status.
+
+        Returns ``(summary, checked_at, fresh, rejected)``.  A transient
+        ``ServiceUnavailable`` during the signed read keeps the last safe
+        cached snapshot (stale, never fresh); a proven ``StaleOperation``
+        rejection is surfaced as ``rejected`` so the caller blocks instead
+        of trusting old cache.  Authentication/ownership/testnet boundary
+        errors are never converted into a stale fallback.
+        """
+        if refresh:
+            try:
+                summary, checked_at = await self._permission(account_id, refresh=True)
+            except StaleOperationError:
+                summary, checked_at = await self._permission(account_id)
+                return summary, checked_at, False, True
+            except ServiceUnavailableError:
+                summary, checked_at = await self._permission(account_id)
+                return summary, checked_at, False, False
+            return summary, checked_at, True, False
+        summary, checked_at = await self._permission(account_id)
+        return summary, checked_at, False, False
+
     async def status(self, user_id: int, refresh: bool = False) -> StatusDTO:
+        """Authoritative read-only System Status (P2.5 control-plane slice).
+
+        Reuses ``_system_state()``, the shared Dashboard copy-state
+        semantics, the process-local runtime snapshot cache, and the signed
+        Agent permission refresh.  A failed refresh never destroys the last
+        useful snapshot and never mints a new timestamp: stale evidence is
+        returned as stale with its original capture time.  ``refresh=False``
+        stays a cheap cached read and never performs a signed/network
+        refresh.  Overall precedence: blocked → degraded → stale → ready.
+        """
         try:
             context = await self._context(user_id)
             account_id = str(context.account_id) if context.account_id else None
+            system_state = await self._system_state()
             if account_id is None:
                 return StatusDTO(
-                    system_state=await self._system_state(),
-                    message="account is not connected",
+                    state=StatusState.BLOCKED,
+                    system_state=system_state,
+                    copy_state=CopyState.EMPTY,
+                    aster_state=AsterState.BLOCKED,
+                    permissions_state=PermissionsState.UNAVAILABLE,
+                    reason=StatusReason.ACCOUNT_NOT_CONNECTED,
+                    remediation=StatusRemediation.OPEN_BOT,
                 )
             context, row, _ = await self._owned_account(
                 user_id,
                 account_id,
                 allow_disabled=True,
             )
-            snapshot = None
-            message = None
-            refreshed_at = None
+            account_masked = mask_address(str(_row_value(row, "user_address", "")))
+            signer_masked = await self._identity(account_id)
+            registered = await self._runtime_registered(account_id)
+            execution_mode = str(_row_value(row, "execution_mode", "REAL") or "REAL")
+            usable = (
+                _is_true(_row_value(row, "enabled", 0)) and registered and execution_mode == "REAL"
+            )
+            copy_state, _ = await self._copy_state_and_message(account_id, row, system_state)
+
+            snapshot: Any = None
+            captured_at: datetime | None = None
+            refresh_failed = False
             if refresh:
                 try:
-                    snapshot, refreshed_at = await self._snapshot(account_id, refresh=True)
+                    snapshot, captured_at = await self._snapshot(account_id, refresh=True)
                 except _SAFE_ERRORS:
                     raise
                 except Exception:
-                    message = "Aster status is temporarily unavailable"
+                    # Transient read failure: fall back to the cached snapshot
+                    # without minting a new capture timestamp.
+                    refresh_failed = True
+                    snapshot, captured_at = await self._snapshot(account_id, refresh=False)
             else:
-                # Default status is a cheap cache read; only the explicit
-                # refresh action crosses the bounded Aster read boundary.
-                snapshot, refreshed_at = await self._snapshot(account_id, refresh=False)
-            permission, checked_at = await self._permission(account_id, refresh=refresh)
-            policy = await self._call_optional(self._settings, "get_policy", account_id)
-            connected = _is_true(_row_value(row, "enabled", 0)) and await self._runtime_registered(
-                account_id
+                snapshot, captured_at = await self._snapshot(account_id, refresh=False)
+
+            snapshot_ttl_s = self._snapshot_ttl_seconds()
+            cache_expired = captured_at is not None and (
+                (self._now() - captured_at).total_seconds() > snapshot_ttl_s
             )
-            if not _is_true(_row_value(row, "enabled", 0)):
-                message = "account is disconnected; connect credentials to continue"
-            global_pause = _is_false(await self._flag("allow_new_entries", "true"))
-            global_emergency = _is_true(await self._flag("emergency_active"))
-            copy_state = CopyState.ACTIVE
-            if not _is_true(_row_value(row, "enabled", 0)):
-                copy_state = CopyState.EMPTY
-            elif (
-                policy is _MISSING
-                or policy is None
-                or not _is_true(_row_value(policy, "allow_new_entries", 0))
-                or global_pause
-                or global_emergency
-            ):
-                copy_state = CopyState.PAUSED
+            snapshot_fresh = (
+                snapshot is not None
+                and captured_at is not None
+                and not cache_expired
+                and not refresh_failed
+            )
+            if not usable:
+                aster_state = AsterState.BLOCKED
+            elif snapshot is None:
+                aster_state = AsterState.UNKNOWN
+            elif not snapshot_fresh:
+                aster_state = AsterState.STALE
+            else:
+                aster_state = AsterState.OK
+
+            permission, checked_at, fresh_signed, rejected = await self._status_permission(
+                account_id, refresh=refresh
+            )
+            validation_row = await self._validation_row(account_id)
+            try:
+                permission_expiry_ms = int(_row_value(validation_row, "expired_ms", 0))
+            except (TypeError, ValueError):
+                permission_expiry_ms = 0
+            now = self._now()
+            now_ms = int(now.timestamp() * 1000)
+            override_raw = await self._call_optional(
+                self._runtime, "permission_override_allowed", account_id
+            )
+            override_allowed = override_raw is not _MISSING and bool(override_raw)
+            triple_ok = (
+                permission.can_read is True
+                and permission.can_perp_trade is True
+                and permission.can_withdraw is False
+            )
+            warning_ok = permission.warning is None or (
+                permission.warning == "permission_check_override" and override_allowed
+            )
+            evidence_ok = (
+                validation_row is not None
+                and triple_ok
+                and permission_expiry_ms > now_ms
+                and warning_ok
+            )
+            # A signed-this-call validation, or a cached check inside the same
+            # TTL bound the resume gate trusts, counts as valid evidence.  A
+            # cached row alone is never fresh proof after a signed rejection,
+            # and a failed signed attempt never leaves a recent cache looking
+            # freshly validated: the transient failure itself marks stale.
+            checked_fresh = checked_at is not None and (
+                fresh_signed or (now - checked_at).total_seconds() <= self._permission_ttl
+            )
+            signed_refresh_failed = refresh and not fresh_signed and not rejected
+            expired_only = (
+                validation_row is not None
+                and triple_ok
+                and warning_ok
+                and permission_expiry_ms <= now_ms
+            )
+            if rejected:
+                permissions_state = PermissionsState.BLOCKED
+            elif evidence_ok and checked_fresh and not signed_refresh_failed:
+                permissions_state = PermissionsState.VALID
+            elif evidence_ok or expired_only:
+                permissions_state = PermissionsState.STALE
+            else:
+                permissions_state = PermissionsState.UNAVAILABLE
+
+            # Conservative last check: the status is never younger than its
+            # oldest mandatory evidence, and never advances on a failed attempt.
+            evidences = [moment for moment in (captured_at, checked_at) if moment is not None]
+            last_check_at = min(evidences) if evidences else None
+            age_seconds = (
+                None
+                if last_check_at is None
+                else max(int((now - last_check_at).total_seconds()), 0)
+            )
+
+            if not usable:
+                state = StatusState.BLOCKED
+                reason = StatusReason.ACCOUNT_DISCONNECTED
+                remediation: StatusRemediation | None = StatusRemediation.OPEN_BOT
+            elif rejected:
+                state = StatusState.BLOCKED
+                reason = StatusReason.PERMISSION_INVALID
+                remediation = StatusRemediation.OPEN_BOT
+            elif copy_state is CopyState.BLOCKED:
+                state = StatusState.BLOCKED
+                reason = StatusReason.COPY_BLOCKED
+                remediation = StatusRemediation.OPEN_BOT
+            elif system_state is SystemState.DEGRADED:
+                state = StatusState.DEGRADED
+                reason = StatusReason.SYSTEM_DEGRADED
+                remediation = StatusRemediation.REFRESH
+            elif copy_state is CopyState.DEGRADED:
+                state = StatusState.DEGRADED
+                reason = StatusReason.COPY_DEGRADED
+                remediation = StatusRemediation.REFRESH
+            elif system_state is SystemState.STALE:
+                state = StatusState.STALE
+                reason = StatusReason.SYSTEM_STALE
+                remediation = StatusRemediation.REFRESH
+            elif system_state is not SystemState.READY:
+                state = StatusState.STALE
+                reason = StatusReason.SYSTEM_NOT_READY
+                remediation = StatusRemediation.REFRESH
+            elif snapshot is None:
+                state = StatusState.STALE
+                reason = StatusReason.SNAPSHOT_MISSING
+                remediation = StatusRemediation.REFRESH
+            elif refresh_failed:
+                state = StatusState.STALE
+                reason = StatusReason.ASTER_UNAVAILABLE
+                remediation = StatusRemediation.REFRESH
+            elif cache_expired or captured_at is None:
+                state = StatusState.STALE
+                reason = StatusReason.SNAPSHOT_STALE
+                remediation = StatusRemediation.REFRESH
+            elif permissions_state is PermissionsState.UNAVAILABLE:
+                state = StatusState.STALE
+                reason = StatusReason.PERMISSION_UNAVAILABLE
+                remediation = StatusRemediation.REFRESH
+            elif permissions_state is PermissionsState.STALE:
+                state = StatusState.STALE
+                reason = StatusReason.PERMISSION_STALE
+                remediation = StatusRemediation.REFRESH
+            elif permissions_state is PermissionsState.BLOCKED:
+                state = StatusState.BLOCKED
+                reason = StatusReason.PERMISSION_INVALID
+                remediation = StatusRemediation.OPEN_BOT
+            elif copy_state not in (CopyState.ACTIVE, CopyState.PAUSED):
+                state = StatusState.BLOCKED
+                reason = StatusReason.COPY_BLOCKED
+                remediation = StatusRemediation.OPEN_BOT
+            else:
+                state = StatusState.READY
+                reason = StatusReason.NONE
+                remediation = None
             return StatusDTO(
-                system_state=await self._system_state(),
+                state=state,
+                system_state=system_state,
                 copy_state=copy_state,
-                aster_connected=connected,
-                account_masked=mask_address(str(_row_value(row, "user_address", ""))),
+                aster_state=aster_state,
+                permissions_state=permissions_state,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
                 positions_count=self._position_count(snapshot),
                 permissions=permission,
-                last_refresh_at=refreshed_at or checked_at,
-                age_seconds=(
-                    None
-                    if checked_at is None
-                    else max(int((self._now() - checked_at).total_seconds()), 0)
-                ),
-                message=message,
+                snapshot_captured_at=captured_at,
+                last_check_at=last_check_at,
+                age_seconds=age_seconds,
+                reason=reason,
+                remediation=remediation,
             )
         except _SAFE_ERRORS:
             raise

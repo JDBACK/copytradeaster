@@ -13,6 +13,7 @@ import copytradeaster.application.service as service_module
 from copytradeaster.application.models import (
     AccessRequestStatus,
     ApplicationProtocol,
+    AsterState,
     AuthorizationError,
     Confirmation,
     ConfirmationAction,
@@ -20,11 +21,15 @@ from copytradeaster.application.models import (
     CopyState,
     DirectCredentialsInput,
     OnboardingApplicationError,
+    PermissionsState,
     PositionProtectionState,
     PositionSide,
     RiskUpdateInput,
     ServiceUnavailableError,
     StaleOperationError,
+    StatusReason,
+    StatusRemediation,
+    StatusState,
     UserRole,
     ValidationError,
 )
@@ -422,7 +427,11 @@ async def test_dashboard_status_risk_activity_and_notifications_are_safe(environ
 
     status = await service.status(7, refresh=True)
     assert status.positions_count == 0
-    assert status.aster_connected
+    assert status.state is StatusState.READY
+    assert status.aster_state is AsterState.OK
+    assert status.permissions_state is PermissionsState.VALID
+    assert status.reason is StatusReason.NONE
+    assert status.remediation is None
     assert any(action[0] == "refresh_snapshot" for action in runtime.actions)
 
     risk = await service.risk(7)
@@ -1656,7 +1665,9 @@ async def test_dashboard_status_degraded_disconnected_and_refresh_failure(enviro
     await db.execute_write("UPDATE accounts SET enabled=0 WHERE id=?", ("tg-7",))
     disconnected = await service.status(7)
     assert disconnected.copy_state is CopyState.EMPTY
-    assert disconnected.message == "account is disconnected; connect credentials to continue"
+    assert disconnected.state is StatusState.BLOCKED
+    assert disconnected.reason is StatusReason.ACCOUNT_DISCONNECTED
+    assert disconnected.remediation is StatusRemediation.OPEN_BOT
 
     await db.execute_write("UPDATE accounts SET enabled=1 WHERE id=?", ("tg-7",))
     await SettingsRepo(db).set_flag("degraded_active", "false")
@@ -1667,7 +1678,13 @@ async def test_dashboard_status_degraded_disconnected_and_refresh_failure(enviro
 
     runtime.refresh_snapshot = broken_refresh
     refreshed = await service.status(7, refresh=True)
-    assert refreshed.message == "Aster status is temporarily unavailable"
+    assert refreshed.state is StatusState.STALE
+    assert refreshed.reason is StatusReason.ASTER_UNAVAILABLE
+    assert refreshed.remediation is StatusRemediation.REFRESH
+    # The last useful snapshot is preserved without a minted timestamp.
+    assert refreshed.positions_count == 0
+    assert refreshed.snapshot_captured_at is None
+    assert refreshed.last_check_at is not None
 
 
 async def test_system_state_handles_stale_bad_heartbeat_and_unknown_runtime(environment):
@@ -2447,8 +2464,13 @@ async def test_permission_summary_missing_pending_and_refresh_validation(environ
         status="VALID",
         checked_at="2026-08-23T12:00:00+00:00",
     )
-    with pytest.raises(StaleOperationError):
-        await service.status(7, refresh=True)
+    # A proven signed rejection never surfaces the old valid cache as fresh:
+    # System Status degrades to a typed blocked DTO instead of raising.
+    blocked = await service.status(7, refresh=True)
+    assert blocked.state is StatusState.BLOCKED
+    assert blocked.permissions_state is PermissionsState.BLOCKED
+    assert blocked.reason is StatusReason.PERMISSION_INVALID
+    assert blocked.remediation is StatusRemediation.OPEN_BOT
 
 
 async def test_risk_success_updates_each_field_and_invalid_storage_is_typed(environment):

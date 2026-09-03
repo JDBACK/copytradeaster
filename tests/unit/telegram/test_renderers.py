@@ -15,14 +15,19 @@ from copytradeaster.application.models import (
     AdminFollowerPage,
     AdminUserItem,
     AdminUserPage,
+    AsterState,
     Confirmation,
     ConfirmationAction,
     CopyState,
     DashboardDTO,
     NotificationSettingsDTO,
+    PermissionsState,
     PermissionSummary,
     RiskDTO,
     StatusDTO,
+    StatusReason,
+    StatusRemediation,
+    StatusState,
     SystemState,
 )
 from copytradeaster.onboarding.errors import OnboardingErrorCode
@@ -76,9 +81,11 @@ def test_empty_dashboard_exposes_admin_only_for_admin() -> None:
 def test_status_renders_permissions_as_tri_state_and_surfaces_safe_notices() -> None:
     view = render_status(
         StatusDTO(
+            state=StatusState.DEGRADED,
             system_state=SystemState.DEGRADED,
             copy_state=CopyState.BLOCKED,
-            aster_connected=True,
+            aster_state=AsterState.OK,
+            permissions_state=PermissionsState.STALE,
             permissions=PermissionSummary(
                 can_read=None,
                 can_perp_trade=True,
@@ -86,7 +93,8 @@ def test_status_renders_permissions_as_tri_state_and_surfaces_safe_notices() -> 
                 whitelist_ok=None,
                 warning="Проверка прав устарела.",
             ),
-            message="Показаны последние сохранённые данные.",
+            reason=StatusReason.PERMISSION_STALE,
+            remediation=StatusRemediation.REFRESH,
         )
     )
 
@@ -95,7 +103,22 @@ def test_status_renders_permissions_as_tri_state_and_surfaces_safe_notices() -> 
     assert "вывод средств нет" in view.text
     assert "ограничение по IP неизвестно" in view.text
     assert "Проверка прав устарела." in view.text
-    assert "Показаны последние сохранённые данные." in view.text
+    assert "Нажмите «Обновить» для повторной проверки." in view.text
+
+
+def test_status_blocked_for_invalid_permissions_points_back_to_bot() -> None:
+    view = render_status(
+        StatusDTO(
+            state=StatusState.BLOCKED,
+            permissions_state=PermissionsState.BLOCKED,
+            reason=StatusReason.PERMISSION_INVALID,
+            remediation=StatusRemediation.OPEN_BOT,
+        )
+    )
+
+    assert "требуется действие" in view.text
+    assert "отклонены" in view.text
+    assert "Права подключения отклонены. Продолжите в чате с ботом." in view.text
 
 
 def test_empty_dashboard_surfaces_notice_as_plain_bounded_text() -> None:

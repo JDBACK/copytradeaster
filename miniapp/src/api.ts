@@ -11,6 +11,7 @@ import type {
   NotificationSettingsDTO,
   PositionPageDTO,
   RiskDTO,
+  StatusDTO,
 } from './types'
 
 export class ApiError extends Error {
@@ -124,6 +125,12 @@ export const api = {
 
   risk: (auth: AuthContext, options?: { timeoutMs?: number; signal?: AbortSignal }) =>
     post<RiskDTO>('/miniapp/api/risk', {}, auth, options),
+
+  status: (
+    auth: AuthContext,
+    refresh = false,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<StatusDTO>('/miniapp/api/status', { refresh }, auth, options),
 
   /** riskPercent travels as a fraction string, e.g. "0.02" for 2,0%. */
   setRiskPercent: (

@@ -26,6 +26,7 @@ from copytradeaster.application.models import (
     AdminUserItem,
     AdminUserPage,
     ApplicationError,
+    AsterState,
     Confirmation,
     ConfirmationAction,
     CopyState,
@@ -34,11 +35,14 @@ from copytradeaster.application.models import (
     NotificationSettingsDTO,
     OnboardingApplicationError,
     OnboardingResult,
+    PermissionsState,
     PermissionSummary,
     RiskDTO,
     RiskUpdateInput,
     ServiceUnavailableError,
     StatusDTO,
+    StatusReason,
+    StatusState,
     SystemState,
     UserContext,
     UserRole,
@@ -220,12 +224,16 @@ class FakeApplication:
     async def status(self, user_id: int, refresh: bool = False) -> StatusDTO:
         self.status_refreshes.append(refresh)
         return StatusDTO(
+            state=StatusState.READY,
             system_state=SystemState.READY,
             copy_state=self.copy_state,
-            aster_connected=True,
+            aster_state=AsterState.OK,
+            permissions_state=PermissionsState.VALID,
             account_masked="0x1234…abcd",
             positions_count=0,
             permissions=PermissionSummary(can_perp_trade=True, whitelist_ok=True),
+            reason=StatusReason.NONE,
+            remediation=None,
         )
 
     async def risk(self, user_id: int) -> RiskDTO:

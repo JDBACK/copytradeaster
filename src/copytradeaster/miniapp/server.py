@@ -255,6 +255,32 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
+    async def status(request: web.Request) -> web.Response:
+        """Read-only System Status (P2.5): strict boolean boundary.
+
+        ``{}`` means ``refresh=False``; a present ``refresh`` must be a real
+        JSON boolean.  No query-param alternative, no account/user IDs from
+        the client — identity always comes from the Telegram boundary.
+        """
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        if body is None:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        if set(body.keys()) - {"refresh"}:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        if "refresh" not in body:
+            refresh = False
+        elif not isinstance(body["refresh"], bool):
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        else:
+            refresh = body["refresh"]
+        try:
+            return _json_dto(await application.status(user_id, refresh=refresh))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
     async def risk_set(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -465,6 +491,7 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/notifications/enabled", notifications_set)
     app.router.add_post("/miniapp/api/risk", risk)
     app.router.add_post("/miniapp/api/risk/percent", risk_set)
+    app.router.add_post("/miniapp/api/status", status)
     app.router.add_post("/miniapp/api/pause", pause)
     app.router.add_post("/miniapp/api/resume", resume)
     app.router.add_post("/miniapp/api/confirmation/begin", confirmation_begin)

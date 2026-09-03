@@ -32,13 +32,18 @@ from copytradeaster.application.models import (
     AdminFollowerPage,
     AdminUserPage,
     ApplicationProtocol,
+    AsterState,
     Confirmation,
     ConfirmationAction,
     CopyState,
     DashboardDTO,
     NotificationSettingsDTO,
+    PermissionsState,
     RiskDTO,
     StatusDTO,
+    StatusReason,
+    StatusRemediation,
+    StatusState,
     SystemState,
 )
 from copytradeaster.onboarding.errors import OnboardingErrorCode
@@ -551,25 +556,87 @@ def render_status(dto: StatusDTO, revision: int = 0) -> MenuView:
     permission = dto.permissions
     text = (
         "Статус\n\n"
+        f"Состояние: {_status_label(dto.state)}\n"
         f"Система: {_system_label(dto.system_state)}\n"
         f"Копирование: {_copy_label(dto.copy_state)}\n"
-        f"Aster: {'подключён' if dto.aster_connected else 'проверка недоступна'}\n"
-        f"Права подключения: чтение {_tri_state(permission.can_read)} · "
+        f"Aster: {_aster_label(dto.aster_state)}\n"
+        f"Разрешения: {_permissions_label(dto.permissions_state)} "
+        f"(чтение {_tri_state(permission.can_read)} · "
         f"торговля {_tri_state(permission.can_perp_trade)} · "
         f"вывод средств {_tri_state(permission.can_withdraw)} · "
-        f"ограничение по IP {_tri_state(permission.whitelist_ok)}\n"
+        f"ограничение по IP {_tri_state(permission.whitelist_ok)})\n"
         f"Счёт: {dto.account_masked or '—'}\n"
         f"Позиции: {dto.positions_count if dto.positions_count is not None else '—'}\n"
-        f"Последняя проверка: {_when(dto.last_refresh_at)}"
+        f"Последняя проверка: {_when(dto.last_check_at)}"
     )
-    notices = [_notice(dto.message), _notice(permission.warning)]
+    notices = [
+        _status_reason_notice(dto.reason),
+        _status_remediation_notice(dto.remediation),
+        _notice(permission.warning),
+    ]
     if any(notice for notice in notices):
         text += "\n\n" + "\n".join(notice for notice in notices if notice)
-    builder.button(text="↻ Обновить Aster", callback_data=_cb(MenuAction.STATUS_REFRESH, revision))
+    builder.button(text="↻ Обновить", callback_data=_cb(MenuAction.STATUS_REFRESH, revision))
     builder.button(text="‹ Назад", callback_data=_cb(MenuAction.BACK, revision))
     builder.button(text="⌂ На главную", callback_data=_cb(MenuAction.HOME, revision))
     builder.adjust(1, 2)
     return MenuView(Screen.STATUS, text, builder.as_markup(), revision)
+
+
+def _status_label(state: StatusState) -> str:
+    return {
+        StatusState.READY: "всё в порядке",
+        StatusState.STALE: "данные устарели",
+        StatusState.DEGRADED: "нужна проверка",
+        StatusState.BLOCKED: "требуется действие",
+    }[state]
+
+
+def _aster_label(state: AsterState) -> str:
+    return {
+        AsterState.OK: "подключён",
+        AsterState.STALE: "данные устарели",
+        AsterState.BLOCKED: "недоступен",
+        AsterState.UNKNOWN: "неизвестно",
+    }[state]
+
+
+def _permissions_label(state: PermissionsState) -> str:
+    return {
+        PermissionsState.VALID: "подтверждены",
+        PermissionsState.STALE: "устарели",
+        PermissionsState.BLOCKED: "отклонены",
+        PermissionsState.UNAVAILABLE: "не проверены",
+    }[state]
+
+
+def _status_reason_notice(reason: StatusReason) -> str | None:
+    return {
+        StatusReason.NONE: None,
+        StatusReason.ACCOUNT_NOT_CONNECTED: "Счёт подписчика не подключён.",
+        StatusReason.ACCOUNT_DISCONNECTED: (
+            "Счёт отключён. Подключите его заново, чтобы продолжить."
+        ),
+        StatusReason.SYSTEM_NOT_READY: "Система пока не готова.",
+        StatusReason.SYSTEM_STALE: "Данные системы устарели.",
+        StatusReason.SYSTEM_DEGRADED: "Система требует проверки.",
+        StatusReason.ASTER_UNAVAILABLE: "Aster временно не отвечает.",
+        StatusReason.SNAPSHOT_MISSING: "Снимок позиций пока не получен.",
+        StatusReason.SNAPSHOT_STALE: "Снимок позиций устарел.",
+        StatusReason.PERMISSION_UNAVAILABLE: "Права подключения пока не проверены.",
+        StatusReason.PERMISSION_STALE: "Проверка прав устарела.",
+        StatusReason.PERMISSION_INVALID: "Права подключения отклонены. Продолжите в чате с ботом.",
+        StatusReason.COPY_BLOCKED: "Копирование заблокировано. Продолжите в чате с ботом.",
+        StatusReason.COPY_DEGRADED: "Копирование требует проверки.",
+    }[reason]
+
+
+def _status_remediation_notice(remediation: StatusRemediation | None) -> str | None:
+    if remediation is StatusRemediation.REFRESH:
+        return "Нажмите «Обновить» для повторной проверки."
+    if remediation is StatusRemediation.OPEN_BOT:
+        return "Продолжите в чате с ботом."
+    return None
 
 
 def render_risk(dto: RiskDTO, revision: int = 0) -> MenuView:

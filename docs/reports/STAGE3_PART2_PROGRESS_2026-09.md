@@ -461,9 +461,114 @@ PROGRESS/ENGINE_TEST_STATUS/SKELETON/adapted plan приведены к факт
 
 P2.4 ACCEPTED / CLOSED (external review + owner acceptance).
 
+## P2.5 — System Status: IMPLEMENTED / AWAITING REVIEW/ACCEPTANCE (2026-09-03)
+
+Read-only control-plane vertical slice поверх существующего
+`UserApplicationService.status()`. Второй status/health subsystem не
+создавался; P2.0–P2.4 не рефакторились (только интеграция P2.5).
+
+Backend (`application/models.py`, `application/service.py`):
+
+- Новый public typed контракт `StatusDTO` (закрытые enum, без free-form):
+  `state` (`ready|stale|degraded|blocked`), `system_state`, `copy_state`,
+  `aster_state` (`ok|stale|blocked|unknown`), `permissions_state`
+  (`valid|stale|blocked|unavailable`), `account_masked`, `signer_masked`,
+  `positions_count`, `permissions`, `snapshot_captured_at`,
+  `last_check_at`, `age_seconds`, `reason` (14 значений), `remediation`
+  (`refresh|open_bot|null`). Старые `aster_connected`/`last_refresh_at`/
+  `message` удалены из Mini App contract; Telegram presenter переведён на
+  новый контракт.
+- Authoritative источники: `system_state` — существующий `_system_state()`;
+  `copy_state` — exact semantics Dashboard через общий private helper
+  `_copy_state_and_message()` (Status и Dashboard не расходятся;
+  `_dashboard_for` переиспользует его же, сообщения нетронуты);
+  Aster — binding + доказуемая свежесть snapshot (без ping);
+  permissions — существующий AgentValidation + настоящий signed refresh
+  (`can_read/can_perp_trade=true`, `can_withdraw=false`, не просрочен,
+  testnet override policy переиспользована, не выдумана).
+- `READY` только при одновременных условиях: usable account, system
+  READY, copy ACTIVE/PAUSED, свежий snapshot, валидные permissions,
+  реальный capture timestamp. PAUSED сам по себе не unhealthy.
+  Precedence: `blocked → degraded → stale → ready`.
+- Stale lifecycle на существующем process-local runtime cache: при
+  `refresh=True` fresh попытка → при failure fallback на cached с
+  исходным `snapshot_captured_at`, timestamp не минтится; без cache —
+  safe stale/blocked с `positions_count=null`. Auth/ownership/testnet
+  ошибки — fail closed, не stale.
+- Permission split: transient `ServiceUnavailable` → stale + `refresh`;
+  `StaleOperation`/rejected → `blocked` + `open_bot` (старый valid cache
+  не выдаётся за fresh).
+- `last_check_at` — min(snapshot, permission evidence), не время попытки;
+  `age_seconds` считает backend.
+- Безопасность: только masked identities + safe facts; ключей, подписей,
+  адресов, nonce/order id, raw payload, traceback/exception text в DTO нет.
+
+Transport: `POST /miniapp/api/status` (`{}` → refresh false; present
+`refresh` — только настоящий JSON boolean; non-object/malformed/
+non-boolean/лишние поля → `400 invalid_input`; без account/user ID и без
+query-альтернативы; auth `401/403`, application `503` без `str(exc)`).
+
+Frontend: TS mirror + `api.status`; Settings-строка «Статус Aster» стала
+nested navigation с chevron (теперь 5 chevron-рядов);
+`system-status → SystemStatusScreen` в `NestedRoute`. Экран: заголовок,
+health block, trust rail (Wallet/Agent из evidence, Builder всегда
+neutral, Sync только при backend ready), шесть read-only diagnostic rows
+без chevrons/actions, refresh, amber stale note, persistent bottom nav.
+DTO только в local component state; первое открытие — `refresh=True`;
+ручной refresh держит DTO + busy/disabled, failure — transport-stale
+warning без зелёного healthy, success снимает; race закрыт sequence ref.
+Remediation: `refresh` → `api.status(auth, true)`, `open_bot` →
+`closeMiniApp()`, unknown — не исполняется. Ready — вторичная «Обновить».
+
+Telegram: `render_status()` на новом контракте (typed labels/reason/
+remediation notices), presenter-only, scope не расширен.
+
+Что НЕ сделано (по плану): P2.6/P2.7 не начинались; Builder не verified;
+copy engine/planner/executor/reconciler не тронуты; нет repository/
+migration/Redis/health service/global store/polling/URL-actions/ping.
+
+Gates (факт):
+
+- backend: новый `tests/unit/application/test_status.py` (14 тестов:
+  fresh/cheap-read/ready/stale-lifecycle/TTL/missing/transient/blocked/
+  degraded/system-stale-unknown/disconnected/copy-parity/last-check/
+  secrets/auth) + обновлённые `test_service.py`/`test_renderers.py`/
+  `test_runtime.py`/`test_scale_gate.py`;
+- HTTP: новый `tests/unit/miniapp/test_status_server.py` (19 тестов:
+  auth/`{}`/exact bool/11 forged-non-bool/extra/non-object/malformed/
+  exact DTO/forbidden fields/typed errors без leak);
+- frontend: новый `systemStatus.test.ts` (8 unit) + новый
+  `systemStatusBehavior.test.tsx` (13 behavioral: loading→fresh,
+  refresh→fresh, backend stale/degraded/blocked, hard error→retry,
+  transport-stale + снятие, race, remediation refresh/open_bot/unknown,
+  read-only rows, Builder neutral, nested route); `settings.test.tsx` —
+  5 chevron-кнопок;
+- offline pytest: 850 passed / 2 skipped / 34 deselected, coverage 87%
+  (порог >= 87%); ruff check/format clean; `git diff --check` clean;
+- frontend: oxlint clean, Vitest 149 passed / 15 файлов, `pnpm build`
+  clean (финальный билд без `VITE_DEV_USER_ID`; dev-билд только для
+  browser walkthrough, `dist/` git-ignored);
+- live: `tests/testnet/test_live_status_acceptance.py` — 1 passed за
+  7.54s (production App + composition на `sqlite3.backup`-копии прод-БД,
+  прод-БД не тронута): `status(refresh=True)` с настоящими signed
+  snapshot + permission reads → `ready/none`, timestamps < 180s,
+  `last_check <= snapshot_captured`, только masked identities, exact
+  safe HTTP DTO, forged `"true"` → 400;
+- browser walkthrough (preview engine на копии прод-БД, `copyc1`, :8085,
+  390×844): Settings — 5 chevron-рядов; System Status fresh
+  (`Всё работает`, 6 rows, trust rail, overflow 390/390); degraded
+  (флаг на копии, движок честно вернул `degraded/degraded`,
+  значения сохранены, amber «Система требует проверки»);
+  4 root tabs, safe-area/bottom nav без изменений;
+- pending (честно): owner Telegram WebView acceptance P2.5 (fresh →
+  offline → transport-stale → online → fresh + Resume gate при
+  stale/degraded) — требуется iPhone владельца; P2.5 остаётся
+  IMPLEMENTED / AWAITING REVIEW/ACCEPTANCE до независимого review.
+
 ## Следующие подчасти
 
-- P2.5 — System Status (`08-system-status`).
+- P2.5 — System Status: IMPLEMENTED, ждёт независимого review + owner
+  WebView acceptance (см. выше).
 - P2.6 — Account + Builder attestation (`07-account-builder`).
 - P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3.
 
