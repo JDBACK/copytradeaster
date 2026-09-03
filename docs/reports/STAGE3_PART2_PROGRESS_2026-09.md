@@ -579,7 +579,20 @@ Gates (факт):
   аккаунт active, система ready (проверено и серверной стороной:
   degraded_active=false, copy_state=active). P2.5 ACCEPTED / CLOSED.
 
-## P2.6 — Account + Builder attestation: IMPLEMENTED / AWAITING REVIEW + OWNER ACCEPTANCE (2026-09-03)
+## P2.6 — Account + Builder attestation: IMPLEMENTED / OWNER ACCEPTANCE COMPLETE, AWAITING RE-REVIEW (2026-09-03)
+
+Owner Telegram WebView acceptance (iPhone, current HEAD `75f0780`,
+direct account `tg-8264892202`, 4 evidence screenshots): 4 root tabs
+intact; nested Account + Builder screen with BackButton; masked-only data;
+honest «Прямое подключение», no «Переавторизовать» on the healthy account;
+Builder step grey on Home/Status (unified trust); airplane-mode refresh →
+data intact + amber «Данные устарели», no green, retry after reconnect →
+verified view back, warning gone; disconnect Sheet states local-only
+(Aster-side authorization NOT revoked), opened for screenshot only, no
+confirm on prod. Separate prod finding (not P2.6): resume refused with
+`service_unavailable` because prod holds `emergency_active=true` +
+global `allow_new_entries=false` — correct fail-closed, owner lifts via
+«Администрирование» screen.
 
 ### Corrective поверх `9bcbc21` (независимое review, 6 findings)
 
