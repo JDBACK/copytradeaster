@@ -313,6 +313,13 @@ async def test_live_same_signer_builder_reauthorization(live_reauth_stack):
     signer_before = dto.signer_masked
     verified_before = dto.verified_at
     assert signer_before and verified_before
+    # Same truth on the trust rails while EXPIRING: no green Builder
+    # anywhere until the 30-day reauthorization below.
+    dashboard0 = await service_short.dashboard(FRESH_TG_ID, refresh=False)
+    assert dashboard0.builder_verified is False
+    status0 = await service_short.status(FRESH_TG_ID, refresh=False)
+    assert status0.builder_verified is False
+    print(f"LIVE reauth phase0 rails=false state={dto.state.value}")
 
     # Phase 1: service-level same-signer reauthorization (short expiry).
     # Proves C2 eligibility + C3 real pause/drain + same signer, still paused.

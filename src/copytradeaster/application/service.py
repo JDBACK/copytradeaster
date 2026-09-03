@@ -1949,7 +1949,31 @@ class UserApplicationService:
         configured one, and a persisted fee cap Decimal-equivalent to the
         configured cap (never float).  Stale, expiring, invalid and
         config-mismatched proofs all read False here, exactly like the
-        Account screen refuses them VERIFIED.
+        Account screen refuses them VERIFIED: an Agent inside the
+        ``BUILDER_EXPIRY_WARNING_MS`` window reads EXPIRING on the Account
+        screen, so the rails must read False too (not True just because the
+        expiry has not elapsed yet).
+        """
+        if not await self._builder_proof_fresh(account_id):
+            return False
+        try:
+            validation = await self._validation_row(account_id)
+            agent_expires = _int_or_none(_row_value(validation, "expired_ms", None))
+            if agent_expires is None:
+                return False
+            now_ms = int(self._now().timestamp() * 1000)
+            return agent_expires - now_ms > BUILDER_EXPIRY_WARNING_MS
+        except Exception:
+            return False
+
+    async def _builder_proof_fresh(self, account_id: str) -> bool:
+        """Durable proof + TTL + current config, without the expiry window.
+
+        Shared core of `_builder_verified` (which additionally requires the
+        Agent outside the reauthorization warning window) and of the cached
+        EXPIRING branch (which requires this core plus an expiry inside the
+        window).  Splitting the two keeps the Account screen and the trust
+        rails on one truth without re-implementing the checks twice.
         """
         try:
             if not await self._durable_builder_proof_ok(account_id):
@@ -2078,10 +2102,19 @@ class UserApplicationService:
         now = self._now()
         account_masked = mask_address(str(_row_value(row, "user_address", "")))
         signer_masked = await self._identity(account_id)
-        permission, _ = await self._permission(account_id)
+        permission, permission_checked_at = await self._permission(account_id)
         source = str(_row_value(row, "identity_source", "direct") or "direct")
         if source not in {"direct", "builder"}:
             source = "direct"
+        # No signed Builder refresh happens on these paths, so the timestamp
+        # must be real evidence time (the last permission check), never the
+        # moment the screen was opened.  Missing evidence reads None.
+        evidence_check_at = permission_checked_at
+        evidence_check_age = (
+            max(int((now - permission_checked_at).total_seconds()), 0)
+            if permission_checked_at is not None
+            else 0
+        )
         if not _is_true(_row_value(row, "enabled", 0)):
             return AccountBuilderDTO(
                 identity_source=source,
@@ -2091,8 +2124,8 @@ class UserApplicationService:
                 account_masked=account_masked,
                 signer_masked=signer_masked,
                 permission=permission,
-                last_check_at=now,
-                age_seconds=0,
+                last_check_at=evidence_check_at,
+                age_seconds=evidence_check_age,
             )
         if source == "direct":
             return AccountBuilderDTO(
@@ -2106,8 +2139,8 @@ class UserApplicationService:
                 agent_expires_at_ms=_int_or_none(
                     _row_value(await self._validation_row(account_id), "expired_ms", None)
                 ),
-                last_check_at=now,
-                age_seconds=0,
+                last_check_at=evidence_check_at,
+                age_seconds=evidence_check_age,
             )
         if not refresh:
             return await self._cached_builder_dto(
@@ -2192,25 +2225,28 @@ class UserApplicationService:
         evidence_at = verified_at
         evidence_age = max(int((now - verified_at).total_seconds()), 0)
         if await self._builder_verified(account_id):
-            if agent_expires is not None and (
-                agent_expires - int(now.timestamp() * 1000) <= BUILDER_EXPIRY_WARNING_MS
-            ):
-                # Same expiring verdict as the fresh path: without this,
-                # a just-refreshed expiring proof would read VERIFIED here
-                # and the reauthorization prepare gate could never open.
-                return AccountBuilderDTO(
-                    **base,  # type: ignore[arg-type]
-                    state=AccountBuilderState.EXPIRING,
-                    reason=AccountBuilderReason.AGENT_EXPIRING,
-                    remediation=AccountBuilderRemediation.REAUTHORIZE,
-                    last_check_at=evidence_at,
-                    age_seconds=evidence_age,
-                )
             return AccountBuilderDTO(
                 **base,  # type: ignore[arg-type]
                 state=AccountBuilderState.VERIFIED,
                 reason=AccountBuilderReason.NONE,
                 remediation=None,
+                last_check_at=evidence_at,
+                age_seconds=evidence_age,
+            )
+        if (
+            agent_expires is not None
+            and agent_expires - int(now.timestamp() * 1000) <= BUILDER_EXPIRY_WARNING_MS
+            and await self._builder_proof_fresh(account_id)
+        ):
+            # Same expiring verdict as the fresh path: without this, a
+            # just-refreshed expiring proof would read STALE here (the
+            # shared rail is False inside the warning window by design)
+            # and the reauthorization prepare gate could never open.
+            return AccountBuilderDTO(
+                **base,  # type: ignore[arg-type]
+                state=AccountBuilderState.EXPIRING,
+                reason=AccountBuilderReason.AGENT_EXPIRING,
+                remediation=AccountBuilderRemediation.REAUTHORIZE,
                 last_check_at=evidence_at,
                 age_seconds=evidence_age,
             )

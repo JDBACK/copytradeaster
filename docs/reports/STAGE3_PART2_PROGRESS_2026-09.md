@@ -594,6 +594,17 @@ confirm on prod. Separate prod finding (not P2.6): resume refused with
 global `allow_new_entries=false` — correct fail-closed, owner lifts via
 «Администрирование» screen.
 
+Re-review follow-up (1 blocker + 1 tail, same scope, no P2.7):
+`_builder_verified()` now returns False inside the
+`BUILDER_EXPIRY_WARNING_MS` window (fresh 5-day proof → Account EXPIRING,
+Dashboard/Status rails False); the cached EXPIRING branch was hoisted out
+of the verified() gate onto the shared `_builder_proof_fresh()` core so a
+fresh-but-expiring proof still reads EXPIRING (not STALE); direct and
+disconnected paths report the real permission `checked_at` (or None) as
+`last_check_at` instead of the screen-open moment. Regression: +4 unit
+tests (all 4 fail on the pre-fix code), live reauth phase 0 asserts
+rails=false with rails=true kept after the 30-day reauth.
+
 ### Corrective поверх `9bcbc21` (независимое review, 6 findings)
 
 * C1 — единый trust verdict стал действительно fresh: `builder_verified=True`

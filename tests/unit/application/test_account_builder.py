@@ -1082,3 +1082,71 @@ async def test_pre_lock_direct_replacement_cannot_be_repromoted(builder_env):
     assert snapshot["identity_source"] == "direct"
     assert snapshot["builder_address"] is None
     assert snapshot["builder_verified_at"] is None
+
+
+# --- Corrective follow-up (re-review): EXPIRING is not verified, anywhere.
+
+
+async def test_trust_verdict_false_for_expiring_agent(builder_env):
+    db, _, service = builder_env
+    await _seed_builder_account(db, NOW)
+    now_ms = int(NOW.timestamp() * 1000)
+    await AgentValidationRepo(db).upsert(
+        "tg-7", validation=_valid_record(expired_ms=now_ms + 5 * 24 * 60 * 60 * 1000)
+    )
+
+    # Proof is fresh and structurally bound, but the Agent sits inside the
+    # reauthorization warning window: the shared rail must read False.
+    assert await service._builder_proof_fresh("tg-7") is True
+    assert await service._builder_verified("tg-7") is False
+
+
+async def test_expiring_cached_proof_reads_expiring_with_rails_false(builder_env):
+    db, _, service = builder_env
+    await _seed_builder_account(db, NOW)
+    now_ms = int(NOW.timestamp() * 1000)
+    await AgentValidationRepo(db).upsert(
+        "tg-7", validation=_valid_record(expired_ms=now_ms + 5 * 24 * 60 * 60 * 1000)
+    )
+
+    dto = await service.account_builder(7, refresh=False)
+
+    assert dto.state is AccountBuilderState.EXPIRING
+    assert dto.reason is AccountBuilderReason.AGENT_EXPIRING
+    assert dto.remediation is AccountBuilderRemediation.REAUTHORIZE
+    # Same truth feeds DashboardDTO/StatusDTO.builder_verified.
+    assert await service._builder_verified("tg-7") is False
+    dashboard = await service.dashboard(7, refresh=False)
+    assert dashboard.builder_verified is False
+    status = await service.status(7, refresh=False)
+    assert status.builder_verified is False
+
+
+async def test_direct_account_reports_no_invented_check_time(builder_env):
+    _, _, service = builder_env
+
+    dto = await service.account_builder(7, refresh=False)
+
+    assert dto.identity_source == "direct"
+    assert dto.state is AccountBuilderState.NOT_APPLICABLE
+    # No permission evidence exists: never present the screen-open moment
+    # as a check time.
+    assert dto.last_check_at is None
+
+
+async def test_direct_account_uses_permission_evidence_time(builder_env):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    db, _, service = builder_env
+    checked = NOW - timedelta(hours=1)
+    await AgentValidationRepo(db).upsert(
+        "tg-7", validation=replace(_valid_record(), checked_at=checked.isoformat())
+    )
+
+    dto = await service.account_builder(7, refresh=False)
+
+    assert dto.identity_source == "direct"
+    # Real evidence time (one hour ago), not the screen-open moment.
+    assert dto.last_check_at == checked
+    assert dto.age_seconds == 3600
