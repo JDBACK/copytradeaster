@@ -28,6 +28,7 @@ from copytradeaster.application.models import (
 from copytradeaster.application.service import UserApplicationService
 from copytradeaster.aster.models import BuilderDTO
 from copytradeaster.aster.trading_api import AsterError
+from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import BuilderReauthorizeResult
 from copytradeaster.storage.database import Database
@@ -35,6 +36,7 @@ from copytradeaster.storage.repositories import (
     AccountRepo,
     AgentValidation,
     AgentValidationRepo,
+    SettingsRepo,
     TelegramUserRepo,
 )
 
@@ -90,6 +92,8 @@ class FakeBuilderRuntime:
         self.builder_records: list[BuilderDTO] | None = [_builder_dto()]
         self.builder_error: Exception | None = None
         self.rotate_on_read = False
+        self.pause_calls: list[str] = []
+        self.pause_error: Exception | None = None
 
     def identity(self, account_id: str):
         del account_id
@@ -121,6 +125,12 @@ class FakeBuilderRuntime:
     async def is_account_registered(self, account_id: str) -> bool:
         del account_id
         return True
+
+    async def pause_account(self, account_id: str) -> None:
+        """Real pause/drain seam double: logs order, injectable failure."""
+        self.pause_calls.append(account_id)
+        if self.pause_error is not None:
+            raise self.pause_error
 
 
 @pytest.fixture
@@ -667,3 +677,408 @@ async def test_submit_rejects_mismatched_account_result(builder_env):
 
     with pytest.raises(ValidationError):
         await service.builder_reauthorize_submit(7, "reauth-1", "0x" + "ab" * 65)
+
+
+# --- Corrective 1: the shared trust verdict is fresh, TTL- and config-bound.
+
+
+def _service_at(runtime, moment):
+    return UserApplicationService(
+        runtime,  # type: ignore[arg-type]
+        admin_ids=[100],
+        clock=lambda: moment,
+    )
+
+
+async def test_trust_verdict_matches_verified_account(builder_env):
+    db, _, service = builder_env
+    await _seed_builder_account(db, NOW)
+
+    dto = await service.account_builder(7, refresh=True)
+
+    assert dto.state is AccountBuilderState.VERIFIED
+    # Same truth feeds DashboardDTO/StatusDTO.builder_verified.
+    assert await service._builder_verified("tg-7") is True
+
+
+async def test_trust_verdict_false_for_stale_proof(builder_env):
+    from datetime import timedelta
+
+    db, _, service = builder_env
+    await _seed_builder_account(db, NOW - timedelta(seconds=3600))
+
+    dto = await service.account_builder(7, refresh=False)
+
+    assert dto.state is AccountBuilderState.STALE
+    assert await service._builder_verified("tg-7") is False
+
+
+async def test_trust_verdict_false_for_expired_agent(builder_env):
+    db, _, service = builder_env
+    await _seed_builder_account(db, NOW)
+    await AgentValidationRepo(db).upsert(
+        "tg-7", validation=_valid_record(expired_ms=int(NOW.timestamp() * 1000) - 1)
+    )
+
+    assert await service._builder_verified("tg-7") is False
+
+
+async def test_trust_verdict_false_for_changed_builder_address(builder_env):
+    db, runtime, service = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.cfg.builder_address = "0x9999999999999999999999999999999999999999"
+
+    assert await service._builder_verified("tg-7") is False
+
+
+async def test_trust_verdict_false_for_changed_fee_cap(builder_env):
+    db, runtime, service = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.cfg.max_fee_rate = "0.0002"
+
+    assert await service._builder_verified("tg-7") is False
+
+
+async def test_trust_verdict_accepts_decimal_equivalent_fee_cap(builder_env):
+    db, runtime, service = builder_env
+    await _seed_builder_account(db, NOW)
+    # Same cap, different representation: Decimal-equivalent, never float.
+    runtime.cfg.max_fee_rate = "0.00010"
+
+    dto = await service.account_builder(7, refresh=True)
+
+    assert dto.state is AccountBuilderState.VERIFIED
+    assert await service._builder_verified("tg-7") is True
+
+
+async def test_trust_verdict_false_after_signer_replacement(builder_env):
+    db, runtime, service = builder_env
+    await _seed_builder_account(db, NOW)
+    await AgentValidationRepo(db).upsert("tg-7", validation=_valid_record(signer=NEW_SIGNER))
+    runtime.signer = SIGNER_ADDRESS
+
+    assert await service._builder_verified("tg-7") is False
+    dto = await service.account_builder(7, refresh=False)
+    assert dto.state is AccountBuilderState.BLOCKED
+
+
+# --- Corrective 5: evidence timestamps are never refreshed without evidence.
+
+
+async def test_cached_read_does_not_refresh_evidence_time(builder_env):
+    from datetime import timedelta
+
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    service = _service_at(runtime, NOW + timedelta(seconds=30))
+
+    dto = await service.account_builder(7, refresh=False)
+
+    assert dto.state is AccountBuilderState.VERIFIED
+    assert dto.verified_at == NOW
+    assert dto.last_check_at == NOW
+    assert dto.age_seconds == 30
+
+
+async def test_stale_after_ttl_preserves_original_timestamp(builder_env):
+    from datetime import timedelta
+
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW - timedelta(seconds=3600))
+    service = _service_at(runtime, NOW)
+
+    dto = await service.account_builder(7, refresh=False)
+
+    assert dto.state is AccountBuilderState.STALE
+    assert dto.last_check_at == NOW - timedelta(seconds=3600)
+    assert dto.age_seconds == 3600
+
+
+async def test_transient_failure_preserves_evidence_time(builder_env):
+    from datetime import timedelta
+
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.permission_error = RuntimeError("aster-is-down")
+    service = _service_at(runtime, NOW + timedelta(seconds=30))
+
+    dto = await service.account_builder(7, refresh=True)
+
+    assert dto.state is AccountBuilderState.STALE
+    assert dto.verified_at == NOW
+    assert dto.last_check_at == NOW
+
+
+async def test_successful_refresh_updates_evidence_time(builder_env):
+    from datetime import timedelta
+
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    service = _service_at(runtime, NOW + timedelta(seconds=30))
+
+    dto = await service.account_builder(7, refresh=True)
+
+    assert dto.state is AccountBuilderState.VERIFIED
+    assert dto.verified_at == NOW + timedelta(seconds=30)
+    assert dto.last_check_at == NOW + timedelta(seconds=30)
+    assert dto.age_seconds == 0
+
+
+async def test_unavailable_without_snapshot_has_no_evidence_time(builder_env):
+    from datetime import timedelta
+
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    await AccountRepo(db).clear_builder_snapshot("tg-7")
+    runtime.permission_error = RuntimeError("aster-is-down")
+    service = _service_at(runtime, NOW + timedelta(seconds=30))
+
+    dto = await service.account_builder(7, refresh=True)
+    assert dto.state is AccountBuilderState.UNAVAILABLE
+    assert dto.last_check_at is None
+    assert dto.age_seconds == 0
+
+    cached = await service.account_builder(7, refresh=False)
+    assert cached.state is AccountBuilderState.UNAVAILABLE
+    assert cached.last_check_at is None
+
+
+async def test_blocked_mismatch_has_no_evidence_time(builder_env):
+    db, runtime, service = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.builder_records = [
+        BuilderDTO.model_validate(
+            {
+                "userAddress": USER_ADDRESS,
+                "builderAddress": "0x9999999999999999999999999999999999999999",
+                "builderName": "copytradeaster",
+                "maxFeeRate": "0.0001",
+            }
+        )
+    ]
+
+    dto = await service.account_builder(7, refresh=True)
+
+    assert dto.state is AccountBuilderState.BLOCKED
+    assert dto.last_check_at is None
+
+
+# --- Corrective 2: BLOCKED invalidates, then reauthorize_prepare still opens.
+
+
+def _mismatch_records():
+    return [
+        BuilderDTO.model_validate(
+            {
+                "userAddress": USER_ADDRESS,
+                "builderAddress": "0x9999999999999999999999999999999999999999",
+                "builderName": "copytradeaster",
+                "maxFeeRate": "0.0001",
+            }
+        )
+    ]
+
+
+async def test_blocked_mismatch_allows_reauthorize_prepare(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.builder_records = _mismatch_records()
+    onboarding = FakeBuilderOnboarding()
+    service = _service_with_reauth(runtime, onboarding)
+
+    dto = await service.account_builder(7, refresh=True)
+    assert dto.state is AccountBuilderState.BLOCKED
+    assert dto.reason is AccountBuilderReason.BUILDER_MISMATCH
+    assert dto.remediation is AccountBuilderRemediation.REAUTHORIZE
+    snapshot = await AccountRepo(db).get_builder_snapshot("tg-7")
+    assert snapshot is not None
+    assert snapshot["builder_address"] is None
+
+    result = await service.builder_reauthorize_prepare(7)
+
+    assert result.pending_id == "reauth-test-1"
+    assert onboarding.prepare_calls == [7]
+    assert runtime.pause_calls == ["tg-7"]
+
+
+async def test_revoked_agent_blocked_allows_reauthorize_prepare(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.permission_error = AsterError(-2015, "Invalid API-key, IP, or permissions")
+    onboarding = FakeBuilderOnboarding()
+    service = _service_with_reauth(runtime, onboarding)
+
+    dto = await service.account_builder(7, refresh=True)
+    assert dto.state is AccountBuilderState.BLOCKED
+    assert dto.reason is AccountBuilderReason.AGENT_INVALID
+    snapshot = await AccountRepo(db).get_builder_snapshot("tg-7")
+    assert snapshot is not None
+    assert snapshot["builder_address"] is None
+
+    result = await service.builder_reauthorize_prepare(7)
+
+    assert result.pending_id == "reauth-test-1"
+    assert onboarding.prepare_calls == [7]
+
+
+async def test_transient_stale_does_not_open_reauthorize(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    runtime.permission_error = RuntimeError("aster-is-down")
+    onboarding = FakeBuilderOnboarding()
+    service = _service_with_reauth(runtime, onboarding)
+
+    dto = await service.account_builder(7, refresh=True)
+    assert dto.state is AccountBuilderState.STALE
+
+    with pytest.raises(ValidationError):
+        await service.builder_reauthorize_prepare(7)
+    assert onboarding.prepare_calls == []
+
+
+async def test_unavailable_without_snapshot_does_not_open_reauthorize(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    await AccountRepo(db).clear_builder_snapshot("tg-7")
+    runtime.permission_error = RuntimeError("aster-is-down")
+    onboarding = FakeBuilderOnboarding()
+    service = _service_with_reauth(runtime, onboarding)
+
+    dto = await service.account_builder(7, refresh=True)
+    assert dto.state is AccountBuilderState.UNAVAILABLE
+
+    with pytest.raises(ValidationError):
+        await service.builder_reauthorize_prepare(7)
+    assert onboarding.prepare_calls == []
+
+
+# --- Corrective 3: real runtime pause/drain before any wallet payload.
+
+
+def _expiring_env(db, runtime):
+    now_ms = int(NOW.timestamp() * 1000)
+    runtime.permission_record = _valid_record(expired_ms=now_ms + 3 * 24 * 60 * 60 * 1000)
+    return AgentValidationRepo(db).upsert("tg-7", validation=runtime.permission_record)
+
+
+async def _seed_open_policy(db: Database) -> None:
+    """Production always has a policy row; patch_policy never upserts."""
+    from decimal import Decimal
+
+    await SettingsRepo(db).upsert_policy(
+        RiskPolicy(
+            risk_percent=Decimal("0.01"),
+            max_leverage=20,
+            max_entry_deviation_pct=Decimal("1"),
+        ),
+        "tg-7",
+    )
+
+
+class _PauseOrderOnboarding(FakeBuilderOnboarding):
+    """Fails unless the runtime drain landed before the wallet payload."""
+
+    def __init__(self, runtime) -> None:
+        super().__init__()
+        self.runtime = runtime
+
+    async def reauthorize_prepare(self, telegram_user_id: int):
+        assert self.runtime.pause_calls == ["tg-7"]
+        return await super().reauthorize_prepare(telegram_user_id)
+
+
+async def test_reauthorize_prepare_pauses_before_payload(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    await _seed_open_policy(db)
+    await _expiring_env(db, runtime)
+    onboarding = _PauseOrderOnboarding(runtime)
+    service = _service_with_reauth(runtime, onboarding)
+
+    result = await service.builder_reauthorize_prepare(7)
+
+    assert result.pending_id == "reauth-test-1"
+    assert runtime.pause_calls == ["tg-7"]
+    assert onboarding.prepare_calls == [7]
+    assert service._settings is not None
+    policy = await service._settings.get_policy("tg-7")
+    assert policy is not None
+    assert policy.allow_new_entries is False
+
+
+async def test_reauthorize_prepare_fails_closed_when_pause_fails(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    await _seed_open_policy(db)
+    await _expiring_env(db, runtime)
+    runtime.pause_error = RuntimeError("drain failed")
+    onboarding = FakeBuilderOnboarding()
+    service = _service_with_reauth(runtime, onboarding)
+
+    with pytest.raises(ServiceUnavailableError):
+        await service.builder_reauthorize_prepare(7)
+    # No wallet payload after a failed pause ...
+    assert onboarding.prepare_calls == []
+    # ... and new entries stay forbidden.
+    assert service._settings is not None
+    policy = await service._settings.get_policy("tg-7")
+    assert policy is not None
+    assert policy.allow_new_entries is False
+
+
+async def test_reauthorize_submit_keeps_account_paused(builder_env):
+    db, runtime, _ = builder_env
+    await _seed_builder_account(db, NOW)
+    await _seed_open_policy(db)
+    await _expiring_env(db, runtime)
+    onboarding = FakeBuilderOnboarding()
+    service = _service_with_reauth(runtime, onboarding)
+
+    await service.builder_reauthorize_prepare(7)
+    result = await service.builder_reauthorize_submit(7, "reauth-test-1", "0x" + "ab" * 65)
+
+    assert result.paused is True
+    assert service._settings is not None
+    policy = await service._settings.get_policy("tg-7")
+    assert policy is not None
+    assert policy.allow_new_entries is False
+
+
+# --- Corrective 4: a pre-lock row can never promote direct back to builder.
+
+
+async def test_pre_lock_direct_replacement_cannot_be_repromoted(builder_env):
+    db, runtime, service = builder_env
+    await _seed_builder_account(db, NOW)
+    real_account_row = service._account_row
+    calls = {"n": 0}
+
+    async def _row_with_midflight_replacement(account_id: str):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            # A direct replacement commits between the pre-lock read and
+            # the locked refresh: new signer, rewritten credentials, proof
+            # cleared.  The version marker moves too, exactly like the
+            # production race where version_before is read post-replacement.
+            runtime.signer = NEW_SIGNER
+            runtime.version = "v2"
+            await AccountRepo(db).set_identity_direct("tg-7")
+            await AgentValidationRepo(db).upsert(
+                "tg-7", validation=_valid_record(signer=NEW_SIGNER)
+            )
+        return await real_account_row(account_id)
+
+    service._account_row = _row_with_midflight_replacement  # type: ignore[method-assign]
+
+    dto = await service.account_builder(7, refresh=True)
+
+    assert calls["n"] >= 2
+    # Fail closed on the fresh state: direct, never re-promoted, even though
+    # the new identity's Aster Builder record would pass the validator.
+    assert dto.identity_source == "direct"
+    assert dto.state is AccountBuilderState.NOT_APPLICABLE
+    snapshot = await AccountRepo(db).get_builder_snapshot("tg-7")
+    assert snapshot is not None
+    assert snapshot["identity_source"] == "direct"
+    assert snapshot["builder_address"] is None
+    assert snapshot["builder_verified_at"] is None

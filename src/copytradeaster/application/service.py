@@ -1939,12 +1939,51 @@ class UserApplicationService:
         return signer.strip()
 
     async def _builder_verified(self, account_id: str) -> bool:
-        """Cheap shared Builder verdict for the trust rails (no network).
+        """Fresh shared Builder verdict for the trust rails (no network).
 
-        True only for a durable proof bound to the current identity: builder
-        source, complete snapshot, live validation triple, valid expiries and
-        a matching signer.  This is the same truth the Account screen
-        evaluates with freshness; the rails never compute their own policy.
+        True only when the durable proof is complete AND fresh AND bound to
+        the current config: builder source, complete snapshot, live
+        validation triple, matching signer, valid expiries, a
+        ``builder_verified_at`` inside the same freshness TTL the Account
+        screen uses, a persisted Builder address equal to the currently
+        configured one, and a persisted fee cap Decimal-equivalent to the
+        configured cap (never float).  Stale, expiring, invalid and
+        config-mismatched proofs all read False here, exactly like the
+        Account screen refuses them VERIFIED.
+        """
+        try:
+            if not await self._durable_builder_proof_ok(account_id):
+                return False
+            row = await self._account_row(account_id)
+            verified_at = _as_datetime(_row_value(row, "builder_verified_at", None))
+            if verified_at is None:
+                return False
+            if (self._now() - verified_at).total_seconds() > self._permission_ttl:
+                return False
+            expected = self._builder_expected()
+            if expected is None:
+                return False
+            expected_address, _, expected_fee = expected
+            persisted_address = str(_row_value(row, "builder_address", "") or "")
+            if persisted_address.strip().lower() != expected_address.strip().lower():
+                return False
+            try:
+                persisted_fee = Decimal(str(_row_value(row, "builder_max_fee_rate", "")))
+                configured_fee = Decimal(str(expected_fee))
+            except (InvalidOperation, ValueError, TypeError, AttributeError):
+                return False
+            if not persisted_fee.is_finite() or not configured_fee.is_finite():
+                return False
+            return persisted_fee == configured_fee
+        except Exception:
+            return False
+
+    async def _durable_builder_proof_ok(self, account_id: str) -> bool:
+        """Structural proof check: complete snapshot bound to live identity.
+
+        No freshness TTL and no config comparison here: a proof that aged
+        out reads STALE (not BLOCKED) on the Account screen, while the
+        trust rails additionally require freshness via `_builder_verified`.
         """
         try:
             row = await self._account_row(account_id)
@@ -2075,7 +2114,39 @@ class UserApplicationService:
                 account_id, row, account_masked, signer_masked, permission, now
             )
         async with self._account_lock(account_id):
-            return await self._refresh_builder_dto(account_id, row, account_masked, signer_masked)
+            return await self._locked_builder_refresh(context, account_id, signer_masked)
+
+    async def _locked_builder_refresh(
+        self,
+        context: UserContext,
+        account_id: str,
+        signer_masked: str | None,
+    ) -> AccountBuilderDTO:
+        """Locked refresh core: a pre-lock row is never trusted (C4).
+
+        Must be called with `_account_lock(account_id)` held.  Re-reads the
+        authoritative account row: a direct replacement or disconnect that
+        landed after the pre-lock read fails closed here (direct
+        re-evaluates to not-applicable, never promoted back to builder).
+        Only a still-builder row reaches the signed reads.
+        """
+        fresh = await self._account_row(account_id)
+        if (
+            fresh is None
+            or str(_row_value(fresh, "role", "")) != "follower"
+            or not _is_true(_row_value(fresh, "enabled", 0))
+            or str(_row_value(fresh, "identity_source", "direct") or "direct") != "builder"
+        ):
+            await self._repair_suspect_proof(account_id)
+            # Fail closed on the fresh state: direct/disabled re-evaluates
+            # to its cheap verdict; a stale pre-lock row can never commit.
+            return await self._account_builder_for(context, fresh, account_id, refresh=False)
+        fresh_masked = mask_address(str(_row_value(fresh, "user_address", "")))
+        live_signer = await self._identity(account_id)
+        permission, _ = await self._permission(account_id)
+        return await self._refresh_builder_dto(
+            account_id, fresh, fresh_masked, live_signer or signer_masked
+        )
 
     async def _cached_builder_dto(
         self,
@@ -2112,40 +2183,48 @@ class UserApplicationService:
                 state=AccountBuilderState.UNAVAILABLE,
                 reason=AccountBuilderReason.SNAPSHOT_MISSING,
                 remediation=AccountBuilderRemediation.REFRESH,
-                last_check_at=now,
+                # No snapshot, no successful evidence: never invent a check time.
+                last_check_at=None,
                 age_seconds=0,
             )
+        # Evidence time, not wall-clock: a cached read must never make the
+        # proof look younger than its last real confirmation.
+        evidence_at = verified_at
+        evidence_age = max(int((now - verified_at).total_seconds()), 0)
         if await self._builder_verified(account_id):
-            if (now - verified_at).total_seconds() <= self._permission_ttl:
-                if agent_expires is not None and (
-                    agent_expires - int(now.timestamp() * 1000) <= BUILDER_EXPIRY_WARNING_MS
-                ):
-                    # Same expiring verdict as the fresh path: without this,
-                    # a just-refreshed expiring proof would read VERIFIED here
-                    # and the reauthorization prepare gate could never open.
-                    return AccountBuilderDTO(
-                        **base,  # type: ignore[arg-type]
-                        state=AccountBuilderState.EXPIRING,
-                        reason=AccountBuilderReason.AGENT_EXPIRING,
-                        remediation=AccountBuilderRemediation.REAUTHORIZE,
-                        last_check_at=now,
-                        age_seconds=max(int((now - verified_at).total_seconds()), 0),
-                    )
+            if agent_expires is not None and (
+                agent_expires - int(now.timestamp() * 1000) <= BUILDER_EXPIRY_WARNING_MS
+            ):
+                # Same expiring verdict as the fresh path: without this,
+                # a just-refreshed expiring proof would read VERIFIED here
+                # and the reauthorization prepare gate could never open.
                 return AccountBuilderDTO(
                     **base,  # type: ignore[arg-type]
-                    state=AccountBuilderState.VERIFIED,
-                    reason=AccountBuilderReason.NONE,
-                    remediation=None,
-                    last_check_at=now,
-                    age_seconds=max(int((now - verified_at).total_seconds()), 0),
+                    state=AccountBuilderState.EXPIRING,
+                    reason=AccountBuilderReason.AGENT_EXPIRING,
+                    remediation=AccountBuilderRemediation.REAUTHORIZE,
+                    last_check_at=evidence_at,
+                    age_seconds=evidence_age,
                 )
+            return AccountBuilderDTO(
+                **base,  # type: ignore[arg-type]
+                state=AccountBuilderState.VERIFIED,
+                reason=AccountBuilderReason.NONE,
+                remediation=None,
+                last_check_at=evidence_at,
+                age_seconds=evidence_age,
+            )
+        if await self._durable_builder_proof_ok(account_id):
+            # Structurally bound but not fresh (aged out) or no longer
+            # matching current config: stale, never verified; an
+            # authoritative refresh resolves it to VERIFIED or BLOCKED.
             return AccountBuilderDTO(
                 **base,  # type: ignore[arg-type]
                 state=AccountBuilderState.STALE,
                 reason=AccountBuilderReason.TRANSIENT_UNAVAILABLE,
                 remediation=AccountBuilderRemediation.REFRESH,
-                last_check_at=now,
-                age_seconds=max(int((now - verified_at).total_seconds()), 0),
+                last_check_at=evidence_at,
+                age_seconds=evidence_age,
             )
         # Durable evidence disproves the proof (bad triple/expiry/signer):
         # blocked without spending a signed read.
@@ -2154,8 +2233,8 @@ class UserApplicationService:
             state=AccountBuilderState.BLOCKED,
             reason=AccountBuilderReason.AGENT_INVALID,
             remediation=AccountBuilderRemediation.REAUTHORIZE,
-            last_check_at=now,
-            age_seconds=(max(int((now - verified_at).total_seconds()), 0) if verified_at else 0),
+            last_check_at=evidence_at,
+            age_seconds=evidence_age,
         )
 
     async def _stale_or_unavailable_dto(
@@ -2200,7 +2279,9 @@ class UserApplicationService:
                 permission=permission,
                 agent_expires_at_ms=agent_expires,
                 verified_at=verified_at,
-                last_check_at=now,
+                # A transient failure is not new evidence: keep the time of
+                # the last real confirmation, never wall-clock.
+                last_check_at=verified_at,
                 age_seconds=age,
             )
         return AccountBuilderDTO(
@@ -2212,7 +2293,31 @@ class UserApplicationService:
             signer_masked=signer_masked,
             permission=permission,
             agent_expires_at_ms=agent_expires,
-            last_check_at=now,
+            # No bound snapshot, no successful evidence: never invent one.
+            last_check_at=None,
+            age_seconds=0,
+        )
+
+    async def _identity_changed_dto(
+        self,
+        account_masked: str | None,
+        signer_masked: str | None,
+        permission: PermissionSummary,
+    ) -> AccountBuilderDTO:
+        """Fail-closed verdict when the identity moved mid-read (C4).
+
+        No builder fields, no invented evidence time: the caller must
+        refresh again against the new identity.
+        """
+        return AccountBuilderDTO(
+            identity_source="builder",
+            state=AccountBuilderState.STALE,
+            reason=AccountBuilderReason.IDENTITY_CHANGED,
+            remediation=AccountBuilderRemediation.REFRESH,
+            account_masked=account_masked,
+            signer_masked=signer_masked,
+            permission=permission,
+            last_check_at=None,
             age_seconds=0,
         )
 
@@ -2246,7 +2351,8 @@ class UserApplicationService:
                 signer_masked=signer_masked,
                 permission=permission,
                 agent_expires_at_ms=_int_or_none(_row_value(validation, "expired_ms", None)),
-                last_check_at=self._now(),
+                # Proof invalidated, no successful evidence: never invent one.
+                last_check_at=None,
                 age_seconds=0,
             )
         except ServiceUnavailableError:
@@ -2291,14 +2397,14 @@ class UserApplicationService:
                 signer_masked=signer_masked,
                 permission=permission,
                 agent_expires_at_ms=_int_or_none(_row_value(validation, "expired_ms", None)),
-                last_check_at=self._now(),
+                # Proof invalidated, no successful evidence: never invent one.
+                last_check_at=None,
                 age_seconds=0,
             )
         try:
             version_after = await self._account_version(account_id)
         except ServiceUnavailableError:
             # Credentials vanished mid-read (disconnect won the race).
-            moment = self._now()
             permission, _ = await self._permission(account_id)
             return AccountBuilderDTO(
                 identity_source="builder",
@@ -2308,24 +2414,29 @@ class UserApplicationService:
                 account_masked=account_masked,
                 signer_masked=signer_masked,
                 permission=permission,
-                last_check_at=moment,
+                last_check_at=None,
                 age_seconds=0,
             )
         if version_after != version_before:
             await self._repair_suspect_proof(account_id)
-            moment = self._now()
             permission, _ = await self._permission(account_id)
-            return AccountBuilderDTO(
-                identity_source="builder",
-                state=AccountBuilderState.STALE,
-                reason=AccountBuilderReason.IDENTITY_CHANGED,
-                remediation=AccountBuilderRemediation.REFRESH,
-                account_masked=account_masked,
-                signer_masked=signer_masked,
-                permission=permission,
-                last_check_at=moment,
-                age_seconds=0,
-            )
+            return await self._identity_changed_dto(account_masked, signer_masked, permission)
+        # Explicit source-transition binding: the version marker covers
+        # credentials/validation, but a builder→direct→builder swing must
+        # never let a stale pre-lock row promote direct back to builder.
+        # Re-read the authoritative row right before the durable commit.
+        commit_row = await self._account_row(account_id)
+        if (
+            commit_row is None
+            or str(_row_value(commit_row, "role", "")) != "follower"
+            or not _is_true(_row_value(commit_row, "enabled", 0))
+            or str(_row_value(commit_row, "identity_source", "direct") or "direct") != "builder"
+            or str(_row_value(commit_row, "user_address", ""))
+            != str(_row_value(row, "user_address", ""))
+        ):
+            await self._repair_suspect_proof(account_id)
+            permission, _ = await self._permission(account_id)
+            return await self._identity_changed_dto(account_masked, signer_masked, permission)
         # The proof belongs to the current identity: persist it durably.
         moment = self._now()
         moment_ms = int(moment.timestamp() * 1000)
@@ -2385,7 +2496,16 @@ class UserApplicationService:
         )
 
     async def builder_reauthorize_prepare(self, user_id: int) -> BuilderPrepareDTO:
-        """Start a same-signer re-approval; allowed only from a typed state."""
+        """Start a same-signer re-approval; allowed only from a typed state.
+
+        Eligibility is determined by an authoritative locked refresh, never
+        by a cached read: after an authoritative BLOCKED the old snapshot is
+        already invalidated, and only a fresh signed verdict can prove that
+        reauthorization is actually required.  Before any wallet payload is
+        issued the account is paused through the same safety seam as
+        `pause()` (durable flag + runtime drain); a pause failure fails
+        closed with no payload.  The account stays paused after submit.
+        """
         try:
             await self._ensure_testnet()
             if self._builder_onboarding is None:
@@ -2396,16 +2516,30 @@ class UserApplicationService:
                 raise ValidationError("account is disconnected")
             if str(_row_value(row, "identity_source", "direct") or "direct") != "builder":
                 raise ValidationError("reauthorization requires a builder account")
-            current = await self._account_builder_for(context, row, account_id, refresh=False)
-            if current.state not in {
-                AccountBuilderState.EXPIRING,
-                AccountBuilderState.BLOCKED,
-            }:
-                raise ValidationError("reauthorization is not required")
+            # Fail fast before any mutation when the runtime cannot drain.
+            self._require_method(self._runtime, "pause_account")
             async with self._account_lock(account_id):
+                signer_masked = await self._identity(account_id)
+                current = await self._locked_builder_refresh(context, account_id, signer_masked)
+                if current.state is AccountBuilderState.BLOCKED and (
+                    current.reason is AccountBuilderReason.ACCOUNT_DISCONNECTED
+                ):
+                    raise ValidationError("account is disconnected")
+                if current.state not in {
+                    AccountBuilderState.EXPIRING,
+                    AccountBuilderState.BLOCKED,
+                }:
+                    # VERIFIED, STALE, UNAVAILABLE and NOT_APPLICABLE carry
+                    # no proven cause: refresh first, reauthorize never.
+                    raise ValidationError("reauthorization is not required")
                 await self._call_required(
                     self._settings, "patch_policy", account_id, allow_new_entries=False
                 )
+                # Same safety semantics as pause(): the durable flag alone
+                # cannot stop an admitted generation; drain it first.  A
+                # failure here fails closed: entries stay forbidden and no
+                # wallet payload is issued below.
+                await self._call_required(self._runtime, "pause_account", account_id)
                 try:
                     result = await self._call_required(
                         self._builder_onboarding, "reauthorize_prepare", context.user_id

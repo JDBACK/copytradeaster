@@ -170,7 +170,11 @@ export function AccountBuilderScreen({
       hapticNotify('success')
       setReauth({ kind: 'idle' })
       // The proof was rebuilt server-side: re-read the authoritative DTO.
+      // Same sequence guard as manual refresh: a late post-reauth response
+      // must never overwrite a newer refresh issued while it was in flight.
+      const my = ++seq.current
       const dto = await api.accountBuilder(auth, true)
+      if (seq.current !== my) return
       setLoad({ kind: 'ready', dto, transportStale: false })
     } catch (err) {
       hapticNotify('error')
@@ -267,8 +271,11 @@ export function AccountBuilderScreen({
   }
 
   const { dto, transportStale } = load
-  const state = stateCopy(dto.state)
-  const verified = isAccountBuilderVerified(dto)
+  // P2.5 pattern: past data stays visible, but a transport failure strips
+  // the green verified visual until a refresh succeeds again.  A
+  // transport-stale snapshot must never render as fresh verified.
+  const hero = transportStale ? { label: 'Данные устарели', tone: 'warning' as const } : stateCopy(dto.state)
+  const verified = isAccountBuilderVerified(dto) && !transportStale
   const canReauthorize = dto.remediation === 'reauthorize'
   const reauthBusy =
     reauth.kind === 'preparing' || reauth.kind === 'signing' || reauth.kind === 'submitting'
@@ -280,10 +287,10 @@ export function AccountBuilderScreen({
         Аккаунт и Builder
       </h1>
 
-      <section className={`status-hero tone-${state.tone}`} aria-live="polite">
-        <div className="status-hero-state">{state.label}</div>
+      <section className={`status-hero tone-${hero.tone}`} aria-live="polite">
+        <div className="status-hero-state">{hero.label}</div>
         <div className="status-hero-reason">{reasonCopy(dto.reason)}</div>
-        <span className={`dot ${state.tone === 'muted' ? '' : state.tone}`} aria-hidden />
+        <span className={`dot ${hero.tone === 'muted' ? '' : hero.tone}`} aria-hidden />
       </section>
 
       {transportStale && (

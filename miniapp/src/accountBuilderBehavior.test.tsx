@@ -11,8 +11,9 @@
 
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { api, ApiError } from './api'
+import * as wallet from './wallet'
 import { isAccountBuilderVerified, isBuilderVerified } from './accountBuilder'
 import { trustSummary } from './home'
 import { NestedRoute } from './components/AppShell'
@@ -150,21 +151,87 @@ describe('AccountBuilderScreen behavior', () => {
     expect(screen.queryByText('Переавторизовать')).toBeNull()
   })
 
-  it('failed refresh keeps shown data with a transport-stale marker', async () => {
+  it('failed refresh keeps data but drops the verified visual until retry succeeds', async () => {
     const loader = vi
       .spyOn(api, 'accountBuilder')
       .mockResolvedValueOnce(dto())
       .mockRejectedValueOnce(new ApiError(0, 'network_error', 'down'))
+      .mockResolvedValueOnce(dto())
     renderScreen()
     await screen.findByText('Builder подтверждён')
 
     fireEvent.click(screen.getByRole('button', { name: 'Перепроверить разрешения' }))
     await screen.findByText(TRANSPORT_STALE_WARNING)
-    // Shown data is not wiped.
-    expect(screen.getByText('Builder подтверждён')).toBeDefined()
+    // Shown data is not wiped ...
     expect(screen.getByText('0x2576…6EF8')).toBeDefined()
+    // ... but the green verified visual is gone until a refresh succeeds.
+    expect(screen.queryByText('Builder подтверждён')).toBeNull()
+    await screen.findByText('Данные устарели')
+    expect(document.querySelector('.status-hero')?.className).toContain('tone-warning')
+    expect(document.querySelector('.status-hero')?.className).not.toContain('tone-success')
     expect(loader).toHaveBeenCalledTimes(2)
+
+    // A successful retry restores verified and clears the warning.
+    fireEvent.click(screen.getByRole('button', { name: 'Перепроверить разрешения' }))
+    await screen.findByText('Builder подтверждён')
+    expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
+    expect(loader).toHaveBeenCalledTimes(3)
     expect(loader).toHaveBeenLastCalledWith(AUTH, true)
+  })
+
+  it('late post-reauthorization refresh never overwrites a newer refresh', async () => {
+    const expiring = () =>
+      dto({
+        state: 'expiring',
+        reason: 'agent_expiring',
+        remediation: 'reauthorize',
+        builder_name: 'proof-old',
+      })
+    const postGate = deferred<AccountBuilderDTO>()
+    const loader = vi
+      .spyOn(api, 'accountBuilder')
+      .mockResolvedValueOnce(expiring())
+      .mockReturnValueOnce(postGate.promise)
+      .mockResolvedValueOnce(
+        dto({ state: 'verified', reason: 'none', remediation: null, builder_name: 'proof-new' }),
+      )
+    vi.spyOn(api, 'reauthorizePrepare').mockResolvedValue({
+      pending_id: 'reauth-1',
+      eip712: { domain: {}, message: {}, types: {} },
+    })
+    vi.spyOn(api, 'reauthorizeSubmit').mockResolvedValue({
+      account_id: 'tg-7',
+      account_masked: '0x1111…1111',
+      signer_masked: '0x2222…2222',
+      builder_name: 'copytradeaster',
+      max_fee_rate: '0.0001',
+      agent_expires_at_ms: 2_000_000_000_000,
+      paused: true,
+    })
+    vi.spyOn(wallet, 'createInjectedAdapter').mockReturnValue({
+      kind: 'injected',
+      connect: async () => '0xabc',
+      switchToRegistrationChain: async () => {},
+      signTypedData: async () => '0xsig',
+    })
+    renderScreen()
+    await screen.findByText('Требуется переавторизация')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Переавторизовать' }))
+    await screen.findByText('Подписать в кошельке')
+    fireEvent.click(screen.getByRole('button', { name: 'Подписать в кошельке' }))
+
+    // The post-submit refresh is in flight; a manual refresh issued
+    // meanwhile must win, and the late post-reauth response must be dropped.
+    const refreshButton = screen.getByRole('button', { name: 'Перепроверить разрешения' })
+    await waitFor(() => expect(refreshButton).toBeEnabled())
+    fireEvent.click(refreshButton)
+    await screen.findByText('proof-new')
+
+    postGate.resolve(expiring())
+    await screen.findByText('proof-new')
+    expect(screen.queryByText('proof-old')).toBeNull()
+    expect(loader).toHaveBeenCalledTimes(3)
   })
 
   it('duplicate refresh taps never start two mutations', async () => {

@@ -581,6 +581,51 @@ Gates (факт):
 
 ## P2.6 — Account + Builder attestation: IMPLEMENTED / AWAITING REVIEW + OWNER ACCEPTANCE (2026-09-03)
 
+### Corrective поверх `9bcbc21` (независимое review, 6 findings)
+
+* C1 — единый trust verdict стал действительно fresh: `builder_verified=True`
+  только при enabled follower + `identity_source=builder` + complete snapshot +
+  triple + matching signer + valid expiries + `builder_verified_at` внутри той
+  же TTL (60s), что у AccountBuilderDTO + persisted address == текущему
+  configured + fee Decimal-equivalent (без float). Stale/expiring/invalid/
+  config-mismatch → rails `False`; cached DTO делит aged-out (STALE) и
+  disproven (BLOCKED) через `_durable_builder_proof_ok`.
+* C2 — `BLOCKED → reauthorize` починен: eligibility определяет authoritative
+  locked refresh (`_locked_builder_refresh`), а не cached read; после
+  invalidate prepare реально открывается для EXPIRING/BLOCKED, для
+  transient/UNAVAILABLE/direct — `ValidationError`, без `force`.
+* C3 — перед выдачей wallet payload: durable `allow_new_entries=False` +
+  required `runtime.pause_account()` (тот же seam, что `pause()`); падение
+  pause → fail closed без payload, entries остаются запрещены; submit не
+  resume'ит.
+* C4 — stale-row race закрыт: `_locked_builder_refresh` заново читает
+  authoritative row под `_account_lock` (direct/disabled → fail-closed
+  verdict, promotion `direct → builder` невозможна) + явная pre-commit
+  source/user/enabled сверка перед `set_builder_snapshot`.
+* C5 — evidence timestamps: `last_check_at` = время последнего реального
+  подтверждения (`verified_at`), не wall-clock; cached/stale/transient не
+  молодят proof; нет snapshot → `None`, без выдуманных проверок.
+* C6 — frontend: transport-stale hero становится amber (`Данные устарели`,
+  P2.5 pattern), зелёный verified снимается до успешного retry; данные не
+  стираются; post-reauthorization refresh подключён к существующему `seq`
+  guard (race доказан падающим тестом без guard).
+
+Regression (backend, `test_account_builder.py` +20): trust TTL/config (7),
+evidence time (6), BLOCKED→prepare sequences (4), pause order/fail-closed/
+stays-paused (3), pre-lock replacement race (1). 13 из 20 падают на коде до
+corrective (проверено stash). Frontend: переписан failed-refresh тест
+(stale-visual + retry→verified) + новый post-reauth seq race тест.
+
+Live reauthorization gate (`tests/testnet/test_live_builder_reauthorize.py`,
+scratch DB, funded throwaway wallet, прод-БД не тронута): short-lived
+approval (5d) → EXPIRING → service prepare (real pause/drain) → main-wallet
+EIP-712 → `/approveAgent` → same signer, proof renewed, still EXPIRING,
+paused; затем normal approval (30d) → VERIFIED, оба trust rail `true`,
+same signer, paused, orders 0. По пути найден и зафиксирован wiring-факт:
+service-level submit требует `runtime_client_factory` (как в проде через
+`BuilderOnboardingService` в адаптерах); без него — честный fail-closed
+`SIGNED_READ_FAILED`, не silent fallback.
+
 Nested control screen поверх `UserApplicationService.account_builder()`.
 P2.5 не рефакторился (только trust-интеграция); trading/copy engine,
 planner/executor/coordinator/reconciler не тронуты; P2.7 не начинался.
