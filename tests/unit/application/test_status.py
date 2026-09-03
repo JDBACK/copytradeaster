@@ -30,6 +30,7 @@ from copytradeaster.application.models import (
     StatusState,
 )
 from copytradeaster.application.service import UserApplicationService
+from copytradeaster.aster.trading_api import AsterError, RateLimitError
 from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
@@ -274,6 +275,71 @@ async def test_transient_permission_failure_keeps_cached_snapshot_as_stale(statu
     # Last safe permission snapshot stays visible, but not as fresh proof.
     assert dto.permissions.can_read is True
     assert dto.permissions.can_withdraw is False
+
+
+async def test_rate_limit_permission_failure_is_stale_not_blocked(status_env):
+    """A 429/418 during the signed read is transient, not a rejection."""
+    db, runtime, service = status_env
+    checked = NOW - timedelta(seconds=10)
+    await _seed_validation(db, checked)
+    runtime.permission_error = RateLimitError(-1003, "rate limited", 429)
+
+    dto = await service.status(7, refresh=True)
+
+    assert dto.state is StatusState.STALE
+    assert dto.permissions_state is PermissionsState.STALE
+    assert dto.reason is StatusReason.PERMISSION_STALE
+    assert dto.remediation is StatusRemediation.REFRESH
+    # Last safe permission snapshot stays visible, but not as fresh proof.
+    assert dto.permissions.can_read is True
+    assert dto.permissions.can_withdraw is False
+
+
+async def test_http_5xx_permission_failure_is_stale_not_blocked(status_env):
+    """An HTTP 5xx during the signed read is transient, not a rejection."""
+    db, runtime, service = status_env
+    checked = NOW - timedelta(seconds=10)
+    await _seed_validation(db, checked)
+    runtime.permission_error = AsterError(-1000, "boom", 503)
+
+    dto = await service.status(7, refresh=True)
+
+    assert dto.state is StatusState.STALE
+    assert dto.permissions_state is PermissionsState.STALE
+    assert dto.reason is StatusReason.PERMISSION_STALE
+    assert dto.remediation is StatusRemediation.REFRESH
+    assert dto.permissions.can_read is True
+    assert dto.permissions.can_withdraw is False
+    body = json.dumps(asdict(dto), default=str)
+    assert "boom" not in body
+
+
+async def test_permission_persistence_failure_is_stale_not_blocked(status_env):
+    """An upsert failure after a good signed read is infra, not rejection."""
+
+    class _FailingUpsertValidations:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def get(self, *args, **kwargs):
+            return self._delegate.get(*args, **kwargs)
+
+        async def upsert(self, *args, **kwargs):
+            raise RuntimeError("SECRET-BOOM-upsert-is-down")
+
+    db, runtime, service = status_env
+    checked = NOW - timedelta(seconds=10)
+    await _seed_validation(db, checked)
+    service._validations = _FailingUpsertValidations(service._validations)
+
+    dto = await service.status(7, refresh=True)
+
+    assert dto.state is StatusState.STALE
+    assert dto.permissions_state is PermissionsState.STALE
+    assert dto.reason is StatusReason.PERMISSION_STALE
+    assert dto.remediation is StatusRemediation.REFRESH
+    body = json.dumps(asdict(dto), default=str)
+    assert "SECRET-BOOM" not in body
 
 
 async def test_rejected_permission_refresh_is_blocked(status_env):

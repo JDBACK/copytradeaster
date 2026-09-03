@@ -76,6 +76,7 @@ from copytradeaster.application.models import (
     UserRole,
     ValidationError,
 )
+from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import (
@@ -1115,10 +1116,24 @@ class UserApplicationService:
                 last_error_code=None,
             )
             await self._call_required(self._validations, "upsert", account_id, validation=persisted)
-        except ServiceUnavailableError:
+        except _SAFE_ERRORS:
+            # Authentication/ownership/testnet boundary errors fail closed
+            # and are never relabeled as stale or rejected.
             raise
-        except Exception:
+        except AsterError:
+            # Transport / rate-limit (429/418) / HTTP 5xx during the signed
+            # read: transient infrastructure failure, never a proven
+            # permission rejection.
+            raise ServiceUnavailableError("signed Agent permission read is unavailable") from None
+        except (OnboardingError, ValueError):
+            # Proven-invalid Agent evidence (failed triple/expiry/whitelist/
+            # signature validation, or a malformed record): blocked, never
+            # served from old cache as fresh.
             raise StaleOperationError("permission refresh was rejected") from None
+        except Exception:
+            # Persistence/upsert or any other infrastructure failure is not
+            # a proven rejection either.
+            raise ServiceUnavailableError("signed Agent permission read is unavailable") from None
 
     async def _permission(
         self, account_id: str, *, refresh: bool = False

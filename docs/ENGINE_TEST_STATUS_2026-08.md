@@ -17,10 +17,10 @@
   strict boolean boundary, `SystemStatusScreen` с transport-stale honesty
   и race guard, Telegram presenter на новом контракте. P2.6/P2.7 не
   начинались, Builder не verified.
-  1. **Offline gate:** offline pytest **850 passed / 2 skipped / 34
+  1. **Offline gate:** offline pytest **853 passed / 2 skipped / 34
      deselected**, coverage **87%** (порог >= 87%); ruff check/format
      clean, `git diff --check` clean. Новые кейсы:
-     `tests/unit/application/test_status.py` (14),
+     `tests/unit/application/test_status.py` (17),
      `tests/unit/miniapp/test_status_server.py` (19).
   2. **Frontend gate:** Vitest **149 passed / 15 файлов**
      (`systemStatus.test.ts` 8 unit + `systemStatusBehavior.test.tsx`
