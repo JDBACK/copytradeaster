@@ -330,7 +330,6 @@ Stage 2 полностью закрыт для testnet scope.
   Telegram presenter на новом контракте; журнал —
   `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [x] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle
-- [x] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle
   (ACCEPTED / CLOSED: persistent `identity_source` + Builder snapshot,
   authoritative signed Agent+Builder verify, `AccountBuilderDTO`, same-signer
   reauthorization, local-only disconnect, единый trust source
@@ -339,8 +338,8 @@ Stage 2 полностью закрыт для testnet scope.
 - [x] P2.7: account-specific `builder + feeRate` в обычном copy-engine
   (ACCEPTED / CLOSED 2026-09-04: corrective review пройден, owner smoke 9/9, full Testnet green: `PlaceOrderRequest`
   + `BuilderAttributionProvider` + Executor safety fallback, offline
-  1032 passed/coverage 87%/ruff clean, live engine proof Builder+direct на
-  Aster Testnet, full testnet 41 passed/1 failed-пре-existing/1 skipped,
+  1075 passed/coverage 87%/ruff clean, live engine proof Builder+direct на
+  Aster Testnet, full testnet 41 passed/1 skipped,
   frontend 168 vitest green; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
 
 Новые бизнес-функции принимаются по настоящему Aster Futures Testnet через

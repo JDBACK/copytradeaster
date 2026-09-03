@@ -5,7 +5,6 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — IMPLEMENTED /
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /
   CLOSED (2026-09-03, ветка `codex/stage-3-mini-app-part2`):** nested control screen поверх
   `UserApplicationService.account_builder()` — persistent `identity_source`
