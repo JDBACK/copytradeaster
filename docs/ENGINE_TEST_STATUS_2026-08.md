@@ -45,12 +45,13 @@
      off-step/NaN/Infinity/non-Decimal/forged rejected, durability,
      audit) и HTTP boundary (auth/read/round-trip/19 malformed-forged
      payloads/non-object/ValidationError→safe 400, no legacy fields).
-  5. **Frontend gate:** Vitest **126 passed / 13 файлов** (`risk.test.tsx`,
+  5. **Frontend gate:** Vitest **127 passed / 13 файлов** (`risk.test.tsx`,
      20 тестов: enumerate/format/policy-gate/dirty/demo/nearest/ruler/
-     nested route; новый `riskBehavior.test.tsx`, 4 behavioral: tap→dirty→
+     nested route; новый `riskBehavior.test.tsx`, 5 behavioral: tap→dirty→
      single POST→confirmed+toast, failed save держит confirmed, freeze
-     линейки mid-save, legacy banner; `settings.test.tsx` — 4 chevron-
-     кнопки), oxlint 0/0, `tsc -b && vite build` clean.
+     линейки mid-save, scroll/settle race перед POST отброшен, legacy
+     banner; `settings.test.tsx` — 4 chevron-кнопки), oxlint 0/0,
+     `tsc -b && vite build` clean.
   6. **Live gate (Aster Testnet):**
      `tests/testnet/test_live_risk_acceptance.py` — **1 passed за
      33.97s** на throwaway `sqlite3.backup`-копии прод-БД (рабочая БД
@@ -78,6 +79,14 @@
      (б) линейка `disabled` на время save (кнопки + scroll/wheel/drag/
      keyboard, `aria-disabled`); (в) living docs приведены к факту
      (см. пп. 3/5/7, PROGRESS, SKELETON, adapted plan deviation note).
+     Follow-up ревью `40b8323` (последний P2-low): полный freeze —
+     при `disabled` отменяются pending rAF/trailTimer, их колбэки
+     перепроверяют флаг через ref, контейнер физически лочится
+     `.risk-ruler[aria-disabled='true'] { overflow-x: hidden }`, после
+     выхода из saving — гарантированный `centerFraction(active)` +
+     repaint; regression-тест гонки (scroll→save до срабатывания
+     колбэков, stale settle обязан не тронуть selection; негативный
+     контроль: без фикса тест падает) — Vitest 127/13.
 - **Stage 3, часть 2 (P2.3 — Settings root и Notifications) — CLOSED
   (2026-09-02, implementation/live/owner acceptance complete):**
   1. **Backend Transport:** `POST /miniapp/api/notifications` (чтение) и

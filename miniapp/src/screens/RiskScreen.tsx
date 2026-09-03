@@ -96,6 +96,11 @@ export function RiskRuler({
     null,
   )
   const suppressClick = useRef(false)
+  // Latest freeze flag for async scroll/settle callbacks scheduled before
+  // the lock: they must re-check it instead of applying a stale pick mid-POST.
+  const disabledRef = useRef(disabled)
+  // Previous freeze state: leaving the lock re-centers the active tick.
+  const wasDisabled = useRef(disabled)
 
   const centerFraction = useCallback((fraction: string) => {
     const strip = stripRef.current
@@ -122,6 +127,30 @@ export function RiskRuler({
     })
   }, [])
 
+  // Freeze lifecycle: entering disabled cancels pending scroll/settle work,
+  // and leaving it re-centers the active tick — a native touch scroll may
+  // have visually slipped the strip mid-POST while selection stayed frozen
+  // (handlers ignore it, but the container is still a live scroll box until
+  // CSS locks it — belt and braces).
+  useEffect(() => {
+    disabledRef.current = disabled
+    if (disabled) {
+      if (rafId.current !== null) {
+        cancelAnimationFrame(rafId.current)
+        rafId.current = null
+      }
+      if (trailTimer.current !== null) {
+        window.clearTimeout(trailTimer.current)
+        trailTimer.current = null
+      }
+    } else if (wasDisabled.current) {
+      centerFraction(active)
+      const strip = stripRef.current
+      if (strip) paintRuler(strip)
+    }
+    wasDisabled.current = disabled
+  }, [disabled, active, centerFraction])
+
   // Live tracking: every scroll frame repaints the fish-eye and moves the
   // selection silently, so the big value follows the finger with no lag.
   // A trailing settle then acknowledges the landing value with one haptic.
@@ -131,7 +160,7 @@ export function RiskRuler({
     rafId.current = requestAnimationFrame(() => {
       rafId.current = null
       const strip = stripRef.current
-      if (!strip || cooling.current) return
+      if (!strip || disabledRef.current || cooling.current) return
       const best = paintRuler(strip)
       const rendered = strip.querySelector('[aria-checked="true"]')?.getAttribute('data-fraction')
       if (best !== null && best !== rendered) onPick(best, { silent: true })
@@ -139,7 +168,7 @@ export function RiskRuler({
     if (trailTimer.current !== null) window.clearTimeout(trailTimer.current)
     trailTimer.current = window.setTimeout(() => {
       const strip = stripRef.current
-      if (!strip) return
+      if (!strip || disabledRef.current) return
       const best = paintRuler(strip)
       if (best !== null && best !== vibrated.current) {
         vibrated.current = best

@@ -9,6 +9,7 @@
  // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
+import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { RiskScreen } from './screens/RiskScreen'
@@ -115,6 +116,37 @@ describe('RiskScreen behavior (tap → dirty → save)', () => {
     for (const tick of screen.getAllByRole('radio')) {
       expect(tick).not.toBeDisabled()
     }
+  })
+
+  it('drops scroll/settle work scheduled just before the save POST locks the ruler', async () => {
+    await renderReady(dto())
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+    // Let the tap cooldown expire so the scroll below schedules real work.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    let release!: (value: RiskDTO) => void
+    const setter = vi
+      .spyOn(api, 'setRiskPercent')
+      .mockImplementation(() => new Promise<RiskDTO>((resolve) => (release = resolve)))
+
+    // Race: a scroll frame queues an rAF repaint + trailing settle, and the
+    // save tap lands before either fires.
+    fireEvent.scroll(screen.getByRole('radiogroup'))
+    fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
+
+    // Let every stale callback fire if it is still alive.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    })
+
+    // Selection survived the freeze: the POST still carries the pre-save pick
+    // (without the fix, the stale settle would have flipped it to 0,5%).
+    expect(screen.getByText(/после 2,0%/i)).toBeDefined()
+    expect(screen.queryByText(/после 0,5%/i)).toBeNull()
+    release(dto({ risk_percent: '0.02' }))
+    await screen.findByText(/сохранено · 2,0%/i)
+    expect(setter).toHaveBeenCalledTimes(1)
+    expect(setter).toHaveBeenCalledWith(AUTH, '0.02')
   })
 
   it('legacy stored value off the grid shows the banner and asks for an explicit save', async () => {

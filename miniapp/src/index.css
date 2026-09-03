@@ -1375,3 +1375,10 @@ button.settings-row {
 .risk-tick-btn:disabled {
   cursor: default;
 }
+
+/* Frozen mid-save: the container must not physically scroll under the fixed
+ * cursor while selection is locked — touch can still move a native
+ * overflow-x:auto box even with every handler ignoring it. */
+.risk-ruler[aria-disabled='true'] {
+  overflow-x: hidden;
+}

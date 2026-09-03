@@ -413,17 +413,18 @@ Tests:
   ValidationError → safe 400.
 - Frontend (`risk.test.tsx`, 20 тестов после редизайна): enumerate/format/
   policy-gate/dirty/demo/`nearestRiskStep`/ruler-render/nested route;
-  новый `riskBehavior.test.tsx` (jsdom + RTL, 4 behavioral: tap→dirty→
+  новый `riskBehavior.test.tsx` (jsdom + RTL, 5 behavioral: tap→dirty→
   single POST→confirmed+toast с double-tap gate, failed save держит
-  confirmed без тоста, freeze линейки mid-save, legacy banner с явным
-  сейвом); `settings.test.tsx` — 4 chevrons.
+  confirmed без тоста, freeze линейки mid-save, scroll/settle race перед
+  POST отброшен (негативный контроль без фикса — падает), legacy banner
+  с явным сейвом); `settings.test.tsx` — 4 chevrons.
 
 Gates:
 
 - offline pytest: 816 passed / 2 skipped / 32 deselected (coverage — см.
   `ENGINE_TEST_STATUS_2026-08.md`); ruff check/format clean; mypy
   недоступен в текущем venv (не входит в offline gate этого окружения).
-- frontend: Vitest 126 passed / 13 файлов, oxlint 0/0, `tsc -b &&
+- frontend: Vitest 127 passed / 13 файлов, oxlint 0/0, `tsc -b &&
   vite build` clean (финальный билд без `VITE_DEV_USER_ID`; dev-билд
   использовался только для browser walkthrough, `dist/` git-ignored).
 - live: `tests/testnet/test_live_risk_acceptance.py` — 1 passed за 33.97s
