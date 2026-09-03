@@ -58,6 +58,7 @@ class PlaceOrderRequest:
     new_client_order_id: str = ""
     new_order_resp_type: str = "ACK"
     working_type: str | None = None  # STOP/TP market and limit flavors
+    time_in_force: str | None = None  # plain LIMIT validity (GTC/IOC/FOK/GTX/GTD)
     builder: str | None = None
     fee_rate: Decimal | None = None
 
@@ -66,6 +67,11 @@ class PlaceOrderRequest:
         has_fee = self.fee_rate is not None
         if has_builder != has_fee:
             raise ValueError("builder and feeRate must be set together")
+        if self.time_in_force is not None:
+            tif = self.time_in_force.strip().upper()
+            if tif not in {"GTC", "IOC", "FOK", "GTX", "GTD"}:
+                raise ValueError("invalid timeInForce")
+            object.__setattr__(self, "time_in_force", tif)
         if not has_builder and not has_fee:
             return
         if not isinstance(self.builder, str) or not self.builder.strip():
@@ -121,6 +127,8 @@ class PlaceOrderRequest:
             "TAKE_PROFIT",
         ):
             params["workingType"] = self.working_type
+        if self.time_in_force is not None:
+            params["timeInForce"] = self.time_in_force
         if self.builder is not None and self.fee_rate is not None:
             params["builder"] = self.builder
             params["feeRate"] = format(self.fee_rate, "f")

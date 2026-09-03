@@ -438,10 +438,10 @@ PENDING → SENDING → SUBMITTED → CONFIRMED
 
 Outbound Builder-атрибуция применяется после journal identity,
 непосредственно при построении `PlaceOrderRequest` (`builder`/`feeRate`,
-Decimal, cap `0.001`): `command_key`, journal payload и operation ID от
+Decimal, cap `0.001`, optional `time_in_force` для plain LIMIT): `command_key`, journal payload и operation ID от
 metadata не зависят. `BuilderAttributionProvider` (composition boundary,
 `App`) различает DIRECT / BUILDER_VALID / BUILDER_UNAVAILABLE по durable
-P2.6 proof + current signer + Agent permissions/actual expiry + config match;
+P2.6 proof + current signer + Agent permissions/actual expiry + config match (permissions строго tri-state: read/perp ровно True, withdraw ровно False; malformed fail closed);
 UI TTL на execution не влияет. Snapshot берётся лениво под per-account
 mutation lock, один на весь `Executor.submit`, сохраняется через
 send→query→retry (`_with_coid`). Safety: entry при UNAVAILABLE fail-closed

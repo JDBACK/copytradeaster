@@ -344,3 +344,70 @@ class TestRouting:
         p = make_provider({"a": row}, {"a": v}, {"a": SIGNER_A})
         d = await p.resolve("a")
         assert d.kind == AttributionKind.BUILDER_VALID
+
+
+class TestStrictPermissions:
+    """P2.6 triple enforced strictly: malformed permission values fail
+    closed (BUILDER_UNAVAILABLE) and never default into a valid state.
+    Withdraw is valid only when strictly False."""
+
+    @pytest.mark.parametrize("bad", [None, 0, False, 2, -1, 1.5, "garbage", "yes", "", "2", "0"])
+    async def test_malformed_can_read_fails_closed(self, bad):
+        v = valid_validation()
+        v["can_read"] = bad
+        p = make_provider({"a": builder_row()}, {"a": v}, {"a": SIGNER_A})
+        d = await p.resolve("a")
+        assert d.kind == AttributionKind.BUILDER_UNAVAILABLE
+        assert d.attribution is None
+
+    @pytest.mark.parametrize("bad", [None, 0, False, 2, "garbage", "no"])
+    async def test_malformed_can_perp_fails_closed(self, bad):
+        v = valid_validation()
+        v["can_perp_trade"] = bad
+        p = make_provider({"a": builder_row()}, {"a": v}, {"a": SIGNER_A})
+        d = await p.resolve("a")
+        assert d.kind == AttributionKind.BUILDER_UNAVAILABLE
+        assert d.attribution is None
+
+    @pytest.mark.parametrize(
+        "bad", [None, 1, True, 2, -1, 1.5, "garbage", "true", "True", "1", "yes"]
+    )
+    async def test_malformed_can_withdraw_fails_closed(self, bad):
+        v = valid_validation()
+        v["can_withdraw"] = bad
+        p = make_provider({"a": builder_row()}, {"a": v}, {"a": SIGNER_A})
+        d = await p.resolve("a")
+        assert d.kind == AttributionKind.BUILDER_UNAVAILABLE
+        assert d.attribution is None
+
+    @pytest.mark.parametrize("good", [False, 0, "0", "false", "False", " FALSE "])
+    async def test_strict_false_withdraw_stays_valid(self, good):
+        v = valid_validation()
+        v["can_withdraw"] = good
+        p = make_provider({"a": builder_row()}, {"a": v}, {"a": SIGNER_A})
+        d = await p.resolve("a")
+        assert d.kind == AttributionKind.BUILDER_VALID
+
+    @pytest.mark.parametrize("good", [True, 1, "1", "true", "True", " TRUE "])
+    async def test_strict_true_read_perp_stays_valid(self, good):
+        v = valid_validation()
+        v["can_read"] = good
+        v["can_perp_trade"] = good
+        p = make_provider({"a": builder_row()}, {"a": v}, {"a": SIGNER_A})
+        d = await p.resolve("a")
+        assert d.kind == AttributionKind.BUILDER_VALID
+
+
+class TestTimeInForce:
+    def test_absent_by_default_byte_compatible(self):
+        req = PlaceOrderRequest(symbol="BTCUSDT", side=Side.BUY, type="LIMIT")
+        assert "timeInForce" not in req.to_params()
+
+    def test_gtc_present_and_normalized(self):
+        req = PlaceOrderRequest(symbol="BTCUSDT", side=Side.BUY, type="LIMIT", time_in_force="gtc")
+        assert req.time_in_force == "GTC"
+        assert req.to_params()["timeInForce"] == "GTC"
+
+    def test_garbage_rejected(self):
+        with pytest.raises(ValueError):
+            PlaceOrderRequest(symbol="BTCUSDT", side=Side.BUY, type="LIMIT", time_in_force="ALWAYS")

@@ -364,7 +364,7 @@ Live gate:
 - [x] `ENGINE_TEST_STATUS_2026-08.md`, `DEV_PLAN_SKELETON.md` и архитектура
   обновлены фактическими результатами.
 
-> Owner acceptance 2026-09-03: 9/9 PASS на live-стенде, скриншоты docs/reports/acceptance-p27/ (12 PNG). Уточнения: пресетов 1/2/3/5 в Risk-UI нет по решению владельца P2.4 (только backend-контракт); builder trust на прод-стенде N/A (0 builder-строк в прод-БД) — покрыт P2.6 acceptance и scratch-live P2.7; full testnet 41 passed / 1 skipped / 1 failed — падение pre-existing live-флак, воспроизведено на чистом HEAD.
+> Owner acceptance 2026-09-03: 9/9 PASS на live-стенде, скриншоты docs/reports/acceptance-p27/ (12 PNG). Уточнения: пресетов 1/2/3/5 в Risk-UI нет по решению владельца P2.4 (только backend-контракт); builder trust на прод-стенде N/A (0 builder-строк в прод-БД) — покрыт P2.6 acceptance и scratch-live P2.7; full testnet 41 passed / 1 skipped — gate зелёный после corrective (strict permissions, честный -5026-probe, стабилизация positions-теста).
 
 ## 7. Три решения, которые нельзя молча выдумать
 

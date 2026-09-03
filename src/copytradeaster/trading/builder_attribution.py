@@ -82,6 +82,33 @@ def _is_true(value: Any) -> bool:
     return bool(value)
 
 
+def _parse_perm(value: Any) -> bool | None:
+    """Strict tri-state permission parsing: True, False, or unknown.
+
+    Only exact representations count: bools, 0/1 ints, and "0"/"1"/
+    "true"/"false" strings (trimmed, case-insensitive). Anything else
+    (None, 2, floats, garbage strings) is unknown and must fail closed
+    at the call site. Withdraw is valid only when strictly False
+    (P2.6 triple: read/perp exactly True, withdraw exactly False).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true"}:
+            return True
+        if text in {"0", "false"}:
+            return False
+        return None
+    return None
+
+
 def _parse_fee(raw: Any) -> Decimal | None:
     if raw is None:
         return None
@@ -195,16 +222,18 @@ class BuilderAttributionProvider:
         can_read = _val(validation, "can_read", None)
         can_perp = _val(validation, "can_perp_trade", None)
         can_withdraw = _val(validation, "can_withdraw", None)
-        # Stored as 0/1 ints; require the exact P2.6 triple.
-        if _is_true(can_read) is not True:
+        # Strict tri-state: only exact True counts for read/perp, only exact
+        # False counts for withdraw (P2.6 triple). Malformed values (None/2/garbage)
+        # fail closed and never default into a valid state.
+        if _parse_perm(can_read) is not True:
             return AttributionDecision(
                 kind=AttributionKind.BUILDER_UNAVAILABLE, reason="permissions-invalid"
             )
-        if _is_true(can_perp) is not True:
+        if _parse_perm(can_perp) is not True:
             return AttributionDecision(
                 kind=AttributionKind.BUILDER_UNAVAILABLE, reason="permissions-invalid"
             )
-        if _is_true(can_withdraw) is True:
+        if _parse_perm(can_withdraw) is not False:
             return AttributionDecision(
                 kind=AttributionKind.BUILDER_UNAVAILABLE, reason="permissions-invalid"
             )

@@ -38,8 +38,8 @@
      `-5050 after deposit` / `-1000 No agent found`; self-signed management
      отвергается; env-политика HEDGE.
      Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.6).
-- **Stage 3, часть 2 (P2.7 — Builder fee в copy-engine) — IMPLEMENTED + OWNER ACCEPTED /
-  AWAITING REVIEW (2026-09-03, ветка
+- **Stage 3, часть 2 (P2.7 — Builder fee в copy-engine) — ACCEPTED / CLOSED
+  corrective review пройден 2026-09-04, ветка
   `codex/stage-3-mini-app-part2`):** account-specific Aster Builder
   attribution в production copy-engine: `PlaceOrderRequest` + optional
   `builder`/`feeRate` (wire names, пара-инвариант, Decimal canonical string,
@@ -56,10 +56,10 @@
   без Builder metadata), safety fallback (entry fail-closed до HTTP,
   close/Stop/TP без fields + degraded signal, cancel/leverage не блокируются).
   Planner/coordinator/reconciler не менялись. Frontend не менялся.
-  1. **Offline gate:** offline pytest **1032 passed / 2 skipped / 43
+  1. **Offline gate:** offline pytest **1075 passed / 2 skipped / 42
      deselected**, coverage **87%** (порог >= 87%); ruff check/format
-     clean. Новые кейсы (30): `test_builder_attribution.py` (17: payload +
-     routing) + `test_builder_executor.py` (13: idempotency/fallback/race/
+     clean. Новые кейсы (73): `test_builder_attribution.py` (60: payload +
+     routing + strict tri-state permissions + time_in_force) + `test_builder_executor.py` (13: idempotency/fallback/race/
      emergency/security).
   2. **Frontend gate:** Vitest **168 passed / 17 файлов**, oxlint clean,
      `vite build` clean (без изменений Mini App).
@@ -70,14 +70,14 @@
      AsterClient`, typed spy перед реальным `place_order`): Builder MARKET
      entry + STOP_MARKET + partial reduction + TAKE_PROFIT_MARKET + full
      close + final flat/no-orders, каждый Builder order с exact approved
-     builder и Decimal-equal fee, direct всегда без fields; journal payload
-     без `builder`/`feeRate`; above-cap diagnostic (far-away LIMIT,
-     Builder identity) отвергнут биржей; `/builder/userTrades` с bare
-     builder identity не queryable — честный non-gating limitation (как в
-     Part 1 e2e). Full testnet suite: **41 passed / 1 skipped / 1 failed**,
-     где единственное падение (`test_live_positions_acceptance`, Phase
-     3/6 количества) воспроизводится на чистом HEAD без P2.7 —
-     pre-existing live-флаки, не регрессия.
+          builder и Decimal-equal fee, direct всегда без fields; journal payload
+     без `builder`/`feeRate`; честный above-cap probe: CONTROL с approved fee принят
+     и отменён, тот же shape с превышением fee отвергнут именно -5026; слабый
+     standalone-тест удалён, в `PlaceOrderRequest` добавлено optional `time_in_force`;
+     `/builder/userTrades` с bare builder identity не queryable — честный non-gating
+     limitation (как в Part 1 e2e). Full testnet suite: **41 passed / 1 skipped**
+     — полный gate зелёный (review corrective: strict permissions, честный probe,
+     стабилизация positions-теста с убранной INTENTIONAL_FLAT-интерференцией).
      4. **Owner acceptance (2026-09-03):** Computer Use-driven live-стенд, prod-БД: **9/9 PASS** (Home / Positions read-only / Activity / Risk-линейка без сохранения / Status ready / Account+Builder direct verified / Notifications вкл+выкл / Pause+Resume с confirm / регресс P2.0-P2.6); в прод-БД 0 builder-строк — builder trust покрыт P2.6 acceptance и scratch-live P2.7; стенд возвращён (active, риск 2,0%, уведомления выкл); скриншоты: docs/reports/acceptance-p27/ (12 PNG).
      Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.7).
 - **Stage 3, часть 2 (P2.5 — System Status) — ACCEPTED / CLOSED

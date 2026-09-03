@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import os
 import time
+from decimal import ROUND_CEILING
 from decimal import Decimal as D
 
 import pytest
@@ -34,6 +35,7 @@ from copytradeaster.domain.models import PosSide, RiskPolicy, Side
 from copytradeaster.miniapp.server import create_miniapp_app
 from copytradeaster.storage.repositories import (
     SettingsRepo,
+    SyncBasisRepo,
     TelegramUserRepo,
 )
 
@@ -160,6 +162,32 @@ async def live_app_stack():
     hedge_follower = await app.master_client.get_position_mode("copyc1")
     await _flatten(app.master_client, "main", hedge_master, "pre-m")
     await _flatten(app.master_client, "copyc1", hedge_follower, "pre-f")
+    # Fail-fast ambient guard: leftover positions/orders from earlier suite
+    # tests must not silently turn Phase 3 into count==0.
+    for _ in range(3):
+        m_pos = [
+            x for x in await app.master_client.position_risk("main", SYMBOL) if x.position_amt != 0
+        ]
+        c_pos = [
+            x
+            for x in await app.master_client.position_risk("copyc1", SYMBOL)
+            if x.position_amt != 0
+        ]
+        m_ord = await app.master_client.open_orders("main", symbol=SYMBOL)
+        c_ord = await app.master_client.open_orders("copyc1", symbol=SYMBOL)
+        if not m_pos and not c_pos and not m_ord and not c_ord:
+            break
+        await _flatten(app.master_client, "main", hedge_master, "pre-m2")
+        await _flatten(app.master_client, "copyc1", hedge_follower, "pre-f2")
+    else:
+        pytest.fail("ambient residue: main/copyc1 not flat before acceptance")
+    # Episode isolation on the shared prod DB: direct exchange flattens above
+    # bypass the engine, so a zero_target marker stranded by an earlier suite
+    # test would INTENTIONAL_FLAT-skip our fresh entry (proven live). The
+    # engine recreates basis rows on the next execution.
+    basis_repo = SyncBasisRepo(app.db)
+    for _side in ("LONG", "SHORT", "BOTH"):
+        await basis_repo.clear("copyc1", SYMBOL, _side)
 
     yield {
         "app": app,
@@ -174,6 +202,17 @@ async def live_app_stack():
         await _flatten(app.master_client, "main", hedge_master, "post-m")
     with contextlib.suppress(Exception):
         await _flatten(app.master_client, "copyc1", hedge_follower, "post-f")
+    # Do not poison later suite tests: drop our episode basis markers too.
+    with contextlib.suppress(Exception):
+        _br = SyncBasisRepo(app.db)
+        for _s in ("LONG", "SHORT", "BOTH"):
+            await _br.clear("copyc1", SYMBOL, _s)
+    # Restore baseline policy: the test calibrates copyc1 risk up for sizing.
+    with contextlib.suppress(Exception):
+        await SettingsRepo(app.db).upsert_policy(
+            RiskPolicy(risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("1")),
+            "copyc1",
+        )
     await test_client.close()
     await app.http.aclose()
     await app.db.close()
@@ -203,6 +242,37 @@ async def test_live_production_positions_acceptance_gate(live_app_stack):
     )
     stop_price = (ref_mark * D("0.95")).quantize(D("0.1"))
     order_qty = D("0.002")
+    # Stabilizer (review corrective): follower entry sizing depends on copyc1
+    # equity x risk% / stop distance, NOT on master qty. Calibrate risk% from
+    # the measured balance so the follower opens >= 3 lot steps: with a
+    # single step, the Phase 6 halving floors back to the same step and the
+    # strict-decrease assert flakes.
+    step_size = app._filters()[SYMBOL].step_size  # noqa: SLF001
+    copy_balances = await client.balance("copyc1")
+    copy_usdt = next((b for b in copy_balances if b.asset == "USDT"), None)
+    live_distance = ref_mark - stop_price
+    if copy_usdt is None or copy_usdt.available_balance <= 0 or live_distance <= 0:
+        pytest.skip("cannot calibrate follower sizing: no balance or bad distance")
+    risk_raw = live_distance * (4 * step_size) * D("1.001") / copy_usdt.available_balance
+    if risk_raw > D("0.10"):
+        pytest.skip("copyc1 equity too small for stable multi-step sizing")
+    risk_pct = (risk_raw * 10000).to_integral_value(rounding=ROUND_CEILING) / 10000
+    await SettingsRepo(app.db).upsert_policy(
+        RiskPolicy(risk_percent=risk_pct, max_leverage=20, max_entry_deviation_pct=D("1")),
+        "copyc1",
+    )
+    # Test-only skip spy (instance-level, cf. P2.7 place_order spy): the
+    # reconciler swallows per-account failures and skips journal nothing,
+    # so record skip reasons for the failure dump below.
+    skip_reasons: list = []
+    coordinator = app.reconciler._coordinator  # noqa: SLF001
+    orig_skip = coordinator._skip_record
+
+    async def _spy_skip(key, reason):  # noqa: ANN001, ANN202
+        skip_reasons.append((str(key.symbol), str(reason)))
+        return await orig_skip(key, reason)
+
+    coordinator._skip_record = _spy_skip  # type: ignore[method-assign]
 
     ts = int(time.time() * 1000)
     await _place(
@@ -231,9 +301,25 @@ async def test_live_production_positions_acceptance_gate(live_app_stack):
         ),
     )
 
+    # Master leg must exist before projecting: fail fast instead of a
+    # confusing count==0 later.
+    main_pos = [x for x in await client.position_risk("main", SYMBOL) if x.position_amt != 0]
+    assert main_pos, "master leg did not open"
     # Phase 2: Feed master state to Projector and reconcile through Coordinator
-    await app.projector.rebuild_full(client, "main")
-    await app.reconcile_follower("copyc1", reason="test_live_open")
+    # The reconciler swallows per-account exceptions into the report (-1) and
+    # legit skips journal nothing: both would surface later as a misleading
+    # count==0. Retry boundedly (reconcile is idempotent; production sweeps
+    # every 15s anyway), then fail with the report attached.
+    entry_report = None
+    for _ in range(3):
+        await app.projector.rebuild_full(client, "main")
+        entry_report = await app.reconcile_follower("copyc1", reason="test_live_open")
+        if (entry_report.per_account.get("copyc1") or 0) > 0:
+            break
+    else:
+        lev = app.leverage.confirmed("copyc1", SYMBOL)
+        lev_ready = app.leverage.is_ready("copyc1", SYMBOL)
+        pytest.fail(f"entry no-cmds: {entry_report} skips={skip_reasons} lev={lev}/{lev_ready}")
 
     # Phase 3: Query Mini App positions endpoint through production Application
     resp1 = await http_client.post(
@@ -241,6 +327,23 @@ async def test_live_production_positions_acceptance_gate(live_app_stack):
     )
     assert resp1.status == 200
     data1 = await resp1.json()
+    if data1["count"] != 1:
+        basis = await app.db.fetchall(
+            "SELECT symbol, pos_side, master_ref_abs,"
+            + "issued_target, zero_target FROM sync_basis WHERE account_id=?",
+            ("copyc1",),
+        )
+        atrades = await app.db.fetchall(
+            "SELECT trade_id, symbol, pos_side, status FROM copy_trades WHERE closed_at IS NULL",
+        )
+        c_risks = await client.position_risk("copyc1", SYMBOL)
+        c_open = await client.open_orders("copyc1", symbol=SYMBOL)
+        m_risks = await client.position_risk("main", SYMBOL)
+        pytest.fail(
+            f"follower leg missing: copyc1 risks={c_risks}"
+            + f" orders={c_open} main={m_risks}"
+            + f" basis={basis} active_trades={atrades} skips={skip_reasons}",
+        )
     assert data1["count"] == 1
     assert data1["is_stale"] is False
     assert data1["snapshot_captured_at"] is not None
@@ -254,6 +357,9 @@ async def test_live_production_positions_acceptance_gate(live_app_stack):
     assert D(str(pos_dto["stop_price"])) == stop_price
     assert pos_dto["risk_to_stop_usdt"] is not None
     assert D(str(pos_dto["risk_to_stop_usdt"])) > 0
+    # Sizing invariant: calibration above must hold, otherwise Phase 6
+    # strict-decrease would be meaningless.
+    assert D(str(pos_dto["qty"])) >= 3 * step_size, "sizing calibration failed"
 
     # Phase 4: Compare DTO against signed follower positionRisk and openOrders
     risks = await client.position_risk("copyc1", SYMBOL)

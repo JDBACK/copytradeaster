@@ -15,7 +15,7 @@ from eth_account import Account
 from eth_account.messages import encode_typed_data
 
 from copytradeaster.app import App
-from copytradeaster.aster.trading_api import AsterClient, PlaceOrderRequest
+from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
 from copytradeaster.config import Settings
 from copytradeaster.domain.models import PosSide, RiskPolicy, Side
 from copytradeaster.onboarding.builder import BuilderOnboardingService
@@ -361,30 +361,79 @@ async def test_builder_and_direct_routing_via_production_engine(tmp_path):
         )
         for r in rows:
             assert "builder" not in str(r["payload"]) and "feeRate" not in str(r["payload"])
-        # Exchange-side above-cap diagnostic on the Builder identity: far-away
-        # LIMIT so an unexpected acceptance never executes. Production never
-        # sends this; the probe proves server-side cap semantics.
-        over_fee = D(str(approved_fee)) + D("0.0001")
+        # Honest above-cap probe (review corrective): CONTROL first with the
+        # approved fee on an otherwise identical non-marketable LIMIT, then
+        # the same shape with fee above the approved maxFeeRate. Fee excess
+        # is the only possible violation; the reject must be the fee-cap
+        # error (-5026), never just any exception.
+        filt = app._filters_cache[SYMBOL]
+        px_resp = await http.get(
+            settings.rest_base_url + "/fapi/v1/premiumIndex", params={"symbol": SYMBOL}
+        )
+        live_mark = D(str(px_resp.json()["markPrice"]))
+        assert live_mark > 0
+        cap_price = ((live_mark * D("0.5")) // filt.tick_size) * filt.tick_size
+        raw_qty = max(filt.min_qty, (filt.min_notional * D("2")) / cap_price)
+        cap_steps = raw_qty // filt.step_size
+        cap_qty = (
+            cap_steps * filt.step_size
+            if cap_steps * filt.step_size == raw_qty
+            else (cap_steps + 1) * filt.step_size
+        )
+        assert cap_price * cap_qty >= filt.min_notional
+        b_hedge = await app.master_client.get_position_mode(builder_aid)
+        b_side = PosSide.LONG if b_hedge else PosSide.BOTH
+        approved = D(str(approved_fee))
+        over_fee = approved + D("0.0001")
         assert over_fee <= D("0.001")
         cap_ts = int(_tmod.time() * 1000)
-        cap_req = PlaceOrderRequest(
-            symbol=SYMBOL,
-            side=Side.BUY,
-            type="LIMIT",
-            quantity=D("0.002"),
-            price=D("1000"),
-            builder=builder_address,
-            fee_rate=over_fee,
-            new_client_order_id=f"p27-cap-{cap_ts}"[:36],
+        ctl_order = await app.master_client.place_order(
+            builder_aid,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="LIMIT",
+                quantity=cap_qty,
+                price=cap_price,
+                position_side=b_side,
+                time_in_force="GTC",
+                builder=builder_address,
+                fee_rate=approved,
+                new_client_order_id=f"p27-capctl-{cap_ts}"[:36],
+            ),
         )
         try:
-            cap_order = await app.master_client.place_order(builder_aid, cap_req)
-        except Exception:
-            cap_order = None
-        if cap_order is not None:
+            assert ctl_order.status in {"NEW", "PARTIALLY_FILLED"}
+        finally:
             with contextlib.suppress(Exception):
                 await app.master_client.cancel_order(
-                    builder_aid, SYMBOL, orig_client_order_id=cap_order.client_order_id
+                    builder_aid, SYMBOL, orig_client_order_id=ctl_order.client_order_id
+                )
+        try:
+            probe_order = await app.master_client.place_order(
+                builder_aid,
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.BUY,
+                    type="LIMIT",
+                    quantity=cap_qty,
+                    price=cap_price,
+                    position_side=b_side,
+                    time_in_force="GTC",
+                    builder=builder_address,
+                    fee_rate=over_fee,
+                    new_client_order_id=f"p27-capprb-{cap_ts}"[:36],
+                ),
+            )
+        except AsterError as exc:
+            assert exc.code == -5026, exc
+            assert "maxFeeRate" in exc.msg, exc
+        except Exception as exc:
+            pytest.fail(f"above-cap probe failed with a non-fee error: {exc!r}")
+        else:
+            with contextlib.suppress(Exception):
+                await app.master_client.cancel_order(
+                    builder_aid, SYMBOL, orig_client_order_id=probe_order.client_order_id
                 )
             pytest.fail("above-approved feeRate was unexpectedly accepted")
         window_end = int(_tmod.time() * 1000)
@@ -450,44 +499,3 @@ async def test_builder_and_direct_routing_via_production_engine(tmp_path):
                 await _flatten(app.master_client, aid, h, "post")
         await http.aclose()
         await app.db.close()
-
-
-async def test_above_cap_diagnostic_rejected(tmp_path):
-    settings = Settings(db_path=tmp_path / "p27-cap.sqlite3")
-    ensure_testnet_guard(settings.rest_base_url, 714, settings.registration_chain_id)
-    if not PROD_DB.exists():
-        pytest.skip("need data/copytrade.sqlite3")
-    db_path = tmp_path / "p27-cap-backup.sqlite3"
-    _backup(PROD_DB, db_path)
-    settings = Settings(db_path=db_path)
-    app = App(settings)
-    await app.db.connect()
-    await app.db.migrate()
-    await app.credentials.load()
-    if "copyc1" not in app.credentials.account_ids():
-        await app.db.close()
-        pytest.skip("need copyc1")
-    over = D(str(settings.max_fee_rate)) + D("0.0001")
-    assert over <= D("0.001")
-    req = PlaceOrderRequest(
-        symbol=SYMBOL,
-        side=Side.BUY,
-        type="LIMIT",
-        quantity=D("0.002"),
-        price=D("1000"),
-        builder=settings.builder_address,
-        fee_rate=over,
-    )
-    try:
-        order = await app.master_client.place_order("copyc1", req)
-    except Exception:
-        await app.db.close()
-        return
-    try:
-        with contextlib.suppress(Exception):
-            await app.master_client.cancel_order(
-                "copyc1", SYMBOL, orig_client_order_id=order.client_order_id
-            )
-    finally:
-        await app.db.close()
-    pytest.fail("above-approved feeRate was unexpectedly accepted")

@@ -761,9 +761,9 @@ P2.7 реализован ниже; из списка остаются `/builder
 statement (non-gating limitation, см. P2.7), remote revoke, history/ledger,
 новый global store, legacy auto-promotion, ослабление guards.
 
-P2.6 ACCEPTED / CLOSED. P2.7 IMPLEMENTED + OWNER ACCEPTANCE COMPLETE (2026-09-03), ждёт независимого review.
+P2.6 ACCEPTED / CLOSED. P2.7 ACCEPTED / CLOSED (2026-09-04): corrective review пройден, полный Testnet gate зелёный.
 
-## P2.7 — Builder fee в обычном copy-engine: IMPLEMENTED + OWNER ACCEPTED, AWAITING REVIEW (2026-09-03)
+## P2.7 — Builder fee в обычном copy-engine: ACCEPTED / CLOSED (2026-09-04)
 
 Сделано (без рефактора P2.0–P2.6, planner/coordinator/reconciler не тронуты):
 
@@ -802,14 +802,17 @@ P2.6 ACCEPTED / CLOSED. P2.7 IMPLEMENTED + OWNER ACCEPTANCE COMPLETE (2026-09-03
 
 Gates:
 
-- offline: `pytest -q -m "not testnet"` **1032 passed / 2 skipped / 43
-  deselected**, coverage **87%**, `ruff check` + `ruff format --check` clean.
+- offline: `pytest -q -m "not testnet"` **1075 passed / 2 skipped / 42
+  deselected**, coverage **87%** (порог >= 87%), `ruff check` + `ruff format --check` clean.
   Новые `tests/unit/trading/test_builder_attribution.py` (17) и
   `tests/unit/trading/test_builder_executor.py` (13): payload (direct/builder
   MARKET/STOP_MARKET/TAKE_PROFIT_MARKET/limit-флейворы, пара-инвариант,
   negative/NaN/Infinity/float, cap `0.001`, каноникализация), routing
   (A/B без cross-leak, missing/corrupt≠direct, config mismatch, expiry/signer
-  mismatch, UI TTL и EXPIRING-window не снимают attribution), executor
+  mismatch, UI TTL и EXPIRING-window не снимают attribution), strict
+  tri-state permissions (40 кейсов: malformed read/perp/withdraw;
+  withdraw валиден только при строгом False), time_in_force (absent by default,
+  GTC, garbage reject), executor
   (command key идентичен, journal чист, `_with_coid`/UNKNOWN-retry сохраняют
   snapshot, direct retry остаётся direct, fallback close/Stop/TP + degraded,
   entry-blocked без HTTP, cancel/leverage не блокируются, lifecycle-race,
@@ -826,34 +829,52 @@ Gates:
   Builder MARKET entry + STOP_MARKET + partial reduction +
   TAKE_PROFIT_MARKET + full close + final flat/no-orders, каждый Builder
   order с exact approved builder и Decimal-equal fee, direct — всегда без
-  полей; journal payload без `builder`/`feeRate`; above-cap diagnostic
-  (far-away LIMIT, Builder identity) отвергнут биржей; `/builder/userTrades`
-  с bare builder identity не queryable — честный non-gating limitation (как
-  в Part 1 e2e). `test_above_cap_diagnostic_rejected` green.
-  `test_exchange_rejects_fee_rate_above_approved_cap` (Builder identity,
-  fee cap semantics с сообщением биржи) green.
-- full testnet suite: **41 passed / 1 skipped / 1 failed**, единственное
-  падение `test_live_positions_acceptance` воспроизводится на чистом HEAD
-  без P2.7 (Phase 3/Phase 6 количественные ассёрты при BTC ~81k: follower
-  qty 0.001 не делится на сетке 0.001) — pre-existing live-флаки, не
-  регрессия P2.7. Финальное состояние биржи: main/copyc1/copyc2/copyc3
-  flat, open orders 0.
+    полей; journal payload без `builder`/`feeRate`; честный above-cap probe на
+  подтверждённом Builder-follower (review corrective): CONTROL с approved fee
+  принят биржей и сразу отменён (shape валиден), тот же shape с fee выше
+  approved maxFeeRate отвергнут именно fee-cap ошибкой -5026;
+  слабый standalone `test_above_cap_diagnostic_rejected` (any-exception,
+  неверные price/timeInForce) удалён; в `PlaceOrderRequest` добавлено
+  optional `time_in_force` (None по умолчанию — direct-сериализация
+  byte-compatible), без него plain LIMIT биржей в принципе не принимается (-1102).
+  `/builder/userTrades` с bare builder identity не queryable — честный
+  non-gating limitation (как в Part 1 e2e).
+- full testnet suite: **41 passed / 1 skipped** — полный gate зелёный.
+  Финальное состояние биржи: main/copyc1/copyc2/copyc3 flat, open orders 0.
 
+Review corrective (REQUEST CHANGES 2026-09-04 → done, без архитектурного переделывания):
+- Blocker 1 (proof слабее P2.6): строгий tri-state парсинг всех трёх permissions
+  в провайдере (`_parse_perm`): валидны только точные True для read/perp и точный
+  False для withdraw; None/2/garbage → `BUILDER_UNAVAILABLE`. Провайдер больше
+  не зависит от loose `bool()`-fallback; P2.6 не тронут. +40 regression-кейсов.
+- Blocker 2 (нечестный above-cap): старый probe ловил любой exception, ставил
+  price=1000 (отклоняется по price-фильтрам раньше fee-валидации) и не слал
+  timeInForce (plain LIMIT без него отклоняется -1102 всегда) — т.е. доказывал
+  пустоту дважды. Новый probe на подтверждённом Builder-follower: CONTROL
+  (approved fee) принят → отменён, тот же shape с превышением fee → -5026.
+  Неожиданный accept → cancel + FAIL. Слабый standalone-тест удалён.
+- Gate (full testnet красный): live-тест стабилизирован — калибровка риска
+  copyc1 по измеренному балансу (фолловер гарантированно ≥3 lot steps,
+  restore политики в teardown), fail-fast проверки (ambient flat, master leg,
+  journaled-commands report с bounded retry), skip-spy для диагностики.
+  По пути поймана и вылечена реальная причина in-suite падений: stranded
+  `zero_target` INTENTIONAL_FLAT-маркер от чужих тестов на shared прод-БД
+  (прямые teardown-флаттены в обход движка не чистят маркер) — фикстура теперь
+  сбрасывает episode basis в setup/teardown. Full gate: 41 passed / 1 skipped.
+- Мелочь: убран дублирующийся заголовок P2.6.
 Owner Telegram WebView acceptance — COMPLETE 2026-09-03 (live-стенд, prod-БД, mainnet-действий нет): **9/9 PASS** — Home (verified trust rail, свежий snapshot, preview совпадает с Positions), Positions (строго read-only, flat + честный stale-баннер), Activity (фильтры Все/Сделки/Система, без секретов), Risk (линейка 0,5-5%/шаг 0,5%, проба 2,0% к 2,5% без сохранения), Status (ready-state; обрыв сети не повторялся — покрыт P2.5 acceptance), Account+Builder direct verified без чужих Builder-данных (в прод-БД 0 строк identity_source=builder; builder trust покрыт P2.6 acceptance source=builder state=verified и scratch-live P2.7), Notifications вкл/выкл подтверждены сервером, Pause/Resume с confirm (resume begin ~6s на testnet — ждать, не кликать повторно). Пресетов 1/2/3/5 в UI нет — так задумано решением владельца P2.4 (presets только в backend-контракте, клиент их не читает). Стенд возвращён в исходное: active, риск 2,0%, уведомления выкл; финальные сверки по нулям. Скриншоты (12 PNG): docs/reports/acceptance-p27/, оригиналы data/acceptance-p27/ (git-ignored).
 
-Stage 3 Part 2 = CLOSED только после независимого review.
+P2.7 ACCEPTED / CLOSED по итогам corrective review. Stage 3 Part 2 = CLOSED.
 
 ## Следующие подчасти
 
 - P2.5 — System Status: ACCEPTED / CLOSED (implementation/live/review/
   owner acceptance complete).
 - P2.6 — Account + Builder attestation (`07-account-builder`):
-- P2.6 — Account + Builder attestation (`07-account-builder`):
   ACCEPTED / CLOSED (live gate complete: attestation + local disconnect +
   verified-onboarding `source=builder state=verified`).
 - P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3:
-  IMPLEMENTED + OWNER ACCEPTANCE COMPLETE (offline/live/frontend gates green + owner smoke 9/9, см. раздел P2.7 выше),
-  ждёт независимого review.
+  ACCEPTED / CLOSED (offline/live/frontend gates green + owner smoke 9/9 + corrective review, см. раздел P2.7 выше).
 
 Открытые решения владельца (остались перед соответствующими подчастями):
 

@@ -337,7 +337,7 @@ Stage 2 полностью закрыт для testnet scope.
   Account/Home/Status; live gate complete — `source=builder
   state=verified`; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [x] P2.7: account-specific `builder + feeRate` в обычном copy-engine
-  (IMPLEMENTED + OWNER ACCEPTANCE COMPLETE 2026-09-03, owner smoke 9/9, ждёт независимого review: `PlaceOrderRequest`
+  (ACCEPTED / CLOSED 2026-09-04: corrective review пройден, owner smoke 9/9, full Testnet green: `PlaceOrderRequest`
   + `BuilderAttributionProvider` + Executor safety fallback, offline
   1032 passed/coverage 87%/ruff clean, live engine proof Builder+direct на
   Aster Testnet, full testnet 41 passed/1 failed-пре-existing/1 skipped,
