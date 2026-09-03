@@ -37,6 +37,11 @@ class OnboardingErrorCode(StrEnum):
     AGENT_SUBMIT_FAILED = "agent_submit_failed"
     APPROVAL_STATUS_UNKNOWN = "approval_status_unknown"
     AGENT_NOT_CONFIRMED = "agent_not_confirmed"
+    BUILDER_NOT_CONFIRMED = "builder_not_confirmed"
+    BUILDER_MISMATCH = "builder_mismatch"
+    BUILDER_FEE_MISMATCH = "builder_fee_mismatch"
+    IDENTITY_CHANGED = "identity_changed"
+    REAUTHORIZE_UNAVAILABLE = "reauthorize_unavailable"
 
 
 _MESSAGES: dict[OnboardingErrorCode, str] = {
@@ -98,6 +103,17 @@ _MESSAGES: dict[OnboardingErrorCode, str] = {
     OnboardingErrorCode.AGENT_NOT_CONFIRMED: (
         "Aster не подтвердил авторизацию Agent после подписи."
     ),
+    OnboardingErrorCode.BUILDER_NOT_CONFIRMED: (
+        "Aster не подтвердил авторизацию Builder после подписи."
+    ),
+    OnboardingErrorCode.BUILDER_MISMATCH: ("Подтверждённый Builder не совпадает с ожидаемым."),
+    OnboardingErrorCode.BUILDER_FEE_MISMATCH: (
+        "Подтверждённая комиссия Builder не совпадает с согласованной."
+    ),
+    OnboardingErrorCode.IDENTITY_CHANGED: (
+        "Аккаунт изменился во время проверки. Повторите действие."
+    ),
+    OnboardingErrorCode.REAUTHORIZE_UNAVAILABLE: ("Переавторизация недоступна для этого аккаунта."),
 }
 
 

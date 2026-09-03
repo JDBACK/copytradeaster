@@ -26,7 +26,7 @@ from copytradeaster.application.service import (
     Stage2RuntimeAdapter,
     UserApplicationService,
 )
-from copytradeaster.aster.models import AgentDTO
+from copytradeaster.aster.models import AgentDTO, BuilderDTO
 from copytradeaster.aster.trading_api import UNKNOWN_CODES, AsterClient, AsterError
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.domain.models import AccountState
@@ -39,12 +39,14 @@ from copytradeaster.onboarding.models import (
     BuilderOnboardingResult,
     BuilderPrepareRequest,
     BuilderPrepareResult,
+    BuilderReauthorizeResult,
     BuilderSubmitRequest,
     DirectOnboardingConfig,
     DirectOnboardingRequest,
     DirectOnboardingResult,
     DirectPreflightResult,
     OnboardingCommit,
+    ReauthorizeContext,
     stable_account_id,
 )
 from copytradeaster.onboarding.providers import (
@@ -58,6 +60,8 @@ from copytradeaster.storage.repositories import (
     BuilderOnboardingAttempt,
     BuilderOnboardingAttemptsRepo,
     TelegramUserRepo,
+    _conn_execute,
+    _conn_fetchone,
 )
 from copytradeaster.trading.leverage import LeverageError
 
@@ -224,6 +228,18 @@ class SqliteOnboardingStore(OnboardingStore):
         if payload.account_id != stable_account_id(payload.telegram_user_id):
             raise ValueError("account ID is not the stable Telegram account ID")
         validation = self.validation_record(payload)
+        builder_verified_at: str | None = None
+        if payload.identity_source == "builder":
+            if (
+                not payload.builder_address
+                or not payload.builder_max_fee_rate
+                or payload.builder_agent_expires_at_ms is None
+                or payload.builder_verified_at_ms is None
+            ):
+                raise ValueError("builder attestation snapshot is required")
+            builder_verified_at = datetime.fromtimestamp(
+                payload.builder_verified_at_ms / 1000, tz=UTC
+            ).isoformat()
         await self._credentials.commit_onboarding(
             account_id=payload.account_id,
             user=payload.user_address,
@@ -233,7 +249,176 @@ class SqliteOnboardingStore(OnboardingStore):
             owner_telegram_user_id=payload.telegram_user_id,
             owner_chat_id=int(owner["chat_id"]),
             validation=validation,
+            identity_source=payload.identity_source,
+            builder_address=payload.builder_address,
+            builder_name=payload.builder_name,
+            builder_max_fee_rate=payload.builder_max_fee_rate,
+            builder_agent_expires_at_ms=payload.builder_agent_expires_at_ms,
+            builder_verified_at=builder_verified_at,
         )
+
+    async def get_reauthorize_context(self, telegram_user_id: int) -> ReauthorizeContext | None:
+        """Return the current builder identity when same-signer re-approval applies.
+
+        Only an enabled builder-source follower with a stored Agent signer
+        qualifies.  Direct accounts, disconnected accounts and missing
+        validation all return None so the reauthorization path stays closed.
+        """
+        owner: Any = await self._users.get(telegram_user_id)
+        if owner is None or str(owner["role"]) not in {"USER", "ADMIN"}:
+            return None
+        account_id = owner["account_id"]
+        if not account_id:
+            return None
+        account: Any = await self._db.fetchone(
+            "SELECT user_address, role, enabled, identity_source FROM accounts WHERE id=?",
+            (str(account_id),),
+        )
+        if (
+            account is None
+            or str(account["role"]) != "follower"
+            or not int(account["enabled"])
+            or str(account["identity_source"] or "direct") != "builder"
+        ):
+            return None
+        validation: Any = await self._db.fetchone(
+            "SELECT signer_address FROM agent_validations WHERE account_id=?",
+            (str(account_id),),
+        )
+        if validation is None or not str(validation["signer_address"] or "").strip():
+            return None
+        return ReauthorizeContext(
+            account_id=str(account_id),
+            user_address=str(account["user_address"]),
+            signer_address=str(validation["signer_address"]),
+        )
+
+    async def account_version(self, account_id: str) -> str | None:
+        """Credential/validation version marker for attestation race checks.
+
+        Same shape as the runtime adapter marker so pre-read and pre-store
+        versions are directly comparable.
+        """
+        row: Any = await self._db.fetchone(
+            "SELECT c.updated_at, a.signer_address, ac.enabled "
+            "FROM credentials c "
+            "JOIN accounts ac ON ac.id=c.account_id "
+            "LEFT JOIN agent_validations a ON a.account_id=c.account_id "
+            "WHERE c.account_id=?",
+            (account_id,),
+        )
+        if row is None:
+            return None
+        return f"{row['updated_at']}:{row['signer_address'] or '-'}:{int(row['enabled'])}"
+
+    async def commit_reauthorization(
+        self,
+        *,
+        account_id: str,
+        telegram_user_id: int,
+        validation: AgentValidation,
+        builder_address: str,
+        builder_name: str,
+        builder_max_fee_rate: str,
+        builder_agent_expires_at_ms: int,
+        builder_verified_at: str,
+        expected_version: str,
+    ) -> None:
+        """Atomically repair the Builder proof for the current identity.
+
+        The Agent validation, Builder snapshot and paused entry gate are
+        written in one transaction.  The credential version is re-checked
+        inside that transaction: a replacement/disconnect that landed while
+        the signed reads were in flight aborts instead of storing an old
+        proof for a new signer.
+        """
+        async with self._db.transaction() as conn:
+            owner = await _conn_fetchone(
+                conn,
+                "SELECT account_id, role FROM telegram_users WHERE telegram_user_id=?",
+                (int(telegram_user_id),),
+            )
+            if (
+                owner is None
+                or str(owner["account_id"]) != account_id
+                or str(owner["role"]) not in {"USER", "ADMIN"}
+            ):
+                raise ValueError("Telegram user must own the follower account")
+            account = await _conn_fetchone(
+                conn,
+                "SELECT role, enabled, identity_source FROM accounts WHERE id=?",
+                (account_id,),
+            )
+            if account is None or str(account["role"]) != "follower" or not int(account["enabled"]):
+                raise ValueError("builder account is not active")
+            version_row = await _conn_fetchone(
+                conn,
+                "SELECT c.updated_at, a.signer_address, ac.enabled "
+                "FROM credentials c "
+                "JOIN accounts ac ON ac.id=c.account_id "
+                "LEFT JOIN agent_validations a ON a.account_id=c.account_id "
+                "WHERE c.account_id=?",
+                (account_id,),
+            )
+            if version_row is None:
+                raise ValueError("account identity is gone")
+            current_version = (
+                f"{version_row['updated_at']}:"
+                f"{version_row['signer_address'] or '-'}:"
+                f"{int(version_row['enabled'])}"
+            )
+            if current_version != expected_version:
+                raise ValueError("account identity changed during verification")
+            if (
+                str(validation.signer_address).casefold()
+                != str(version_row["signer_address"] or "").casefold()
+                or not str(version_row["signer_address"] or "").strip()
+            ):
+                # The proof must belong to the current signer; a version
+                # string alone cannot prove that after a same-timestamp swap.
+                raise ValueError("attestation signer does not match current identity")
+            await _conn_execute(
+                conn,
+                "INSERT INTO agent_validations(account_id, signer_address, can_read, "
+                "can_perp_trade, can_withdraw, expired_ms, ip_whitelist, status, "
+                "checked_at, last_error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(account_id) DO UPDATE SET signer_address=excluded.signer_address, "
+                "can_read=excluded.can_read, can_perp_trade=excluded.can_perp_trade, "
+                "can_withdraw=excluded.can_withdraw, expired_ms=excluded.expired_ms, "
+                "ip_whitelist=excluded.ip_whitelist, status=excluded.status, "
+                "checked_at=excluded.checked_at, last_error_code=excluded.last_error_code",
+                (
+                    account_id,
+                    validation.signer_address,
+                    int(validation.can_read),
+                    int(validation.can_perp_trade),
+                    int(validation.can_withdraw),
+                    validation.expired_ms,
+                    validation.ip_whitelist,
+                    validation.status,
+                    validation.checked_at,
+                    validation.last_error_code,
+                ),
+            )
+            await _conn_execute(
+                conn,
+                "UPDATE accounts SET identity_source='builder', builder_address=?, "
+                "builder_name=?, builder_max_fee_rate=?, builder_agent_expires_at_ms=?, "
+                "builder_verified_at=? WHERE id=?",
+                (
+                    builder_address,
+                    builder_name,
+                    builder_max_fee_rate,
+                    int(builder_agent_expires_at_ms),
+                    builder_verified_at,
+                    account_id,
+                ),
+            )
+            await _conn_execute(
+                conn,
+                "UPDATE copy_settings SET allow_new_entries=0 WHERE account_id=?",
+                (account_id,),
+            )
 
     async def get_builder_attempt(self, telegram_user_id: int) -> BuilderOnboardingAttempt | None:
         repo = BuilderOnboardingAttemptsRepo(self._db, self._credentials.encryption_key)
@@ -413,7 +598,15 @@ class BuilderOnboardingAdapter:
             store,
             config=config,
             activation=self._activate,
+            runtime_client_factory=self._runtime_client,
         )
+
+    def _runtime_client(self, account_id: str) -> Any:
+        """Live signed-read client for the current identity (reauthorization only)."""
+        runtime = self._app.follower_registry.get(account_id)
+        if runtime is None:
+            raise KeyError(f"follower runtime {account_id!r} not found")
+        return runtime.client
 
     def _client_factory(
         self,
@@ -442,6 +635,12 @@ class BuilderOnboardingAdapter:
 
     async def submit(self, request: BuilderSubmitRequest) -> BuilderOnboardingResult:
         return await self._service.submit(request)
+
+    async def reauthorize_prepare(self, telegram_user_id: int) -> BuilderPrepareResult:
+        return await self._service.reauthorize_prepare(telegram_user_id)
+
+    async def reauthorize_submit(self, request: BuilderSubmitRequest) -> BuilderReauthorizeResult:
+        return await self._service.reauthorize_submit(request)
 
     async def identity_for_recovery(
         self, account_id: str, telegram_user_id: int
@@ -653,6 +852,28 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
             and self.cfg.is_testnet
             and await self.is_account_registered(account_id)
         )
+
+    async def refresh_builder_record(self, account_id: str) -> list[BuilderDTO]:
+        """Signed GET /fapi/v3/builder for the current identity.
+
+        Transport failures map exactly like the Agent permission read:
+        unknown-outcome/rate-limit codes are transient, everything else
+        propagates for the caller to classify.
+        """
+        runtime = self.app.follower_registry.get(account_id)
+        if runtime is None:
+            raise KeyError(f"follower runtime {account_id!r} not found")
+        try:
+            records = await runtime.client.builder(account_id)
+        except AsterError as exc:
+            if exc.code in UNKNOWN_CODES:
+                raise ServiceUnavailableError(
+                    "signed Builder attestation read is unavailable"
+                ) from None
+            raise
+        if not isinstance(records, list):
+            raise ServiceUnavailableError("signed Builder attestation read is unavailable")
+        return records
 
     async def validate_resume_safety(self, account_id: str, snapshot: AccountState) -> None:
         if not isinstance(snapshot, AccountState) or snapshot.account_id != account_id:

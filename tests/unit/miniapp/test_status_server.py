@@ -192,6 +192,7 @@ async def test_status_returns_exact_safe_dto(client):
         "age_seconds": 5,
         "reason": "none",
         "remediation": None,
+        "builder_verified": False,
     }
     for forbidden in (
         "message",

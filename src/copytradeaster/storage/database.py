@@ -187,6 +187,18 @@ MIGRATIONS: list[str] = [
         "CREATE INDEX IF NOT EXISTS idx_builder_attempts_user "
         "ON builder_onboarding_attempts(telegram_user_id)"
     ),
+    # P2.6 Account + Builder attestation: durable identity source plus a
+    # nullable last-known Builder snapshot on the account row.  The snapshot
+    # is evidence, never proof: only a fresh signed Agent + Builder check
+    # counts as verified.  Existing rows backfill to direct without guessing
+    # any legacy Builder status.
+    "ALTER TABLE accounts ADD COLUMN identity_source TEXT NOT NULL DEFAULT 'direct'"
+    " CHECK(identity_source IN ('direct','builder'))",
+    "ALTER TABLE accounts ADD COLUMN builder_address TEXT",
+    "ALTER TABLE accounts ADD COLUMN builder_name TEXT",
+    "ALTER TABLE accounts ADD COLUMN builder_max_fee_rate TEXT",
+    "ALTER TABLE accounts ADD COLUMN builder_agent_expires_at_ms INTEGER",
+    "ALTER TABLE accounts ADD COLUMN builder_verified_at TEXT",
 ]
 
 CASEFOLD_ADDRESS_INDEX_VERSION = next(

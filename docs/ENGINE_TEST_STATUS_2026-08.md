@@ -5,9 +5,41 @@
 
 ## Текущее состояние
 
-- **Stage 3, часть 2 (P2.5 — System Status) — IMPLEMENTED /
-  AWAITING REVIEW/ACCEPTANCE (2026-09-03, ветка
-  `codex/stage-3-mini-app-part2`):** read-only control-plane slice поверх
+- **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — IMPLEMENTED /
+  AWAITING REVIEW + OWNER ACCEPTANCE (2026-09-03, ветка
+  `codex/stage-3-mini-app-part2`):** nested control screen поверх
+  `UserApplicationService.account_builder()` — persistent `identity_source`
+  + Builder snapshot (одна append-only migration, backfill `direct`),
+  authoritative verified только одновременными signed `GET /agent` +
+  exact-match `GET /builder` (typed `BuilderDTO`, без float), typed
+  `AccountBuilderDTO` (только masked, state verified/expiring/stale/
+  blocked/unavailable/not_applicable, remediation refresh/reauthorize/null),
+  race-gate `account_version` + `IDENTITY_CHANGED`, same-signer
+  reauthorization (`reauth-`, paused сохраняется), local-only disconnect с
+  атомарной инвалидацией proof, единый trust source `isBuilderVerified()`
+  для Account/Home/Status. P2.5 не рефакторился; engine/P2.7 не тронуты.
+  1. **Offline gate:** offline pytest **977 passed / 2 skipped / 40
+     deselected**, coverage **87%** (порог >= 87%); ruff check/format
+     clean. Новые кейсы (117): storage identity (6), aster builder_api (9),
+     attestation exact-match (13), reauthorize same-signer (12),
+     application DTO (34), adapter reauth durability (16), credentials
+     lifecycle (4), HTTP account_builder_server (23).
+  2. **Frontend gate:** Vitest **167 passed / 17 файлов**
+     (`accountBuilderBehavior.test.tsx` 11 + обновлённые settings/home/
+     systemStatus), lint + `tsc` + build clean.
+  3. **Live gate (Aster Testnet, scratch `sqlite3.backup`-копии прод-БД,
+     прод-БД не тронута):**
+     `tests/testnet/test_live_account_builder_acceptance.py` — attestation
+     gate + local disconnect (exchange-авторизация пережила disconnect —
+     local-only доказан) + verified-onboarding **`LIVE onboarded
+     source=builder state=verified`** (fresh faucet-funded wallet,
+     стандартный Part 1 flow, atomic paused commit, оба trust rail
+     `builder_verified=true`). Live-факты биржи: never-deposited счёт —
+     `-5050 after deposit` / `-1000 No agent found`; self-signed management
+     отвергается; env-политика HEDGE.
+     Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.6).
+- **Stage 3, часть 2 (P2.5 — System Status) — ACCEPTED / CLOSED
+  (2026-09-03):** read-only control-plane slice поверх
   `UserApplicationService.status()` — новый typed `StatusDTO`
   (`state/system_state/copy_state/aster_state/permissions_state/masked
   identities/positions_count/permissions/snapshot_captured_at/last_check_at/
@@ -38,8 +70,7 @@
      («Система требует проверки»); Resume под degraded отклонён, после
      самоисцеления sweep'ом resume прошёл (аккаунт active, ready).
      Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.5).
-     Статус P2.5: IMPLEMENTED / AWAITING REVIEW (независимое review
-     corrective-2).
+     Статус P2.5: ACCEPTED / CLOSED.
 - **Stage 3, часть 2 (P2.4 — Risk on Stop) — CLOSED
   (2026-09-03, implementation/live/owner acceptance complete + external
   review corrective applied):**

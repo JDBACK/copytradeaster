@@ -1,6 +1,7 @@
 /** Pure Home view-model (minimal part-1 scope over DashboardDTO). */
 
 import type { DashboardDTO } from './types'
+import { isBuilderVerified } from './accountBuilder'
 import { formatTime } from './format'
 
 export type HomeTone = 'active' | 'paused' | 'empty' | 'attention'
@@ -71,15 +72,14 @@ export interface TrustItem {
 }
 
 /** Compact verified trust summary (эталон 02-home-active): Wallet → Agent →
- * Builder → Sync.  Every item is derived from backend facts; until the
- * persisted identity source / Builder attestation lands in P2.6, Builder
- * remains unverified (done: false). Sync requires both system_state === 'ready'
- * AND a fresh snapshot timestamp. */
+ * Builder → Sync.  Every item is derived from backend facts; the Builder item
+ * uses the single shared P2.6 attestation verdict (verified only). Sync
+ * requires both system_state === 'ready' AND a fresh snapshot timestamp. */
 export function trustSummary(dashboard: DashboardDTO): TrustItem[] {
   return [
     { key: 'wallet', label: 'Wallet', done: Boolean(dashboard.account_masked) },
     { key: 'agent', label: 'Agent', done: Boolean(dashboard.signer_masked) },
-    { key: 'builder', label: 'Builder', done: false },
+    { key: 'builder', label: 'Builder', done: isBuilderVerified(dashboard) },
     {
       key: 'sync',
       label: 'Sync',

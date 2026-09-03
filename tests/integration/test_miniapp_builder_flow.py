@@ -68,6 +68,20 @@ class FakeExchange:
                 }
         return None
 
+    def builder_for(self, user: str) -> list[dict[str, str]]:
+        records = []
+        for params in self.approvals:
+            if params.get("user") == user and params.get("builder"):
+                records.append(
+                    {
+                        "userAddress": params["user"],
+                        "builderAddress": params["builder"],
+                        "builderName": params.get("builderName", "copytradeaster"),
+                        "maxFeeRate": params["maxFeeRate"],
+                    }
+                )
+        return records
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         params = {k: v for k, v in request.url.params.items()}
         path = request.url.path
@@ -88,6 +102,8 @@ class FakeExchange:
                     json={"code": -2015, "msg": "Invalid API-key, IP, or permissions for action."},
                 )
             return httpx.Response(200, json=agent)
+        if request.method == "GET" and path == "/fapi/v3/builder":
+            return httpx.Response(200, json=self.builder_for(params.get("user", "")))
         if request.method == "GET" and path == "/fapi/v3/balance":
             return httpx.Response(
                 200,

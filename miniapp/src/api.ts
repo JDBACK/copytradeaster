@@ -1,10 +1,12 @@
 /** Typed API client: every call carries the signed Telegram initData header. */
 
 import type {
+  AccountBuilderDTO,
   ActivityFilter,
   ActivityPageDTO,
   BuilderOnboardedDTO,
   BuilderPrepareDTO,
+  BuilderReauthorizedDTO,
   ConfirmationDTO,
   DashboardDTO,
   MiniAppSessionDTO,
@@ -146,6 +148,9 @@ export const api = {
   beginConfirmation: (auth: AuthContext, action: string) =>
     post<ConfirmationDTO>('/miniapp/api/confirmation/begin', { action }, auth),
 
+  confirmConfirmation: (auth: AuthContext, confirmation: ConfirmationDTO) =>
+    post<DashboardDTO>('/miniapp/api/confirmation/confirm', { confirmation }, auth),
+
   builderPrepare: (auth: AuthContext, userAddress: string) =>
     post<BuilderPrepareDTO>('/miniapp/api/builder/prepare', { user_address: userAddress }, auth),
 
@@ -163,6 +168,22 @@ export const api = {
     auth: AuthContext,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<MiniAppSessionDTO>('/miniapp/api/builder/recover', {}, auth, options),
+
+  accountBuilder: (
+    auth: AuthContext,
+    refresh = false,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => post<AccountBuilderDTO>('/miniapp/api/account-builder', { refresh }, auth, options),
+
+  reauthorizePrepare: (auth: AuthContext) =>
+    post<BuilderPrepareDTO>('/miniapp/api/builder/reauthorize-prepare', {}, auth),
+
+  reauthorizeSubmit: (auth: AuthContext, pendingId: string, signature: string) =>
+    post<BuilderReauthorizedDTO>(
+      '/miniapp/api/builder/reauthorize-submit',
+      { pending_id: pendingId, signature },
+      auth,
+    ),
 
   /** Fire-and-forget diagnostics: lands in the operator's server log. */
   clientLog: (

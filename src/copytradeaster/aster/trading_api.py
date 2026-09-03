@@ -15,6 +15,7 @@ import httpx
 from copytradeaster.aster.models import (
     AgentDTO,
     BalanceDTO,
+    BuilderDTO,
     ExchangeInfo,
     LeverageBracketResponse,
     OrderDTO,
@@ -302,6 +303,43 @@ class AsterClient:
             if dto.agent_address and dto.agent_address.strip().lower() == expected_signer:
                 return dto
         raise AsterError(-2015, "agent not found")
+
+    async def builder(self, account_id: str) -> list[BuilderDTO]:
+        """Return the typed approved-Builder records for the account identity.
+
+        ``GET /fapi/v3/builder`` is a signed USER_DATA request returning a
+        collection.  Accept the documented list shape plus ``data``/``rows``/
+        ``builders``/``builder`` wrappers seen across deployments, but expose
+        only typed records — never raw dicts.  Selection of the record that
+        proves the current Builder authorization belongs to the attestation
+        validator, not to transport: every well-formed record is returned.
+        A malformed critical record fails the whole read closed.
+        """
+        body = await self._signed(account_id, "GET", "/fapi/v3/builder", {}, weight=5)
+        if isinstance(body, list):
+            records = body
+        elif isinstance(body, dict):
+            nested: object = body.get("data")
+            if nested is None:
+                nested = body.get("rows", body.get("builders", body.get("builder")))
+            if isinstance(nested, list):
+                records = nested
+            elif isinstance(nested, dict):
+                records = [nested]
+            else:
+                records = [body]
+        else:
+            raise AsterError(-1000, "invalid builder response")
+
+        result: list[BuilderDTO] = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise AsterError(-1000, "invalid builder response")
+            try:
+                result.append(BuilderDTO.model_validate(record))
+            except Exception:
+                raise AsterError(-1000, "invalid builder response") from None
+        return result
 
     async def leverage_bracket(self, account_id: str, symbol: str) -> LeverageBracketResponse:
         """Read and normalize the symbol-specific leverage brackets.

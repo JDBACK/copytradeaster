@@ -165,6 +165,63 @@ class AccountRepo:
             "WHERE COALESCE(execution_mode, 'REAL')='REAL' AND enabled=1 ORDER BY id"
         )
 
+    async def get_builder_snapshot(self, id_: str) -> Row | None:
+        """Return the durable Builder attestation snapshot for one account.
+
+        The snapshot is last-known evidence, never proof: callers must not
+        treat its presence as a verified Builder authorization.
+        """
+        return await self.db.fetchone(
+            "SELECT identity_source, builder_address, builder_name, builder_max_fee_rate, "
+            "builder_agent_expires_at_ms, builder_verified_at "
+            "FROM accounts WHERE id=?",
+            (id_,),
+        )  # type: ignore[return-value]
+
+    async def set_builder_snapshot(
+        self,
+        id_: str,
+        *,
+        builder_address: str,
+        builder_name: str,
+        builder_max_fee_rate: str,
+        builder_agent_expires_at_ms: int,
+        builder_verified_at: str,
+    ) -> None:
+        """Persist a freshly verified Builder proof for a builder account."""
+        await self.db.execute_write(
+            "UPDATE accounts SET identity_source='builder', builder_address=?, builder_name=?, "
+            "builder_max_fee_rate=?, builder_agent_expires_at_ms=?, builder_verified_at=? "
+            "WHERE id=?",
+            (
+                builder_address,
+                builder_name,
+                builder_max_fee_rate,
+                int(builder_agent_expires_at_ms),
+                builder_verified_at,
+                id_,
+            ),
+        )
+
+    async def set_identity_direct(self, id_: str) -> None:
+        """Mark an account direct and atomically drop any Builder proof."""
+        await self.db.execute_write(
+            "UPDATE accounts SET identity_source='direct', builder_address=NULL, "
+            "builder_name=NULL, "
+            "builder_max_fee_rate=NULL, builder_agent_expires_at_ms=NULL, builder_verified_at=NULL "
+            "WHERE id=?",
+            (id_,),
+        )
+
+    async def clear_builder_snapshot(self, id_: str) -> None:
+        """Invalidate a stale Builder proof without changing the source marker."""
+        await self.db.execute_write(
+            "UPDATE accounts SET builder_address=NULL, builder_name=NULL, "
+            "builder_max_fee_rate=NULL, builder_agent_expires_at_ms=NULL, builder_verified_at=NULL "
+            "WHERE id=?",
+            (id_,),
+        )
+
 
 class CredentialRepo:
     def __init__(self, db: Database) -> None:

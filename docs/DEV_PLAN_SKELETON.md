@@ -324,8 +324,18 @@ Stage 2 полностью закрыт для testnet scope.
   review corrective: legacy off-grid proof + banner, ruler freeze mid-save,
   4 behavioral + 3 `nearestRiskStep` теста; журнал —
   `STAGE3_PART2_PROGRESS_2026-09.md`).
-- [ ] P2.5: System Status с typed remediation и сохранением stale snapshot.
-- [ ] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle.
+- [x] P2.5: System Status с typed remediation и сохранением stale snapshot
+  (ACCEPTED / CLOSED 2026-09-03: implementation/live/review/owner
+  acceptance complete; `POST /miniapp/api/status`, SystemStatusScreen,
+  Telegram presenter на новом контракте; журнал —
+  `STAGE3_PART2_PROGRESS_2026-09.md`).
+- [x] P2.6: Account + Builder attestation, disconnect и reauthorize lifecycle
+  (IMPLEMENTED 2026-09-03, ждёт review + owner acceptance: persistent
+  `identity_source` + Builder snapshot, authoritative signed Agent+Builder
+  verify, `AccountBuilderDTO`, same-signer reauthorization, local-only
+  disconnect, единый trust source Account/Home/Status; live gate complete —
+  `source=builder state=verified`; журнал —
+  `STAGE3_PART2_PROGRESS_2026-09.md`).
 - [ ] P2.7: account-specific `builder + feeRate` в обычном copy-engine и
   финальное закрытие Stage 3.
 

@@ -232,6 +232,9 @@ class DashboardDTO:
     permission: PermissionSummary = field(default_factory=PermissionSummary)
     notification_enabled: bool = True
     is_admin: bool = False
+    # P2.6 shared Builder verdict: True only for a current authoritative
+    # ``verified`` attestation from the same truth as AccountBuilderDTO.
+    builder_verified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +263,8 @@ class StatusDTO:
     age_seconds: int | None = None
     reason: StatusReason = StatusReason.SYSTEM_NOT_READY
     remediation: StatusRemediation | None = None
+    # P2.6 shared Builder verdict, same truth as DashboardDTO/AccountBuilderDTO.
+    builder_verified: bool = False
 
 
 RISK_MIN = Decimal("0.005")
@@ -563,6 +568,92 @@ class BuilderOnboardedDTO:
     message: str | None = None
 
 
+class AccountBuilderState(StrEnum):
+    """Authoritative Builder attestation verdict for the Account screen.
+
+    The durable snapshot is last-known evidence only: ``verified`` requires
+    a fresh combined signed Agent + Builder check (or a TTL-bounded recent
+    one).  ``stale`` keeps showing the snapshot after a transient failure;
+    ``blocked`` is a proven negative; ``unavailable`` has no usable snapshot;
+    ``not_applicable`` is a direct (non-Builder) account.  There is no
+    ``pending`` — that belongs to the onboarding flow.
+    """
+
+    VERIFIED = "verified"
+    EXPIRING = "expiring"
+    STALE = "stale"
+    BLOCKED = "blocked"
+    UNAVAILABLE = "unavailable"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class AccountBuilderReason(StrEnum):
+    """Closed typed reason behind a non-verified attestation."""
+
+    NONE = "none"
+    DIRECT_ACCOUNT = "direct_account"
+    ACCOUNT_DISCONNECTED = "account_disconnected"
+    AGENT_INVALID = "agent_invalid"
+    AGENT_EXPIRING = "agent_expiring"
+    BUILDER_NOT_CONFIRMED = "builder_not_confirmed"
+    BUILDER_MISMATCH = "builder_mismatch"
+    FEE_MISMATCH = "fee_mismatch"
+    TRANSIENT_UNAVAILABLE = "transient_unavailable"
+    SNAPSHOT_MISSING = "snapshot_missing"
+    IDENTITY_CHANGED = "identity_changed"
+
+
+class AccountBuilderRemediation(StrEnum):
+    """Executable remediation set for the Account + Builder screen.
+
+    ``refresh`` re-runs ``account_builder(refresh=True)``; ``reauthorize``
+    is the only signal that shows the re-authorize action.  The field is
+    ``None`` when no action applies.  The frontend never decides on its own.
+    """
+
+    REFRESH = "refresh"
+    REAUTHORIZE = "reauthorize"
+
+
+@dataclass(frozen=True, slots=True)
+class AccountBuilderDTO:
+    """Public Account + Builder attestation contract (P2.6).
+
+    Only masked identities and the actual authorized fee cap reach the UI.
+    Full addresses, keys, signatures, nonces, raw Aster payloads and
+    internal exception text never enter this DTO.
+    """
+
+    identity_source: str = "direct"
+    state: AccountBuilderState = AccountBuilderState.UNAVAILABLE
+    reason: AccountBuilderReason = AccountBuilderReason.SNAPSHOT_MISSING
+    remediation: AccountBuilderRemediation | None = AccountBuilderRemediation.REFRESH
+    account_masked: str | None = None
+    signer_masked: str | None = None
+    builder_address_masked: str | None = None
+    builder_name: str | None = None
+    max_fee_rate: str | None = None
+    permission: PermissionSummary = field(default_factory=PermissionSummary)
+    agent_expires_at_ms: int | None = None
+    verified_at: datetime | None = None
+    last_check_at: datetime | None = None
+    age_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderReauthorizedDTO:
+    """Safe result of a same-signer Builder re-approval (always paused)."""
+
+    account_id: str
+    account_masked: str
+    signer_masked: str
+    builder_name: str
+    max_fee_rate: str
+    agent_expires_at_ms: int
+    paused: bool = True
+    message: str | None = None
+
+
 class ApplicationProtocol(Protocol):
     """Shared application boundary; implementations live outside Telegram."""
 
@@ -612,6 +703,14 @@ class ApplicationProtocol(Protocol):
     ) -> BuilderOnboardedDTO: ...
 
     async def builder_resume_attempt(self, user_id: int) -> BuilderOnboardedDTO: ...
+
+    async def account_builder(self, user_id: int, refresh: bool = False) -> AccountBuilderDTO: ...
+
+    async def builder_reauthorize_prepare(self, user_id: int) -> BuilderPrepareDTO: ...
+
+    async def builder_reauthorize_submit(
+        self, user_id: int, pending_id: str, signature: str
+    ) -> BuilderReauthorizedDTO: ...
 
     async def update_risk(self, user_id: int, values: RiskUpdateInput) -> RiskDTO: ...
 

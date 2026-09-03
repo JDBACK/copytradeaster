@@ -470,6 +470,74 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, "Восстановление запуска не выполнено — попробуйте ещё раз.")
 
+    async def account_builder(request: web.Request) -> web.Response:
+        """Authoritative Account + Builder attestation (P2.6).
+
+        Strict single-boolean boundary like ``/status``: ``{}`` means
+        ``refresh=False``; ``refresh=true`` runs the signed Agent + Builder
+        re-check.  Identity always comes from the Telegram boundary.
+        """
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        if body is None:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        if set(body.keys()) - {"refresh"}:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        if "refresh" not in body:
+            refresh = False
+        elif not isinstance(body["refresh"], bool):
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        else:
+            refresh = body["refresh"]
+        try:
+            return _json_dto(await application.account_builder(user_id, refresh=refresh))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def builder_reauthorize_prepare(request: web.Request) -> web.Response:
+        """Same-signer re-approval payload; every field is server-derived.
+
+        The body carries no fields by design: account/user/signer/builder
+        come from the Telegram identity, never from client claims, so there
+        is no ``force`` flag to forge.
+        """
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        try:
+            return _json_dto(await application.builder_reauthorize_prepare(user_id))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_ONBOARDING_FAILED)
+
+    async def builder_reauthorize_submit(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request)
+        if body is None:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        if set(body.keys()) != {"pending_id", "signature"}:
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        pending_id = body.get("pending_id")
+        signature = body.get("signature")
+        if (
+            not isinstance(pending_id, str)
+            or not pending_id.strip()
+            or not isinstance(signature, str)
+            or not signature.strip()
+        ):
+            return _json_error(400, "invalid_input", MSG_BAD_BODY)
+        try:
+            return _json_dto(
+                await application.builder_reauthorize_submit(
+                    user_id, pending_id.strip(), signature.strip()
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_ONBOARDING_FAILED)
+
     @web.middleware
     async def security_headers(request: web.Request, handler) -> web.StreamResponse:
         response = await handler(request)
@@ -500,6 +568,9 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/builder/submit", builder_submit)
     app.router.add_post("/miniapp/api/builder/resume-attempt", builder_resume_attempt)
     app.router.add_post("/miniapp/api/builder/recover", builder_recover)
+    app.router.add_post("/miniapp/api/account-builder", account_builder)
+    app.router.add_post("/miniapp/api/builder/reauthorize-prepare", builder_reauthorize_prepare)
+    app.router.add_post("/miniapp/api/builder/reauthorize-submit", builder_reauthorize_submit)
 
     static_dir: Path | None = settings.miniapp_static_dir
     if static_dir is not None and Path(static_dir).is_dir():

@@ -9,6 +9,7 @@ importing Telegram types here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import re
@@ -30,6 +31,10 @@ from copytradeaster.application.models import (
     RISK_STEP,
     AccessRequestDTO,
     AccessRequestStatus,
+    AccountBuilderDTO,
+    AccountBuilderReason,
+    AccountBuilderRemediation,
+    AccountBuilderState,
     ActivityCategory,
     ActivityFilter,
     ActivityItem,
@@ -45,6 +50,7 @@ from copytradeaster.application.models import (
     AuthorizationError,
     BuilderOnboardedDTO,
     BuilderPrepareDTO,
+    BuilderReauthorizedDTO,
     Confirmation,
     ConfirmationAction,
     ConfirmationExpiredError,
@@ -78,6 +84,7 @@ from copytradeaster.application.models import (
 )
 from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
+from copytradeaster.onboarding.builder import validate_builder_record
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import (
     BuilderPrepareRequest,
@@ -100,6 +107,9 @@ from copytradeaster.storage.repositories import (
 TESTNET_REST_URL = "https://fapi.asterdex-testnet.com"
 TESTNET_WS_URL = "wss://fstream.asterdex-testnet.com/ws"
 PERMISSION_TTL_SECONDS = 60
+# P2.6: an Agent authorization this close to expiry needs re-approval.
+# The value is backend policy — the frontend never computes it.
+BUILDER_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60 * 1000
 TESTNET_PERMISSION_FALLBACK_TTL_SECONDS = 86_400
 ACTIVITY_PAGE_SIZE = 10
 ADMIN_PAGE_SIZE = 10
@@ -194,6 +204,10 @@ class Stage2RuntimeAdapter(Protocol):
         """Reopen reductions/protection while the durable entry gate stays false."""
 
     async def refresh_agent_permission(self, account_id: str) -> AgentValidation: ...
+
+    async def refresh_builder_record(self, account_id: str) -> list[Any]:
+        """Signed GET /fapi/v3/builder records for the current identity."""
+        ...
 
     async def permission_override_allowed(self, account_id: str) -> bool: ...
 
@@ -1372,6 +1386,7 @@ class UserApplicationService:
             permission=permission,
             notification_enabled=enabled,
             is_admin=context.role is UserRole.ADMIN,
+            builder_verified=await self._builder_verified(account_id),
         )
 
     async def _identity(self, account_id: str) -> str | None:
@@ -1886,11 +1901,580 @@ class UserApplicationService:
                 age_seconds=age_seconds,
                 reason=reason,
                 remediation=remediation,
+                builder_verified=await self._builder_verified(account_id),
             )
         except _SAFE_ERRORS:
             raise
         except Exception:
             raise ServiceUnavailableError("status is unavailable") from None
+
+    # --- P2.6 Account + Builder attestation -----------------------------------
+
+    def _builder_expected(self) -> tuple[str, str, str] | None:
+        """Configured Builder identity (address, name, fee cap), or None."""
+        cfg = getattr(self._runtime, "cfg", None)
+        if cfg is None:
+            return None
+        address = str(getattr(cfg, "builder_address", "") or "").strip()
+        if not address:
+            return None
+        return (
+            address,
+            str(getattr(cfg, "builder_name", "") or ""),
+            str(getattr(cfg, "max_fee_rate", "") or ""),
+        )
+
+    async def _current_signer(self, account_id: str) -> str | None:
+        """Full current signer address for proof binding; never sent masked."""
+        credentials = getattr(self._runtime, "credentials", None)
+        try:
+            result = await self._call_optional(credentials, "identity", account_id)
+        except Exception:
+            return None
+        if result is _MISSING or result is None:
+            return None
+        signer = _row_value(result, "signer", _row_value(result, "signer_address"))
+        if not isinstance(signer, str) or not signer.strip():
+            return None
+        return signer.strip()
+
+    async def _builder_verified(self, account_id: str) -> bool:
+        """Cheap shared Builder verdict for the trust rails (no network).
+
+        True only for a durable proof bound to the current identity: builder
+        source, complete snapshot, live validation triple, valid expiries and
+        a matching signer.  This is the same truth the Account screen
+        evaluates with freshness; the rails never compute their own policy.
+        """
+        try:
+            row = await self._account_row(account_id)
+            if row is None or str(_row_value(row, "role", "")) != "follower":
+                return False
+            if not _is_true(_row_value(row, "enabled", 0)):
+                return False
+            if str(_row_value(row, "identity_source", "direct") or "direct") != "builder":
+                return False
+            if not _row_value(row, "builder_address", None):
+                return False
+            if not _row_value(row, "builder_max_fee_rate", None):
+                return False
+            if not _row_value(row, "builder_verified_at", None):
+                return False
+            now_ms = int(self._now().timestamp() * 1000)
+            try:
+                snapshot_expiry = int(_row_value(row, "builder_agent_expires_at_ms", 0))
+            except (TypeError, ValueError):
+                return False
+            if snapshot_expiry <= now_ms:
+                return False
+            validation = await self._validation_row(account_id)
+            if validation is None:
+                return False
+            if (
+                _row_bool(validation, "can_read") is not True
+                or _row_bool(validation, "can_perp_trade") is not True
+                or _row_bool(validation, "can_withdraw") is not False
+            ):
+                return False
+            try:
+                validation_expiry = int(_row_value(validation, "expired_ms", 0))
+            except (TypeError, ValueError):
+                return False
+            if validation_expiry <= now_ms:
+                return False
+            current = await self._current_signer(account_id)
+            stored = _row_value(validation, "signer_address", "")
+            if not current or not isinstance(stored, str):
+                return False
+            return stored.strip().lower() == current.lower()
+        except Exception:
+            return False
+
+    async def _invalidate_builder_proof(self, account_id: str) -> None:
+        """Drop a disproven Builder snapshot; best-effort, never raises."""
+        with contextlib.suppress(Exception):
+            await self._call_optional(self._accounts, "clear_builder_snapshot", account_id)
+
+    async def _repair_suspect_proof(self, account_id: str) -> None:
+        """Drop validation/snapshot rows left by a replaced identity.
+
+        A credential replacement that landed mid-read may leave the previous
+        signer's validation behind.  When the stored signer no longer matches
+        the current identity, both rows go so no old proof can be served.
+        """
+        with contextlib.suppress(Exception):
+            current = await self._current_signer(account_id)
+            validation = await self._validation_row(account_id)
+            stored = _row_value(validation, "signer_address", "") if validation is not None else ""
+            if (
+                not current
+                or not isinstance(stored, str)
+                or stored.strip().lower() != current.lower()
+            ):
+                await self._call_optional(self._validations, "delete", account_id)
+                await self._call_optional(self._accounts, "clear_builder_snapshot", account_id)
+
+    @staticmethod
+    def _builder_reason_for(code: OnboardingErrorCode) -> AccountBuilderReason:
+        if code == OnboardingErrorCode.BUILDER_NOT_CONFIRMED:
+            return AccountBuilderReason.BUILDER_NOT_CONFIRMED
+        if code == OnboardingErrorCode.BUILDER_FEE_MISMATCH:
+            return AccountBuilderReason.FEE_MISMATCH
+        return AccountBuilderReason.BUILDER_MISMATCH
+
+    async def account_builder(self, user_id: int, refresh: bool = False) -> AccountBuilderDTO:
+        """Authoritative Account + Builder attestation for the nested screen."""
+        try:
+            context, row, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            return await self._account_builder_for(context, row, account_id, refresh=refresh)
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("account builder attestation is unavailable") from None
+
+    async def _account_builder_for(
+        self, context: UserContext, row: Any, account_id: str, *, refresh: bool
+    ) -> AccountBuilderDTO:
+        now = self._now()
+        account_masked = mask_address(str(_row_value(row, "user_address", "")))
+        signer_masked = await self._identity(account_id)
+        permission, _ = await self._permission(account_id)
+        source = str(_row_value(row, "identity_source", "direct") or "direct")
+        if source not in {"direct", "builder"}:
+            source = "direct"
+        if not _is_true(_row_value(row, "enabled", 0)):
+            return AccountBuilderDTO(
+                identity_source=source,
+                state=AccountBuilderState.BLOCKED,
+                reason=AccountBuilderReason.ACCOUNT_DISCONNECTED,
+                remediation=None,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                permission=permission,
+                last_check_at=now,
+                age_seconds=0,
+            )
+        if source == "direct":
+            return AccountBuilderDTO(
+                identity_source="direct",
+                state=AccountBuilderState.NOT_APPLICABLE,
+                reason=AccountBuilderReason.DIRECT_ACCOUNT,
+                remediation=None,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                permission=permission,
+                agent_expires_at_ms=_int_or_none(
+                    _row_value(await self._validation_row(account_id), "expired_ms", None)
+                ),
+                last_check_at=now,
+                age_seconds=0,
+            )
+        if not refresh:
+            return await self._cached_builder_dto(
+                account_id, row, account_masked, signer_masked, permission, now
+            )
+        async with self._account_lock(account_id):
+            return await self._refresh_builder_dto(account_id, row, account_masked, signer_masked)
+
+    async def _cached_builder_dto(
+        self,
+        account_id: str,
+        row: Any,
+        account_masked: str | None,
+        signer_masked: str | None,
+        permission: PermissionSummary,
+        now: datetime,
+    ) -> AccountBuilderDTO:
+        """Cheap cached read: durable evidence only, never a fresh verdict."""
+        builder_address = _row_value(row, "builder_address", None)
+        builder_name = _row_value(row, "builder_name", None)
+        max_fee_rate = _row_value(row, "builder_max_fee_rate", None)
+        verified_at = _as_datetime(_row_value(row, "builder_verified_at", None))
+        validation = await self._validation_row(account_id)
+        agent_expires = _int_or_none(_row_value(validation, "expired_ms", None))
+        base = {
+            "identity_source": "builder",
+            "account_masked": account_masked,
+            "signer_masked": signer_masked,
+            "builder_address_masked": (
+                mask_address(str(builder_address)) if builder_address else None
+            ),
+            "builder_name": str(builder_name) if builder_name else None,
+            "max_fee_rate": str(max_fee_rate) if max_fee_rate else None,
+            "permission": permission,
+            "agent_expires_at_ms": agent_expires,
+            "verified_at": verified_at,
+        }
+        if not builder_address or not max_fee_rate or verified_at is None:
+            return AccountBuilderDTO(
+                **base,  # type: ignore[arg-type]
+                state=AccountBuilderState.UNAVAILABLE,
+                reason=AccountBuilderReason.SNAPSHOT_MISSING,
+                remediation=AccountBuilderRemediation.REFRESH,
+                last_check_at=now,
+                age_seconds=0,
+            )
+        if await self._builder_verified(account_id):
+            if (now - verified_at).total_seconds() <= self._permission_ttl:
+                if agent_expires is not None and (
+                    agent_expires - int(now.timestamp() * 1000) <= BUILDER_EXPIRY_WARNING_MS
+                ):
+                    # Same expiring verdict as the fresh path: without this,
+                    # a just-refreshed expiring proof would read VERIFIED here
+                    # and the reauthorization prepare gate could never open.
+                    return AccountBuilderDTO(
+                        **base,  # type: ignore[arg-type]
+                        state=AccountBuilderState.EXPIRING,
+                        reason=AccountBuilderReason.AGENT_EXPIRING,
+                        remediation=AccountBuilderRemediation.REAUTHORIZE,
+                        last_check_at=now,
+                        age_seconds=max(int((now - verified_at).total_seconds()), 0),
+                    )
+                return AccountBuilderDTO(
+                    **base,  # type: ignore[arg-type]
+                    state=AccountBuilderState.VERIFIED,
+                    reason=AccountBuilderReason.NONE,
+                    remediation=None,
+                    last_check_at=now,
+                    age_seconds=max(int((now - verified_at).total_seconds()), 0),
+                )
+            return AccountBuilderDTO(
+                **base,  # type: ignore[arg-type]
+                state=AccountBuilderState.STALE,
+                reason=AccountBuilderReason.TRANSIENT_UNAVAILABLE,
+                remediation=AccountBuilderRemediation.REFRESH,
+                last_check_at=now,
+                age_seconds=max(int((now - verified_at).total_seconds()), 0),
+            )
+        # Durable evidence disproves the proof (bad triple/expiry/signer):
+        # blocked without spending a signed read.
+        return AccountBuilderDTO(
+            **base,  # type: ignore[arg-type]
+            state=AccountBuilderState.BLOCKED,
+            reason=AccountBuilderReason.AGENT_INVALID,
+            remediation=AccountBuilderRemediation.REAUTHORIZE,
+            last_check_at=now,
+            age_seconds=(max(int((now - verified_at).total_seconds()), 0) if verified_at else 0),
+        )
+
+    async def _stale_or_unavailable_dto(
+        self,
+        account_id: str,
+        row: Any,
+        account_masked: str | None,
+        signer_masked: str | None,
+        permission: PermissionSummary,
+        now: datetime,
+    ) -> AccountBuilderDTO:
+        """Transient failure: keep a bound snapshot as stale, else unavailable."""
+        builder_address = _row_value(row, "builder_address", None)
+        builder_name = _row_value(row, "builder_name", None)
+        max_fee_rate = _row_value(row, "builder_max_fee_rate", None)
+        verified_at = _as_datetime(_row_value(row, "builder_verified_at", None))
+        validation = await self._validation_row(account_id)
+        agent_expires = _int_or_none(_row_value(validation, "expired_ms", None))
+        current = await self._current_signer(account_id)
+        stored = _row_value(validation, "signer_address", "") if validation is not None else ""
+        bound = (
+            bool(builder_address)
+            and bool(max_fee_rate)
+            and verified_at is not None
+            and validation is not None
+            and bool(current)
+            and isinstance(stored, str)
+            and stored.strip().lower() == current.lower()
+        )
+        if bound:
+            age = max(int((now - verified_at).total_seconds()), 0) if verified_at is not None else 0
+            return AccountBuilderDTO(
+                identity_source="builder",
+                state=AccountBuilderState.STALE,
+                reason=AccountBuilderReason.TRANSIENT_UNAVAILABLE,
+                remediation=AccountBuilderRemediation.REFRESH,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                builder_address_masked=mask_address(str(builder_address)),
+                builder_name=str(builder_name) if builder_name else None,
+                max_fee_rate=str(max_fee_rate),
+                permission=permission,
+                agent_expires_at_ms=agent_expires,
+                verified_at=verified_at,
+                last_check_at=now,
+                age_seconds=age,
+            )
+        return AccountBuilderDTO(
+            identity_source="builder",
+            state=AccountBuilderState.UNAVAILABLE,
+            reason=AccountBuilderReason.SNAPSHOT_MISSING,
+            remediation=AccountBuilderRemediation.REFRESH,
+            account_masked=account_masked,
+            signer_masked=signer_masked,
+            permission=permission,
+            agent_expires_at_ms=agent_expires,
+            last_check_at=now,
+            age_seconds=0,
+        )
+
+    async def _refresh_builder_dto(
+        self,
+        account_id: str,
+        row: Any,
+        account_masked: str | None,
+        signer_masked: str | None,
+    ) -> AccountBuilderDTO:
+        """Authoritative refresh: signed Agent + Builder reads, race-gated store."""
+        try:
+            version_before = await self._account_version(account_id)
+        except ServiceUnavailableError:
+            raise
+        except _SAFE_ERRORS:
+            raise
+        try:
+            await self._refresh_permission_snapshot(account_id)
+        except StaleOperationError:
+            # Proven-invalid Agent: the old proof dies here, never served again.
+            await self._invalidate_builder_proof(account_id)
+            permission, _ = await self._permission(account_id)
+            validation = await self._validation_row(account_id)
+            return AccountBuilderDTO(
+                identity_source="builder",
+                state=AccountBuilderState.BLOCKED,
+                reason=AccountBuilderReason.AGENT_INVALID,
+                remediation=AccountBuilderRemediation.REAUTHORIZE,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                permission=permission,
+                agent_expires_at_ms=_int_or_none(_row_value(validation, "expired_ms", None)),
+                last_check_at=self._now(),
+                age_seconds=0,
+            )
+        except ServiceUnavailableError:
+            permission, _ = await self._permission(account_id)
+            return await self._stale_or_unavailable_dto(
+                account_id, row, account_masked, signer_masked, permission, self._now()
+            )
+        expected = self._builder_expected()
+        if expected is None:
+            raise ServiceUnavailableError("builder attestation is not configured")
+        expected_address, _, expected_fee = expected
+        try:
+            records = await self._call_required(self._runtime, "refresh_builder_record", account_id)
+        except ServiceUnavailableError:
+            permission, _ = await self._permission(account_id)
+            return await self._stale_or_unavailable_dto(
+                account_id, row, account_masked, signer_masked, permission, self._now()
+            )
+        except AsterError:
+            # The exchange answered with an error, not a proof: never verified.
+            permission, _ = await self._permission(account_id)
+            return await self._stale_or_unavailable_dto(
+                account_id, row, account_masked, signer_masked, permission, self._now()
+            )
+        try:
+            record = validate_builder_record(
+                records if isinstance(records, list) else [],
+                user_address=str(_row_value(row, "user_address", "")),
+                builder_address=expected_address,
+                max_fee_rate=expected_fee,
+            )
+        except OnboardingError as exc:
+            await self._invalidate_builder_proof(account_id)
+            permission, _ = await self._permission(account_id)
+            validation = await self._validation_row(account_id)
+            return AccountBuilderDTO(
+                identity_source="builder",
+                state=AccountBuilderState.BLOCKED,
+                reason=self._builder_reason_for(exc.code),
+                remediation=AccountBuilderRemediation.REAUTHORIZE,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                permission=permission,
+                agent_expires_at_ms=_int_or_none(_row_value(validation, "expired_ms", None)),
+                last_check_at=self._now(),
+                age_seconds=0,
+            )
+        try:
+            version_after = await self._account_version(account_id)
+        except ServiceUnavailableError:
+            # Credentials vanished mid-read (disconnect won the race).
+            moment = self._now()
+            permission, _ = await self._permission(account_id)
+            return AccountBuilderDTO(
+                identity_source="builder",
+                state=AccountBuilderState.BLOCKED,
+                reason=AccountBuilderReason.ACCOUNT_DISCONNECTED,
+                remediation=None,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                permission=permission,
+                last_check_at=moment,
+                age_seconds=0,
+            )
+        if version_after != version_before:
+            await self._repair_suspect_proof(account_id)
+            moment = self._now()
+            permission, _ = await self._permission(account_id)
+            return AccountBuilderDTO(
+                identity_source="builder",
+                state=AccountBuilderState.STALE,
+                reason=AccountBuilderReason.IDENTITY_CHANGED,
+                remediation=AccountBuilderRemediation.REFRESH,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                permission=permission,
+                last_check_at=moment,
+                age_seconds=0,
+            )
+        # The proof belongs to the current identity: persist it durably.
+        moment = self._now()
+        moment_ms = int(moment.timestamp() * 1000)
+        validation = await self._validation_row(account_id)
+        # Just persisted as an int by _refresh_permission_snapshot above; a
+        # missing row (None) falls back to 0, which reads as expiring.
+        agent_expiry_ms = int(_row_value(validation, "expired_ms", 0) or 0)
+        record_builder = _row_value(record, "builder_address", expected_address)
+        record_name = _row_value(record, "builder_name", None)
+        record_fee = _row_value(record, "max_fee_rate", expected_fee)
+        fresh_signer = await self._identity(account_id)
+        if fresh_signer is not None:
+            signer_masked = fresh_signer
+        await self._call_required(
+            self._accounts,
+            "set_builder_snapshot",
+            account_id,
+            builder_address=str(record_builder),
+            builder_name=str(record_name) if record_name else expected[1],
+            builder_max_fee_rate=str(record_fee),
+            builder_agent_expires_at_ms=agent_expiry_ms,
+            builder_verified_at=moment.isoformat(),
+        )
+        permission, _ = await self._permission(account_id)
+        if agent_expiry_ms - moment_ms <= BUILDER_EXPIRY_WARNING_MS:
+            return AccountBuilderDTO(
+                identity_source="builder",
+                state=AccountBuilderState.EXPIRING,
+                reason=AccountBuilderReason.AGENT_EXPIRING,
+                remediation=AccountBuilderRemediation.REAUTHORIZE,
+                account_masked=account_masked,
+                signer_masked=signer_masked,
+                builder_address_masked=mask_address(str(record_builder)),
+                builder_name=str(record_name) if record_name else expected[1],
+                max_fee_rate=str(record_fee),
+                permission=permission,
+                agent_expires_at_ms=agent_expiry_ms,
+                verified_at=moment,
+                last_check_at=moment,
+                age_seconds=0,
+            )
+        return AccountBuilderDTO(
+            identity_source="builder",
+            state=AccountBuilderState.VERIFIED,
+            reason=AccountBuilderReason.NONE,
+            remediation=None,
+            account_masked=account_masked,
+            signer_masked=signer_masked,
+            builder_address_masked=mask_address(str(record_builder)),
+            builder_name=str(record_name) if record_name else expected[1],
+            max_fee_rate=str(record_fee),
+            permission=permission,
+            agent_expires_at_ms=agent_expiry_ms,
+            verified_at=moment,
+            last_check_at=moment,
+            age_seconds=0,
+        )
+
+    async def builder_reauthorize_prepare(self, user_id: int) -> BuilderPrepareDTO:
+        """Start a same-signer re-approval; allowed only from a typed state."""
+        try:
+            await self._ensure_testnet()
+            if self._builder_onboarding is None:
+                raise ServiceUnavailableError("builder onboarding is unavailable")
+            context, row, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            if not _is_true(_row_value(row, "enabled", 0)):
+                raise ValidationError("account is disconnected")
+            if str(_row_value(row, "identity_source", "direct") or "direct") != "builder":
+                raise ValidationError("reauthorization requires a builder account")
+            current = await self._account_builder_for(context, row, account_id, refresh=False)
+            if current.state not in {
+                AccountBuilderState.EXPIRING,
+                AccountBuilderState.BLOCKED,
+            }:
+                raise ValidationError("reauthorization is not required")
+            async with self._account_lock(account_id):
+                await self._call_required(
+                    self._settings, "patch_policy", account_id, allow_new_entries=False
+                )
+                try:
+                    result = await self._call_required(
+                        self._builder_onboarding, "reauthorize_prepare", context.user_id
+                    )
+                except OnboardingError as exc:
+                    raise OnboardingApplicationError(exc.code) from None
+            return BuilderPrepareDTO(
+                pending_id=result.pending_id,
+                user_masked=result.masked_user_address,
+                agent_masked=result.masked_signer_address,
+                builder_masked=result.builder_masked,
+                builder_name=result.builder_name,
+                max_fee_rate=result.max_fee_rate,
+                signature_plan=result.signature_plan,
+                can_perp_trade=result.can_perp_trade,
+                can_withdraw=result.can_withdraw,
+                agent_expires_at_ms=result.agent_expires_at_ms,
+                approval_expires_at_ms=result.approval_expires_at_ms,
+                eip712=result.eip712,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("builder reauthorization is unavailable") from None
+
+    async def builder_reauthorize_submit(
+        self, user_id: int, pending_id: str, signature: str
+    ) -> BuilderReauthorizedDTO:
+        """Complete a same-signer re-approval; the account stays paused."""
+        try:
+            await self._ensure_testnet()
+            if self._builder_onboarding is None:
+                raise ServiceUnavailableError("builder onboarding is unavailable")
+            if (
+                not isinstance(pending_id, str)
+                or not pending_id.strip()
+                or not isinstance(signature, str)
+                or not signature.strip()
+            ):
+                raise ValidationError("builder approval is invalid")
+            context = await self._context(user_id)
+            try:
+                result = await self._call_required(
+                    self._builder_onboarding,
+                    "reauthorize_submit",
+                    BuilderSubmitRequest(
+                        telegram_user_id=context.user_id,
+                        pending_id=pending_id.strip(),
+                        signature=signature.strip(),
+                    ),
+                )
+            except OnboardingError as exc:
+                raise OnboardingApplicationError(exc.code) from None
+            if str(result.account_id) != stable_account_id(context.user_id) or not result.paused:
+                raise ValidationError("reauthorization result is invalid")
+            return BuilderReauthorizedDTO(
+                account_id=str(result.account_id),
+                account_masked=str(result.account_masked),
+                signer_masked=str(result.signer_masked),
+                builder_name=str(result.builder_name),
+                max_fee_rate=str(result.max_fee_rate),
+                agent_expires_at_ms=int(result.agent_expires_at_ms),
+                paused=True,
+                message="builder authorization renewed paused",
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("builder reauthorization is unavailable") from None
 
     async def risk(self, user_id: int) -> RiskDTO:
         try:

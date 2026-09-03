@@ -146,6 +146,15 @@ class OnboardingCommit:
     validation: AgentValidationSnapshot
     read_bundle: SignedReadBundle
     allow_new_entries: bool = False
+    # P2.6 Builder attestation: direct commits keep the defaults (no proof).
+    # Builder commits set identity_source="builder" plus the freshly verified
+    # snapshot; the store persists all of it in the same atomic transaction.
+    identity_source: str = "direct"
+    builder_address: str | None = None
+    builder_name: str | None = None
+    builder_max_fee_rate: str | None = None
+    builder_agent_expires_at_ms: int | None = None
+    builder_verified_at_ms: int | None = None
 
     @property
     def label(self) -> str:
@@ -272,6 +281,52 @@ class BuilderSubmitRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ReauthorizeContext:
+    """Server-derived current Builder identity for same-signer re-approval."""
+
+    account_id: str
+    user_address: str
+    signer_address: str
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderReauthorizeResult:
+    """Safe result of a same-signer Builder re-approval (always paused)."""
+
+    account_id: str
+    masked_user_address: str
+    masked_signer_address: str
+    builder_name: str
+    max_fee_rate: str
+    agent_expires_at_ms: int
+    paused: bool = True
+
+    @property
+    def account_masked(self) -> str:
+        return self.masked_user_address
+
+    @property
+    def signer_masked(self) -> str:
+        return self.masked_signer_address
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderAttestation:
+    """Freshly verified Builder proof carried into the atomic commit.
+
+    ``max_fee_rate`` is the actual exchange-confirmed cap (Decimal string,
+    never float).  The display name is presentation metadata only — the
+    builder address is the security identity.
+    """
+
+    builder_address: str
+    builder_name: str
+    max_fee_rate: str
+    agent_expires_at_ms: int
+    verified_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class BuilderOnboardingResult:
     """Safe result of a completed Builder onboarding (always paused)."""
 
@@ -296,16 +351,19 @@ class BuilderOnboardingResult:
 
 __all__ = [
     "AgentValidationSnapshot",
+    "BuilderAttestation",
     "BuilderOnboardingConfig",
     "BuilderOnboardingResult",
     "BuilderPrepareRequest",
     "BuilderPrepareResult",
+    "BuilderReauthorizeResult",
     "BuilderSubmitRequest",
     "DirectOnboardingConfig",
     "DirectOnboardingRequest",
     "DirectOnboardingResult",
     "DirectPreflightResult",
     "OnboardingCommit",
+    "ReauthorizeContext",
     "SignedReadBundle",
     "mask_address",
     "stable_account_id",

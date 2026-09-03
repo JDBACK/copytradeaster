@@ -203,6 +203,7 @@ export function SettingsView({
           label="Аккаунт и Builder"
           value={account ?? 'Подключено'}
           valueTone="muted"
+          onClick={() => open({ kind: 'account-builder' })}
         />
         <SettingsRow
           icon={<ShieldIcon />}

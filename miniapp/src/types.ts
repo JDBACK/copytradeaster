@@ -65,6 +65,7 @@ export interface DashboardDTO {
   message?: string | null
   notification_enabled: boolean
   is_admin: boolean
+  builder_verified?: boolean
 }
 
 export interface ConfirmationDTO {
@@ -196,4 +197,57 @@ export interface StatusDTO {
   age_seconds?: number | null
   reason: StatusReason
   remediation?: StatusRemediation | null
+  builder_verified?: boolean
+}
+
+/** Mirror of the server-side P2.6 AccountBuilderDTO (application/models.py). */
+export type AccountBuilderState =
+  | 'verified'
+  | 'expiring'
+  | 'stale'
+  | 'blocked'
+  | 'unavailable'
+  | 'not_applicable'
+
+export type AccountBuilderReason =
+  | 'none'
+  | 'direct_account'
+  | 'account_disconnected'
+  | 'agent_invalid'
+  | 'agent_expiring'
+  | 'builder_not_confirmed'
+  | 'builder_mismatch'
+  | 'fee_mismatch'
+  | 'transient_unavailable'
+  | 'snapshot_missing'
+  | 'identity_changed'
+
+export type AccountBuilderRemediation = 'refresh' | 'reauthorize'
+
+export interface AccountBuilderDTO {
+  identity_source: 'direct' | 'builder'
+  state: AccountBuilderState
+  reason: AccountBuilderReason
+  remediation?: AccountBuilderRemediation | null
+  account_masked?: string | null
+  signer_masked?: string | null
+  builder_address_masked?: string | null
+  builder_name?: string | null
+  max_fee_rate?: string | null
+  permission: StatusPermissionsDTO
+  agent_expires_at_ms?: number | null
+  verified_at?: string | null
+  last_check_at?: string | null
+  age_seconds?: number | null
+}
+
+export interface BuilderReauthorizedDTO {
+  account_id: string
+  account_masked: string
+  signer_masked: string
+  builder_name: string
+  max_fee_rate: string
+  agent_expires_at_ms: number
+  paused: boolean
+  message?: string | null
 }

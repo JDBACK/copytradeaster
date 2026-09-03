@@ -16,6 +16,7 @@ import {
   type RootTab,
 } from '../navigation'
 import { hapticImpact, setBackButton } from '../telegram'
+import { AccountBuilderScreen } from '../screens/AccountBuilderScreen'
 import { ActivityScreen } from '../screens/ActivityScreen'
 import { HelpScreen, SecurityScreen } from '../screens/InfoScreens'
 import { HomeScreen } from '../screens/HomeScreen'
@@ -62,7 +63,12 @@ export function AppShell({
       {banner}
       <div className="shell-content">
         {nested ? (
-          <NestedRoute nested={nested} auth={auth} accountMasked={accountMasked} />
+          <NestedRoute
+            nested={nested}
+            auth={auth}
+            accountMasked={accountMasked}
+            onNotConnected={onNotConnected}
+          />
         ) : (
           <>
             {route.tab === 'home' && <HomeScreen auth={auth} onNotConnected={onNotConnected} />}
@@ -107,11 +113,14 @@ export function NestedRoute({
   nested,
   auth,
   accountMasked,
+  onNotConnected,
 }: {
   nested: NestedScreen
   auth: AuthContext
   accountMasked?: string | null
+  onNotConnected?: () => void
 }) {
+  const handleNotConnected = onNotConnected ?? (() => {})
   switch (nested.kind) {
     case 'risk':
       return <RiskScreen auth={auth} accountMasked={accountMasked} />
@@ -119,6 +128,14 @@ export function NestedRoute({
       return <NotificationsScreen auth={auth} accountMasked={accountMasked} />
     case 'system-status':
       return <SystemStatusScreen auth={auth} accountMasked={accountMasked} />
+    case 'account-builder':
+      return (
+        <AccountBuilderScreen
+          auth={auth}
+          accountMasked={accountMasked}
+          onNotConnected={handleNotConnected}
+        />
+      )
     case 'security':
       return <SecurityScreen accountMasked={accountMasked} />
     case 'help':

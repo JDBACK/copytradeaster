@@ -137,6 +137,13 @@ class SqliteCredentials:
         validation: AgentValidation | Mapping[str, Any],
         main_private_key_hex: str | None = None,
         policy: RiskPolicy | None = None,
+        *,
+        identity_source: str = "direct",
+        builder_address: str | None = None,
+        builder_name: str | None = None,
+        builder_max_fee_rate: str | None = None,
+        builder_agent_expires_at_ms: int | None = None,
+        builder_verified_at: str | None = None,
     ) -> None:
         """Atomically install a direct-onboarding identity and ownership.
 
@@ -161,6 +168,12 @@ class SqliteCredentials:
             require_existing=False,
             reject_enabled_existing=True,
             allow_disabled_address_change=True,
+            identity_source=identity_source,
+            builder_address=builder_address,
+            builder_name=builder_name,
+            builder_max_fee_rate=builder_max_fee_rate,
+            builder_agent_expires_at_ms=builder_agent_expires_at_ms,
+            builder_verified_at=builder_verified_at,
         )
 
     async def replace_identity(
@@ -218,7 +231,9 @@ class SqliteCredentials:
                 return False
             await _conn_execute(
                 conn,
-                "UPDATE accounts SET enabled=0 WHERE id=?",
+                "UPDATE accounts SET enabled=0, identity_source='direct', "
+                "builder_address=NULL, builder_name=NULL, builder_max_fee_rate=NULL, "
+                "builder_agent_expires_at_ms=NULL, builder_verified_at=NULL WHERE id=?",
                 (account_id,),
             )
             await _conn_execute(
@@ -257,11 +272,38 @@ class SqliteCredentials:
         require_existing: bool,
         reject_enabled_existing: bool,
         allow_disabled_address_change: bool,
+        identity_source: str = "direct",
+        builder_address: str | None = None,
+        builder_name: str | None = None,
+        builder_max_fee_rate: str | None = None,
+        builder_agent_expires_at_ms: int | None = None,
+        builder_verified_at: str | None = None,
     ) -> None:
         if not account_id or not label or not user:
             raise ValueError("account_id, label and user address are required")
         if role not in {"master", "follower"}:
             raise ValueError(f"unsupported account role: {role!r}")
+        if identity_source not in {"direct", "builder"}:
+            raise ValueError("identity source must be direct or builder")
+        if identity_source == "builder":
+            if (
+                not builder_address
+                or not builder_max_fee_rate
+                or builder_agent_expires_at_ms is None
+                or not builder_verified_at
+            ):
+                raise ValueError("builder attestation snapshot is required")
+        elif any(
+            value is not None
+            for value in (
+                builder_address,
+                builder_name,
+                builder_max_fee_rate,
+                builder_agent_expires_at_ms,
+                builder_verified_at,
+            )
+        ):
+            raise ValueError("direct identity must not carry a builder snapshot")
         if (owner_telegram_user_id is None) != (owner_chat_id is None):
             raise ValueError("owner Telegram user and chat IDs must be supplied together")
         if owner_telegram_user_id is not None and role != "follower":
@@ -355,11 +397,31 @@ class SqliteCredentials:
 
             await _conn_execute(
                 conn,
-                "INSERT INTO accounts(id, role, label, user_address, enabled, execution_mode) "
-                "VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET "
+                "INSERT INTO accounts(id, role, label, user_address, enabled, execution_mode, "
+                "identity_source, builder_address, builder_name, builder_max_fee_rate, "
+                "builder_agent_expires_at_ms, builder_verified_at) "
+                "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
                 "role=excluded.role, label=excluded.label, user_address=excluded.user_address, "
-                "enabled=1, execution_mode=excluded.execution_mode",
-                (account_id, role, label, user, "REAL"),
+                "enabled=1, execution_mode=excluded.execution_mode, "
+                "identity_source=excluded.identity_source, "
+                "builder_address=excluded.builder_address, "
+                "builder_name=excluded.builder_name, "
+                "builder_max_fee_rate=excluded.builder_max_fee_rate, "
+                "builder_agent_expires_at_ms=excluded.builder_agent_expires_at_ms, "
+                "builder_verified_at=excluded.builder_verified_at",
+                (
+                    account_id,
+                    role,
+                    label,
+                    user,
+                    "REAL",
+                    identity_source,
+                    builder_address,
+                    builder_name,
+                    builder_max_fee_rate,
+                    builder_agent_expires_at_ms,
+                    builder_verified_at,
+                ),
             )
             await _conn_execute(
                 conn,

@@ -6,6 +6,7 @@
  * unknown runtime remediation value is never executable (maps to null).
  */
 
+import { isBuilderVerified } from './accountBuilder'
 import { formatTime } from './format'
 import type {
   AsterState,
@@ -177,8 +178,9 @@ export interface StatusTrustItem {
 }
 
 /** Trust rail over StatusDTO evidence (same Wallet → Agent → Builder → Sync
- * direction as Home).  Builder stays neutral until the P2.6 attestation;
- * Sync requires the authoritative overall ``ready`` verdict. */
+ * direction as Home).  Builder uses the single shared P2.6 attestation
+ * verdict (verified only); Sync requires the authoritative overall
+ * ``ready`` verdict. */
 export function statusTrust(dto: StatusDTO): StatusTrustItem[] {
   return [
     { key: 'wallet', label: 'Wallet', done: Boolean(dto.account_masked) },
@@ -187,7 +189,7 @@ export function statusTrust(dto: StatusDTO): StatusTrustItem[] {
       label: 'Agent',
       done: Boolean(dto.signer_masked) && dto.permissions_state === 'valid',
     },
-    { key: 'builder', label: 'Builder', done: false },
+    { key: 'builder', label: 'Builder', done: isBuilderVerified(dto) },
     { key: 'sync', label: 'Sync', done: dto.state === 'ready' },
   ]
 }

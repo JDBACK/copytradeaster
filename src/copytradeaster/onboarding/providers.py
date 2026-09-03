@@ -6,10 +6,10 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from copytradeaster.aster.models import AgentDTO, BalanceDTO, OrderDTO, PositionDTO
+from copytradeaster.aster.models import AgentDTO, BalanceDTO, BuilderDTO, OrderDTO, PositionDTO
 from copytradeaster.domain.models import TradingIdentity
-from copytradeaster.onboarding.models import OnboardingCommit
-from copytradeaster.storage.repositories import BuilderOnboardingAttempt
+from copytradeaster.onboarding.models import OnboardingCommit, ReauthorizeContext
+from copytradeaster.storage.repositories import AgentValidation, BuilderOnboardingAttempt
 
 
 class EphemeralIdentityProvider:
@@ -59,6 +59,8 @@ class EphemeralKeyProvider:
 class SignedReadClient(Protocol):
     async def agent(self, account_id: str) -> AgentDTO: ...
 
+    async def builder(self, account_id: str) -> list[BuilderDTO]: ...
+
     async def balance(self, account_id: str) -> list[BalanceDTO]: ...
 
     async def position_risk(self, account_id: str) -> list[PositionDTO]: ...
@@ -80,6 +82,24 @@ class OnboardingStore(Protocol):
     ) -> str | None: ...
 
     async def commit_onboarding(self, payload: OnboardingCommit) -> None: ...
+
+    async def get_reauthorize_context(self, telegram_user_id: int) -> ReauthorizeContext | None: ...
+
+    async def account_version(self, account_id: str) -> str | None: ...
+
+    async def commit_reauthorization(
+        self,
+        *,
+        account_id: str,
+        telegram_user_id: int,
+        validation: AgentValidation,
+        builder_address: str,
+        builder_name: str,
+        builder_max_fee_rate: str,
+        builder_agent_expires_at_ms: int,
+        builder_verified_at: str,
+        expected_version: str,
+    ) -> None: ...
 
     async def get_builder_attempt(
         self, telegram_user_id: int

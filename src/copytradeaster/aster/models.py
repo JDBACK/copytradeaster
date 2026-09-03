@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from pydantic.alias_generators import to_camel
 
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters
@@ -41,6 +41,40 @@ class AgentDTO(_Camel):
     can_spot_trade: bool | None = Field(default=None, alias="canSpotTrade")
     can_perp_trade: bool | None = Field(default=None, alias="canPerpTrade")
     can_withdraw: bool | None = Field(default=None, alias="canWithdraw")
+
+
+class BuilderDTO(_Camel):
+    """One Aster V3 approved-Builder record (``GET /fapi/v3/builder``).
+
+    All critical fields are deliberately nullable here: an omitted/null
+    ``userAddress``/``builderAddress``/``maxFeeRate`` is a valid wire shape
+    but must be rejected by the attestation validator (fail closed), never
+    treated as a verified authorization.  ``maxFeeRate`` stays a string —
+    fee math never uses float.  The live wire sends it as a JSON number,
+    so numeric input is coerced to its shortest round-trip string here
+    (``str()``), keeping the downstream Decimal comparison exact.
+    """
+
+    user_address: str | None = Field(default=None, alias="userAddress")
+    builder_address: str | None = Field(default=None, alias="builderAddress")
+    builder_name: str | None = Field(default=None, alias="builderName")
+    max_fee_rate: str | None = Field(default=None, alias="maxFeeRate")
+    approve_time: int | None = Field(default=None, alias="approveTime")
+
+    @field_validator("max_fee_rate", mode="before")
+    @classmethod
+    def _coerce_fee_rate(cls, value: object) -> object:
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, bool):
+            raise ValueError("invalid maxFeeRate")
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            if value != value or value in (float("inf"), float("-inf")):
+                raise ValueError("invalid maxFeeRate")
+            return str(value)
+        raise ValueError("invalid maxFeeRate")
 
 
 class LeverageBracketDTO(_Camel):
@@ -159,6 +193,7 @@ class ExchangeInfo(BaseModel):
 __all__ = [
     "AgentDTO",
     "BalanceDTO",
+    "BuilderDTO",
     "ExchangeInfo",
     "LeverageBracketDTO",
     "LeverageBracketResponse",

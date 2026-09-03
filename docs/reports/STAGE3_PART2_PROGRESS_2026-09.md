@@ -461,7 +461,7 @@ PROGRESS/ENGINE_TEST_STATUS/SKELETON/adapted plan приведены к факт
 
 P2.4 ACCEPTED / CLOSED (external review + owner acceptance).
 
-## P2.5 — System Status: IMPLEMENTED / AWAITING REVIEW/ACCEPTANCE (2026-09-03)
+## P2.5 — System Status: ACCEPTED / CLOSED (2026-09-03)
 
 Read-only control-plane vertical slice поверх существующего
 `UserApplicationService.status()`. Второй status/health subsystem не
@@ -577,22 +577,139 @@ Gates (факт):
   Resume gate: «Возобновить» под degraded отклонён («что-то пошло не так»),
   через ~20 сек после самоисцеления sweep'ом повторный resume прошёл,
   аккаунт active, система ready (проверено и серверной стороной:
-  degraded_active=false, copy_state=active). P2.5 остаётся IMPLEMENTED /
-  AWAITING REVIEW до независимого review corrective-2.
+  degraded_active=false, copy_state=active). P2.5 ACCEPTED / CLOSED.
+
+## P2.6 — Account + Builder attestation: IMPLEMENTED / AWAITING REVIEW + OWNER ACCEPTANCE (2026-09-03)
+
+Nested control screen поверх `UserApplicationService.account_builder()`.
+P2.5 не рефакторился (только trust-интеграция); trading/copy engine,
+planner/executor/coordinator/reconciler не тронуты; P2.7 не начинался.
+
+Persistent identity (одна append-only migration, без history-таблицы):
+`accounts` расширены `identity_source` (`direct|builder`), `builder_address`,
+`builder_name`, `builder_max_fee_rate`, `builder_agent_expires_at_ms`,
+`builder_verified_at` (nullable). Backfill: существующие rows →
+`identity_source=direct`, Builder-поля NULL; legacy Builder status не
+угадывается (unverified/not-applicable до authoritative onboarding).
+Builder commit атомарно пишет credentials + current Agent validation +
+`identity_source=builder` + verified snapshot. Direct onboarding/replacement
+атомарно ставит `direct` и чистит proof. Disconnect в той же durable
+transaction удаляет credentials + Agent validation + Builder snapshot
+(local-only; remote revoke не реализован и не заявляется).
+
+Authoritative verified — только одновременные signed reads backend:
+владение account серверным TG user, current credential identity, живой
+`GET /agent` = current signer с допустимыми permissions (read+perp,
+без withdraw, expiry валиден), exact-match `GET /builder` запись текущего
+account под configured Builder (`userAddress`, `builderAddress`,
+фактический `maxFeeRate` == cap; имя — только presentation metadata).
+Typed `BuilderDTO`, raw dict до application/frontend не доходит; float для
+fee нет. Onboarding не COMMITTED как `builder`, если Agent подтверждён,
+а Builder proof — нет (новые `BUILDER_NOT_CONFIRMED/BUILDER_MISMATCH/
+FEE_CAP_MISMATCH`, без raw exchange text).
+
+`AccountBuilderDTO` (transport-neutral, только masked данные, без
+секретов/raw подписей/nonce): `identity_source`, `account_masked`,
+`signer_masked`, `builder_address_masked`, `builder_name`, фактический
+`max_fee_rate`, permission summary, Agent expiry, `verified_at`/last-check,
+typed state (`verified|expiring|stale|blocked|unavailable|not_applicable`,
+без `pending`), typed reason, remediation (`refresh|reauthorize|null` —
+frontend сам reauthorization не решает).
+
+Semantics: успешный combined check → `verified` + snapshot/`verified_at`;
+близкий expiry → `expiring` + `reauthorize`; transient failure → `stale`
+с видимым snapshot и возрастом (remediation `refresh`), без snapshot →
+`unavailable`; authoritative mismatch/invalid/expired → не `verified`,
+proof инвалидируется (`clear_builder_snapshot`, не воскресает после
+restart). Cached read никогда не `verified` при stale.
+
+Race: `account_version` marker (credentials+validation triple) снимается до
+signed reads и сверяется перед commit; mismatch → `IDENTITY_CHANGED` без
+commit; replacement/disconnect чистят proof атомарно (regression tests).
+
+Reauthorization только при backend remediation: reuse Part 1 wallet/EIP-712
+(payload привязан к текущему account/user/Agent/Builder, nonce/TTL/
+ownership/anti-replay, чужой wallet отклоняется, duplicate submit
+безопасен), same-signer (`reauth-` pending prefix, без ротации signer и
+orphan Agent), после успеха account остаётся/возвращается paused. Отдельный
+`reauthorize-prepare` внутри application boundary с server-side проверками;
+frontend `force`-флагов нет, `/builder/prepare` не ослаблен.
+
+HTTP (`miniapp/server.py`, только через `UserApplicationService`, strict
+validation): `POST /miniapp/api/account-builder` (`{refresh: bool}`),
+`builder/reauthorize-prepare|submit`; disconnect — существующие
+confirmation endpoints, нового нет.
+
+Frontend: `AccountBuilderScreen.tsx` (nested из Settings, Telegram
+BackButton, 4 root tabs нетронуты; Settings row `Аккаунт и Builder` стала
+chevron-navigation `{kind:'account-builder'}`): masked account/Agent/
+Builder + fee cap + permissions/expiry + время server-side verification +
+typed status; loading/verified/expiring/stale/blocked/unavailable/direct/
+hard transport error; refresh не стирает данные, stale не выглядит
+verified; `Перепроверить разрешения`, `Переавторизовать` только по backend
+remediation, destructive `Отключить аккаунт` через confirmation Sheet +
+existing token; duplicate taps — одна mutation. Единый trust source
+`isBuilderVerified()` для Account/Home/Status (`builder_verified` в
+DashboardDTO/StatusDTO; done только при authoritative `verified`).
+
+Gates (факт):
+
+- backend: 977 passed / 2 skipped / 40 deselected, coverage 87%
+  (порог >= 87%); ruff check/format clean. Новые: storage identity (6),
+  aster `test_builder_api` (9: bare-list/dict envelope, `""→None`,
+  fee-cap decimal), attestation exact-match (13), reauthorize same-signer
+  (12: no orphan, version binding, abort без commit), application DTO (34:
+  verified/expiring/stale/unavailable/blocked/direct, remediation exact,
+  masked-only, no secrets), adapter store reauth durability (16),
+  credentials lifecycle (4: builder commit/direct clear/disconnect clear),
+  HTTP `test_account_builder_server` (23: auth/spoofed user/strict body/
+  refresh false+true/exact DTO/no full addresses/reauth без подмены);
+  обновлены `test_builder.py`, `test_wp1.py`, `test_miniapp_builder_flow.py`
+  (fake `GET /builder`), `test_status_server.py` (`builder_verified`);
+- frontend: `accountBuilderBehavior.test.tsx` (11: verified/expiring+reauth/
+  stale+snapshot/unavailable/blocked/direct/refresh-transition/transport
+  не затирает DTO/disconnect-confirm/duplicate-taps/no-reauth таб/единый
+  verdict/trust done только при verified) + обновлённые settings/home/
+  systemStatus; Vitest 167 passed / 17 файлов, lint + `tsc` + build clean;
+- live (Aster Testnet, scratch `sqlite3.backup`-копии прод-БД, прод-БД не
+  тронута): attestation gate (direct/not_applicable честно) + local
+  disconnect (flat → confirm → identity снесена, exchange-авторизация
+  пережила — local-only доказан) + verified-onboarding
+  `LIVE onboarded source=builder state=verified` за ~8s (fresh
+  faucet-funded wallet `builder-gate`, стандартный Part 1 flow: prepare →
+  in-process EIP-712 подпись → submit → agent+builder verify → preflight
+  → atomic paused commit → DTO verified, `paused`, оба trust rail
+  `builder_verified=true`). По пути зафиксированы live-факты биржи:
+  never-deposited счёт — `-5050 after deposit` (openOrders/position-mode)
+  и `-1000 No agent found` (balance/positionRisk), self-signed management —
+  `-1000 No agent found` (нормализация mode — agent-ключом после APPROVAL);
+  env-политика — HEDGE (`CT_POSITION_MODE`).
+
+Что НЕ сделано (по плану): P2.7 (fee в ордерах), `/builder/userTrades`,
+fee statement, remote revoke, history/ledger таблица, новый global store,
+legacy auto-promotion, ослабление testnet/mainnet guards.
+
+P2.6 IMPLEMENTED, ждёт независимого review + owner Telegram WebView
+acceptance на current HEAD. P2.7 NOT STARTED.
 
 ## Следующие подчасти
 
-- P2.5 — System Status: IMPLEMENTED, owner WebView acceptance COMPLETE,
-  ждёт независимого review corrective-2 (см. выше).
-- P2.6 — Account + Builder attestation (`07-account-builder`).
-- P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3.
+- P2.5 — System Status: ACCEPTED / CLOSED (implementation/live/review/
+  owner acceptance complete).
+- P2.6 — Account + Builder attestation (`07-account-builder`):
+  IMPLEMENTED, live gate complete (attestation + local disconnect +
+  verified-onboarding `source=builder state=verified`), ждёт независимого
+  review + owner Telegram WebView acceptance.
+- P2.7 — Builder fee в обычном engine и финальное закрытие Stage 3:
+  NOT STARTED.
 
 Открытые решения владельца (остались перед соответствующими подчастями):
 
 1. ~~точные `risk min/max/step/presets` (перед P2.4)~~ — утверждены
    2026-09-03: min 0,5% / max 5% / step 0,5% / presets 1/2/3/5.
-2. disconnect semantics: только локальный или + отдельный remote revoke
-   (перед P2.6);
+2. ~~disconnect semantics: только локальный или + отдельный remote revoke
+   (перед P2.6)~~ — решено 2026-09-03: local-only (remote revoke — отдельный
+   main-wallet-signed destructive flow, не в P2.6).
 3. auth-модель `/builder/userTrades` — bounded live probe (перед P2.7).
 
 Part 2 backlog (не блокирует переход к P2.3):

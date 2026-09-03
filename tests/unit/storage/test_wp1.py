@@ -7,7 +7,12 @@ import pytest
 from eth_account import Account
 
 from copytradeaster.domain.models import RiskPolicy
-from copytradeaster.storage.database import MIGRATIONS, Database, MigrationConflictError
+from copytradeaster.storage.database import (
+    CASEFOLD_ADDRESS_INDEX_VERSION,
+    MIGRATIONS,
+    Database,
+    MigrationConflictError,
+)
 from copytradeaster.storage.repositories import (
     AccountRepo,
     AgentValidation,
@@ -46,7 +51,11 @@ async def test_stage1_database_gets_only_append_only_wp1_migrations(tmp_path: Pa
     database = Database(tmp_path / "stage1.sqlite3")
     await database.connect()
     try:
-        stage1_migration_count = len(MIGRATIONS) - 9
+        stage1_migration_count = next(
+            version
+            for version, statement in enumerate(MIGRATIONS)
+            if "CREATE TABLE telegram_users" in statement
+        )
         assert stage1_migration_count > 0
         assert database.conn is not None
         await database.conn.execute(MIGRATIONS[0])
@@ -60,7 +69,7 @@ async def test_stage1_database_gets_only_append_only_wp1_migrations(tmp_path: Pa
             await database.conn.commit()
 
         applied = await database.migrate()
-        assert applied == 9
+        assert applied == len(MIGRATIONS) - stage1_migration_count
         tables = await database.fetchall(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         )
@@ -89,7 +98,7 @@ async def test_stage1_case_variant_addresses_fail_with_actionable_migration_erro
     database = Database(tmp_path / "legacy-duplicates.sqlite3")
     await database.connect()
     try:
-        stage1_migration_count = len(MIGRATIONS) - 9
+        stage1_migration_count = CASEFOLD_ADDRESS_INDEX_VERSION
         assert database.conn is not None
         await database.conn.execute(MIGRATIONS[0])
         for version in range(1, stage1_migration_count):

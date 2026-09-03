@@ -7,7 +7,7 @@ import pytest
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
-from copytradeaster.aster.models import AgentDTO, BalanceDTO, PositionDTO
+from copytradeaster.aster.models import AgentDTO, BalanceDTO, BuilderDTO, PositionDTO
 from copytradeaster.aster.signing import recover_registration
 from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.onboarding.builder import EPHEMERAL_PREFIX, BuilderOnboardingService
@@ -182,9 +182,21 @@ class FakeStore:
         return len(to_del)
 
 
+def _builder_record(**changes: object) -> BuilderDTO:
+    values: dict[str, object] = {
+        "userAddress": USER_ADDRESS,
+        "builderAddress": BUILDER,
+        "builderName": "copytradeaster",
+        "maxFeeRate": "0.0001",
+    }
+    values.update(changes)
+    return BuilderDTO.model_validate(values)
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.agent_record: AgentDTO | Exception = _agent()
+        self.builder_records: list[BuilderDTO] | Exception = [_builder_record()]
         self.positions: list[PositionDTO] = [_position()]
         self.open_orders_result: list = []
         self.dual_side_position = False
@@ -196,6 +208,13 @@ class FakeClient:
         if isinstance(self.agent_record, Exception):
             raise self.agent_record
         return self.agent_record
+
+    async def builder(self, account_id: str) -> list[BuilderDTO]:
+        self.seen_ids.append(account_id)
+        assert account_id.startswith(EPHEMERAL_PREFIX)
+        if isinstance(self.builder_records, Exception):
+            raise self.builder_records
+        return self.builder_records
 
     async def balance(self, account_id: str) -> list[BalanceDTO]:
         return [_balance()]

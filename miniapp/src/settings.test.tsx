@@ -132,15 +132,15 @@ describe('SettingsView render (эталон 06-settings)', () => {
     expect(html).not.toContain('Проверено')
   })
 
-  it('gives chevrons (buttons) only to the five navigable rows', () => {
+  it('gives chevrons (buttons) only to the six navigable rows', () => {
     const html = renderToStaticMarkup(
       <SettingsView dashboard={makeDashboard()} accountMasked={null} onOpen={onOpen} />,
     )
-    // Риск, Уведомления, Статус Aster, Безопасность, Помощь — и никаких
-    // других кнопок в списке.
+    // Риск, Уведомления, Статус Aster, Аккаунт и Builder, Безопасность,
+    // Помощь — и никаких других кнопок в списке.
     const buttons = html.match(/<button[^>]*class="settings-row"/g) ?? []
-    expect(buttons).toHaveLength(5)
-    // Read-only rows stay divs: среда, аккаунт.
+    expect(buttons).toHaveLength(6)
+    // The static environment row stays a div.
     expect(html).toContain('class="settings-row"')
   })
 

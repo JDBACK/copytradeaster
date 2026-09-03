@@ -217,6 +217,20 @@ wallet signature только server-owned `APPROVAL_SENT`/`APPROVED`; `PREPARED
 `COMMITTED`, а затем очищается после runtime activation либо лениво при
 идемпотентном recovery.
 
+Durable account identity (P2.6): `accounts` несут `identity_source`
+(`direct|builder`) + nullable Builder snapshot (`builder_address`,
+`builder_name`, `builder_max_fee_rate`, `builder_agent_expires_at_ms`,
+`builder_verified_at`). Snapshot — last-known evidence, не proof: verified
+только одновременными signed `GET /agent` (current signer, допустимые
+permissions) + exact-match `GET /builder` (`userAddress`, `builderAddress`,
+`maxFeeRate` == cap). Commit Builder-атомарен (credentials + validation +
+`identity_source=builder` + snapshot); direct/replacement/disconnect
+атомарно чистят proof (`identity_source=direct`, поля NULL). Race закрыт
+`account_version` (mismatch → `IDENTITY_CHANGED` без commit). Disconnect —
+local-only: remote Agent/Builder revoke не выполняется и не заявляется.
+Reauthorization — same-signer reuse Part 1 wallet/EIP-712 flow, без ротации
+signer; после неё account остаётся paused.
+
 ### `onboarding/`
 
 Способ получения `TradingIdentity`. Два независимых адаптера: `direct`
