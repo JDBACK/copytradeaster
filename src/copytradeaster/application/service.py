@@ -1120,7 +1120,13 @@ class UserApplicationService:
             # Authentication/ownership/testnet boundary errors fail closed
             # and are never relabeled as stale or rejected.
             raise
-        except AsterError:
+        except AsterError as exc:
+            if exc.code in {-2015, -2016}:
+                # The Agent is gone / no longer authorized (AGENT_NOT_FOUND):
+                # proven invalid, never a transient outage.  This must stay a
+                # rejection so the resume gate cannot take the timed override
+                # fallback on a revoked Agent.
+                raise StaleOperationError("permission refresh was rejected") from None
             # Transport / rate-limit (429/418) / HTTP 5xx during the signed
             # read: transient infrastructure failure, never a proven
             # permission rejection.

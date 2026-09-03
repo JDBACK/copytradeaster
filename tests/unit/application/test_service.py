@@ -34,6 +34,7 @@ from copytradeaster.application.models import (
     ValidationError,
 )
 from copytradeaster.application.service import UserApplicationService
+from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import DirectOnboardingResult
@@ -1493,6 +1494,31 @@ async def test_resume_uses_bounded_testnet_override_cache_on_unknown_agent_read(
 
     assert result.copy_state is CopyState.ACTIVE
     assert runtime.permission_refresh_calls == 1
+
+
+async def test_resume_rejects_revoked_agent_without_override_fallback(environment):
+    db, runtime, _, clock, service = environment
+    override = AgentValidation(
+        signer_address="0x2222222222222222222222222222222222222222",
+        can_read=True,
+        can_perp_trade=True,
+        can_withdraw=False,
+        expired_ms=2_000_000_000_000,
+        ip_whitelist="",
+        status="VALID_OVERRIDE",
+        checked_at=(clock.value - timedelta(minutes=2)).isoformat(),
+    )
+    await AgentValidationRepo(db).upsert("tg-7", validation=override)
+    runtime.permission_override = True
+    runtime.permission_refresh_error = AsterError(-2015, "agent not found")
+    await service.pause(7)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+
+    with pytest.raises(StaleOperationError):
+        await service.resume(7, confirmation)
+
+    policy = await SettingsRepo(db).get_policy("tg-7")
+    assert policy is not None and policy.allow_new_entries is False
 
 
 async def test_resume_rejects_expired_testnet_override_cache_on_unknown_agent_read(environment):

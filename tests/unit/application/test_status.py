@@ -314,6 +314,22 @@ async def test_http_5xx_permission_failure_is_stale_not_blocked(status_env):
     assert "boom" not in body
 
 
+async def test_agent_not_found_permission_failure_is_blocked(status_env):
+    """-2015/-2016 means the Agent is gone: proven invalid, not transient."""
+    db, runtime, service = status_env
+    checked = NOW - timedelta(seconds=10)
+    await _seed_validation(db, checked)
+    for code in (-2015, -2016):
+        runtime.permission_error = AsterError(code, "agent not found")
+
+        dto = await service.status(7, refresh=True)
+
+        assert dto.state is StatusState.BLOCKED
+        assert dto.permissions_state is PermissionsState.BLOCKED
+        assert dto.reason is StatusReason.PERMISSION_INVALID
+        assert dto.remediation is StatusRemediation.OPEN_BOT
+
+
 async def test_permission_persistence_failure_is_stale_not_blocked(status_env):
     """An upsert failure after a good signed read is infra, not rejection."""
 

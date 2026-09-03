@@ -529,16 +529,20 @@ migration/Redis/health service/global store/polling/URL-actions/ping.
 
 Gates (факт):
 
-- backend: новый `tests/unit/application/test_status.py` (17 тестов:
+- backend: новый `tests/unit/application/test_status.py` (18 тестов:
   fresh/cheap-read/ready/stale-lifecycle/TTL/missing/transient/429-rate-limit/
-  5xx/persistence-failure/blocked/degraded/system-stale-unknown/disconnected/
-  copy-parity/last-check/secrets/auth) + обновлённые `test_service.py`/
+  5xx/agent-not-found-blocked/persistence-failure/blocked/degraded/
+  system-stale-unknown/disconnected/copy-parity/last-check/secrets/auth) + обновлённые `test_service.py`/
   `test_renderers.py`/`test_runtime.py`/`test_scale_gate.py`;
   corrective после review `c35e2b9`: transient permission errors (любой
   `AsterError` — 429/418/5xx/transport — и persistence/upsert failure)
   классифицируются как `ServiceUnavailable` → stale + refresh, а не как
   доказанный rejection; proven-invalid (`OnboardingError`/`ValueError`
   triple/expiry/whitelist/record checks) по-прежнему → blocked + open_bot;
+  corrective-2 после второго review: `-2015/-2016` (AGENT_NOT_FOUND,
+  конвенция direct/builder onboarding) исключены из transient — это
+  доказанный rejection → blocked + open_bot, без 24h override fallback
+  в resume-gate (fail-closed на отозванном Agent);
 - HTTP: новый `tests/unit/miniapp/test_status_server.py` (19 тестов:
   auth/`{}`/exact bool/11 forged-non-bool/extra/non-object/malformed/
   exact DTO/forbidden fields/typed errors без leak);
@@ -548,7 +552,7 @@ Gates (факт):
   transport-stale + снятие, race, remediation refresh/open_bot/unknown,
   read-only rows, Builder neutral, nested route); `settings.test.tsx` —
   5 chevron-кнопок;
-- offline pytest: 853 passed / 2 skipped / 34 deselected, coverage 87%
+- offline pytest: 855 passed / 2 skipped / 34 deselected, coverage 87%
   (порог >= 87%); ruff check/format clean; `git diff --check` clean;
 - frontend: oxlint clean, Vitest 149 passed / 15 файлов, `pnpm build`
   clean (финальный билд без `VITE_DEV_USER_ID`; dev-билд только для
