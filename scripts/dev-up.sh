@@ -47,6 +47,8 @@ elif [ -n "${1:-}" ]; then
   echo "Usage: scripts/dev-up.sh [--rotate] | stop" >&2
   exit 2
 fi
+[ -x .venv/bin/python ] || { echo "ERROR: .venv not found — run: python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2; exit 1; }
+command -v cloudflared >/dev/null || { echo "ERROR: cloudflared is not installed (brew install cloudflared)" >&2; exit 1; }
 
 edge_check() {
   # True when the public URL serves the Mini App bundle through the edge.
