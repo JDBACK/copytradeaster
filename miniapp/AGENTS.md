@@ -47,7 +47,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `main.tsx` | Bootstrap: StrictMode `createRoot` + `index.css`; no exports |
 | `navigation.ts` | Pure typed nav: `ROOT_TABS` (home/positions/activity/settings, RU labels), `NestedScreen` (risk/notifications/system-status/account-builder/security/help), `initialRoute/selectTab/pushNested/popNested/currentNested` |
 | `session.ts` | Server→UI router: `sessionDestination()` over `MiniAppSessionDTO` (recovery_required beats connected; APPROVAL_SENT/APPROVED → attempt_recovery; PREPARED → wizard) |
-| `components/AppShell.tsx` | Shell: persistent bottom nav + `NestedRoute` switch + BackButton wiring; child screens fetch own data |
+| `components/AppShell.tsx` | Shell: mount-all four tabs in `hidden` wrappers + `NestedRoute` switch + BackButton wiring; warmup gate (`warmReady` on Home ready) + per-tab scroll slots; child screens fetch own data |
 | `screens/SessionGate.tsx` | Read-only access gate (loading/pending/rejected/invalid/error/recovery_required) |
 | `screens/SuccessScreen.tsx` | Post-onboarding receipt (`BuilderOnboardedDTO` rows; copying paused) |
 | `screens/BuilderAttemptRecovery.tsx` | Durable-attempt resync without wallet re-prompt (`builder/resume-attempt` + `client-log`) |
@@ -64,6 +64,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `types.ts` | DTO mirrors of backend `application/models.py` (session/dashboard/builder/status/account-builder) |
 | `wizard.ts` | Pure onboarding machine: wallet→review→signing→sync + trust-rail index |
 | `accountBuilder.ts` | Shared verdict (verified-only), state/reason copy, local-only disconnect copy |
+| `revalidate.ts` | Shared warm-activation primitive: `useWarmRevalidation` (active-only trigger, TTL floors, busy guard, retry/revalidate split) + `HOME_REVALIDATE_MS`/`ACTIVITY_REVALIDATE_MS` |
 | `screens/BuilderWizard.tsx` | Onboarding screen: resolveAdapter → prepare → one combined `approveAgent` signature → submit |
 | `screens/AccountBuilderScreen.tsx` | Read-only attestation: seq-guarded refresh, backend-gated reauthorize, local-only disconnect |
 
@@ -89,7 +90,7 @@ cd miniapp
 pnpm install          # deps (@walletconnect lazy chunk needs VITE_WC_PROJECT_ID at runtime)
 pnpm dev              # HMR; needs backend on :8080 (VITE_API_TARGET override) — or real bot via dev-up.sh
 pnpm lint             # oxlint (no ESLint)
-pnpm test             # vitest run, 17 files
+pnpm test             # vitest run, 18 files
 pnpm build            # tsc -b && vite build -> dist/ (git-ignored, served by bot at /miniapp/)
 pnpm preview          # vite preview
 ```
@@ -130,8 +131,7 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 ## Testing & QA
 
-17 test files, three styles:
+18 test files, three styles:
 
-- **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format` tests — import helpers directly.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/systemStatus/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
-- **Behavior** (jsdom + testing-library, mocked `api.*`): `riskBehavior` (tap→dirty→save, one-POST gate, ruler freeze), `systemStatusBehavior` (races, stale honesty, retry), `accountBuilderBehavior` (load/refresh/reauth/disconnect/seq-guard).
+- **Behavior** (jsdom + testing-library, mocked `api.*`): `riskBehavior` (tap→dirty→save, one-POST gate, ruler freeze), `systemStatusBehavior` (races, stale honesty, retry), `accountBuilderBehavior` (load/refresh/reauth/disconnect/seq-guard), `appShellKeepAlive` (mount-all warmup budget, TTL revalidation, scroll slots, seq-guards, partial-ready).

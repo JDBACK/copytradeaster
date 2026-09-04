@@ -15,7 +15,7 @@ pytest -q -m "not testnet"                              # offline (unit + integr
 pytest -q -m "not testnet" --cov=src/copytradeaster     # + coverage (>= 87% by eye, no fail_under)
 CT_TESTNET=1 pytest tests/testnet/ -v                   # signed live (needs wallet.txt, leave flat behind)
 CT_LOAD=1 pytest tests/integration/test_shadow_scale.py # scale preflight 30x100 + 100x20 (load marker unused)
-cd miniapp && pnpm test                                 # frontend Vitest (17 files)
+cd miniapp && pnpm test                                 # frontend Vitest (18 files)
 ```
 
 ## unit/trading + risk + domain + master — trading core
