@@ -133,5 +133,6 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 18 test files, three styles:
 
+- **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format` tests — import helpers directly.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/systemStatus/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
 - **Behavior** (jsdom + testing-library, mocked `api.*`): `riskBehavior` (tap→dirty→save, one-POST gate, ruler freeze), `systemStatusBehavior` (races, stale honesty, retry), `accountBuilderBehavior` (load/refresh/reauth/disconnect/seq-guard), `appShellKeepAlive` (mount-all warmup budget, TTL revalidation, scroll slots, seq-guards, partial-ready).
