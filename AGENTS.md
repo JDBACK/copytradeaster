@@ -61,13 +61,13 @@ copytradeaster/
 │   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, FSM flows
 │   ├── miniapp/               # aiohttp server (HMAC initData auth, 21 POST /miniapp/api/*, static host)
 │   └── cli/                   # main.py CLI dispatcher (11 subcommands)
-├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest)
+├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest); map: miniapp/AGENTS.md
 │   ├── src/screens/           # Home, Positions (PositionCard), Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard/Recovery, SessionGate
 │   ├── src/components/        # AppShell.tsx + ui.tsx (Brand/TrustRail/Sheet/Row/ErrorBox; SVG icons inline)
 │   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
 │   └── src/api.ts             # Typed API client with 15s AbortController timeout
-├── tests/                     # unit/ (58 files), integration/ (7 + fake_aster.py), replay/ (1 test x 6 fixtures), testnet/ (15 live files)
-├── scripts/                   # dev-up.sh, preview_miniapp_engine.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py
+├── tests/                     # unit/ (58 files), integration/ (7 + fake_aster.py), replay/ (1 test x 6 fixtures), testnet/ (15 live files); map: tests/AGENTS.md
+├── scripts/                   # dev-up.sh, preview_miniapp_engine.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py; map: scripts/AGENTS.md
 ├── docs/                      # AGENTS.md (docs map), ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md, reports/ (stage journals + acceptance-p27/), ASTER_API_RESEARCH_2026-08.md
 └── data/                      # Local SQLite databases, logs, test artifacts (git-ignored)
 ```
@@ -193,7 +193,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 |`scripts/testnet_soak.py`|Signed testnet soak runner (requires `CT_TESTNET=1` + `CT_SOAK=1`)|
 |`docs/AGENTS.md`|Docs map: central navigation for all project documentation (what lives where, what is live vs history, reading order)|
 |`docs/ENGINE_TEST_STATUS_2026-08.md`|Single source of truth for test status, counters, and bug registry (#1–26)|
-|`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§1–§15)|
+|`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§§1–18)|
 |`docs/reports/STAGE3_PART2_PROGRESS_2026-09.md`|Stage 3 Part 2 execution journal (P2.0–P2.7 CLOSED)|
 
 ---
