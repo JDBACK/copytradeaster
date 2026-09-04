@@ -255,16 +255,23 @@ class TelegramRuntime:
 
     async def startup(self) -> None:
         await ensure_webhook_clean(self.bot)
+        # Each metadata call is isolated: a default-button failure must never
+        # skip the per-chat admin overrides — a stale override beats the
+        # default and serves a dead tunnel URL (quick-tunnel hostnames die
+        # with their process). All best effort; handlers work regardless.
         try:
             await register_commands(
                 self.bot,
                 web_app_url=self.settings.miniapp_public_url or None,
             )
-            await install_admin_webapp_buttons(self.bot, self.settings)
         except AiogramError as exc:
             # Commands/menu-button metadata is best effort; handlers remain
             # usable when Telegram temporarily rejects configuration calls.
             logger.warning("Telegram command registration failed (%s)", type(exc).__name__)
+        try:
+            await install_admin_webapp_buttons(self.bot, self.settings)
+        except AiogramError as exc:
+            logger.warning("Telegram admin menu buttons failed (%s)", type(exc).__name__)
 
     async def run(
         self,
