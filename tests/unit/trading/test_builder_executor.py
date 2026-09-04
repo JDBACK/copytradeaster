@@ -238,6 +238,9 @@ class FakeClient:
                 return _O()
         return None
 
+    async def query_order_history(self, account_id, symbol, *, orig_client_order_id):
+        return await self.query_order(account_id, symbol, orig_client_order_id=orig_client_order_id)
+
 
 @pytest.fixture
 async def exec_env(tmp_path: Path):

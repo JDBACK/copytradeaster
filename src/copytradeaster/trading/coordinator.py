@@ -195,6 +195,7 @@ class Coordinator:
         snapshot_symbols: set[str] | None = None,
         notifier: Notifier | NotificationCallback | None = None,
         leverage: LeverageManager | None = None,
+        entry_admission: Callable[[], bool] | None = None,
     ) -> None:
         self._registry = (
             followers if isinstance(followers, FollowerRegistry) else FollowerRegistry(followers)
@@ -235,6 +236,10 @@ class Coordinator:
         # per-account state). None keeps the legacy test seam where the target
         # leverage resolves from the client/policy without a control plane.
         self._leverage = leverage
+        # Process-local startup/reconnect boundary. It is independent of the
+        # user's durable pause: false blocks only new/increased exposure while
+        # closes, reductions and protection convergence continue.
+        self._entry_admission = entry_admission or (lambda: True)
         self._notification_key_order: deque[str] = deque()
 
     @staticmethod
@@ -451,6 +456,11 @@ class Coordinator:
 
     async def _entries_allowed(self, policy: RiskPolicy) -> bool:
         """Both the per-follower policy AND the global CLI pause must allow."""
+        try:
+            if not self._entry_admission():
+                return False
+        except Exception:  # fail closed on a malformed composition callback
+            return False
         if not policy.allow_new_entries:
             return False
         flag = await self._app_flags.get_flag("allow_new_entries")

@@ -528,3 +528,30 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 ---
 
 Источники: [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md) — status 20–21.08.2026; [REPORTS_FACTUAL_COMPARISON_2026-08.md](reports/REPORTS_FACTUAL_COMPARISON_2026-08.md).
+
+## 7. Pre-Mainnet Hardening — STARTED 2026-09-04
+
+Рабочий журнал и evidence: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md).
+
+Scope намеренно ограничен safety-hardening существующего modular monolith;
+инфраструктурная перестройка и новые типы торговых продуктов не входят.
+
+- [x] **Package A — Economic idempotency (CLOSED 2026-09-04):** PM-B1, единая
+  fail-closed UNKNOWN resolution policy для runtime/boot, history + position proof,
+  residual-only reconciliation и signed SIGKILL recovery.
+- [ ] **Package B — Master recovery correctness:** PM-B2/PM-B3, dirty/generation,
+  queue invalidation, reconnect recovery и startup entry admission.
+- [ ] **Package C — Mainnet profile:** PM-B4, immutable network context и
+  production-App composition/preflight без реальных order writes.
+- [ ] **Package D — Risk invariants:** PM-B5/PM-B6/PM-B7, точная причина zero,
+  отсутствие naked exposure, leverage cap и liquidation-vs-stop policy.
+- [ ] **Package E — Production scale:** PM-B8, symbol-aware snapshots,
+  authoritative degraded convergence, метрики и доказанный launch cap.
+- [ ] **Package F — Final signed qualification:** Testnet fault injection,
+  restart/SIGKILL, App E2E, multi-follower isolation, load и финальный audit.
+
+Mainnet rollout запрещён, пока каждый blocker не закрыт кодом, тестами и
+записанным evidence. Следующий активный пакет: **B / PM-B2 + PM-B3**.
+Текущий checkpoint находится в ветке `codex/live-copy-tests-hardening`:
+Package A закрыт, Package B частично реализован и помечен **WIP / NOT GREEN**;
+точная точка продолжения записана в журнале.

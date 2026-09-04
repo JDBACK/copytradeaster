@@ -45,6 +45,7 @@ class UserStream:
         on_reconnect: Callable[[], Awaitable[None]],
         *,
         on_connected: Callable[[], Awaitable[None]] | None = None,
+        on_disconnected: Callable[[], Awaitable[None]] | None = None,
         ws_factory: Callable[[str], Any] | None = None,
         backoff_base_s: float = BACKOFF_BASE_S,
         backoff_max_s: float = BACKOFF_MAX_S,
@@ -57,6 +58,7 @@ class UserStream:
         self._on_event = on_event
         self._on_reconnect = on_reconnect
         self._on_connected = on_connected
+        self._on_disconnected = on_disconnected
         self._ws_factory = ws_factory or default_ws_factory
         self._backoff_base = backoff_base_s
         self._backoff_max = backoff_max_s
@@ -66,6 +68,7 @@ class UserStream:
         backoff = self._backoff_base
         first = True
         while not stop.is_set():
+            connected = False
             try:
                 listen_key = await self._client.start_listen_key(self._account_id)
                 url = f"{self._ws_base}/{listen_key}"
@@ -74,13 +77,27 @@ class UserStream:
                     if not first:
                         await self._safe_on_reconnect()
                     first = False
-                    if self._on_connected is not None:
-                        await self._on_connected()
-                    await self._session(ws, stop)
+                    connected = True
+                    # Start recv before the authoritative connected callback.
+                    # Frames already buffered by Aster are therefore queued and
+                    # tagged with the pre-rebuild generation while the callback
+                    # obtains the post-connect REST snapshot.
+                    session_task = asyncio.create_task(self._session(ws, stop))
+                    try:
+                        if self._on_connected is not None:
+                            await self._on_connected()
+                        await session_task
+                    finally:
+                        session_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await session_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect loop boundary
                 log.warning("user stream error: %s: %s", type(exc).__name__, exc, exc_info=True)
+            finally:
+                if connected and not stop.is_set():
+                    await self._safe_on_disconnected()
             if stop.is_set():
                 break
             jitter = random.uniform(0, backoff * 0.3)
@@ -156,3 +173,11 @@ class UserStream:
             await self._on_reconnect()
         except Exception as exc:  # noqa: BLE001
             log.error("on_reconnect handler failed: %s", exc)
+
+    async def _safe_on_disconnected(self) -> None:
+        if self._on_disconnected is None:
+            return
+        try:
+            await self._on_disconnected()
+        except Exception as exc:  # noqa: BLE001
+            log.error("on_disconnected handler failed: %s", exc)

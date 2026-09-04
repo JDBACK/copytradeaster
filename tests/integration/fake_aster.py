@@ -2,7 +2,7 @@
 
 Supports: balances, positions (one-way and hedge), MARKET fills at a
 configurable price, STOP_MARKET triggering on price movement, open-order
-tracking, query_order, cancel_order, leverage/mode endpoints and injected
+tracking, current/history order queries, cancel_order, leverage/mode endpoints and injected
 failures (HTTP 503, timeout, -2019 margin).
 """
 
@@ -77,7 +77,9 @@ class FakeAster:
         self.open_order_coids: dict[str, set[str]] = {}
         self._seq = 0
         self._lock = asyncio.Lock()
-        self.fail_next: dict[str, str | None] = {}  # account -> "503"|"timeout"|"-2019"
+        self.fail_next: dict[str, str | None] = {}
+        # Values: 503/timeout/-2019 fail before acceptance; 503-after-fill
+        # applies and journals a MARKET fill, then loses the response.
         self.fail_order_types: dict[tuple[str, str], int] = {}
         self.placed_log: list[tuple[str, str]] = []
         self.canceled_log: list[tuple[str, str]] = []
@@ -309,6 +311,20 @@ class FakeAster:
             return None
         return self.orders.get(self._k(account_id, orig_client_order_id))
 
+    async def all_orders(self, account_id: str, symbol: str, *, limit: int = 1000):
+        orders = [
+            order
+            for key, order in self.orders.items()
+            if key.startswith(f"{account_id}|") and order.symbol == symbol
+        ]
+        return sorted(orders, key=lambda order: order.update_seq, reverse=True)[:limit]
+
+    async def query_order_history(self, account_id: str, symbol: str, *, orig_client_order_id: str):
+        order = self.orders.get(self._k(account_id, orig_client_order_id))
+        if order is None or order.symbol != symbol:
+            return None
+        return order
+
     async def place_order(self, account_id: str, req):
         failure_key = (account_id, req.type)
         remaining = self.fail_order_types.get(failure_key, 0)
@@ -384,6 +400,12 @@ class FakeAster:
             order.status = "FILLED"
             self.orders[self._k(account_id, req.new_client_order_id)] = order
             self.placed_log.append((account_id, req.new_client_order_id))
+            if failure == "503-after-fill":
+                raise AsterError(
+                    -1000,
+                    "Unknown error after accepted MARKET.",
+                    http_status=503,
+                )
             return order
         # conditional: rest as NEW until price touches it
         self.orders[self._k(account_id, req.new_client_order_id)] = order

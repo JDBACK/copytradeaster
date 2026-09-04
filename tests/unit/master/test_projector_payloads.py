@@ -294,6 +294,52 @@ class TestDedupAndOrder:
         key = PositionKey("BTCUSDT", PosSide.BOTH)
         assert projector.state.positions[key].qty == D("0.002")
 
+    async def test_delayed_trade_after_authoritative_snapshot_is_not_reapplied(self, deps):
+        """PM-B2 red regression: a frame buffered before REST rebuild must not
+        add the same fill again after the snapshot already contains it."""
+        projector, _, _ = deps
+
+        class Balance:
+            asset = "USDT"
+            available_balance = D("500")
+
+        class Position:
+            symbol = "BTCUSDT"
+            position_amt = D("0.002")
+            entry_price = D("65000")
+            mark_price = D("65000")
+            leverage = 5
+            liquidation_price = D("30000")
+            position_side = PosSide.BOTH
+
+        class Client:
+            async def balance(self, account_id):
+                return [Balance()]
+
+            async def position_risk(self, account_id, symbol=None):
+                return [Position()]
+
+            async def open_orders(self, account_id, symbol=None):
+                return []
+
+        await projector.rebuild_full(Client(), "main")
+        await projector.apply_raw(
+            order_trade(
+                E=1000,
+                x="TRADE",
+                X="FILLED",
+                l="0.002",
+                z="0.002",
+                ap="65000",
+                L="65000",
+                q="0.002",
+                t=44,
+            )
+        )
+
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        assert projector.state.positions[key].qty == D("0.002")
+
 
 class TestAccountUpdate:
     async def test_balance_applied_positions_informational(self, deps):

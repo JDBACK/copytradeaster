@@ -340,8 +340,9 @@ class TestUserStreamRobustness:
 
 
 class TestAppStartupGap:
-    async def test_connected_callback_resnapshots_before_stream_ready_once(self):
+    async def test_connected_callback_opens_entries_only_after_close_only_sweep(self):
         from copytradeaster.app import App
+        from copytradeaster.trading.reconciler import ReconcileReport
 
         calls: list[str] = []
 
@@ -355,24 +356,57 @@ class TestAppStartupGap:
 
         class Reconciler:
             async def reconcile(self, state, reason):
-                assert state is Projector.state and reason == "post-stream-startup"
+                assert state is Projector.state
                 assert not app._stream_ready.is_set()
-                calls.append("reconcile")
+                if reason == "post-stream-close-only":
+                    assert app._entry_admission_ready is False
+                elif reason == "post-stream-entry":
+                    assert app._entry_admission_ready is True
+                else:
+                    raise AssertionError(reason)
+                calls.append(reason)
+                return ReconcileReport(per_account={"copyc1": 0})
+
+        class Commands:
+            async def in_flight(self):
+                return []
+
+        class Settings:
+            def __init__(self):
+                self.flags = []
+
+            async def set_flag(self, key, value):
+                self.flags.append((key, value))
 
         master_client = object()
         app = App.__new__(App)
         app.master_client = master_client
         app.projector = Projector()
         app.reconciler = Reconciler()
+        app.commands = Commands()
+        app.settings = Settings()
         app._stream_ready = asyncio.Event()
         app._stream_connect_count = 0
+        app._entry_admission_ready = False
+        app._ready = False
+        app._notification_token = "startup-test"
+        app._emit_notification = lambda **kwargs: asyncio.sleep(0)
 
         await app._on_stream_connected()
-        assert calls == ["rebuild", "reconcile"]
+        assert calls == ["rebuild", "post-stream-close-only", "post-stream-entry"]
+        assert app._entry_admission_ready is True
+        assert app._ready is True
         assert app._stream_ready.is_set() and app._stream_connect_count == 1
 
         await app._on_stream_connected()
-        assert calls == ["rebuild", "reconcile"]
+        assert calls == [
+            "rebuild",
+            "post-stream-close-only",
+            "post-stream-entry",
+            "rebuild",
+            "post-stream-close-only",
+            "post-stream-entry",
+        ]
         assert app._stream_connect_count == 2
 
 

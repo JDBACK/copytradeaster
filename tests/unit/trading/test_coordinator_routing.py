@@ -44,8 +44,13 @@ class FakeClient:
     async def balance(self, account_id):
         return [FakeBalance(self.available)]
 
-    async def position_risk(self, account_id):
-        return [FakePosition(k, v) for k, v in self.positions.items()]
+    async def position_risk(self, account_id, symbol=None):
+        del account_id
+        return [
+            FakePosition(k, v)
+            for k, v in self.positions.items()
+            if symbol is None or k.symbol == symbol
+        ]
 
     async def open_orders(self, account_id, symbol=None):
         out = []
@@ -71,7 +76,18 @@ class FakeClient:
         self.leverage_calls.append((symbol, leverage))
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
-        return self.query_results.get(orig_client_order_id)
+        del account_id, symbol, order_id
+        if orig_client_order_id in self.query_results:
+            return self.query_results[orig_client_order_id]
+        for params in self.placed:
+            if params.get("newClientOrderId") == orig_client_order_id:
+                placed = FakePlaced(None)
+                placed.client_order_id = orig_client_order_id
+                return placed
+        return None
+
+    async def query_order_history(self, account_id, symbol, *, orig_client_order_id):
+        return await self.query_order(account_id, symbol, orig_client_order_id=orig_client_order_id)
 
 
 class FakeBalance:
@@ -224,6 +240,16 @@ async def test_fanout_all_followers_receive_plan(env):
     # sizing: budget 1000*0.01=10; distance 500*1.001 -> qty 0.019
     open_params = [p for p in followers[0].client.placed if p["type"] == "MARKET"][0]
     assert open_params["quantity"] == "0.019"
+
+
+async def test_runtime_entry_admission_blocks_open_but_not_user_pause_state(env):
+    coordinator, followers, db, notifications = env
+    del db, notifications
+    coordinator._entry_admission = lambda: False
+
+    await coordinator.on_master_delta(delta_of(master_state()))
+
+    assert all(fr.client.placed == [] for fr in followers)
 
 
 async def test_production_recompute_uses_exchange_symbol_maximum(env):

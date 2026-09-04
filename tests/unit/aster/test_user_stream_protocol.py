@@ -70,8 +70,8 @@ def make_stream(client, factory, on_event, on_reconnect=None, **kwargs):
         on_event=on_event,
         on_reconnect=on_reconnect or (lambda: asyncio.sleep(0)),
         ws_factory=factory,
-        backoff_base_s=0.05,
-        backoff_max_s=0.2,
+        backoff_base_s=kwargs.pop("backoff_base_s", 0.05),
+        backoff_max_s=kwargs.pop("backoff_max_s", 0.2),
         max_session_s=kwargs.pop("max_session_s", 3600.0),
         **kwargs,
     )
@@ -108,6 +108,61 @@ async def test_events_delivered_to_on_event():
     assert factory.urls == ["wss://stream.test/ws/lk1"]
     assert events[0].received_at > 0
     assert connected == [1]
+
+
+async def test_receiver_buffers_frames_while_connected_boundary_runs():
+    """PM-B2: frames already waiting on the socket must be tagged/queued
+    while the post-connect authoritative snapshot callback is still running."""
+    received = asyncio.Event()
+    boundary_completed = asyncio.Event()
+
+    async def collect(event: StreamEvent) -> None:
+        assert event.raw["e"] == "ORDER_TRADE_UPDATE"
+        received.set()
+
+    async def connected_cb() -> None:
+        await asyncio.wait_for(received.wait(), timeout=0.5)
+        boundary_completed.set()
+
+    ws = FakeWS(['{"e":"ORDER_TRADE_UPDATE","E":1,"o":{"x":"TRADE"}}'])
+    stream = make_stream(
+        FakeClient(["lk1"]),
+        FlakyFactory(0, [ws]),
+        collect,
+        on_connected=connected_cb,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(stream.run(stop))
+    try:
+        await asyncio.wait_for(boundary_completed.wait(), timeout=1)
+    finally:
+        stop.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_disconnect_callback_runs_before_reconnect_backoff():
+    disconnected = asyncio.Event()
+
+    async def on_disconnected() -> None:
+        disconnected.set()
+
+    stream = make_stream(
+        FakeClient(["lk1", "lk2"]),
+        FlakyFactory(0, [FakeWS(['{"e":"listenKeyExpired","E":5}'])]),
+        lambda event: asyncio.sleep(0),
+        on_disconnected=on_disconnected,
+        backoff_base_s=1,
+        backoff_max_s=1,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(stream.run(stop))
+    try:
+        await asyncio.wait_for(disconnected.wait(), timeout=0.5)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
 
 
 async def test_listen_key_expired_rotates_and_reconnects():

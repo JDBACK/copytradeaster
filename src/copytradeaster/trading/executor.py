@@ -6,7 +6,8 @@ Per plan (docs/ARCHITECTURE.md §7):
 - client_order_id = "ct" + command_key (+ "r{attempt}" on retries), fits
   ^[\\.A-Z\\:/a-z0-9_-]{1,36}$;
 - statuses: PENDING -> SENDING -> SUBMITTED -> CONFIRMED / UNKNOWN / FAILED;
-- 503/timeout/-1000/-1006/-1007 => UNKNOWN, resolved by query_order BEFORE any retry;
+- 503/timeout/-1000/-1006/-1007 => UNKNOWN, resolved from order history plus
+  durable pre-position evidence before any retry;
 - per-account lock serializes mutations (nonce ordering, ARCHITECTURE §8).
 """
 
@@ -19,6 +20,8 @@ import json
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from typing import Any, NamedTuple
 
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
@@ -45,6 +48,8 @@ UNKNOWN_CODES = {-1000, -1006, -1007}
 MAX_ATTEMPTS = 3
 BOOT_QUERY_ATTEMPTS = 3
 BOOT_QUERY_BACKOFF_S = 0.05
+RECOVERY_QUERY_ATTEMPTS = 3
+RECOVERY_QUERY_BACKOFF_S = 0.25
 
 # Stage 3 Part 2 corrective: only these kinds may DIRECT-retry after an
 # authoritative Builder rejection. ENTRY must always fail closed.
@@ -53,6 +58,8 @@ RISK_REDUCTION_KINDS = frozenset(
 )
 
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+MARKET_KINDS = frozenset({ActionKind.MARKET_OPEN, ActionKind.MARKET_CLOSE})
+NO_FILL_TERMINAL_STATUSES = frozenset({"CANCELED", "EXPIRED", "REJECTED"})
 
 
 def _safe_error_category(exc: BaseException) -> str:
@@ -76,16 +83,78 @@ class CommandResult(NamedTuple):
     error: str | None
 
 
+class ResolutionOutcome(StrEnum):
+    """Safety verdict for an exchange mutation whose response is ambiguous."""
+
+    FOUND = "FOUND"
+    PROVEN_NOT_EXECUTED = "PROVEN_NOT_EXECUTED"
+    UNRESOLVED = "UNRESOLVED"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketRecoveryContext:
+    """Durable state captured immediately before a MARKET mutation."""
+
+    symbol: str
+    position_side: PosSide
+    pre_position_amt: Decimal
+    expected_delta: Decimal
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "symbol": self.symbol,
+                "position_side": self.position_side.value,
+                "pre_position_amt": format(self.pre_position_amt, "f"),
+                "expected_delta": format(self.expected_delta, "f"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_json(cls, raw: object) -> MarketRecoveryContext | None:
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            context = cls(
+                symbol=str(payload["symbol"]),
+                position_side=PosSide(str(payload["position_side"])),
+                pre_position_amt=Decimal(str(payload["pre_position_amt"])),
+                expected_delta=Decimal(str(payload["expected_delta"])),
+            )
+        except (KeyError, TypeError, ValueError, InvalidOperation, json.JSONDecodeError):
+            return None
+        if (
+            not context.symbol
+            or not context.pre_position_amt.is_finite()
+            or not context.expected_delta.is_finite()
+            or context.expected_delta == 0
+        ):
+            return None
+        return context
+
+
+@dataclass(frozen=True, slots=True)
+class OrderResolution:
+    outcome: ResolutionOutcome
+    reason: str
+    order: object | None = None
+    observed_delta: Decimal | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class BootResolutionReport:
     confirmed: int = 0
     failed_not_found: int = 0
     unresolved_query_error: int = 0
     unresolved_without_coid: int = 0
+    unresolved_economic: int = 0
 
     @property
     def unresolved(self) -> int:
-        return self.unresolved_query_error + self.unresolved_without_coid
+        return self.unresolved_query_error + self.unresolved_without_coid + self.unresolved_economic
 
 
 def _payload_for(action: ExecutionAction) -> PlaceOrderRequest:
@@ -112,9 +181,210 @@ def _payload_for(action: ExecutionAction) -> PlaceOrderRequest:
 
 
 def _dec_or_none(raw: str | None):
-    from decimal import Decimal
-
     return Decimal(raw) if raw is not None else None
+
+
+def _order_field(order: object, name: str, default: object = None) -> object:
+    if isinstance(order, dict):
+        return order.get(name, default)
+    return getattr(order, name, default)
+
+
+def _resolution_from_order(order: object, source: str) -> OrderResolution:
+    status = str(_order_field(order, "status", "UNKNOWN")).upper()
+    raw_executed = _order_field(order, "executed_qty")
+    executed: Decimal | None = None
+    if raw_executed is not None:
+        try:
+            executed = Decimal(str(raw_executed))
+        except (InvalidOperation, ValueError, TypeError):
+            executed = None
+    if status in NO_FILL_TERMINAL_STATUSES and executed == 0:
+        return OrderResolution(
+            ResolutionOutcome.PROVEN_NOT_EXECUTED,
+            f"{source}:{status}:executed=0",
+            order=order,
+        )
+    executed_text = "unknown" if executed is None else format(executed, "f")
+    return OrderResolution(
+        ResolutionOutcome.FOUND,
+        f"{source}:{status}:executed={executed_text}",
+        order=order,
+    )
+
+
+async def _read_position_amount(
+    client: object,
+    account_id: str,
+    symbol: str,
+    position_side: PosSide,
+) -> Decimal:
+    rows = await client.position_risk(account_id, symbol=symbol)  # type: ignore[attr-defined]
+    matches: list[Decimal] = []
+    for position in rows:
+        if str(getattr(position, "symbol", symbol)) != symbol:
+            continue
+        raw_side = getattr(position, "position_side", PosSide.BOTH)
+        try:
+            side = raw_side if isinstance(raw_side, PosSide) else PosSide(str(raw_side))
+        except ValueError:
+            continue
+        if side != position_side:
+            continue
+        matches.append(Decimal(str(position.position_amt)))
+    if not matches:
+        # Aster-compatible fakes and some account snapshots omit flat rows.
+        # A successful symbol-scoped read with no matching leg is flat.
+        return Decimal(0)
+    if len(set(matches)) != 1:
+        raise ValueError("conflicting position rows")
+    return matches[0]
+
+
+def _context_matches_payload(
+    context: MarketRecoveryContext,
+    payload: dict[str, object],
+) -> bool:
+    raw_side = payload.get("positionSide", PosSide.BOTH.value)
+    try:
+        position_side = PosSide(str(raw_side))
+        quantity = Decimal(str(payload["quantity"]))
+        side = Side(str(payload["side"]))
+    except (KeyError, InvalidOperation, TypeError, ValueError):
+        return False
+    expected_delta = quantity if side == Side.BUY else -quantity
+    return (
+        context.symbol == str(payload.get("symbol", ""))
+        and context.position_side == position_side
+        and context.expected_delta == expected_delta
+    )
+
+
+async def _resolve_exchange_outcome(
+    client: object,
+    account_id: str,
+    kind: ActionKind,
+    payload: dict[str, object],
+    coid: str,
+    recovery_context: MarketRecoveryContext | None,
+) -> OrderResolution:
+    """Resolve one ambiguous send without authorizing a blind mutation.
+
+    Order history is the negative-evidence boundary.  For MARKET commands an
+    unchanged authoritative position must agree with every history sample
+    before absence is considered proven.  Any expected-direction position
+    movement proves economic progress even if order lookup is unavailable;
+    inconsistent movement remains unresolved.
+    """
+    symbol = str(payload.get("symbol", ""))
+    if not symbol:
+        return OrderResolution(ResolutionOutcome.UNRESOLVED, "malformed:missing-symbol")
+    is_market = kind in MARKET_KINDS
+    valid_context = (
+        recovery_context
+        if recovery_context is not None and _context_matches_payload(recovery_context, payload)
+        else None
+    )
+
+    try:
+        order = await client.query_order(  # type: ignore[attr-defined]
+            account_id, symbol, orig_client_order_id=coid
+        )
+    except Exception as exc:  # noqa: BLE001 - adapters/fakes share this boundary
+        log.warning(
+            "current-order recovery unavailable account_id=%s category=%s",
+            account_id,
+            _safe_error_category(exc),
+        )
+    else:
+        if order is not None:
+            order_resolution = _resolution_from_order(order, "current")
+            if order_resolution.outcome != ResolutionOutcome.PROVEN_NOT_EXECUTED or not is_market:
+                return order_resolution
+
+    complete_absence_samples = 0
+    last_reason = "history-unavailable"
+    for attempt in range(RECOVERY_QUERY_ATTEMPTS):
+        history_read = False
+        try:
+            order = await client.query_order_history(  # type: ignore[attr-defined]
+                account_id, symbol, orig_client_order_id=coid
+            )
+            history_read = True
+        except Exception as exc:  # noqa: BLE001 - fail closed on any adapter failure
+            last_reason = f"history-unavailable:{_safe_error_category(exc)}"
+            log.warning(
+                "order-history recovery unavailable account_id=%s attempt=%d/%d category=%s",
+                account_id,
+                attempt + 1,
+                RECOVERY_QUERY_ATTEMPTS,
+                _safe_error_category(exc),
+            )
+        else:
+            if order is not None:
+                order_resolution = _resolution_from_order(order, "history")
+                if (
+                    order_resolution.outcome != ResolutionOutcome.PROVEN_NOT_EXECUTED
+                    or not is_market
+                ):
+                    return order_resolution
+
+        position_unchanged = not is_market
+        if is_market:
+            if valid_context is None:
+                last_reason = "missing-or-invalid-market-context"
+                position_unchanged = False
+            else:
+                try:
+                    actual = await _read_position_amount(
+                        client,
+                        account_id,
+                        valid_context.symbol,
+                        valid_context.position_side,
+                    )
+                except Exception as exc:  # noqa: BLE001 - unreadable state is ambiguous
+                    last_reason = f"position-unavailable:{_safe_error_category(exc)}"
+                    log.warning(
+                        "position recovery unavailable account_id=%s attempt=%d/%d category=%s",
+                        account_id,
+                        attempt + 1,
+                        RECOVERY_QUERY_ATTEMPTS,
+                        _safe_error_category(exc),
+                    )
+                    position_unchanged = False
+                else:
+                    observed_delta = actual - valid_context.pre_position_amt
+                    if observed_delta != 0:
+                        expected = valid_context.expected_delta
+                        progressed = observed_delta * expected > 0 and abs(observed_delta) <= abs(
+                            expected
+                        )
+                        if progressed:
+                            return OrderResolution(
+                                ResolutionOutcome.FOUND,
+                                "position-progress:"
+                                f"observed={format(observed_delta, 'f')}:"
+                                f"expected={format(expected, 'f')}",
+                                observed_delta=observed_delta,
+                            )
+                        return OrderResolution(
+                            ResolutionOutcome.UNRESOLVED,
+                            "position-inconsistent:"
+                            f"observed={format(observed_delta, 'f')}:"
+                            f"expected={format(expected, 'f')}",
+                            observed_delta=observed_delta,
+                        )
+                    position_unchanged = True
+
+        if history_read and position_unchanged:
+            complete_absence_samples += 1
+            last_reason = "history-absent:position-unchanged"
+        if attempt + 1 < RECOVERY_QUERY_ATTEMPTS:
+            await asyncio.sleep(RECOVERY_QUERY_BACKOFF_S * (attempt + 1))
+
+    if complete_absence_samples == RECOVERY_QUERY_ATTEMPTS:
+        return OrderResolution(ResolutionOutcome.PROVEN_NOT_EXECUTED, last_reason)
+    return OrderResolution(ResolutionOutcome.UNRESOLVED, last_reason)
 
 
 def _apply_attribution(
@@ -547,17 +817,16 @@ class Executor:
             status = str(existing["status"])
             if status == "CONFIRMED":
                 return CommandResult(key, status, None), False
-            if status in ("SENDING", "UNKNOWN"):
-                return CommandResult(key, status, "boot resolution required"), False
-            if status == "SUBMITTED":
-                # A previous attempt answered SUBMITTED but was never confirmed
-                # in openOrders. That is NOT terminal success: verify on the
-                # exchange before deciding to skip or re-send.
-                recovered = await self._recover_submitted(
+            if status in ("SENDING", "UNKNOWN", "SUBMITTED"):
+                # Reconciliation may revisit an in-flight command before a
+                # restart.  Re-run the exact same resolver used at boot; only
+                # PROVEN_NOT_EXECUTED is allowed to fall through to a resend.
+                recovered = await self._recover_in_flight(
                     plan, action, key, existing, client=client
                 )
                 if recovered is not None:
                     return recovered, False
+                existing = await self._commands.get(key)
 
         attempts = int(existing["attempts"]) if existing is not None else 0
         attempt = attempts + 1
@@ -577,7 +846,21 @@ class Executor:
         else:
             await self._commands.set_status(key, "PENDING", client_order_id=coid)
 
-        req = _apply_attribution(_with_coid(_payload_for(action), coid), attribution)
+        base_req = _payload_for(action)
+        if action.kind in MARKET_KINDS:
+            try:
+                recovery_context = await self._capture_market_recovery_context(
+                    plan, base_req, client=client
+                )
+            except Exception as exc:  # noqa: BLE001 - no mutation has left yet
+                reason = f"pre-position-unavailable:{_safe_error_category(exc)}"
+                failed = await self._degrade(plan, key, reason)
+                return failed, False
+            await self._commands.set_recovery_context(key, recovery_context.to_json())
+        else:
+            recovery_context = None
+
+        req = _apply_attribution(_with_coid(base_req, coid), attribution)
         symbol = action.payload["symbol"]
         current_attribution = attribution
         builder_invalidated = False
@@ -629,18 +912,44 @@ class Executor:
                 # AsterError(-1006/-1007) from the adapter boundary
                 pass
             if order is None:
-                # outcome unknown: check the exchange BEFORE any retry
-                resolved = await self._resolve_unknown(
-                    plan, action, key, symbol, coid, client=client
+                await self._commands.set_status(
+                    key,
+                    "UNKNOWN",
+                    last_error="send-outcome-unknown",
+                    client_order_id=coid,
                 )
-                if resolved is not None:
+                resolution = await _resolve_exchange_outcome(
+                    self._client_for(plan, client),
+                    plan.account_id,
+                    action.kind,
+                    action.payload,
+                    coid,
+                    recovery_context,
+                )
+                if resolution.outcome == ResolutionOutcome.FOUND:
+                    resolved = await self._complete_resolved_order(
+                        plan, action, key, coid, resolution, prefix="resolved-unknown"
+                    )
                     return resolved, builder_invalidated
+                if resolution.outcome == ResolutionOutcome.UNRESOLVED:
+                    unresolved = await self._mark_unresolved(
+                        plan, key, "UNKNOWN", resolution.reason
+                    )
+                    return unresolved, builder_invalidated
                 if attempt >= MAX_ATTEMPTS:
-                    degraded = await self._degrade(plan, key, "max attempts reached")
+                    degraded = await self._degrade(
+                        plan, key, f"not-executed:max-attempts:{resolution.reason}"
+                    )
                     return degraded, builder_invalidated
                 attempt += 1
                 coid = "ct" + key + f"r{attempt}"
                 req = _with_coid(req, coid)
+                await self._commands.set_status(
+                    key,
+                    "PENDING",
+                    last_error=f"proven-not-executed:{resolution.reason}",
+                    client_order_id=coid,
+                )
                 continue
 
             await self._commands.set_status(key, "SUBMITTED", client_order_id=coid)
@@ -669,9 +978,32 @@ class Executor:
                 return position.position_amt == 0
         return True
 
+    async def _capture_market_recovery_context(
+        self,
+        plan: ExecutionPlan,
+        req: PlaceOrderRequest,
+        *,
+        client: AsterClient | None = None,
+    ) -> MarketRecoveryContext:
+        if req.quantity is None or req.quantity <= 0:
+            raise ValueError("MARKET recovery requires positive quantity")
+        before = await _read_position_amount(
+            self._client_for(plan, client),
+            plan.account_id,
+            req.symbol,
+            req.position_side,
+        )
+        expected_delta = req.quantity if req.side == Side.BUY else -req.quantity
+        return MarketRecoveryContext(
+            symbol=req.symbol,
+            position_side=req.position_side,
+            pre_position_amt=before,
+            expected_delta=expected_delta,
+        )
+
     # --- status transitions ---------------------------------------------------------
 
-    async def _recover_submitted(
+    async def _recover_in_flight(
         self,
         plan: ExecutionPlan,
         action: ExecutionAction,
@@ -680,38 +1012,40 @@ class Executor:
         *,
         client: AsterClient | None = None,
     ) -> CommandResult | None:
-        """Resolve a previously SUBMITTED command via the exchange.
+        """Apply shared recovery policy to SENDING/UNKNOWN/SUBMITTED.
 
-        Found -> CONFIRMED (+order_link). Missing -> the caller falls through to
-        a fresh attempt (SUBMITTED is never terminal success on its own).
+        ``None`` is returned only for PROVEN_NOT_EXECUTED, allowing the caller
+        to create a fresh COID.  UNRESOLVED remains in-flight and can be
+        re-queried by a later reconciliation or the boot resolver.
         """
         coid = existing["client_order_id"]
         if not coid:
-            return None
-        symbol = action.payload["symbol"]
-        try:
-            order = await self._client_for(plan, client).query_order(
-                plan.account_id, symbol, orig_client_order_id=str(coid)
+            return await self._mark_unresolved(
+                plan, key, str(existing["status"]), "missing-client-order-id"
             )
-        except AsterError as exc:
-            log.warning("submitted-recovery query failed for %s: %s", key, exc)
-            return CommandResult(
-                key,
-                "SUBMITTED",
-                f"resolution query failed:{_safe_error_category(exc)}",
-            )
-        if order is None:
-            await self._commands.set_status(key, "FAILED", last_error="submitted:not-found")
-            return None
-        await self._commands.set_status(
-            key,
-            "CONFIRMED",
-            client_order_id=str(coid),
-            last_error=f"recovered-submitted:{order.status}",
+        context = MarketRecoveryContext.from_json(existing["recovery_context"])
+        resolution = await _resolve_exchange_outcome(
+            self._client_for(plan, client),
+            plan.account_id,
+            action.kind,
+            action.payload,
+            str(coid),
+            context,
         )
-        await self._record_link(plan, action, str(coid))
-        await self._notify_confirmed(plan.account_id, action, key)
-        return CommandResult(key, "CONFIRMED", None)
+        if resolution.outcome == ResolutionOutcome.PROVEN_NOT_EXECUTED:
+            await self._commands.set_status(
+                key,
+                "FAILED",
+                last_error=f"proven-not-executed:{resolution.reason}",
+            )
+            return None
+        if resolution.outcome == ResolutionOutcome.UNRESOLVED:
+            return await self._mark_unresolved(
+                plan, key, str(existing["status"]), resolution.reason
+            )
+        return await self._complete_resolved_order(
+            plan, action, key, str(coid), resolution, prefix="recovered-in-flight"
+        )
 
     async def _confirm(
         self,
@@ -745,36 +1079,41 @@ class Executor:
         await self._record_link(plan, action, coid)
         return CommandResult(key, "SUBMITTED", None)
 
-    async def _resolve_unknown(
+    async def _complete_resolved_order(
         self,
         plan: ExecutionPlan,
         action: ExecutionAction,
         key: str,
-        symbol: str,
         coid: str,
+        resolution: OrderResolution,
         *,
-        client: AsterClient | None = None,
-    ) -> CommandResult | None:
-        """query_order BEFORE retry: found -> CONFIRMED (+link); missing -> caller retries."""
-        try:
-            order = await self._client_for(plan, client).query_order(
-                plan.account_id, symbol, orig_client_order_id=coid
-            )
-        except AsterError as exc:
-            log.warning("unknown-resolution query failed: %s", exc)
-            return None
-        if order is not None:
-            await self._commands.set_status(
-                key,
-                "CONFIRMED",
-                client_order_id=coid,
-                last_error=f"resolved-unknown:{order.status}",
-            )
-            await self._record_link(plan, action, coid)
-            await self._notify_confirmed(plan.account_id, action, key)
-            log.info("UNKNOWN resolved as %s for %s (%s)", order.status, key, coid)
-            return CommandResult(key, "CONFIRMED", None)
-        return None
+        prefix: str,
+    ) -> CommandResult:
+        await self._commands.set_status(
+            key,
+            "CONFIRMED",
+            client_order_id=coid,
+            last_error=f"{prefix}:{resolution.reason}",
+        )
+        await self._record_link(plan, action, coid)
+        await self._notify_confirmed(plan.account_id, action, key)
+        log.info("economic outcome resolved for %s (%s): %s", key, coid, resolution.reason)
+        return CommandResult(key, "CONFIRMED", None)
+
+    async def _mark_unresolved(
+        self,
+        plan: ExecutionPlan,
+        key: str,
+        status: str,
+        reason: str,
+    ) -> CommandResult:
+        safe_status = status if status in ("SENDING", "SUBMITTED", "UNKNOWN") else "UNKNOWN"
+        error = f"resolution-unresolved:{reason}"
+        await self._commands.set_status(key, safe_status, last_error=error)
+        if self._settings is not None:
+            await self._settings.set_flag("degraded", f"{plan.account_id}:{key}:{error}")
+        log.error("command %s remains %s: %s", key, safe_status, reason)
+        return CommandResult(key, safe_status, error)
 
     def _client_for(self, plan: ExecutionPlan, client: AsterClient | None) -> AsterClient:
         return client if client is not None else self._clients(plan.account_id)
@@ -809,22 +1148,29 @@ async def resolve_boot_unknowns(
 ) -> BootResolutionReport:
     """Boot-time resolution of every in-flight command: UNKNOWN / SENDING / SUBMITTED.
 
-    Crash windows: SENDING (request left, no response recorded) and SUBMITTED
-    (response seen, confirmation lost) are resolved against exchange state via
-    query_order on the stored client_order_id. Found -> CONFIRMED (+order_link
-    so recovered protective orders re-enter the follower-own-fill guard);
-    missing -> FAILED (reconciliation re-issues a fresh transition if needed).
+    Crash windows use the same three-state exchange resolver as runtime.
+    FOUND -> CONFIRMED; PROVEN_NOT_EXECUTED -> FAILED so reconciliation may
+    safely issue a new transition; UNRESOLVED stays in-flight and blocks boot.
     """
     rows = await commands.in_flight()
     confirmed = 0
     failed_not_found = 0
     unresolved_query_error = 0
     unresolved_without_coid = 0
+    unresolved_economic = 0
     for row in rows:
         key = str(row["command_key"])
         account_id = str(row["account_id"])
         coid = row["client_order_id"]
-        payload = json.loads(str(row["payload"]))
+        try:
+            payload = json.loads(str(row["payload"]))
+            kind = ActionKind(str(row["kind"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            await commands.set_status(
+                key, str(row["status"]), last_error="boot-resolution:malformed-command"
+            )
+            unresolved_economic += 1
+            continue
         if not coid and str(row["kind"]) == ActionKind.SET_LEVERAGE.value:
             outcome = await _resolve_set_leverage_boot(clients, commands, row)
             if outcome == "confirmed":
@@ -838,38 +1184,22 @@ async def resolve_boot_unknowns(
             await commands.set_status(key, "UNKNOWN", last_error="boot: no coid to resolve")
             unresolved_without_coid += 1
             continue
-        order = None
-        query_succeeded = False
-        last_error: AsterError | None = None
-        for attempt in range(BOOT_QUERY_ATTEMPTS):
-            try:
-                order = await clients(account_id).query_order(
-                    account_id, payload["symbol"], orig_client_order_id=str(coid)
-                )
-                query_succeeded = True
-                break
-            except AsterError as exc:
-                last_error = exc
-                log.warning(
-                    "boot resolve query failed for %s (%d/%d): %s",
-                    key,
-                    attempt + 1,
-                    BOOT_QUERY_ATTEMPTS,
-                    exc,
-                )
-                if attempt + 1 < BOOT_QUERY_ATTEMPTS:
-                    await asyncio.sleep(BOOT_QUERY_BACKOFF_S * (attempt + 1))
-        if not query_succeeded:
-            unresolved_query_error += 1
-            safe_error = _safe_error_category(last_error) if last_error is not None else "unknown"
+        context = MarketRecoveryContext.from_json(row["recovery_context"])
+        resolution = await _resolve_exchange_outcome(
+            clients(account_id),
+            account_id,
+            kind,
+            payload,
+            str(coid),
+            context,
+        )
+        if resolution.outcome == ResolutionOutcome.FOUND:
             await commands.set_status(
                 key,
-                str(row["status"]),
-                last_error=f"boot-query-unresolved:{safe_error}",
+                "CONFIRMED",
+                client_order_id=str(coid),
+                last_error=f"boot-resolved:{resolution.reason}",
             )
-            continue
-        if order is not None:
-            await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:{order.status}")
             if links is not None:
                 trade_id = row["trade_id"]
                 await links.add(
@@ -880,14 +1210,29 @@ async def resolve_boot_unknowns(
                     master_coid=None,
                 )
             confirmed += 1
-        else:
-            await commands.set_status(key, "FAILED", last_error="boot-resolved:not-found")
+        elif resolution.outcome == ResolutionOutcome.PROVEN_NOT_EXECUTED:
+            await commands.set_status(
+                key,
+                "FAILED",
+                last_error=f"boot-proven-not-executed:{resolution.reason}",
+            )
             failed_not_found += 1
+        else:
+            await commands.set_status(
+                key,
+                str(row["status"]),
+                last_error=f"boot-resolution-unresolved:{resolution.reason}",
+            )
+            if "unavailable" in resolution.reason:
+                unresolved_query_error += 1
+            else:
+                unresolved_economic += 1
     return BootResolutionReport(
         confirmed=confirmed,
         failed_not_found=failed_not_found,
         unresolved_query_error=unresolved_query_error,
         unresolved_without_coid=unresolved_without_coid,
+        unresolved_economic=unresolved_economic,
     )
 
 

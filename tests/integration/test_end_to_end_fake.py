@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from copytradeaster.domain.models import (
+    AccountState,
+    ActionKind,
+    ExecutionAction,
+    ExecutionPlan,
     PositionKey,
+    PositionState,
     PosSide,
     RiskPolicy,
     Side,
@@ -284,6 +289,141 @@ class TestFailureIsolation:
         # retry used a suffixed coid
         coids = [c for a, c in fake.placed_log if a == "copyc2"]
         assert any(c.endswith("r2") for c in coids)
+
+    async def test_accepted_market_open_response_lost_has_one_economic_fill(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        del coordinator, db, deltas, fids
+        fake.fail_next["copyc2"] = "503-after-fill"
+
+        await open_master_long(projector, fake)
+
+        fills = [
+            order
+            for key, order in fake.orders.items()
+            if key.startswith("copyc2|") and order.type == "MARKET"
+        ]
+        assert len(fills) == 1
+        assert fills[0].executed_qty == D("0.019")
+        assert follower_qty(fake, "copyc2") == D("0.019")
+
+    async def test_accepted_market_close_response_lost_has_one_economic_fill(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        del coordinator, db, deltas, fids
+        await open_master_long(projector, fake)
+        before = len(
+            [
+                order
+                for key, order in fake.orders.items()
+                if key.startswith("copyc2|") and order.type == "MARKET"
+            ]
+        )
+        fake.fail_next["copyc2"] = "503-after-fill"
+
+        await projector.apply_raw(
+            order_trade(
+                E=1200,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="1",
+                z="1",
+                ap="65500",
+                L="65500",
+                q="1",
+                rp="5",
+            )
+        )
+
+        after = [
+            order
+            for key, order in fake.orders.items()
+            if key.startswith("copyc2|") and order.type == "MARKET"
+        ]
+        assert len(after) == before + 1
+        assert follower_qty(fake, "copyc2") == 0
+
+
+class TestEconomicOutcomeRecovery:
+    async def test_partial_response_lost_next_plan_contains_only_residual(self, tmp_path):
+        db = Database(tmp_path / "partial-unknown.sqlite3")
+        await db.connect()
+        await db.migrate()
+        fake = FakeAster(fill_price=D("65000"))
+        fake.add_account("copyc1", D("1000"))
+        executor = Executor(
+            lambda _aid: fake,
+            CommandRepo(db),
+            OrderLinkRepo(db),
+            {},
+            settings=SettingsRepo(db),
+        )
+        first_action = ExecutionAction(
+            kind=ActionKind.MARKET_OPEN,
+            symbol="BTCUSDT",
+            payload={
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "type": "MARKET",
+                "quantity": "0.05",
+                "newOrderRespType": "RESULT",
+            },
+            client_order_id="planner-open",
+            replaces_client_order_id=None,
+            priority=1,
+        )
+        fake.partial_market_fill_ratio = D("0.4")
+        fake.fail_next["copyc1"] = "503-after-fill"
+
+        first = await executor.submit(
+            ExecutionPlan(account_id="copyc1", trade_id=None, actions=[first_action])
+        )
+
+        assert first[0].status == "CONFIRMED"
+        assert follower_qty(fake, "copyc1") == D("0.02")
+        actual = AccountState(
+            account_id="copyc1",
+            available_usdt=D("1000"),
+            positions={
+                PositionKey("BTCUSDT"): PositionState(
+                    key=PositionKey("BTCUSDT"),
+                    qty=D("0.02"),
+                    entry_price=D("65000"),
+                    leverage=20,
+                    mark_price=D("65000"),
+                    liquidation_price=D("100"),
+                )
+            },
+        )
+        residual_plan = build_plan(
+            actual,
+            TargetState(
+                "copyc1",
+                [
+                    TargetPosition(
+                        key=PositionKey("BTCUSDT"),
+                        qty=D("0.05"),
+                        stop_price=None,
+                        tp_price=None,
+                        leverage=20,
+                    )
+                ],
+            ),
+            {"BTCUSDT": btc_filters()},
+            lambda kind, symbol, seq: f"residual-{kind.value}-{symbol}-{seq}",
+        )
+        market_actions = [
+            action for action in residual_plan.actions if action.kind == ActionKind.MARKET_OPEN
+        ]
+        assert len(market_actions) == 1
+        assert market_actions[0].payload["quantity"] == "0.03"
+
+        fake.partial_market_fill_ratio = None
+        second = await executor.submit(residual_plan)
+        assert second[0].status == "CONFIRMED"
+        assert follower_qty(fake, "copyc1") == D("0.05")
+        market_orders = [order for order in fake.orders.values() if order.type == "MARKET"]
+        assert [order.executed_qty for order in market_orders] == [D("0.02"), D("0.03")]
+        await db.close()
 
 
 class TestProtectionQuantitySafety:

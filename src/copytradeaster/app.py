@@ -18,7 +18,7 @@ from copytradeaster.aster.user_stream import UserStream
 from copytradeaster.config import Settings
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.logging_utils import DEFAULT_LOG_PATH, get_logger, setup_logging
-from copytradeaster.master.projector import MasterProjector
+from copytradeaster.master.projector import MasterProjector, symbols_for_raw
 from copytradeaster.notifications.console import ConsoleNotifier
 from copytradeaster.notifications.formatter import format_confirmed_action
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
@@ -50,6 +50,12 @@ STREAM_READY_TIMEOUT_S = 30.0
 TESTNET_REST_URL = "https://fapi.asterdex-testnet.com"
 TESTNET_WS_URL = "wss://fstream.asterdex-testnet.com/ws"
 _SAFE_FRAGMENT = re.compile(r"[^A-Za-z0-9_.:-]+")
+
+
+@dataclass(frozen=True, slots=True)
+class MasterIngestEnvelope:
+    raw: dict
+    generation: int
 
 
 def _safe_fragment(value: object, fallback: str = "unknown") -> str:
@@ -246,13 +252,22 @@ class App:
             basis=self.basis,
             snapshot_symbols=set(cfg.follower_snapshot_symbols) or None,
             leverage=self.leverage,
+            entry_admission=lambda: self._entry_admission_ready,
         )
         self.reconciler = Reconciler(self.coordinator)
         self.stream: UserStream | None = None
         self.stop_event = asyncio.Event()
         self._stream_ready = asyncio.Event()
-        self._ingest_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=INGEST_QUEUE_MAX)
+        self._stream_connected = False
+        self._entry_admission_ready = False
+        self._ingest_queue: asyncio.Queue[MasterIngestEnvelope] = asyncio.Queue(
+            maxsize=INGEST_QUEUE_MAX
+        )
         self._ingest_dropped = 0
+        self._master_recovery_requested = asyncio.Event()
+        self._master_recovery_reason = "master-dirty"
+        self._master_recovery_task: asyncio.Task | None = None
+        self._master_boundary_lock = asyncio.Lock()
         self._ingest_task: asyncio.Task | None = None
         self._sweep_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
@@ -339,6 +354,10 @@ class App:
 
     async def start(self) -> None:
         cfg = self.cfg
+        self._entry_admission_ready = False
+        self._stream_connected = False
+        self._stream_ready.clear()
+        self._ready = False
         setup_logging(
             cfg.log_level,
             log_path=getattr(cfg, "log_path", DEFAULT_LOG_PATH),
@@ -476,30 +495,25 @@ class App:
             on_event=self._on_stream_event,
             on_reconnect=self._on_stream_reconnect,
             on_connected=self._on_stream_connected,
+            on_disconnected=self._on_stream_disconnected,
         )
         stream_task = asyncio.create_task(self.stream.run(self.stop_event))
         self._stream_task = stream_task
-        await self._wait_for_stream_startup()
+        stream_ready = await self._wait_for_stream_startup()
         self._sweep_task = asyncio.create_task(self._periodic_sweep())
         self._ingest_task = asyncio.create_task(self._ingest_loop())
-        # 8. READY
-        await self.settings.set_flag("ready", "true")
-        self._ready = True
-        await self._emit_notification(
-            event_key=f"app:{self._notification_token}:ready",
-            kind="engine.ready",
-            severity=NotificationSeverity.INFO,
-            text="Движок готов к работе.",
-        )
-        log.info("READY")
+        if not stream_ready:
+            # The engine remains alive for close-only REST sweeps and future WS
+            # retries, but it is deliberately not READY for new exposure.
+            await self._set_master_not_ready("stream-startup-timeout")
 
     async def _wait_for_stream_startup(self) -> bool:
-        """Prefer the low-latency stream, but keep REST reconciliation live.
+        """Wait for the post-connect boundary without opening on REST alone.
 
         The startup snapshot and reconciliation have already completed before
         this method runs.  When Testnet's listenKey endpoint is unavailable,
-        the UserStream task keeps retrying and ``_periodic_sweep`` temporarily
-        performs an authoritative master REST snapshot on every cycle.
+        UserStream keeps retrying and ``_periodic_sweep`` performs authoritative
+        close-only REST convergence; new/increased exposure remains blocked.
         """
         try:
             await asyncio.wait_for(self._stream_ready.wait(), timeout=STREAM_READY_TIMEOUT_S)
@@ -511,8 +525,8 @@ class App:
                 severity=NotificationSeverity.WARN,
                 account_id="main",
                 text=(
-                    "Поток master временно недоступен; движок использует регулярные "
-                    "REST-снимки до восстановления подключения."
+                    "Поток master временно недоступен; разрешена только уменьшающая "
+                    "риск REST-сверка до post-connect snapshot."
                 ),
             )
             return False
@@ -542,6 +556,8 @@ class App:
             return
         log.info("stopping...")
         self._ready = False
+        self._entry_admission_ready = False
+        self._stream_connected = False
         stop_event = getattr(self, "stop_event", None)
         task_names = (
             "_sweep_task",
@@ -549,6 +565,7 @@ class App:
             "_heartbeat_task",
             "_stream_task",
             "_leverage_task",
+            "_master_recovery_task",
         )
         if stop_event is not None:
             stop_event.set()
@@ -602,8 +619,8 @@ class App:
                 self.stop_event.set()
                 return
 
-    async def _consume(self, raw: dict) -> None:
-        await self.projector.apply_raw(raw)
+    async def _consume(self, envelope: MasterIngestEnvelope) -> None:
+        await self.projector.apply_raw(envelope.raw, generation=envelope.generation)
 
     async def _on_stream_event(self, event) -> None:
         """Async adapter required by UserStream's awaited callback contract."""
@@ -611,30 +628,108 @@ class App:
 
     async def _on_stream_connected(self) -> None:
         self._stream_connect_count += 1
-        if not self._stream_ready.is_set():
-            # UserStream awaits this callback before reading its first frame.
-            # Therefore the second authoritative snapshot cannot race queued
-            # pre-snapshot TRADE events and READY is published only afterwards.
-            await self.projector.rebuild_full(self.master_client, "main")
-            await self.reconciler.reconcile(self.projector.state, reason="post-stream-startup")
-        self._stream_ready.set()
+        self._stream_connected = True
+        self.projector.mark_dirty("*")
+        await self._establish_master_boundary("stream-connected")
+
+    async def _on_stream_disconnected(self) -> None:
+        self._stream_connected = False
+        self.projector.mark_dirty("*")
+        await self._set_master_not_ready("stream-disconnected")
 
     def _enqueue(self, raw: dict) -> None:
-        """Decouple WS ingest from follower execution: the stream loop must
-        never wait on dozens of REST calls. Bounded queue drops the oldest
-        event under pressure (state reconciliation heals any gap)."""
+        """Queue one frame with the current authoritative generation."""
         q = self._ingest_queue
         if q.qsize() >= q.maxsize:
+            dropped: MasterIngestEnvelope | None = None
             with contextlib.suppress(asyncio.QueueEmpty):
-                q.get_nowait()
+                dropped = q.get_nowait()
             self._ingest_dropped += 1
-        q.put_nowait(raw)
+            if dropped is not None:
+                self._mark_master_dirty(dropped.raw, "ingest-overflow")
+        q.put_nowait(MasterIngestEnvelope(raw=raw, generation=self.projector.generation))
+
+    def _mark_master_dirty(self, raw: dict, reason: str) -> None:
+        self.projector.mark_dirty(*symbols_for_raw(raw))
+        self._entry_admission_ready = False
+        self._ready = False
+        self._stream_ready.clear()
+        self._master_recovery_reason = reason
+        self._master_recovery_requested.set()
+        task = self._master_recovery_task
+        if task is None or task.done():
+            self._master_recovery_task = asyncio.create_task(self._master_recovery_loop())
+
+    async def _master_recovery_loop(self) -> None:
+        while self._master_recovery_requested.is_set() and not self.stop_event.is_set():
+            self._master_recovery_requested.clear()
+            reason = self._master_recovery_reason
+            try:
+                await self._establish_master_boundary(reason)
+            except Exception as exc:  # noqa: BLE001 - periodic/reconnect retries
+                log.error("dirty master recovery failed (%s): %s", reason, exc)
+                await self._set_master_not_ready(f"master-recovery:{reason}:{_error_category(exc)}")
+                return
+
+    async def _set_master_not_ready(self, reason: str) -> None:
+        self._entry_admission_ready = False
+        self._ready = False
+        self._stream_ready.clear()
+        await self.settings.set_flag("ready", "false")
+        await self.settings.set_flag("degraded", reason)
+
+    async def _publish_master_ready(self) -> None:
+        was_ready = self._ready
+        await self.settings.set_flag("ready", "true")
+        self._ready = True
+        if not was_ready:
+            await self._emit_notification(
+                event_key=f"app:{self._notification_token}:ready",
+                kind="engine.ready",
+                severity=NotificationSeverity.INFO,
+                text="Движок готов к работе.",
+            )
+        log.info("READY master_generation=%d", self.projector.generation)
+
+    @staticmethod
+    def _reconcile_succeeded(report) -> bool:
+        return all(created >= 0 for created in report.per_account.values())
+
+    async def _establish_master_boundary(self, reason: str) -> bool:
+        """Rebuild master and validate followers before admitting increases."""
+        lock = getattr(self, "_master_boundary_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._master_boundary_lock = lock
+        async with lock:
+            await self._set_master_not_ready(reason)
+            await self.projector.rebuild_full(self.master_client, "main")
+
+            close_only = await self.reconciler.reconcile(
+                self.projector.state, reason="post-stream-close-only"
+            )
+            if not self._reconcile_succeeded(close_only) or await self.commands.in_flight():
+                raise RuntimeError("close-only follower reconciliation incomplete")
+            if not self._stream_connected:
+                return False
+
+            self._entry_admission_ready = True
+            entry = await self.reconciler.reconcile(
+                self.projector.state, reason="post-stream-entry"
+            )
+            if not self._reconcile_succeeded(entry) or await self.commands.in_flight():
+                self._entry_admission_ready = False
+                raise RuntimeError("entry follower reconciliation incomplete")
+            self._stream_ready.set()
+            await self.settings.clear_degraded()
+            await self._publish_master_ready()
+            return True
 
     async def _ingest_loop(self) -> None:
         while not self.stop_event.is_set():
-            raw = await self._ingest_queue.get()
+            envelope = await self._ingest_queue.get()
             try:
-                await self._consume(raw)
+                await self._consume(envelope)
             except Exception as exc:  # noqa: BLE001 - one bad event must not kill ingest
                 log.error("ingest processing failed: %s", exc)
 
@@ -678,8 +773,8 @@ class App:
     async def _on_master_critical(self, reason: str) -> None:
         """Authoritative recovery for margin/liquidation/autoclose signals."""
         try:
-            await self.projector.rebuild_full(self.master_client, "main")
-            await self.reconciler.reconcile(self.projector.state, reason=f"critical:{reason}")
+            self.projector.mark_dirty("*")
+            await self._establish_master_boundary(f"critical:{reason}")
         except Exception as exc:  # noqa: BLE001 - keep stream alive, retry on sweep
             log.error("critical master resnapshot failed (%s): %s", reason, exc)
             category = _error_category(exc)
@@ -702,9 +797,8 @@ class App:
 
     async def _on_stream_reconnect(self) -> None:
         self._stream_reconnect_count += 1
-        log.info("master stream reconnected - resnapshotting")
-        await self.projector.rebuild_full(self.master_client, "main")
-        await self.reconciler.reconcile(self.projector.state, reason="reconnect")
+        log.info("master stream transport reconnected - awaiting authoritative boundary")
+        await self._set_master_not_ready("stream-reconnecting")
 
     async def _on_confirmed(self, account_id: str, action, command_key: str | None = None) -> None:
         """Handle a durable confirmation without coupling it to delivery.
@@ -753,16 +847,20 @@ class App:
             try:
                 sweep_count += 1
                 if (
-                    not self._stream_ready.is_set()
+                    not self._stream_connected
+                    or self.projector.dirty_symbols
                     or sweep_count % MASTER_RESNAPSHOT_EVERY_SWEEPS == 0
                 ):
-                    # authoritative master state: heals projector drift that the
-                    # informational ACCOUNT_UPDATE only logs. Without a live
-                    # stream this is also the primary state-change trigger.
-                    await self.projector.rebuild_full(self.master_client, "main")
+                    # Without a live stream this stays close-only. With a live
+                    # stream the two-phase boundary may reopen local increases.
+                    await self._establish_master_boundary("periodic-snapshot")
+                    continue
                 report = await self.reconciler.reconcile(self.projector.state, reason="sweep")
-                if all(created >= 0 for created in report.per_account.values()) and not (
-                    await self.commands.in_flight()
+                if (
+                    self._ready
+                    and self._reconcile_succeeded(report)
+                    and not self.projector.dirty_symbols
+                    and not await self.commands.in_flight()
                 ):
                     await self.settings.clear_degraded()
             except Exception as exc:  # noqa: BLE001

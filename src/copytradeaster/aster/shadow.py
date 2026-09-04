@@ -232,6 +232,35 @@ class ShadowExchange:
             return None
         return order.dto()
 
+    async def all_orders(
+        self, account_id: str, symbol: str, *, limit: int = 1000
+    ) -> list[OrderDTO]:
+        self._ensure_account(account_id)
+        self.metrics["all_orders"] += 1
+        orders = [
+            order
+            for order in self._orders.values()
+            if order.account_id == account_id and order.symbol == symbol
+        ]
+        return [
+            order.dto()
+            for order in sorted(orders, key=lambda item: item.update_time, reverse=True)[:limit]
+        ]
+
+    async def query_order_history(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        orig_client_order_id: str,
+    ) -> OrderDTO | None:
+        self._ensure_account(account_id)
+        self.metrics["query_order_history"] += 1
+        order = self._orders.get((account_id, orig_client_order_id))
+        if order is None or order.symbol != symbol:
+            return None
+        return order.dto()
+
     async def place_order(self, account_id: str, req: PlaceOrderRequest) -> OrderDTO:
         self._ensure_account(account_id)
         self.metrics["place_order"] += 1

@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,16 @@ from copytradeaster.domain.models import (
     ActionKind,
     ExecutionAction,
     ExecutionPlan,
+    PosSide,
 )
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo, SettingsRepo
-from copytradeaster.trading.executor import Executor, command_key_of, resolve_boot_unknowns
+from copytradeaster.trading.executor import (
+    Executor,
+    MarketRecoveryContext,
+    command_key_of,
+    resolve_boot_unknowns,
+)
 
 KEY_BTC = {"symbol": "BTCUSDT"}
 
@@ -92,17 +99,21 @@ def plan_of(*actions):
 class FakeClient:
     def __init__(self):
         self.placed: list[PlaceOrderRequest] = []
+        self.place_calls = 0
         self.canceled: list[str] = []
         self.leverage_calls: list[tuple[str, int]] = []
         self.open_orders_result: list = []
         self.query_results: dict[str, object | None] = {}
+        self.history_results: dict[str, object | None] = {}
         self.positions_result: list = []
         self.risk_error: AsterError | None = None
         self.place_error: AsterError | None = None
         self.place_timeout = False
         self.query_error: AsterError | None = None
+        self.history_error: AsterError | None = None
 
     async def place_order(self, account_id, req):
+        self.place_calls += 1
         if self.place_timeout:
             self.place_timeout = False
             raise TimeoutError
@@ -138,11 +149,24 @@ class FakeClient:
                 return SimpleOrder(coid=orig_client_order_id or "", status="NEW")
         return None
 
+    async def query_order_history(self, account_id, symbol, *, orig_client_order_id):
+        if self.history_error is not None:
+            raise self.history_error
+        return self.history_results.get(orig_client_order_id)
+
 
 class SimpleOrder:
-    def __init__(self, coid, status):
+    def __init__(self, coid, status, executed_qty="0"):
         self.client_order_id = coid
         self.status = status
+        self.executed_qty = Decimal(executed_qty)
+
+
+class SimpleMarketPosition:
+    def __init__(self, amount: str, position_side: str = "BOTH"):
+        self.symbol = "BTCUSDT"
+        self.position_side = PosSide(position_side)
+        self.position_amt = Decimal(amount)
 
 
 @pytest.fixture
@@ -224,6 +248,7 @@ async def test_503_unknown_then_query_found_confirmed_without_resend(env):
     assert results[0].status in ("CONFIRMED", "SUBMITTED", "FAILED")
     # exactly one successful placement (retry), the failed attempt left no order
     assert len(client.placed) == 1
+    assert client.place_calls == 2
 
 
 async def test_503_unknown_query_finds_order_confirmed(env):
@@ -242,6 +267,130 @@ async def test_503_unknown_query_finds_order_confirmed(env):
     assert results[0].status == "CONFIRMED"
     row = await commands.get(results[0].command_key)
     assert row["last_error"].startswith("resolved-unknown")
+
+
+async def test_market_accepted_response_lost_history_found_never_resends(env):
+    executor, client, commands, _links, _settings = env
+
+    async def accepted_but_response_lost(account_id, req):
+        del account_id
+        client.place_calls += 1
+        client.query_results[req.new_client_order_id] = None
+        client.history_results[req.new_client_order_id] = SimpleOrder(
+            req.new_client_order_id, "FILLED", executed_qty="0.05"
+        )
+        raise AsterError(-1000, "Unknown", http_status=503)
+
+    client.place_order = accepted_but_response_lost  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(open_action()))
+
+    assert results[0].status == "CONFIRMED"
+    assert client.place_calls == 1
+    row = await commands.get(results[0].command_key)
+    assert row["client_order_id"] == "ct" + results[0].command_key
+
+
+async def test_market_response_lost_unavailable_recovery_never_resends(env):
+    executor, client, commands, _links, _settings = env
+    client.place_error = AsterError(-1000, "Unknown", http_status=503)
+    client.query_error = AsterError(-1006, "query unavailable")
+    client.history_error = AsterError(-1006, "history unavailable")
+
+    results = await executor.submit(plan_of(open_action()))
+
+    assert results[0].status == "UNKNOWN"
+    assert client.place_calls == 1
+    row = await commands.get(results[0].command_key)
+    assert row["status"] == "UNKNOWN"
+
+
+async def test_market_partial_fill_response_lost_confirms_progress_without_full_retry(env):
+    executor, client, commands, _links, _settings = env
+
+    async def partial_fill_response_lost(account_id, req):
+        del account_id
+        client.place_calls += 1
+        client.query_results[req.new_client_order_id] = None
+        client.history_error = AsterError(-1006, "history unavailable")
+        client.positions_result = [SimpleMarketPosition("0.02")]
+        raise AsterError(-1000, "Unknown", http_status=503)
+
+    client.place_order = partial_fill_response_lost  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(open_action()))
+
+    assert results[0].status == "CONFIRMED"
+    assert client.place_calls == 1
+    row = await commands.get(results[0].command_key)
+    assert "position-progress:observed=0.02:expected=0.05" in row["last_error"]
+
+
+async def test_market_close_accepted_response_lost_uses_signed_position_delta(env):
+    executor, client, commands, _links, _settings = env
+    client.positions_result = [SimpleMarketPosition("0.05", "LONG")]
+
+    async def close_fill_response_lost(account_id, req):
+        del account_id
+        client.place_calls += 1
+        client.query_results[req.new_client_order_id] = None
+        client.history_error = AsterError(-1006, "history unavailable")
+        client.positions_result = []
+        raise AsterError(-1000, "Unknown", http_status=503)
+
+    client.place_order = close_fill_response_lost  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(close_action()))
+
+    assert results[0].status == "CONFIRMED"
+    assert client.place_calls == 1
+    row = await commands.get(results[0].command_key)
+    assert "position-progress:observed=-0.05:expected=-0.05" in row["last_error"]
+
+
+async def test_market_close_partial_fill_response_lost_never_retries_full_quantity(env):
+    executor, client, commands, _links, _settings = env
+    client.positions_result = [SimpleMarketPosition("0.05", "LONG")]
+
+    async def partial_close_response_lost(account_id, req):
+        del account_id
+        client.place_calls += 1
+        client.query_results[req.new_client_order_id] = None
+        client.history_error = AsterError(-1006, "history unavailable")
+        client.positions_result = [SimpleMarketPosition("0.03", "LONG")]
+        raise AsterError(-1000, "Unknown", http_status=503)
+
+    client.place_order = partial_close_response_lost  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(close_action()))
+
+    assert results[0].status == "CONFIRMED"
+    assert client.place_calls == 1
+    row = await commands.get(results[0].command_key)
+    assert "position-progress:observed=-0.02:expected=-0.05" in row["last_error"]
+
+
+async def test_market_close_unavailable_recovery_stays_unknown_without_retry(env):
+    executor, client, commands, _links, _settings = env
+    client.positions_result = [SimpleMarketPosition("0.05", "LONG")]
+    client.place_error = AsterError(-1000, "Unknown", http_status=503)
+    client.query_error = AsterError(-1006, "query unavailable")
+    client.history_error = AsterError(-1006, "history unavailable")
+
+    results = await executor.submit(plan_of(close_action()))
+
+    assert results[0].status == "UNKNOWN"
+    assert client.place_calls == 1
+    assert (await commands.get(results[0].command_key))["status"] == "UNKNOWN"
+
+
+async def test_market_close_proven_not_executed_allows_retry(env):
+    executor, client, commands, _links, _settings = env
+    client.positions_result = [SimpleMarketPosition("0.05", "LONG")]
+    client.place_error = AsterError(-1000, "Unknown", http_status=503)
+
+    results = await executor.submit(plan_of(close_action()))
+
+    assert results[0].status == "CONFIRMED"
+    assert client.place_calls == 2
+    row = await commands.get(results[0].command_key)
+    assert row["attempts"] == 2
 
 
 async def test_gateway_timeout_code_zero_is_outcome_unknown(env):
@@ -508,15 +657,25 @@ async def test_boot_query_error_remains_unresolved_after_bounded_retries(env):
         action.priority,
         "ct-unresolved",
     )
+    await commands.set_recovery_context(
+        key,
+        MarketRecoveryContext(
+            symbol="BTCUSDT",
+            position_side=PosSide.BOTH,
+            pre_position_amt=Decimal(0),
+            expected_delta=Decimal("0.05"),
+        ).to_json(),
+    )
     await commands.set_status(key, "SENDING")
     client.query_error = AsterError(-1006, "transport unavailable")
+    client.history_error = AsterError(-1006, "history unavailable")
     report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
     assert report.unresolved_query_error == 1
     assert len(await commands.in_flight()) == 1
     assert client.placed == []
 
 
-async def test_boot_authoritative_not_found_marks_failed(env):
+async def test_boot_legacy_market_not_found_without_context_stays_unresolved(env):
     executor, client, commands, links, _ = env
     del executor
     action = open_action()
@@ -533,8 +692,84 @@ async def test_boot_authoritative_not_found_marks_failed(env):
     )
     await commands.set_status(key, "UNKNOWN")
     report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.unresolved_economic == 1 and report.failed_not_found == 0
+    assert (await commands.get(key))["status"] == "UNKNOWN"
+
+
+async def test_boot_market_history_and_position_prove_not_executed(env):
+    executor, client, commands, links, _ = env
+    del executor
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        "ct-not-found",
+    )
+    await commands.set_recovery_context(
+        key,
+        MarketRecoveryContext(
+            symbol="BTCUSDT",
+            position_side=PosSide.BOTH,
+            pre_position_amt=Decimal(0),
+            expected_delta=Decimal("0.05"),
+        ).to_json(),
+    )
+    await commands.set_status(key, "UNKNOWN")
+
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+
     assert report.failed_not_found == 1 and report.unresolved == 0
     assert (await commands.get(key))["status"] == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("action", "status", "pre_position", "expected_delta"),
+    [
+        (open_action(), "SENDING", "0", "0.05"),
+        (close_action(), "UNKNOWN", "0.05", "-0.05"),
+    ],
+)
+async def test_boot_market_history_found_confirms_without_new_mutation(
+    env, action, status, pre_position, expected_delta
+):
+    executor, client, commands, links, _ = env
+    del executor
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    coid = f"ct-restart-{action.kind.value.lower()}"
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        coid,
+    )
+    await commands.set_recovery_context(
+        key,
+        MarketRecoveryContext(
+            symbol="BTCUSDT",
+            position_side=PosSide(action.payload.get("positionSide", "BOTH")),
+            pre_position_amt=Decimal(pre_position),
+            expected_delta=Decimal(expected_delta),
+        ).to_json(),
+    )
+    await commands.set_status(key, status)
+    client.query_results[coid] = None
+    client.history_results[coid] = SimpleOrder(coid, "FILLED", executed_qty="0.05")
+
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+
+    assert report.confirmed == 1 and report.unresolved == 0
+    assert (await commands.get(key))["status"] == "CONFIRMED"
+    assert client.place_calls == 0
 
 
 class SimplePosition:

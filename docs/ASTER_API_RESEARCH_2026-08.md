@@ -467,6 +467,12 @@ State DB + Telegram notifications + reconciliation
 
 - `429` требует backoff; продолжение запросов приводит к IP ban `418` от 2 минут до 3 дней;
 - `503` означает неизвестный результат исполнения, а не гарантированный fail: нельзя слепо повторять ордер, нужно проверять `clientOrderId`/WebSocket;
+- `GET /fapi/v3/order` не является достаточным negative proof для response-lost
+  MARKET: `GET /fapi/v3/allOrders` включает active/canceled/filled history. Полная
+  страница из 1000 записей также не доказывает отсутствие более старого COID, поэтому
+  production recovery сочетает history с сохранённым pre-position и актуальным
+  `positionRisk`, а недоступность любого необходимого доказательства даёт
+  `UNRESOLVED`, не retry;
 - стандартный new order имеет weight 1, а place/update strategy order — weight 50;
 - `nonce` должен быть уникальным для signer; сервер хранит последние 100 nonce на agent address;
 - в документе есть несогласованность окна nonce: общий раздел говорит ±60 секунд, пример и registration notes — не более 10 секунд. Надёжная реализация должна синхронизировать часы и укладываться в 10 секунд;

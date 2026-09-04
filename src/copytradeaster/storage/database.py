@@ -199,6 +199,10 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE accounts ADD COLUMN builder_max_fee_rate TEXT",
     "ALTER TABLE accounts ADD COLUMN builder_agent_expires_at_ms INTEGER",
     "ALTER TABLE accounts ADD COLUMN builder_verified_at TEXT",
+    # PM-B1: durable pre-mutation evidence used by the shared runtime/boot
+    # economic-outcome resolver.  JSON keeps the migration additive while the
+    # resolver validates the exact Decimal fields fail-closed.
+    "ALTER TABLE execution_commands ADD COLUMN recovery_context TEXT",
 ]
 
 CASEFOLD_ADDRESS_INDEX_VERSION = next(

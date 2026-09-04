@@ -355,3 +355,19 @@ async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):
     assert await app._wait_for_stream_startup() is False
     assert events[0].kind == "engine.stream_fallback"
     assert events[0].account_id == "main"
+
+
+def test_ingest_overflow_marks_dropped_symbol_dirty_and_requests_recovery():
+    app = App.__new__(App)
+    app._ingest_queue = asyncio.Queue(maxsize=1)
+    app._ingest_dropped = 0
+    marked: list[tuple[dict, str]] = []
+    app._mark_master_dirty = lambda raw, reason: marked.append((raw, reason))
+
+    first = {"e": "ORDER_TRADE_UPDATE", "E": 1, "o": {"s": "BTCUSDT", "x": "TRADE"}}
+    second = {"e": "ORDER_TRADE_UPDATE", "E": 2, "o": {"s": "ETHUSDT", "x": "TRADE"}}
+    app._enqueue(first)
+    app._enqueue(second)
+
+    assert app._ingest_dropped == 1
+    assert marked == [(first, "ingest-overflow")]

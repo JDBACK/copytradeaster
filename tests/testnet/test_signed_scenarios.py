@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import sys
 import time
 from decimal import Decimal as D
 
@@ -19,9 +21,10 @@ import pytest
 
 from copytradeaster.config import Settings
 from copytradeaster.credentials.service import SqliteCredentials
-from copytradeaster.domain.models import ExecutionPlan
+from copytradeaster.domain.models import ActionKind, ExecutionAction, ExecutionPlan, PosSide
 from copytradeaster.storage.database import Database
-from copytradeaster.storage.repositories import NonceStore
+from copytradeaster.storage.repositories import CommandRepo, NonceStore, OrderLinkRepo, SettingsRepo
+from copytradeaster.trading.executor import Executor
 
 pytestmark = [
     pytest.mark.testnet,
@@ -292,6 +295,240 @@ async def _flatten_main(client) -> None:
                         new_order_resp_type="RESULT",
                     ),
                 )
+
+
+async def _run_pm_b1_sigkill_worker(journal_path: str) -> None:
+    """Send one real MARKET and die after Aster accepts it.
+
+    This is intentionally a process boundary instead of an exception fake:
+    SQLite must retain ``recovery_context`` + ``SENDING`` after SIGKILL, while
+    the HTTP response and every in-memory object disappear.
+    """
+    from pathlib import Path
+
+    import httpx
+
+    from copytradeaster.aster.rate_limits import RateLimits
+    from copytradeaster.aster.trading_api import AsterClient
+    from copytradeaster.storage.repositories import NonceStore
+
+    worker_settings = Settings()
+    if "testnet" not in worker_settings.rest_base_url.lower():
+        raise RuntimeError("PM-B1 SIGKILL worker is restricted to testnet")
+
+    source_db = Database(worker_settings.db_path)
+    await source_db.connect()
+    worker_creds = SqliteCredentials(source_db, worker_settings.encryption_key_bytes())
+    await worker_creds.load()
+    if "main" not in worker_creds.account_ids():
+        raise RuntimeError("main credentials are required")
+
+    http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
+    limiter = RateLimits(
+        worker_settings.weight_limit_per_min,
+        worker_settings.orders_limit_per_min,
+        worker_settings.orders_limit_per_10s,
+    )
+    real = AsterClient(
+        http,
+        worker_settings.rest_base_url,
+        limiter,
+        worker_creds,
+        worker_creds,
+        NonceStore(source_db),
+    )
+    journal = Database(Path(journal_path))
+    await journal.connect()
+    await journal.migrate()
+    hedge = await real.get_position_mode("main")
+
+    class KillAfterAcceptedClient:
+        async def position_risk(self, account_id, symbol=None):
+            return await real.position_risk(account_id, symbol)
+
+        async def place_order(self, account_id, req):
+            await real.place_order(account_id, req)
+            os.kill(os.getpid(), signal.SIGKILL)
+            raise AssertionError("SIGKILL returned")
+
+    wrapped = KillAfterAcceptedClient()
+    executor = Executor(
+        lambda _account_id: wrapped,
+        CommandRepo(journal),
+        OrderLinkRepo(journal),
+        {},
+        settings=SettingsRepo(journal),
+    )
+    payload = {
+        "symbol": SYMBOL,
+        "side": "BUY",
+        "type": "MARKET",
+        "quantity": format(QTY, "f"),
+        "newOrderRespType": "RESULT",
+    }
+    if hedge:
+        payload["positionSide"] = PosSide.LONG.value
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol=SYMBOL,
+        payload=payload,
+        client_order_id="pm-b1-sigkill",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    await executor.submit(ExecutionPlan(account_id="main", trade_id=None, actions=[action]))
+    raise AssertionError("worker survived accepted MARKET")
+
+
+async def test_market_response_lost_recovers_from_real_all_orders_once(clients, creds, tmp_path):
+    """PM-B1 signed proof: Aster accepts MARKET, its response is discarded,
+    current-order lookup is hidden, and Executor resolves the original COID
+    through real ``allOrders`` without a second economic mutation."""
+    from copytradeaster.aster.trading_api import AsterError
+
+    if "main" not in creds.account_ids():
+        pytest.skip("main credentials are required for signed UNKNOWN recovery")
+    real = clients["main"]
+    await _flatten_main(real)
+    hedge = await _is_hedge(real)
+    position_side = PosSide.LONG if hedge else PosSide.BOTH
+    journal = Database(tmp_path / "unknown-recovery.sqlite3")
+    await journal.connect()
+    await journal.migrate()
+
+    class LostResponseClient:
+        def __init__(self):
+            self.place_calls = 0
+            self.accepted_coid = ""
+
+        async def position_risk(self, account_id, symbol=None):
+            return await real.position_risk(account_id, symbol)
+
+        async def place_order(self, account_id, req):
+            self.place_calls += 1
+            accepted = await real.place_order(account_id, req)
+            self.accepted_coid = accepted.client_order_id
+            raise AsterError(-1000, "injected lost response", http_status=503)
+
+        async def query_order(self, account_id, symbol, **kwargs):
+            del account_id, symbol, kwargs
+            return None
+
+        async def query_order_history(self, account_id, symbol, *, orig_client_order_id):
+            return await real.query_order_history(
+                account_id, symbol, orig_client_order_id=orig_client_order_id
+            )
+
+    wrapped = LostResponseClient()
+    executor = Executor(
+        lambda _account_id: wrapped,
+        CommandRepo(journal),
+        OrderLinkRepo(journal),
+        {},
+        settings=SettingsRepo(journal),
+    )
+    payload = {
+        "symbol": SYMBOL,
+        "side": "BUY",
+        "type": "MARKET",
+        "quantity": format(QTY, "f"),
+        "newOrderRespType": "RESULT",
+    }
+    if hedge:
+        payload["positionSide"] = position_side.value
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol=SYMBOL,
+        payload=payload,
+        client_order_id="pm-b1-live",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    try:
+        result = await executor.submit(
+            ExecutionPlan(account_id="main", trade_id=None, actions=[action])
+        )
+        assert result[0].status == "CONFIRMED"
+        assert wrapped.place_calls == 1
+        row = await CommandRepo(journal).get(result[0].command_key)
+        assert row is not None
+        assert row["client_order_id"] == wrapped.accepted_coid
+        assert "history:FILLED" in str(row["last_error"])
+        history = await real.query_order_history(
+            "main", SYMBOL, orig_client_order_id=wrapped.accepted_coid
+        )
+        assert history is not None and history.executed_qty == QTY
+    finally:
+        await _flatten_main(real)
+        positions = await real.position_risk("main", SYMBOL)
+        assert all(position.position_amt == 0 for position in positions)
+        assert await real.open_orders("main", SYMBOL) == []
+        await journal.close()
+
+
+async def test_market_sigkill_sending_recovers_without_second_order(clients, creds, tmp_path):
+    """PM-B1 signed crash proof over a fresh Python process and real Aster."""
+    from copytradeaster.trading.executor import resolve_boot_unknowns
+
+    if "main" not in creds.account_ids():
+        pytest.skip("main credentials are required for signed SIGKILL recovery")
+    real = clients["main"]
+    await _flatten_main(real)
+    journal_path = tmp_path / "unknown-sigkill.sqlite3"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            __file__,
+            "--pm-b1-sigkill-worker",
+            str(journal_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(process.wait(), timeout=45)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            pytest.fail("PM-B1 SIGKILL worker timed out")
+        assert process.returncode == -signal.SIGKILL
+
+        journal = Database(journal_path)
+        await journal.connect()
+        try:
+            commands = CommandRepo(journal)
+            in_flight = await commands.in_flight()
+            assert len(in_flight) == 1
+            row = in_flight[0]
+            assert row["status"] == "SENDING"
+            assert row["recovery_context"]
+            coid = str(row["client_order_id"])
+
+            history_before = await real.query_order_history(
+                "main", SYMBOL, orig_client_order_id=coid
+            )
+            assert history_before is not None and history_before.executed_qty == QTY
+            report = await resolve_boot_unknowns(
+                lambda _account_id: real,
+                commands,
+                OrderLinkRepo(journal),
+            )
+            assert report.confirmed == 1 and report.unresolved == 0
+            recovered = await commands.get(str(row["command_key"]))
+            assert recovered is not None and recovered["status"] == "CONFIRMED"
+            history_after = await real.query_order_history(
+                "main", SYMBOL, orig_client_order_id=coid
+            )
+            assert history_after is not None and history_after.order_id == history_before.order_id
+            positions = await real.position_risk("main", SYMBOL)
+            assert sum(abs(position.position_amt) for position in positions) == QTY
+        finally:
+            await journal.close()
+    finally:
+        await _flatten_main(real)
+        assert all(
+            position.position_amt == 0 for position in await real.position_risk("main", SYMBOL)
+        )
+        assert await real.open_orders("main", SYMBOL) == []
 
 
 async def test_close_position_contract_one_way_and_hedge(clients):
@@ -1059,3 +1296,14 @@ async def test_one_way_signed_cycle(clients, creds):
         await _flatten_main(client)
         if original_hedge:
             await client.set_position_mode(main_id, True)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] != "--pm-b1-sigkill-worker":
+        raise SystemExit("test module is executable only as the PM-B1 SIGKILL worker")
+    try:
+        asyncio.run(_run_pm_b1_sigkill_worker(sys.argv[2]))
+    except BaseException:  # pragma: no cover - parent asserts SIGKILL, never a soft failure
+        # aiosqlite owns non-daemon worker threads; force a distinct immediate
+        # failure instead of letting a pre-SIGKILL setup error hang in finalize.
+        os._exit(70)

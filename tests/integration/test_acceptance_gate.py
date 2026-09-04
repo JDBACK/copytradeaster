@@ -37,7 +37,11 @@ from copytradeaster.storage.repositories import (
     SyncBasisRepo,
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
-from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
+from copytradeaster.trading.executor import (
+    Executor,
+    MarketRecoveryContext,
+    resolve_boot_unknowns,
+)
 from tests.integration.fake_aster import FakeAster, FakeOrder, btc_filters
 from tests.integration.test_end_to_end_fake import order_trade, stop_new
 
@@ -250,9 +254,25 @@ class TestCrashWindows:
         fake = FakeAster(fill_price=D("65000"))
         commands = CommandRepo(db)
         links = OrderLinkRepo(db)
-        # SENDING: request left, nothing on exchange -> FAILED
+        # SENDING: full history + unchanged position prove the request never
+        # executed, so reconciliation may safely re-issue it after boot.
         await commands.insert(
-            "k-send", "copyc1", None, "MARKET_OPEN", '{"symbol":"BTCUSDT"}', 1, "ct-send"
+            "k-send",
+            "copyc1",
+            None,
+            "MARKET_OPEN",
+            '{"symbol":"BTCUSDT","side":"BUY","type":"MARKET","quantity":"0.01"}',
+            1,
+            "ct-send",
+        )
+        await commands.set_recovery_context(
+            "k-send",
+            MarketRecoveryContext(
+                symbol="BTCUSDT",
+                position_side=PosSide.BOTH,
+                pre_position_amt=D(0),
+                expected_delta=D("0.01"),
+            ).to_json(),
         )
         await commands.set_status("k-send", "SENDING")
         # SUBMITTED: exchange HAS the order -> CONFIRMED (+link), zero resend

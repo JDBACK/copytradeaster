@@ -217,6 +217,50 @@ class TestSignedRequests:
         assert await client.query_order("copyc1", "BTCUSDT", orig_client_order_id="gone") is None
 
     @respx.mock
+    async def test_query_order_history_finds_filled_order_by_client_id(self):
+        history = respx.get(f"{BASE}/fapi/v3/allOrders").respond(
+            json=[
+                {**ORDER_RESPONSE, "orderId": 10, "clientOrderId": "other"},
+                {**ORDER_RESPONSE, "orderId": 11, "clientOrderId": "ct-target"},
+            ]
+        )
+        client = make_client()
+
+        order = await client.query_order_history(
+            "copyc1", "BTCUSDT", orig_client_order_id="ct-target"
+        )
+
+        assert order is not None and order.order_id == 11
+        sent = dict(history.calls[0].request.url.params)
+        assert sent["symbol"] == "BTCUSDT" and sent["limit"] == "1000"
+
+    @respx.mock
+    async def test_query_order_history_absent_on_complete_page_returns_none(self):
+        respx.get(f"{BASE}/fapi/v3/allOrders").respond(json=[])
+        client = make_client()
+        assert (
+            await client.query_order_history("copyc1", "BTCUSDT", orig_client_order_id="ct-missing")
+            is None
+        )
+
+    @respx.mock
+    async def test_query_order_history_full_page_cannot_prove_absence(self):
+        respx.get(f"{BASE}/fapi/v3/allOrders").respond(
+            json=[
+                {
+                    **ORDER_RESPONSE,
+                    "orderId": index,
+                    "clientOrderId": f"other-{index}",
+                }
+                for index in range(1000)
+            ]
+        )
+        client = make_client()
+
+        with pytest.raises(AsterError, match="window saturated"):
+            await client.query_order_history("copyc1", "BTCUSDT", orig_client_order_id="ct-missing")
+
+    @respx.mock
     async def test_429_raises_rate_limit_error(self):
         respx.get(f"{BASE}/fapi/v3/balance").respond(
             status_code=429, json={"code": -1003, "msg": "too many"}

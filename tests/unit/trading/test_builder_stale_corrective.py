@@ -190,6 +190,8 @@ class FakeClient:
         self.place_calls = 0
         self.script = None
         self.query_found = False
+        self.query_error = None
+        self.history_error = None
 
     async def place_order(self, account_id, req):
         self.place_calls += 1
@@ -219,6 +221,8 @@ class FakeClient:
         return []
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
+        if self.query_error is not None:
+            raise self.query_error
         if self.query_found:
 
             class _O:
@@ -233,6 +237,11 @@ class FakeClient:
 
                 return _O2()
         return None
+
+    async def query_order_history(self, account_id, symbol, *, orig_client_order_id):
+        if self.history_error is not None:
+            raise self.history_error
+        return await self.query_order(account_id, symbol, orig_client_order_id=orig_client_order_id)
 
 
 @pytest.fixture
@@ -502,6 +511,34 @@ class TestUnknownAfterDirect:
         assert client.place_calls == 2
         row = await commands.get(res[0].command_key)
         assert "resolved-unknown" in (row["last_error"] or "")
+
+    async def test_direct_unknown_unresolved_never_gets_second_direct_retry(self, exec_env):
+        _, commands, links, settings = exec_env
+        client = FakeClient()
+        client.query_error = AsterError(-1006, "current query unavailable")
+        client.history_error = AsterError(-1006, "history unavailable")
+        accounts = FakeAccounts({"a": builder_row()})
+
+        async def script(account_id, req, n):
+            del account_id
+            if n == 1:
+                assert req.builder == BUILDER_A
+                raise AsterError(-5026, "Fee rate exceeds maxFeeRate")
+            assert req.builder is None
+            raise AsterError(-1007, "transport timeout")
+
+        client.script = script
+        ex, _prov = make_executor(
+            client, commands, links, settings, accounts, {"a": valid_validation()}, {"a": SIGNER_A}
+        )
+
+        result = await ex.submit(
+            ExecutionPlan(account_id="a", trade_id=None, actions=[close_action()])
+        )
+
+        assert result[0].status == "UNKNOWN"
+        assert client.place_calls == 2
+        assert [req.builder for _, req in client.placed] == [BUILDER_A, None]
 
 
 class TestIsolation:

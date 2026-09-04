@@ -3,11 +3,29 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-04):** Stage 1–3 CLOSED в `main`, открытых gates нет.
-> Offline 1089/2/42 (~87%), frontend 168/17, full testnet 42/1, ruff/oxlint clean.
+> **TL;DR (2026-09-04):** Stage 1–3 CLOSED; Pre-Mainnet Package A / PM-B1 CLOSED,
+> Package B ещё не закрыт, поэтому Mainnet gate открыт. Offline **1107 passed / 2
+> skipped / 45 deselected**, coverage **87%**; frontend 168/17 (последний неизменённый
+> gate); full testnet 42/1 (последний полный gate) + focused PM-B1 signed fault/
+> SIGKILL **2 passed**; ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
+
+- **Pre-Mainnet Package A / PM-B1 — CLOSED (2026-09-04):** устранён duplicate
+  economic mutation после response-lost MARKET. Additive migration #33 хранит
+  pre-position/expected delta до `SENDING`; current query + `allOrders` +
+  `positionRisk` дают явный `FOUND / PROVEN_NOT_EXECUTED / UNRESOLVED`; только
+  доказанное отсутствие разрешает новый COID, runtime/re-submit/boot используют один
+  resolver, partial progress доводится только residual reconciliation. Builder
+  `-5026 → DIRECT` reduction остаётся внутри той же policy. Красная регрессия до fix
+  воспроизвела duplicate и retry при unavailable recovery. Offline gate: **1107
+  passed / 2 skipped / 45 deselected**, coverage **87%**, ruff/format/diff-check
+  clean. Focused signed Aster Testnet: accepted response-lost с принудительно скрытым
+  current lookup и real `allOrders`, затем отдельный Python worker с настоящим
+  `SIGKILL` после принятого MARKET и boot/WAL recovery — **2 passed**, в обоих случаях
+  один economic order; финальный account audit flat/0 open orders. Полный контракт и
+  TODO следующих пакетов — `reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
 
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /
   CLOSED (2026-09-03, ветка `codex/stage-3-mini-app-part2`):** nested control screen поверх

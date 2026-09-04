@@ -294,22 +294,54 @@ class AsterClient:
                 account_id,
                 symbol,
             )
-            body = await self._signed(
-                account_id,
-                "GET",
-                "/fapi/v3/allOrders",
-                {"symbol": symbol, "limit": "1000"},
-                weight=5,
-            )
-            if not isinstance(body, list):
-                raise AsterError(-1000, "invalid allOrders response") from exc
-            body = [
-                row
-                for row in body
-                if isinstance(row, dict)
-                and str(row.get("status", "")) in {"NEW", "PARTIALLY_FILLED"}
-            ]
+            history = await self.all_orders(account_id, symbol, limit=1000)
+            return [order for order in history if order.status in {"NEW", "PARTIALLY_FILLED"}]
         return [OrderDTO.model_validate(x) for x in body]
+
+    async def all_orders(
+        self, account_id: str, symbol: str, *, limit: int = 1000
+    ) -> list[OrderDTO]:
+        """Return symbol-scoped active/canceled/filled order history.
+
+        Aster requires ``symbol`` and caps ``limit`` at 1000.  Recovery uses
+        this endpoint because the current-order view alone is not proof that a
+        response-lost MARKET never executed.
+        """
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise AsterError(-1000, "symbol is required for allOrders")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("allOrders limit must be in [1, 1000]")
+        body = await self._signed(
+            account_id,
+            "GET",
+            "/fapi/v3/allOrders",
+            {"symbol": symbol.strip(), "limit": str(limit)},
+            weight=5,
+        )
+        if not isinstance(body, list):
+            raise AsterError(-1000, "invalid allOrders response")
+        try:
+            return [OrderDTO.model_validate(row) for row in body]
+        except Exception:
+            raise AsterError(-1000, "invalid allOrders response") from None
+
+    async def query_order_history(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        orig_client_order_id: str,
+    ) -> OrderDTO | None:
+        """Find a recent order by COID in authoritative symbol history."""
+        orders = await self.all_orders(account_id, symbol, limit=1000)
+        matches = [order for order in orders if order.client_order_id == orig_client_order_id]
+        if not matches:
+            if len(orders) >= 1000:
+                # A full page cannot prove absence: the target order may have
+                # fallen outside the returned window on a busy account.
+                raise AsterError(-1000, "allOrders recovery window saturated")
+            return None
+        return max(matches, key=lambda order: order.update_time)
 
     async def agent(self, account_id: str) -> AgentDTO:
         """Return the Agent record belonging to the configured signer.

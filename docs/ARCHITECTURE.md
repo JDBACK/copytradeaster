@@ -412,6 +412,7 @@ account_id
 trade_id
 kind
 payload
+recovery_context
 priority
 status
 attempts
@@ -427,7 +428,24 @@ PENDING → SENDING → SUBMITTED → CONFIRMED
                          ↘ FAILED
 ```
 
-`503` или timeout после отправки финансовой команды трактуется как `UNKNOWN`, а не как гарантированный fail. Перед retry сначала проверяется состояние биржи / clientOrderId.
+`503` или timeout после отправки финансовой команды трактуется как `UNKNOWN`, а не как
+гарантированный fail. Для `MARKET_OPEN`/`MARKET_CLOSE` Executor до перехода
+`PENDING → SENDING` сохраняет в `recovery_context` symbol/leg, точную Decimal-позицию
+до mutation и ожидаемый signed delta. Runtime, повторный submit и boot используют один
+resolver с тремя исходами:
+
+- `FOUND` — исходный COID найден либо authoritative `positionRisk` показывает
+  согласованное продвижение в ожидаемом направлении не больше requested delta;
+- `PROVEN_NOT_EXECUTED` — исходный COID отсутствует в трёх полных чтениях
+  `allOrders`, а соответствующая position leg во всех чтениях не изменилась;
+- `UNRESOLVED` — history/position недоступны, history page насыщена 1000 строками,
+  recovery context отсутствует/повреждён или position delta противоречив.
+
+Только `PROVEN_NOT_EXECUTED` разрешает новый COID. `UNRESOLVED` остаётся
+non-terminal, ставит degraded и блокирует новую economic mutation. Current-order query
+служит быстрым positive lookup, но его `None` не является negative proof. Partial
+progress подтверждает выполненную часть; residual создаёт следующий authoritative
+reconciliation, поэтому полный исходный quantity повторно не отправляется.
 
 Собственный `command_key` является долговременной идемпотентностью сервиса; `newClientOrderId` используется как внешний correlation id, но не заменяет внутренний журнал. `BLOCKED` — ephemeral-результат исполнителя для действий с упавшим prerequisite (в журнале не персистится; шесть статусов выше — весь CHECK).
 
@@ -537,7 +555,7 @@ master REST snapshot
  ↓
 follower snapshots
  ↓
-resolve UNKNOWN commands
+resolve SENDING/SUBMITTED/UNKNOWN commands
  ↓
 seed leverage candidate catalog (fail-closed if unavailable)
  ↓
@@ -546,7 +564,10 @@ reconciliation
 READY
 ```
 
-Только после `READY` разрешаются новые follower entries.
+Только после `READY` разрешаются новые follower entries. Boot recovery применяет тот же
+`FOUND / PROVEN_NOT_EXECUTED / UNRESOLVED` контракт, что и runtime. Legacy MARKET-row
+без `recovery_context` не может быть признан неисполненным: он остаётся in-flight и
+останавливает boot fail-closed.
 
 Stage 2 process (`application/engine.py`) продолжает этот порядок:
 
@@ -611,7 +632,8 @@ notification_outbox
 - `copy_trades` — внутренние торговые эпизоды (с `direction = ±1` — сторона
   эпизода, миграция #13);
 - `order_links` — master ↔ follower order mapping;
-- `execution_commands` — durable execution journal/queue.
+- `execution_commands` — durable execution journal/queue; additive migration #33
+  добавляет `recovery_context` с pre-mutation evidence для MARKET recovery.
 - `telegram_users` — private-chat allowlist и единственный owner account;
   admin — дополнительная capability immutable ID из env, а не взаимоисключающая
   роль, поэтому один operator ID может одновременно иметь owner account;

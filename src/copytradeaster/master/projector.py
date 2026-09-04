@@ -8,6 +8,7 @@ the position returns to zero.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -39,6 +40,8 @@ class MasterState:
     positions: dict[PositionKey, PositionState] = field(default_factory=dict)
     """Wall-clock ms of the last applied WS event; 0 = snapshot/manual (fresh)."""
     event_time: int = 0
+    """Monotonic process-local generation of the last authoritative REST boundary."""
+    generation: int = 0
 
 
 @dataclass(slots=True)
@@ -61,6 +64,40 @@ def _last_fill_price(o: dict) -> Decimal:
     return Decimal(str(value))
 
 
+def _event_identity(raw: dict) -> tuple[str, int, str]:
+    event_type = str(raw.get("e", ""))
+    event_time = int(raw.get("E", 0))
+    if event_type == "ORDER_TRADE_UPDATE":
+        order = raw.get("o", {})
+        # trade id t distinguishes two partial fills of one order in the same
+        # millisecond E; without it the durable ledger would lose a fill.
+        dedup_key = f"{event_type}:{event_time}:{order.get('i')}:{order.get('x')}:{order.get('t')}"
+    else:
+        dedup_key = f"{event_type}:{event_time}"
+    return event_type, event_time, dedup_key
+
+
+def symbols_for_raw(raw: dict) -> frozenset[str]:
+    """Extract affected master symbols for dirty/recovery diagnostics."""
+    event_type = str(raw.get("e", ""))
+    symbols: set[str] = set()
+    if event_type == "ORDER_TRADE_UPDATE":
+        symbol = str(raw.get("o", {}).get("s", ""))
+        if symbol:
+            symbols.add(symbol)
+    elif event_type == "ACCOUNT_UPDATE":
+        symbols.update(
+            str(position.get("s", ""))
+            for position in raw.get("a", {}).get("P", [])
+            if position.get("s")
+        )
+    elif event_type == "ACCOUNT_CONFIG_UPDATE":
+        symbol = str(raw.get("ac", {}).get("s", ""))
+        if symbol:
+            symbols.add(symbol)
+    return frozenset(symbols or {"*"})
+
+
 class MasterProjector:
     def __init__(
         self,
@@ -79,57 +116,125 @@ class MasterProjector:
         self._on_critical = on_critical
         self.state = MasterState()
         self._last_event_time: int | None = None
+        self._generation = 0
+        self._authoritative_cutoff_ms = 0
+        self._dirty_symbols: set[str] = set()
+        self._state_lock = asyncio.Lock()
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def dirty_symbols(self) -> frozenset[str]:
+        return frozenset(self._dirty_symbols)
+
+    def mark_dirty(self, *symbols: str) -> None:
+        normalized = {symbol for symbol in symbols if symbol}
+        if not normalized:
+            normalized = {"*"}
+        if "*" in normalized:
+            self._dirty_symbols = {"*"}
+        elif "*" not in self._dirty_symbols:
+            self._dirty_symbols.update(normalized)
 
     # --- entry points -----------------------------------------------------------
 
-    async def apply_raw(self, raw: dict) -> None:
-        event_type = str(raw.get("e", ""))
-        event_time = int(raw.get("E", 0))
-        if event_type == "ORDER_TRADE_UPDATE":
-            o = raw.get("o", {})
-            # trade id t distinguishes two partial fills of one order in the
-            # same millisecond E - without it a fill is lost to dedup
-            dedup_key = f"{event_type}:{event_time}:{o.get('i')}:{o.get('x')}:{o.get('t')}"
-        else:
-            dedup_key = f"{event_type}:{event_time}"
-        event_id = await self._events.append(
-            event_type, event_time, json.dumps(raw, separators=(",", ":")), dedup_key
-        )
-        if event_id is None:
-            log.debug("duplicate event dropped: %s", dedup_key)
-            return
-        raw_o = raw.get("o", {}) if event_type == "ORDER_TRADE_UPDATE" else {}
-        is_trade = event_type == "ORDER_TRADE_UPDATE" and str(raw_o.get("x", "")) == "TRADE"
-        if (
-            not is_trade
-            and self._last_event_time is not None
-            and event_time < self._last_event_time
-        ):
-            # stale non-trade events (protective NEW/CANCELED, config) are
-            # ignored; TRADE fills are applied OUT OF ORDER on purpose -
-            # dropping them loses position deltas when ACCOUNT_UPDATE wins the
-            # race, and only rebuild_full would heal it otherwise.
-            log.debug("out-of-order event ignored: E=%s < %s", event_time, self._last_event_time)
-            await self._events.mark_processed(event_id)
-            return
-        if not is_trade or self._last_event_time is None or event_time > self._last_event_time:
-            self._last_event_time = max(event_time, self._last_event_time or 0)
-        self.state.event_time = int(time.time() * 1000)
+    async def apply_raw(self, raw: dict, *, generation: int | None = None) -> None:
+        """Persist and apply one WS frame inside the current REST generation.
 
-        if event_type == "ORDER_TRADE_UPDATE":
-            await self._on_order_update(raw["o"], event_id)
-            if _requires_authoritative_rebuild(raw["o"]):
-                await self._request_critical_rebuild(
-                    f"position-changing-order:{raw['o'].get('x', '')}"
+        Frames tagged before a completed rebuild are audit-recorded but never
+        mutate the new state. A delayed frame from the current generation whose
+        exchange timestamp predates the completed snapshot is also discarded,
+        marks the master dirty, and requests another authoritative rebuild.
+        """
+        critical_reason: str | None = None
+        async with self._state_lock:
+            event_type, event_time, dedup_key = _event_identity(raw)
+            event_id = await self._events.append(
+                event_type,
+                event_time,
+                json.dumps(raw, separators=(",", ":")),
+                dedup_key,
+            )
+            if event_id is None:
+                log.debug("duplicate event dropped: %s", dedup_key)
+                return
+
+            if generation is not None and generation != self._generation:
+                log.info(
+                    "pre-boundary event invalidated: event_generation=%d current=%d key=%s",
+                    generation,
+                    self._generation,
+                    dedup_key,
                 )
-        elif event_type == "ACCOUNT_UPDATE":
-            await self._on_account_update(raw.get("a", {}), event_id)
-        elif event_type == "ACCOUNT_CONFIG_UPDATE":
-            await self._on_config_update(raw, event_id)
-        elif event_type == "MARGIN_CALL":
-            await self._on_margin_call(raw, event_id)
-        else:
-            await self._events.mark_processed(event_id)
+                await self._events.mark_processed(event_id)
+                return
+
+            symbols = symbols_for_raw(raw)
+            boundary_sensitive = event_type in {
+                "ORDER_TRADE_UPDATE",
+                "ACCOUNT_CONFIG_UPDATE",
+            }
+            if self._dirty_symbols:
+                await self._events.mark_processed(event_id)
+                critical_reason = "dirty-master-event"
+            elif (
+                boundary_sensitive
+                and self._authoritative_cutoff_ms > 0
+                and event_time <= self._authoritative_cutoff_ms
+            ):
+                self.mark_dirty(*symbols)
+                await self._events.mark_processed(event_id)
+                critical_reason = "stale-event-after-snapshot"
+                log.warning(
+                    "delayed master event discarded after REST boundary: E=%d cutoff=%d key=%s",
+                    event_time,
+                    self._authoritative_cutoff_ms,
+                    dedup_key,
+                )
+            else:
+                raw_o = raw.get("o", {}) if event_type == "ORDER_TRADE_UPDATE" else {}
+                is_trade = event_type == "ORDER_TRADE_UPDATE" and str(raw_o.get("x", "")) == "TRADE"
+                if (
+                    self._last_event_time is not None
+                    and event_time < self._last_event_time
+                    and not is_trade
+                ):
+                    # Out-of-order TRADE is valid only within one WS generation.
+                    # Across an authoritative boundary it is handled above.
+                    log.debug(
+                        "out-of-order event ignored: E=%s < %s",
+                        event_time,
+                        self._last_event_time,
+                    )
+                    await self._events.mark_processed(event_id)
+                    return
+                if (
+                    not is_trade
+                    or self._last_event_time is None
+                    or event_time > self._last_event_time
+                ):
+                    self._last_event_time = max(event_time, self._last_event_time or 0)
+                self.state.event_time = int(time.time() * 1000)
+
+                if event_type == "ORDER_TRADE_UPDATE":
+                    await self._on_order_update(raw["o"], event_id)
+                    if _requires_authoritative_rebuild(raw["o"]):
+                        critical_reason = f"position-changing-order:{raw['o'].get('x', '')}"
+                elif event_type == "ACCOUNT_UPDATE":
+                    await self._on_account_update(raw.get("a", {}), event_id)
+                elif event_type == "ACCOUNT_CONFIG_UPDATE":
+                    await self._on_config_update(raw, event_id)
+                elif event_type == "MARGIN_CALL":
+                    await self._on_margin_call(raw, event_id)
+                    critical_reason = "margin_call"
+                else:
+                    await self._events.mark_processed(event_id)
+
+        # Rebuild outside _state_lock: App's callback re-enters rebuild_full().
+        if critical_reason is not None:
+            await self._request_critical_rebuild(critical_reason)
 
     async def rebuild_full(self, client: AsterClient, account_id: str) -> MasterState:
         """REST snapshot: balance + positionRisk + openOrders -> MasterState.
@@ -138,58 +243,79 @@ class MasterProjector:
         lifecycle, so a master close missed while offline does not leave a
         stale OPEN episode (which would poison sizing and the own-fill guard).
         """
-        balances = await client.balance(account_id)
-        available = Decimal(0)
-        for b in balances:
-            if b.asset == "USDT":
-                available = b.available_balance
-                break
-        position_rows = await client.position_risk(account_id)
-        # The copy engine mirrors held state, not pending master entry orders.
-        # Querying only symbols with non-flat positions preserves every
-        # protective order relevant to replication and permits the documented
-        # symbol-scoped allOrders recovery path when Testnet openOrders is down.
-        held_symbols = sorted({str(p.symbol) for p in position_rows if p.position_amt != 0})
-        orders = []
-        for symbol in held_symbols:
-            orders.extend(await client.open_orders(account_id, symbol=symbol))
-        positions: dict[PositionKey, PositionState] = {}
-        open_orders: dict[str, list] = {str(o.symbol): [] for o in orders}
-        for dto in orders:
-            open_orders.setdefault(str(dto.symbol), []).append(dto)
-        held_keys: set[PositionKey] = set()
-        for p in position_rows:
-            key = PositionKey(symbol=str(p.symbol), pos_side=p.position_side)
-            same_symbol = [
-                o
-                for o in open_orders.get(str(p.symbol), [])
-                if _matches_position_side(o.position_side, key.pos_side)
-            ]
-            stop = _pick_protective(same_symbol, "STOP_MARKET") or _pick_protective(
-                same_symbol, "STOP"
+        async with self._state_lock:
+            # Increment at boundary START. Frames received during REST reads are
+            # tagged with this generation, then rejected by the completion
+            # cutoff; frames already queued retain the previous generation.
+            self._generation += 1
+            generation = self._generation
+            self.mark_dirty("*")
+
+            balances = await client.balance(account_id)
+            available = Decimal(0)
+            for b in balances:
+                if b.asset == "USDT":
+                    available = b.available_balance
+                    break
+            position_rows = await client.position_risk(account_id)
+            # The copy engine mirrors held state, not pending master entry orders.
+            # Querying only symbols with non-flat positions preserves every
+            # protective order relevant to replication and permits the documented
+            # symbol-scoped allOrders recovery path when Testnet openOrders is down.
+            held_symbols = sorted({str(p.symbol) for p in position_rows if p.position_amt != 0})
+            orders = []
+            for symbol in held_symbols:
+                orders.extend(await client.open_orders(account_id, symbol=symbol))
+            positions: dict[PositionKey, PositionState] = {}
+            open_orders: dict[str, list] = {str(o.symbol): [] for o in orders}
+            for dto in orders:
+                open_orders.setdefault(str(dto.symbol), []).append(dto)
+            held_keys: set[PositionKey] = set()
+            for p in position_rows:
+                key = PositionKey(symbol=str(p.symbol), pos_side=p.position_side)
+                same_symbol = [
+                    o
+                    for o in open_orders.get(str(p.symbol), [])
+                    if _matches_position_side(o.position_side, key.pos_side)
+                ]
+                stop = _pick_protective(same_symbol, "STOP_MARKET") or _pick_protective(
+                    same_symbol, "STOP"
+                )
+                tp = _pick_protective(same_symbol, "TAKE_PROFIT_MARKET") or _pick_protective(
+                    same_symbol, "TAKE_PROFIT"
+                )
+                if (
+                    p.position_amt == 0
+                    and key.pos_side == PosSide.BOTH
+                    and stop is None
+                    and tp is None
+                ):
+                    continue
+                if p.position_amt != 0:
+                    held_keys.add(key)
+                positions[key] = PositionState(
+                    key=key,
+                    qty=p.position_amt,
+                    entry_price=p.entry_price,
+                    leverage=int(p.leverage),
+                    mark_price=p.mark_price,
+                    liquidation_price=p.liquidation_price,
+                    stop=stop,
+                    take_profit=tp,
+                    unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
+                )
+            completed_at_ms = int(time.time() * 1000)
+            self.state = MasterState(
+                available_usdt=available,
+                positions=positions,
+                event_time=completed_at_ms,
+                generation=generation,
             )
-            tp = _pick_protective(same_symbol, "TAKE_PROFIT_MARKET") or _pick_protective(
-                same_symbol, "TAKE_PROFIT"
-            )
-            if p.position_amt == 0 and key.pos_side == PosSide.BOTH and stop is None and tp is None:
-                continue
-            if p.position_amt != 0:
-                held_keys.add(key)
-            positions[key] = PositionState(
-                key=key,
-                qty=p.position_amt,
-                entry_price=p.entry_price,
-                leverage=int(p.leverage),
-                mark_price=p.mark_price,
-                liquidation_price=p.liquidation_price,
-                stop=stop,
-                take_profit=tp,
-                unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
-            )
-        self.state = MasterState(available_usdt=available, positions=positions)
-        self.state.event_time = int(time.time() * 1000)
-        await self._sync_episodes_from_snapshot(held_keys)
-        return self.state
+            await self._sync_episodes_from_snapshot(held_keys)
+            self._authoritative_cutoff_ms = completed_at_ms
+            self._last_event_time = completed_at_ms
+            self._dirty_symbols.clear()
+            return self.state
 
     async def refresh_mark_prices(
         self, client: AsterClient, account_id: str, symbols: frozenset[str] | set[str]
@@ -473,7 +599,6 @@ class MasterProjector:
         log.critical("MARGIN CALL: %s", json.dumps(raw))
         await self._settings.set_flag("degraded", f"margin_call:{raw.get('E', '')}")
         await self._events.mark_processed(event_id)
-        await self._request_critical_rebuild("margin_call")
 
     async def _request_critical_rebuild(self, reason: str) -> None:
         if self._on_critical is not None:

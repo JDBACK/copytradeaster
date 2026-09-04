@@ -579,6 +579,18 @@ class CommandRepo:
             f"UPDATE execution_commands SET {', '.join(sets)} WHERE command_key=?", tuple(params)
         )
 
+    async def set_recovery_context(self, command_key: str, context_json: str) -> None:
+        """Persist pre-send economic evidence before a MARKET mutation leaves.
+
+        The caller writes this while the command is still PENDING.  Therefore
+        any SENDING/UNKNOWN row either carries the exact pre-position context
+        needed for position-delta recovery or remains unresolved fail-closed.
+        """
+        await self.db.execute_write(
+            "UPDATE execution_commands SET recovery_context=?, updated_at=? WHERE command_key=?",
+            (context_json, _now_iso(), command_key),
+        )
+
     async def get(self, command_key: str) -> Row | None:
         return await self.db.fetchone(
             "SELECT * FROM execution_commands WHERE command_key=?", (command_key,)
