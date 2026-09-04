@@ -66,6 +66,27 @@ class ServiceUnavailableError(ApplicationError):
     public_code = "service_unavailable"
 
 
+class GlobalEmergencyActiveError(ServiceUnavailableError):
+    """A latched global emergency blocks the operation (operator-only reset).
+
+    Distinct public code so clients can explain the block honestly instead
+    of a generic outage: the engine is up, but entries are closed by an
+    explicit safety latch. Still a 503-class ServiceUnavailableError.
+    """
+
+    public_code = "global_emergency_active"
+
+
+class GlobalPauseActiveError(ServiceUnavailableError):
+    """The global admission gate is closed (operator-only resume).
+
+    Distinct public code so clients can tell a closed gate from an outage.
+    Still a 503-class ServiceUnavailableError.
+    """
+
+    public_code = "global_pause_active"
+
+
 class UserRole(StrEnum):
     USER = "USER"
     ADMIN = "ADMIN"

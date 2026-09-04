@@ -20,6 +20,8 @@ from copytradeaster.application.models import (
     ConfirmationExpiredError,
     CopyState,
     DirectCredentialsInput,
+    GlobalEmergencyActiveError,
+    GlobalPauseActiveError,
     OnboardingApplicationError,
     PermissionsState,
     PositionProtectionState,
@@ -1427,6 +1429,25 @@ async def test_resume_rechecks_global_pause_at_mutation_boundary(environment):
     policy = await SettingsRepo(db).get_policy("tg-7")
     assert policy is not None and policy.allow_new_entries is False
     assert not any(action[0] == "resume" for action in runtime.actions)
+
+
+async def test_resume_rejects_latched_global_gates_with_distinct_codes(environment):
+    db, runtime, _, _, service = environment
+    del runtime
+    await service.pause(7)
+
+    await SettingsRepo(db).set_flag("emergency_active", "true")
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+    with pytest.raises(GlobalEmergencyActiveError) as emergency_info:
+        await service.confirm_action(7, confirmation)
+    assert emergency_info.value.public_code == "global_emergency_active"
+
+    await SettingsRepo(db).set_flag("emergency_active", "false")
+    await SettingsRepo(db).set_flag("allow_new_entries", "false")
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+    with pytest.raises(GlobalPauseActiveError) as pause_info:
+        await service.confirm_action(7, confirmation)
+    assert pause_info.value.public_code == "global_pause_active"
 
 
 async def test_resume_rejects_credential_change_after_signed_checks(environment):

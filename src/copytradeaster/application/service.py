@@ -57,6 +57,8 @@ from copytradeaster.application.models import (
     CopyState,
     DashboardDTO,
     DirectCredentialsInput,
+    GlobalEmergencyActiveError,
+    GlobalPauseActiveError,
     MiniAppAccessState,
     MiniAppConnectionState,
     MiniAppSessionDTO,
@@ -2758,6 +2760,10 @@ class UserApplicationService:
             return "validation", "invalid_input", None
         if isinstance(exc, AuthorizationError):
             return "authorization", "not_authorized", None
+        if isinstance(exc, GlobalEmergencyActiveError):
+            return "service_unavailable", "global_emergency_active", None
+        if isinstance(exc, GlobalPauseActiveError):
+            return "service_unavailable", "global_pause_active", None
         if isinstance(exc, ServiceUnavailableError):
             return "service_unavailable", "service_unavailable", None
         if isinstance(exc, _SAFE_ERRORS):
@@ -3658,9 +3664,9 @@ class UserApplicationService:
         if not _is_true(_row_value(row, "enabled", 0)):
             raise AuthorizationError("account is disconnected")
         if _is_true(await self._flag("emergency_active")):
-            raise ServiceUnavailableError("global emergency is active")
+            raise GlobalEmergencyActiveError("global emergency is active")
         if _is_false(await self._flag("allow_new_entries", "true")):
-            raise ServiceUnavailableError("global pause is active")
+            raise GlobalPauseActiveError("global pause is active")
         if not await self._runtime_registered(account_id):
             raise ServiceUnavailableError("account runtime is unavailable")
         validated_account_version = await self._account_version(account_id)
@@ -3752,9 +3758,9 @@ class UserApplicationService:
         # again under the same lock used by admin controls.
         async with self._global_mutation_lock, self._account_lock(account_id):
             if _is_true(await self._flag("emergency_active")):
-                raise ServiceUnavailableError("global emergency is active")
+                raise GlobalEmergencyActiveError("global emergency is active")
             if _is_false(await self._flag("allow_new_entries", "true")):
-                raise ServiceUnavailableError("global pause is active")
+                raise GlobalPauseActiveError("global pause is active")
             # Replacement/disconnect use the same account lock.  A version
             # change proves that the permission/snapshot checks above belong
             # to an older credential runtime and must not be published.
