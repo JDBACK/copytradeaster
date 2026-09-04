@@ -4,8 +4,12 @@
 Исходный audit baseline: `3c38db34f42d7a61c334367edbc434e6fbb97c8a`
 Рабочая ветка: `codex/live-copy-tests-hardening`; `918bf46` — исходный
 WIP-checkpoint Package B, а текущий факт исполнения вести по журналу ниже.
-Подробное текущее состояние: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md)
-Задача следующей сессии: [PRE_MAINNET_HARDENING_HANDOFF_2026-09.md](reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md)
+Подробное текущее состояние:
+`/Users/jd_ebash/copytradeaster/docs/reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
+Задача следующей сессии с полными путям и описаниям:
+`/Users/jd_ebash/copytradeaster/docs/reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md`.
+Единая точка счётчиков тестов:
+`/Users/jd_ebash/copytradeaster/docs/ENGINE_TEST_STATUS_2026-08.md`.
 
 Статус на 2026-09-04: **Packages A–B реализованы и offline-green,
 но их полная signed Testnet qualification ещё не закрыта; Packages C–F
