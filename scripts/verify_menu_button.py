@@ -50,8 +50,25 @@ def _read_token() -> str | None:
     return None
 
 
+def _env_file_value(key: str) -> str | None:
+    try:
+        text = (ROOT / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == key:
+            return value.strip().strip("\"'")
+    return None
+
+
 def _admin_ids() -> list[int]:
-    raw = os.environ.get("CT_TELEGRAM_ADMIN_IDS") or ""
+    # dev-up.sh never sources .env into its own environment, so without the
+    # file fallback the per-chat admin overrides would silently go unchecked.
+    # Real env wins; values are never logged.
+    raw = (os.environ.get("CT_TELEGRAM_ADMIN_IDS") or "").strip()
+    if not raw:
+        raw = _env_file_value("CT_TELEGRAM_ADMIN_IDS") or ""
     return [int(match) for match in re.findall(r"-?\d+", raw)]
 
 
