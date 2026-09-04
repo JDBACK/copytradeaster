@@ -269,6 +269,9 @@ export function HomeScreen({
         }
       />
 
+      {/* Error slot honesty: partial-ready paints over dashboard data without
+          clearing a visible error, and a failed background revalidation only
+          fills this slot — the stale ready UI underneath is never wiped. */}
       {error && <ErrorBox {...describeError(error)} />}
 
       <section className="panel rail trust-strip" aria-label="Статус подключения">

@@ -35,6 +35,10 @@ export default function App() {
     return { initData: '', devUserId: DEV_USER_ID || undefined }
   }, [])
 
+  // Stable identity: an inline closure would restart Home's mount fetch on
+  // every App re-render (refresh is keyed on onNotConnected).
+  const handleNotConnected = useCallback(() => setPhase({ kind: 'wizard' }), [])
+
   const routeSession = useCallback((session: MiniAppSessionDTO) => {
     setGateError(undefined)
     if (session.account_masked) {
@@ -158,7 +162,7 @@ export default function App() {
           auth={auth}
           banner={devBanner}
           accountMasked={accountMasked}
-          onNotConnected={() => setPhase({ kind: 'wizard' })}
+          onNotConnected={handleNotConnected}
         />
       )}
     </>
