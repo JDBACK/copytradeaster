@@ -533,6 +533,10 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 
 Рабочий журнал и evidence: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md).
 
+**ВСЯ PRE-PRODUCTION QUALIFICATION — ТОЛЬКО REAL ASTER TESTNET С
+РЕАЛЬНЫМИ TESTNET-КОШЕЛЬКАМИ. OFFLINE/FAKE/SHADOW-ONLY НЕ ЗАСЧИТЫВАЮТСЯ
+КАК ACCEPTANCE. QUALIFICATION НАЧАТЬ ЗАНОВО С PACKAGE A.**
+
 Scope намеренно ограничен safety-hardening существующего modular monolith;
 инфраструктурная перестройка и новые типы торговых продуктов не входят.
 
@@ -554,6 +558,7 @@ Scope намеренно ограничен safety-hardening существую�
   restart/SIGKILL, App E2E, multi-follower isolation, load и финальный audit.
 
 Mainnet rollout запрещён, пока каждый blocker не закрыт кодом, тестами и
-записанным evidence. Следующая активная работа: **signed Testnet
-qualification Packages A–B перед C / PM-B4**. Текущая ветка
+записанным evidence. Следующая активная работа: **НАЧАТЬ ЗАНОВО С
+PACKAGE A И ДОБИТЬ ВСЮ SIGNED REAL TESTNET-МАТРИЦУ A–B ДО C / PM-B4**.
+Текущая ветка
 `codex/live-copy-tests-hardening`; fake-only acceptance не закрывает package.

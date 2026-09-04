@@ -10,6 +10,8 @@
 > gate); full testnet 42/1 (последний полный gate) + focused PM-B1 signed fault/
 > SIGKILL **2 passed** + focused PM-B2/B3 real App/WS/reconnect **1 passed**;
 > ruff/oxlint clean. Fake-only evidence не закрывает pre-mainnet package.
+> **СЛЕДУЮЩАЯ СЕССИЯ НАЧИНАЕТ QUALIFICATION ЗАНОВО С PACKAGE A;
+> ВСЕ EXCHANGE-FACING ACCEPTANCE-СЦЕНАРИИ ОБЯЗАНЫ ПРОЙТИ НА REAL ASTER TESTNET.**
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние

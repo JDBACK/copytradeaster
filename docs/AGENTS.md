@@ -34,8 +34,9 @@
     corrective gate после независимого аудита: план, полный журнал и evidence.
 13. `docs/plan_live_test.md` — исходный pre-mainnet hardening plan с текущими
     статусами Package A–F; подробный факт исполнения — в отчёте ниже.
-14. `docs/reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` — исторический
-    WIP-checkpoint Package B на `918bf46`; текущую правду брать из пунктов 3, 5 и 13.
+14. `docs/reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` — актуальная
+    задача следующей сессии: начать заново с Package A и закрывать
+    всю pre-production матрицу на REAL Aster Testnet.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.
 
@@ -84,7 +85,7 @@
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Исходный implementation plan follower Mini App: восемь подчастей P2.0–P2.7, конкретные файлы, Testnet acceptance gates и anti-overengineering boundaries (2026-09-01). Статус внутри — `PLAN READY / IMPLEMENTATION NOT STARTED`; факт исполнения — строкой ниже |
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
 | `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` | **Открытый append-only журнал pre-mainnet hardening: Packages A–F, safety blockers PM-B1..PM-B8, тестовые поверхности и evidence (STARTED 2026-09-04; A–B implemented, signed live qualification in progress).** |
-| `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | Исторический WIP-handoff Package B на checkpoint `918bf46`; актуальный факт исполнения — в `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` (2026-09-04) |
+| `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | **Актуальная задача следующей сессии: qualification заново с Package A; REAL Aster Testnet обязателен, fake-only acceptance запрещён (2026-09-04).** |
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 

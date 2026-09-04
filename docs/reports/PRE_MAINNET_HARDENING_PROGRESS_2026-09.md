@@ -4,7 +4,7 @@
 Источник плана: owner-provided `Pre-Mainnet Hardening Plan`
 Audit baseline плана: `3c38db34f42d7a61c334367edbc434e6fbb97c8a`
 Рабочий кодовый срез на старте: `0db6c8476d9e623824129b028e2223fc64c32187`
-Статус: **Packages A–B IMPLEMENTED / SIGNED LIVE QUALIFICATION IN PROGRESS**
+Статус: **QUALIFICATION RESET — START AGAIN FROM PACKAGE A ON REAL ASTER TESTNET**
 Рабочая ветка: `codex/live-copy-tests-hardening`
 
 Этот файл — append-only журнал исполнения нового pre-mainnet gate. Актуальные
@@ -255,3 +255,15 @@ mutation/read/state остаются живыми. Shadow разрешён то�
   дублей и финальный flat cleanup; focused result `1 passed`;
 - оставшиеся B Snapshot/WS и slow-startup scenarios ещё не закрыты,
   поэтому переход к Package C пока не разрешён.
+
+## 2026-09-04 — qualification reset: следующая сессия начинает с A
+
+По owner instruction не продолжать к Package C. Следующая сессия
+начинает qualification заново с Package A и идёт строго A → B →
+C → D → E → F. Код A/B и offline-тесты не откатывать: они
+остаются implementation/regression baseline, но каждый acceptance-пункт
+из owner plan нужно повторить/добавить как REAL Aster Testnet scenario.
+
+Документ `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` переписан как
+актуальная задача с полной живой матрицей A/B и обязательным
+flat/no-open-orders audit до и после каждого сценария.

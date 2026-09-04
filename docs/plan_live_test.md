@@ -5,7 +5,7 @@
 Рабочая ветка: `codex/live-copy-tests-hardening`; `918bf46` — исходный
 WIP-checkpoint Package B, а текущий факт исполнения вести по журналу ниже.
 Подробное текущее состояние: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md)
-Исторический WIP-handoff: [PRE_MAINNET_HARDENING_HANDOFF_2026-09.md](reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md)
+Задача следующей сессии: [PRE_MAINNET_HARDENING_HANDOFF_2026-09.md](reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md)
 
 Статус на 2026-09-04: **Packages A–B реализованы и offline-green,
 но их полная signed Testnet qualification ещё не закрыта; Packages C–F
@@ -13,7 +13,7 @@ WIP-checkpoint Package B, а текущий факт исполнения вес
 
 Обозначения: `[x]` — сделано и подтверждено; `[~]` — частично/WIP; `[ ]` — осталось.
 
-## Обязательная live-qualification policy
+## ОБЯЗАТЕЛЬНО: ВСЯ PRE-PRODUCTION QUALIFICATION ИДЁТ НА РЕАЛЬНОМ ASTER TESTNET
 
 Ни один package не получает финальный `CLOSED` только по unit,
 FakeAster, MockTransport или offline integration. Каждый сценарий этого
@@ -54,10 +54,12 @@ failure допустим детерминированный fault injector во�
 
 # BLOCKERS
 
-## PM-B1 — UNKNOWN economic outcome / duplicate execution — DONE 2026-09-04
+## PM-B1 — UNKNOWN economic outcome / duplicate execution — LIVE QUALIFICATION IN PROGRESS
 
-Статус: `[x]` реализовано в Executor, journal/recovery API, Builder fallback и boot
-recovery; unit/integration/signed Testnet evidence записаны в подробном журнале.
+Статус: `[~]` implementation/offline gate готовы. На реальном Testnet
+пройдены response-lost + hidden current-order/real `allOrders` и отдельный
+SIGKILL recovery. Вся остальная UNKNOWN live-matrix не засчитана;
+package не `CLOSED`.
 
 ### Проблема
 
@@ -559,20 +561,25 @@ Position-mode switch должен вызывать authoritative rebuild, а н�
 
 ---
 
-# TESTNET PROOF
+# ОБЯЗАТЕЛЬНАЯ REAL ASTER TESTNET QUALIFICATION
 
-После BLOCKERS нужен отдельный final signed campaign.
+КАЖДЫЙ ПУНКТ НИЖЕ ДОЛЖЕН ПРОЙТИ НА РЕАЛЬНОЙ TESTNET-СЕТИ С
+РЕАЛЬНЫМИ TESTNET-КОШЕЛЬКАМИ. UNIT/FAKE/MOCK НЕ ЗАСЧИТЫВАЮТСЯ КАК
+PRE-PRODUCTION ACCEPTANCE. Package F повторяет весь уже пройденный live-
+набор единым финальным campaign, а не служит местом для отложенных
+непроверенных сценариев.
 
-Не использовать FakeAster как доказательство exchange semantics там, где важны реальные Aster responses.
+Обозначения этого раздела: `[x]` — прошёл живой Testnet;
+`[~]` — только часть live-сценария; `[ ]` — не прошёл live-проверку.
 
 ## UNKNOWN
 
-* MARKET_OPEN accepted + response lost;
-* MARKET_CLOSE accepted + response lost;
-* resolution endpoint временно недоступен;
-* FILLED order отсутствует в current-order query;
-* partial execution;
-* SIGKILL в SENDING/UNKNOWN window.
+- [x] MARKET_OPEN accepted + response lost.
+- [ ] MARKET_CLOSE accepted + response lost.
+- [ ] Resolution endpoint временно недоступен.
+- [x] FILLED order отсутствует в current-order query, найден через real `allOrders`.
+- [ ] Partial execution/outcome recovery.
+- [x] SIGKILL в SENDING/UNKNOWN window.
 
 Главный invariant:
 
@@ -580,40 +587,41 @@ Position-mode switch должен вызывать authoritative rebuild, а н�
 
 ## Snapshot / WS
 
-* TRADE находится в queue во время REST rebuild;
-* queue overflow;
-* delayed stale TRADE;
-* reconnect с пропущенным fill;
-* reconnect resnapshot временно падает;
-* после восстановления final state совпадает с Aster REST.
+- [ ] TRADE находится в queue во время real REST rebuild.
+- [ ] Queue overflow на frames из real WS.
+- [ ] Delayed stale TRADE из real WS.
+- [~] Forced real listenKey reconnect прошёл; missed-fill variant ещё нет.
+- [ ] Reconnect resnapshot временно падает.
+- [~] После reconnect follower qty/Stop не дублировались и cleanup flat;
+  полная final-state matrix ещё нет.
 
 ## Startup
 
-* startup reconciliation искусственно замедлен;
-* master меняется между initial snapshot и WS ready;
-* follower не открывает stale entry.
+- [ ] Startup reconciliation искусственно замедлен.
+- [ ] Master реально меняется на Testnet между initial snapshot и WS ready.
+- [ ] REAL followers не открывают stale entry.
 
 ## Dust
 
-* proportional reduction → zero → sticky;
-* risk cap → zero → recovery → re-entry/increase;
-* flip zero не sticky.
+- [ ] Proportional reduction → zero → sticky.
+- [ ] Risk cap → zero → recovery → re-entry/increase.
+- [ ] Flip zero не sticky.
 
 ## Protection
 
-* manual follower Stop cancellation;
-* master still has Stop → protection восстанавливается;
-* master no longer has usable Stop → position flatten;
-* actual Stop trigger;
-* actual TP trigger.
+- [ ] Manual follower Stop cancellation.
+- [ ] Master still has Stop → protection восстанавливается.
+- [ ] Master no longer has usable Stop → position flatten.
+- [ ] Actual Stop trigger.
+- [ ] Actual TP trigger.
 
 ## LIMIT
 
-* LIMIT entry multiple partial fills;
-* cancellation остатка;
-* LIMIT reduction multiple partial fills;
-* final target convergence;
-* no duplicate copy episode.
+- [ ] LIMIT entry multiple partial fills.
+- [ ] Cancellation остатка.
+- [ ] LIMIT reduction multiple partial fills.
+- [ ] Final target convergence.
+- [ ] No duplicate copy episode.
 
 Follower не обязан зеркалировать pending LIMIT master order до fill.
 
@@ -621,12 +629,12 @@ Follower не обязан зеркалировать pending LIMIT master order
 
 Только если HEDGE входит в first-mainnet scope:
 
-* LONG + SHORT одновременно;
-* разные fills;
-* Stop/TP каждой leg;
-* leverage config update;
-* partial close одной leg;
-* flip/close без влияния на вторую.
+- [ ] LONG + SHORT одновременно.
+- [ ] Разные fills.
+- [ ] Stop/TP каждой leg.
+- [ ] Leverage config update.
+- [ ] Partial close одной leg.
+- [ ] Flip/close без влияния на вторую.
 
 Иначе HEDGE явно отключается на v1.
 
@@ -634,10 +642,10 @@ Follower не обязан зеркалировать pending LIMIT master order
 
 Несколько REAL followers:
 
-* один получает 429/network error;
-* один permission error;
-* один insufficient margin;
-* остальные followers продолжают convergence.
+- [ ] Один REAL follower получает injected 429/network error.
+- [ ] Один REAL follower получает permission error.
+- [ ] Один REAL follower получает insufficient margin.
+- [ ] Остальные REAL followers продолжают convergence.
 
 ## Load
 
@@ -645,17 +653,17 @@ Follower не обязан зеркалировать pending LIMIT master order
 
 Достаточный gate:
 
-* 3–5 REAL followers;
-* 100 SHADOW slots;
-* production-equivalent request profile;
-* минимум 100 cycles;
-* measured request-weight/latency;
-* no unresolved journal rows;
-* no duplicate mutations;
-* final flat/order-free audit;
-* restart;
-* SIGTERM;
-* SIGKILL.
+- [ ] 3–5 REAL followers.
+- [ ] 100 SHADOW slots.
+- [ ] Production-equivalent request profile.
+- [ ] Минимум 100 cycles.
+- [ ] Measured request-weight/latency.
+- [ ] No unresolved journal rows.
+- [ ] No duplicate mutations.
+- [ ] Final flat/order-free audit.
+- [ ] Restart.
+- [ ] SIGTERM.
+- [ ] SIGKILL.
 
 ---
 
@@ -690,11 +698,9 @@ PM-B1.
 
 После implementation:
 
-* unit;
-* Fake negative tests;
-* integration;
-* signed testnet fault-injection;
-* restart/SIGKILL.
+* unit/Fake/integration — только supplemental regression;
+* ОБЯЗАТЕЛЬНО вся UNKNOWN-matrix на реальном Aster Testnet;
+* реальные signed fault-injection и restart/SIGKILL.
 
 ---
 
@@ -711,6 +717,8 @@ PM-B2 + PM-B3.
 * startup entry gate.
 
 После implementation обязательно тестировать race conditions, а не только обычный reconnect.
+ВСЯ Snapshot/WS + Startup matrix должна пройти на реальном Testnet;
+offline race-tests package не закрывают.
 
 ---
 
@@ -719,6 +727,8 @@ PM-B2 + PM-B3.
 PM-B4.
 
 После него должен существовать технически валидный MAINNET composition, но реальные trade writes ещё не включать.
+Все exchange-facing profile/signing/onboarding paths пройти на REAL Testnet;
+MAINNET composition проверить без order writes.
 
 ---
 
@@ -731,6 +741,8 @@ PM-B5 + PM-B6 + PM-B7.
 * leverage cap;
 * liquidation-vs-stop.
 
+Вся Dust/Protection/HEDGE матрица — обязательно REAL Testnet.
+
 ---
 
 ## Package E — Production scale
@@ -738,6 +750,8 @@ PM-B5 + PM-B6 + PM-B7.
 PM-B8 + health convergence.
 
 Сделать production snapshot profile и определить реальный launch cap.
+Acceptance: 3–5 REAL Testnet followers + 100 SHADOW slots; чистый
+SHADOW-only load не засчитывается.
 
 ---
 
@@ -747,7 +761,7 @@ PM-B8 + health convergence.
 
 Только:
 
-* testnet campaign;
+* повторный полный REAL Testnet campaign всех сценариев выше;
 * restart/SIGKILL;
 * App E2E;
 * multi-follower failure isolation;
@@ -810,10 +824,12 @@ PM-B8 + health convergence.
 
 # Текущий статус
 
-**Implementation разрешена.**
+**PRE-PRODUCTION ACCEPTANCE — ТОЛЬКО REAL ASTER TESTNET.
+FAKE/OFFLINE НЕ ЗАСЧИТЫВАЮТСЯ.**
 
 Следующая задача:
 
-**Package A — Economic idempotency / UNKNOWN outcome hardening.**
+**НАЧАТЬ ЗАНОВО С PACKAGE A: ДОБИТЬ ВСЮ REAL TESTNET UNKNOWN-MATRIX,
+ЗАТЕМ PACKAGE B REAL TESTNET SNAPSHOT/WS + STARTUP MATRIX, И ТОЛЬКО ПОТОМ C.**
 
 До закрытия Package A переходить к реальному Mainnet нельзя.
