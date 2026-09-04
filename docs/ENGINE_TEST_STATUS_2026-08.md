@@ -3,6 +3,10 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
+> **TL;DR (2026-09-04):** Stage 1–3 CLOSED в `main`, открытых gates нет.
+> Offline 1089/2/42 (~87%), frontend 168/17, full testnet 42/1, ruff/oxlint clean.
+> Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
+
 ## Текущее состояние
 
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /
@@ -1200,4 +1204,4 @@ Runtime после restart:
    - Покрытие кода: **87.15%** (выше обязательного порога 87.0%);
    - Статический анализ: `ruff check` и `ruff format --check` — clean.
 
-**Stage 2 официально CLOSED. Код готов к слиянию в main и переходу к Stage 3 (Builder / Aster Code).**
+**[Снимок 2026-08-24]** Stage 2 официально CLOSED. Код готов к слиянию в main и переходу к Stage 3 (Builder / Aster Code).

@@ -14,24 +14,20 @@
    фактический scope Stage 2, реализованная архитектура, owner/testnet evidence,
    leverage control-plane, ограничения и выполненный acceptance verdict.
 5. `docs/DEV_PLAN_SKELETON.md` — roadmap этапов и чеклисты; что уже сделано, что дальше.
-6. `docs/reports/STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` — исходный
-   план Stage 3 follower Mini App (P2.0–P2.7, статус внутри `PLAN READY /
-   IMPLEMENTATION NOT STARTED` на 2026-09-01): история планирования, не факт.
-   Факт исполнения — в пункте 7.
-7. `docs/reports/STAGE3_PART2_PROGRESS_2026-09.md` — журнал исполнения
+6. `docs/reports/STAGE3_PART2_PROGRESS_2026-09.md` — журнал исполнения
    Stage 3 Part 2: P2.0–P2.7 + post-closure corrective, все CLOSED (2026-09-04).
-   Читать вместо плана из пункта 6 для текущего состояния.
-8. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — design-only источник:
+   Текущая правда по Part 2 (исходный план — только в таблице reports ниже).
+7. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — design-only источник:
    IA, восемь Aster-style concepts и исходные screen states.
-9. `docs/reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` —
+8. `docs/reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` —
    закрытый corrective gate Part 1 и фактическое acceptance evidence.
-10. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
-11. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
+9. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
+10. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
   план Telegram/direct-V3 этапа и append-only журнал исполнения. Его старые
   sections/checklists — история планирования; текущую правду брать из пункта 4.
-12. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
+11. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
    guest captcha, durable access request, env-admin approval и regression gate.
-13. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
+12. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
     corrective gate после независимого аудита: план, полный журнал и evidence.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.

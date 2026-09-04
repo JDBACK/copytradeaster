@@ -1,7 +1,7 @@
 # Tests Guidelines
 
 Map of `tests/`: what lives where, what each file covers, how to run it.
-Counters are a 2026-09-04 snapshot; truth lives only in `docs/ENGINE_TEST_STATUS_2026-08.md`.
+Suite counters live only in `docs/ENGINE_TEST_STATUS_2026-08.md` — never copy them here.
 
 ## Suites
 
@@ -126,7 +126,8 @@ cd miniapp && pnpm test                                 # frontend Vitest (17 fi
 ## testnet — signed live (testnet only)
 
 Gate: `pytestmark = [pytest.mark.testnet, skipif(CT_TESTNET != "1")]` in every file.
-Protocol: `wallet.txt` (sections `main`/`copyc1..3`/`copyc2`/`builder`/`builder-gate`), `ensure_testnet_guard` (host + chains 714/56), pre/post `flatten` (cancel + MARKET-close to flat in `finally`), scratch DBs via `sqlite3.backup` (never touch prod).
+Protocol: `wallet.txt` at repo root (git-ignored, never commit) with section blocks `main`/`copyc1..3`/`copyc2`/`builder`/`builder-gate`; `ensure_testnet_guard` (host + chains 714/56), pre/post `flatten` (cancel + MARKET-close to flat in `finally`), scratch DBs via `sqlite3.backup` (never touch prod).
+Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): label line, then `evm adress: 0x…` (user), `api wallet adress: 0x…` (signer), `privte key: 0x…` (66-hex signer key), optional `main privte key: 0x…`. Fund accounts from the testnet faucet (`https://www.asterdex-testnet.com/en/faucet`: 1000 test USDT + 1000 test ASTER once a day); example shape in `tests/unit/cli/test_wallet_parser.py:WALLET_FIXTURE`.
 
 | File | Scenario |
 |---|---|

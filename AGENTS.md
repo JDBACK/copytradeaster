@@ -211,11 +211,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 ## Testing & QA Guidelines
 
 - **Coverage Requirement**: $\ge 87\%$ statement coverage across `src/copytradeaster` — documentary convention (no `fail_under` / `--cov-fail-under` enforcement; eyeball `--cov` output).
-- **Test Status (snapshot 2026-09-04; authoritative counters live only in `docs/ENGINE_TEST_STATUS_2026-08.md`)**:
-  - Offline Backend: **1089 passed / 2 skipped / 42 deselected** (~87% coverage).
-  - Frontend Vitest: **168 passed across 17 test files** (clean Oxlint, clean Vite build).
-  - Signed Testnet: **42 passed / 1 skipped** against `fapi.asterdex-testnet.com`.
-- **Authoritative Bug Registry**: Bugs #1–26 are fully closed in `docs/ENGINE_TEST_STATUS_2026-08.md` (no bug #27).
+- **Test Status**: counters and bug registry live only in `docs/ENGINE_TEST_STATUS_2026-08.md` (bugs #1–26 closed, no #27) — never copy numbers here.
 - **Naming & Isolation**: `test_<module>_<behavior>.py`. Default `pytest -q -m "not testnet"` must run hermetically without network or private keys (per-test `tmp_path` SQLite + `migrate()`, `respx` HTTP mocks, `FakeAster`/`ShadowExchange`, synthetic `0x..` keys). `load` marker is registered but unused — real scale gate is `CT_LOAD=1` on the explicit path.
 - **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` (`copyc2`/`builder` sections) with testnet faucet accounts. Always ensure clean flat positions after tests.
 - **Living Documentation**: Update `docs/ENGINE_TEST_STATUS_2026-08.md` after any test suite change. Do not duplicate counters across files.
