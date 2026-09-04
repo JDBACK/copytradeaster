@@ -70,15 +70,22 @@ current_public_url() {
 
 wait_button() {
   # Converge the Telegram menu button onto $1 (base URL, no trailing path).
-  # setChatMenuButton applies with minutes of propagation lag: verify in a
-  # loop, repair on mismatch, never trust the first read after a write.
+  # setChatMenuButton applies with minutes of propagation lag: a MISMATCH
+  # right after our own SET proves nothing (read-after-write lag), so repair
+  # sparingly — a repeated SET every 30 s only burns Bot API calls without
+  # speeding up Telegram-side propagation. Worst case is now ~68 calls
+  # (reads + two repairs) instead of ~288.
   local url="$1" i
   for i in $(seq 1 24); do
     if .venv/bin/python scripts/verify_menu_button.py --expected-url "$url"; then
       return 0
     fi
-    echo "    not converged yet — repairing button via Bot API and waiting 30s"
-    .venv/bin/python scripts/verify_menu_button.py --expected-url "$url" --fix || true
+    if [ "$i" -eq 1 ] || [ "$i" -eq 12 ]; then
+      echo "    not converged — repairing button via Bot API and waiting 30s"
+      .venv/bin/python scripts/verify_menu_button.py --expected-url "$url" --fix || true
+    else
+      echo "    not converged yet — waiting 30s (no API calls, propagation lag)"
+    fi
     sleep 30
   done
   return 1
