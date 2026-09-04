@@ -866,6 +866,56 @@ Owner Telegram WebView acceptance — COMPLETE 2026-09-03 (live-стенд, prod
 
 P2.7 ACCEPTED / CLOSED по итогам corrective review. Stage 3 Part 2 = CLOSED.
 
+## Stage 3 Part 2 post-closure Builder execution safety corrective (2026-09-04)
+
+Найденный failure mode: локально валидная, но фактически устаревшая Builder attribution
+(локально builder + feeRate + proof valid, на Aster maxFeeRate уже ниже) возвращала
+BUILDER_VALID, attributed order отвергался биржей fee-cap ошибкой -5026, а Executor
+переводил любой deterministic AsterError (кроме известных) в terminal FAILED без DIRECT
+safety fallback. Stale attribution блокировала уменьшение существующего риска:
+partial/full close, Stop, TP и emergency MARKET_CLOSE.
+
+Выбранная semantics (узкая, без live-read перед каждым ордером):
+ENTRY (MARKET_OPEN) при недоступной/невалидной/отвергнутой attribution всегда FAIL CLOSED
+без DIRECT retry; RISK REDUCTION (MARKET_CLOSE/PLACE_STOP/PLACE_TP) при заранее
+BUILDER_UNAVAILABLE пользуется существующим DIRECT fallback, а при authoritative
+Builder rejection (-5026) после считавшейся valid attribution инвалидирует stale proof,
+переключает snapshot остатка plan в BUILDER_UNAVAILABLE и делает один DIRECT safety retry
+тем же logical command_key с новым COID, чистым journal payload и degraded marker.
+CANCEL/SET_LEVERAGE не используют Builder metadata и не менялись.
+
+Изменены файлы:
+trading/builder_attribution.py — BUILDER_ATTRIBUTION_REJECTION_CODES ({-5026}),
+is_builder_attribution_rejection(), Provider.invalidate() (durable clear snapshot,
+identity_source остается builder); trading/executor.py — RISK_REDUCTION_KINDS,
+builder_invalidator seam, _invalidate_builder_proof(), _flag_builder_rejection(),
+_submit_order возвращает (result, builder_invalidated) с DIRECT retry только для
+reduction и fail-closed для entry, plan-snapshot переключается после первого rejection,
+DIRECT retry наследует UNKNOWN query-before-retry; app.py — wiring
+builder_invalidator=accounts.clear_builder_snapshot.
+
+Tests: tests/unit/trading/test_builder_stale_corrective.py (14: predicate, close/entry,
+Stop/TP param, остаток plan + поздний entry stays blocked, UNKNOWN после DIRECT,
+изоляция, restart на real SQLite, production-composition integration, emergency через
+EmergencyController, service trust после clear);
+tests/testnet/test_builder_stale_corrective_live.py (production App на scratch-копии
+прод-БД: Builder onboarding copyc2, Builder MARKET entry, controlled mismatch bump
+snapshot+config 0.0001→0.0002 при remote cap 0.0001, master close → attributed 0.0002
+получил настоящий -5026 → DIRECT retry → follower flat, snapshot cleared,
+resolve BUILDER_UNAVAILABLE, degraded builder-rejected:-5026, journal без builder/feeRate,
+новый entry заблокирован без HTTP, финал flat/0 orders).
+
+Gates (факт): offline pytest 1089 passed / 2 skipped / 42 deselected, coverage 87%;
+ruff check + format clean; frontend oxlint clean, Vitest 168 passed / 17 файлов,
+pnpm build clean (Mini App не менялся); новый live gate 1 passed (~46s);
+full testnet 42 passed / 1 skipped. Финальное состояние биржи: main/copyc1/builder flat,
+open orders 0. Прод-БД не тронута (scratch backup), mainnet-действий нет.
+Производство/mainnet preparation (asterChain Testnet, guards, Builder address/fee,
+WebApp, secrets/backup, re-attestation, canary) — отдельным этапом, guards не снимались.
+
+Stage 3 Part 2 corrective = CLOSED. Stage 3 Part 2 = CLOSED.
+Ready for separate production/mainnet preparation.
+
 ## Следующие подчасти
 
 - P2.5 — System Status: ACCEPTED / CLOSED (implementation/live/review/

@@ -35,6 +35,7 @@ from copytradeaster.trading.builder_attribution import (
     AttributionDecision,
     AttributionKind,
     BuilderAttribution,
+    is_builder_attribution_rejection,
 )
 
 log = get_logger(__name__)
@@ -44,6 +45,12 @@ UNKNOWN_CODES = {-1000, -1006, -1007}
 MAX_ATTEMPTS = 3
 BOOT_QUERY_ATTEMPTS = 3
 BOOT_QUERY_BACKOFF_S = 0.05
+
+# Stage 3 Part 2 corrective: only these kinds may DIRECT-retry after an
+# authoritative Builder rejection. ENTRY must always fail closed.
+RISK_REDUCTION_KINDS = frozenset(
+    {ActionKind.MARKET_CLOSE, ActionKind.PLACE_STOP, ActionKind.PLACE_TP}
+)
 
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
 
@@ -147,6 +154,7 @@ class Executor:
         settings: SettingsRepo | None = None,
         on_confirmed: Callable[..., Awaitable[None]] | None = None,
         attribution_provider: Any | None = None,
+        builder_invalidator: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._clients = clients
         self._commands = commands
@@ -155,6 +163,7 @@ class Executor:
         self._settings = settings
         self._on_confirmed = on_confirmed
         self._attribution_provider = attribution_provider
+        self._builder_invalidator = builder_invalidator
         self._mutation_owners: dict[str, asyncio.Task] = {}
         self._confirmed_callback_accepts_key = self._callback_accepts_command_key(on_confirmed)
 
@@ -288,12 +297,22 @@ class Executor:
                     result = await self._builder_block_entry(plan, action, decision)
                 elif decision.kind == AttributionKind.BUILDER_VALID:
                     assert decision.attribution is not None
-                    result = await self._submit_order(
+                    result, builder_rejected = await self._submit_order(
                         plan, action, client=client, attribution=decision.attribution
                     )
+                    if builder_rejected:
+                        cached_decision = AttributionDecision(
+                            kind=AttributionKind.BUILDER_UNAVAILABLE,
+                            reason="builder-rejected",
+                        )
                 else:
                     is_fallback = decision.kind == AttributionKind.BUILDER_UNAVAILABLE
-                    result = await self._submit_order(plan, action, client=client)
+                    result, builder_rejected = await self._submit_order(plan, action, client=client)
+                    if builder_rejected:
+                        cached_decision = AttributionDecision(
+                            kind=AttributionKind.BUILDER_UNAVAILABLE,
+                            reason="builder-rejected",
+                        )
                     if is_fallback and action.kind in (
                         ActionKind.MARKET_CLOSE,
                         ActionKind.PLACE_STOP,
@@ -395,6 +414,31 @@ class Executor:
             await self._settings.set_flag("degraded", f"{plan.account_id}:{command_key}:{reason}")
         log.warning("command %s builder fallback: %s", command_key, reason)
 
+    async def _invalidate_builder_proof(self, account_id: str) -> None:
+        # Durable invalidation only: identity_source stays builder, the verified
+        # snapshot is dropped so the next resolve (even after restart) reads
+        # BUILDER_UNAVAILABLE. Best-effort and never raises; never logs secrets.
+        try:
+            if self._builder_invalidator is not None:
+                await self._builder_invalidator(account_id)
+                return
+            provider = self._attribution_provider
+            invalidate = getattr(provider, "invalidate", None)
+            if callable(invalidate):
+                await invalidate(account_id)
+            else:
+                log.warning("builder proof invalidation unavailable account_id=%s", account_id)
+        except Exception:
+            log.warning("builder proof invalidation failed account_id=%s", account_id)
+
+    async def _flag_builder_rejection(
+        self, plan: ExecutionPlan, command_key: str, action: ExecutionAction, exc: AsterError
+    ) -> None:
+        reason = f"builder-rejected:{action.kind.value}:{exc.code}"
+        if self._settings is not None:
+            await self._settings.set_flag("degraded", f"{plan.account_id}:{command_key}:{reason}")
+        log.warning("command %s builder rejected: %s", command_key, reason)
+
     # --- individual command kinds -------------------------------------------------
 
     async def _submit_leverage(
@@ -491,15 +535,20 @@ class Executor:
         *,
         client: AsterClient | None = None,
         attribution: BuilderAttribution | None = None,
-    ) -> CommandResult:
+    ) -> tuple[CommandResult, bool]:
+        # Returns (result, builder_invalidated). builder_invalidated is True
+        # only after an authoritative Builder rejection (-5026) proved the
+        # stored attribution stale and durably invalidated it. ENTRY never
+        # DIRECT-retries; risk reduction (CLOSE/STOP/TP) retries once DIRECT
+        # with a fresh COID under the same command_key.
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
         if existing is not None:
             status = str(existing["status"])
             if status == "CONFIRMED":
-                return CommandResult(key, status, None)
+                return CommandResult(key, status, None), False
             if status in ("SENDING", "UNKNOWN"):
-                return CommandResult(key, status, "boot resolution required")
+                return CommandResult(key, status, "boot resolution required"), False
             if status == "SUBMITTED":
                 # A previous attempt answered SUBMITTED but was never confirmed
                 # in openOrders. That is NOT terminal success: verify on the
@@ -508,7 +557,7 @@ class Executor:
                     plan, action, key, existing, client=client
                 )
                 if recovered is not None:
-                    return recovered
+                    return recovered, False
 
         attempts = int(existing["attempts"]) if existing is not None else 0
         attempt = attempts + 1
@@ -530,6 +579,8 @@ class Executor:
 
         req = _apply_attribution(_with_coid(_payload_for(action), coid), attribution)
         symbol = action.payload["symbol"]
+        current_attribution = attribution
+        builder_invalidated = False
 
         while True:
             await self._commands.set_status(
@@ -539,6 +590,24 @@ class Executor:
             try:
                 order = await self._client_for(plan, client).place_order(plan.account_id, req)
             except AsterError as exc:
+                if current_attribution is not None and is_builder_attribution_rejection(exc):
+                    # Deterministic proof the stored attribution is stale: the
+                    # first attempt was never accepted, so a DIRECT safety retry
+                    # is idempotent under the same command_key.
+                    await self._invalidate_builder_proof(plan.account_id)
+                    builder_invalidated = True
+                    current_attribution = None
+                    if action.kind == ActionKind.MARKET_OPEN:
+                        failed = await self._fail(plan, key, exc)
+                        return failed, True
+                    if action.kind in RISK_REDUCTION_KINDS:
+                        await self._flag_builder_rejection(plan, key, action, exc)
+                        attempt += 1
+                        coid = "ct" + key + f"r{attempt}"
+                        req = _with_coid(_payload_for(action), coid)
+                        continue
+                    failed = await self._fail(plan, key, exc)
+                    return failed, True
                 if exc.code == -2022 and await self._close_is_already_flat(
                     plan, action, client=client
                 ):
@@ -551,9 +620,10 @@ class Executor:
                     message = f"already-flat:-2022:{_safe_error_category(exc)}"
                     await self._commands.set_status(key, "CONFIRMED", last_error=message)
                     await self._notify_confirmed(plan.account_id, action, key)
-                    return CommandResult(key, "CONFIRMED", message)
+                    return CommandResult(key, "CONFIRMED", message), builder_invalidated
                 if not _is_unknown_error(exc):
-                    return await self._fail(plan, key, exc)
+                    failed = await self._fail(plan, key, exc)
+                    return failed, builder_invalidated
             except TimeoutError:
                 # built-in timeouts (asyncio); transport timeouts arrive as
                 # AsterError(-1006/-1007) from the adapter boundary
@@ -564,16 +634,18 @@ class Executor:
                     plan, action, key, symbol, coid, client=client
                 )
                 if resolved is not None:
-                    return resolved
+                    return resolved, builder_invalidated
                 if attempt >= MAX_ATTEMPTS:
-                    return await self._degrade(plan, key, "max attempts reached")
+                    degraded = await self._degrade(plan, key, "max attempts reached")
+                    return degraded, builder_invalidated
                 attempt += 1
                 coid = "ct" + key + f"r{attempt}"
                 req = _with_coid(req, coid)
                 continue
 
             await self._commands.set_status(key, "SUBMITTED", client_order_id=coid)
-            return await self._confirm(plan, key, action, symbol, coid, order, client=client)
+            confirmed = await self._confirm(plan, key, action, symbol, coid, order, client=client)
+            return confirmed, builder_invalidated
 
     async def _close_is_already_flat(
         self,

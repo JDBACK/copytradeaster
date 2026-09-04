@@ -212,6 +212,7 @@ class App:
             settings=self.settings,
             on_confirmed=self._on_confirmed,
             attribution_provider=self.builder_attribution,
+            builder_invalidator=self.accounts.clear_builder_snapshot,
         )
         self.master_client = self._make_client()
         self.projector = MasterProjector(

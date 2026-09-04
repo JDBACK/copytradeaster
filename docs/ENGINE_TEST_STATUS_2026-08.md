@@ -79,6 +79,18 @@
      стабилизация positions-теста с убранной INTENTIONAL_FLAT-интерференцией).
      4. **Owner acceptance (2026-09-03):** Computer Use-driven live-стенд, prod-БД: **9/9 PASS** (Home / Positions read-only / Activity / Risk-линейка без сохранения / Status ready / Account+Builder direct verified / Notifications вкл+выкл / Pause+Resume с confirm / регресс P2.0-P2.6); в прод-БД 0 builder-строк — builder trust покрыт P2.6 acceptance и scratch-live P2.7; стенд возвращён (active, риск 2,0%, уведомления выкл); скриншоты: docs/reports/acceptance-p27/ (12 PNG).
      Детали — `STAGE3_PART2_PROGRESS_2026-09.md` (раздел P2.7).
+- **Stage 3 Part 2 post-closure Builder execution safety corrective (2026-09-04):**
+  stale BUILDER_VALID (локальный proof valid, remote maxFeeRate ниже) отвергался -5026
+  и без fallback блокировал close/Stop/TP/emergency. Fix: только -5026 классифицируется
+  как authoritative Builder rejection; durable invalidation clear_builder_snapshot
+  (identity_source остается builder → resolve BUILDER_UNAVAILABLE и после restart);
+  ENTRY fail-closed без DIRECT retry; reduction — один DIRECT retry тем же command_key
+  с новым COID, чистым journal и degraded builder-rejected:-5026; остаток plan
+  переключается в UNAVAILABLE; DIRECT retry наследует UNKNOWN query-before-retry.
+  Файлы: trading/builder_attribution.py, trading/executor.py, app.py wiring.
+  Gates: offline 1089/2/42 coverage 87%, ruff clean, frontend 168/17 build clean,
+  unit corrective 14, live corrective 1 passed, full testnet 42/1. Биржа flat/0 orders,
+  прод-БД не тронута. Stage 3 Part 2 corrective = CLOSED, Stage 3 Part 2 = CLOSED.
 - **Stage 3, часть 2 (P2.5 — System Status) — ACCEPTED / CLOSED
   (2026-09-03):** read-only control-plane slice поверх
   `UserApplicationService.status()` — новый typed `StatusDTO`

@@ -16,6 +16,18 @@ log = get_logger(__name__)
 BUILDER_FEE_ABSOLUTE_CAP = Decimal("0.001")
 
 
+# Authoritative Builder-attribution rejection (Stage 3 Part 2 corrective).
+# -5026 is proven by the signed Testnet gate as feeRate above the approved
+# maxFeeRate. No other codes are classified: ordinary filter, margin,
+# quantity or order errors must never trigger a DIRECT safety retry.
+BUILDER_ATTRIBUTION_REJECTION_CODES = frozenset({-5026})
+
+
+def is_builder_attribution_rejection(exc: BaseException) -> bool:
+    """True only for deterministic proof that stored attribution is stale."""
+    return getattr(exc, "code", None) in BUILDER_ATTRIBUTION_REJECTION_CODES
+
+
 class AttributionKind(StrEnum):
     DIRECT = "DIRECT"
     BUILDER_VALID = "BUILDER_VALID"
@@ -309,11 +321,28 @@ class BuilderAttributionProvider:
             )
         return AttributionDecision(kind=AttributionKind.BUILDER_VALID, attribution=snapshot)
 
+    async def invalidate(self, account_id: str) -> None:
+        # Durable invalidation after an authoritative Builder rejection.
+        # Keeps identity_source=builder while dropping the verified snapshot,
+        # so the next resolve (including after restart) reads
+        # BUILDER_UNAVAILABLE instead of resurrecting stale attribution.
+        # Best-effort: never raises, never logs secrets.
+        try:
+            clear = getattr(self._accounts, "clear_builder_snapshot", None)
+            if callable(clear):
+                await clear(account_id)
+            else:
+                log.warning("builder proof invalidation unavailable account_id=%s", account_id)
+        except Exception:
+            log.warning("builder proof invalidation failed account_id=%s", account_id)
+
 
 __all__ = [
     "AttributionDecision",
     "AttributionKind",
     "BUILDER_FEE_ABSOLUTE_CAP",
+    "BUILDER_ATTRIBUTION_REJECTION_CODES",
     "BuilderAttribution",
     "BuilderAttributionProvider",
+    "is_builder_attribution_rejection",
 ]

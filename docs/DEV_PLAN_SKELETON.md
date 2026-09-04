@@ -341,6 +341,11 @@ Stage 2 полностью закрыт для testnet scope.
   1075 passed/coverage 87%/ruff clean, live engine proof Builder+direct на
   Aster Testnet, full testnet 41 passed/1 skipped,
   frontend 168 vitest green; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
+- [x] P2.7 post-closure corrective: stale Builder -5026 safety retry
+  (CLOSED 2026-09-04: только -5026, durable invalidation без смены source,
+  entry fail-closed, reduction DIRECT retry тем же key, остаток plan в UNAVAILABLE,
+  UNKNOWN query-before-retry; offline 1089/coverage 87%, unit 14, live 1, full testnet
+  42/1, frontend 168; журнал — `STAGE3_PART2_PROGRESS_2026-09.md`).
 
 Новые бизнес-функции принимаются по настоящему Aster Futures Testnet через
 production application/aiohttp path. Fake/fixtures допустимы для чистых
