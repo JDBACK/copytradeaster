@@ -1,7 +1,8 @@
 # Scripts Guidelines
 
 Map of `scripts/`: what each script does, how to run it, which gates apply.
-Everything except `dev-up.sh` is testnet-only and touches a real DB/exchange:
+Everything except `dev-up.sh`, `preview_miniapp_engine.py` (backup-copy preview),
+and `check_doc_links.py` is testnet-only and touches a real DB/exchange:
 read the usage before running. `__pycache__/` is noise, ignore it.
 
 ## Launch and preview (safe, local)
@@ -24,6 +25,12 @@ read the usage before running. `__pycache__/` is noise, ignore it.
 |---|---|---|
 | `hybrid_load_test.py` | Hybrid load: REAL signed-testnet master+followers plus SHADOW rows on `ShadowExchange`, shared coordinator/planner/executor/journal. Safety: refuses non-testnet URLs, clones only encrypted REAL creds into a separate run DB (refuses if it exists), requires flat/order-free accounts, cleanup in `finally` | `--followers` (30) `--cycles` (100) `--quantity` (0.002) `--stop-distance` (500) `--source-db/--run-db/--report/--timeout`; evidence in `docs/reports/HYBRID_LOAD_TEST_REPORT_2026-08.md` |
 | `testnet_soak.py` | Two-hour Stage 1 soak: few min-size cycles (default 6×0.002, stop/TP 3000/2800) + forced listenKey reconnect + graceful restart + real SIGKILL of a child App with heartbeat recovery. Reuses `hybrid_load_test` helpers | Gate: both `CT_TESTNET=1` and `CT_SOAK=1` (else `RuntimeError`); `--duration/--cycles/--quantity/--source-db/--run-db/--report` |
+
+## Repo checks (safe, local)
+
+| Script | Purpose | Run |
+|---|---|---|
+| `check_doc_links.py` | Verifies every relative `.md` link in root/test/scripts/miniapp `AGENTS.md`, `PRODUCT.md`, `README.md`, `docs/**/*.md` resolves to an existing file (`--strict` also checks `#fragment` anchors). Run before docs commits per `docs/AGENTS.md` conventions | `python scripts/check_doc_links.py [--strict]` |
 
 ## Conventions
 
