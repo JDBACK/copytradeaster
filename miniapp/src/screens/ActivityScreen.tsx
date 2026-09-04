@@ -62,6 +62,11 @@ export function ActivityScreen({
     ttlMs: ACTIVITY_REVALIDATE_MS,
     busy: load.kind === 'loading' || loadingMore,
     onRefresh: (reason: WarmReason) => {
+      // Revalidation must not reset the client-side pagination position:
+      // a silent page-0 refresh replaces the accumulated timeline, so it
+      // only applies while nothing was appended yet. A paginated timeline
+      // skips the refresh; the next activation past TTL retries the skip.
+      if (load.kind === 'ready' && load.page > 0) return
       void fetchPage(filter, 0, false, reason === 'revalidate')
     },
   })

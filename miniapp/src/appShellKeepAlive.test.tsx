@@ -565,6 +565,32 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     expect(activitySpy).toHaveBeenCalledTimes(2)
   })
 
+  it('revalidation past TTL never resets appended pagination', async () => {
+    const t0 = Date.now()
+    const activitySpy = vi
+      .spyOn(api, 'activity')
+      .mockResolvedValueOnce(
+        activityPage({ items: [activityItem()], has_next: true }),
+      )
+      .mockResolvedValueOnce(
+        activityPage({ items: [activityItem({ title: 'Сделка B открыта' })], page: 1, has_next: false }),
+      )
+    const { rerender } = render(<ActivityScreen auth={AUTH} />)
+    await screen.findByText('Открыта позиция BTCUSDT')
+
+    // Paginate to page 1, then age past the TTL and come back.
+    fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }))
+    await screen.findByText('Сделка B открыта')
+    rerender(<ActivityScreen auth={AUTH} active={false} />)
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + 65_000 + 1)
+    rerender(<ActivityScreen auth={AUTH} active={true} />)
+    nowSpy.mockRestore()
+    await screen.findByText('Сделка B открыта')
+    // The paginated timeline is preserved verbatim: no page-0 refresh fired.
+    expect(screen.getByText('Открыта позиция BTCUSDT')).toBeDefined()
+    expect(activitySpy).toHaveBeenCalledTimes(2)
+  })
+
   it('activation never fires while the first fetch is still in flight', async () => {
     const gate = deferred<PositionPageDTO>()
     const positionsSpy = vi.spyOn(api, 'positions').mockReturnValue(gate.promise)
