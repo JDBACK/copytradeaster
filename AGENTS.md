@@ -6,7 +6,7 @@
 - **Trading Engine**: Durable SQLite execution journal (`execution_commands`), RAM leverage control plane (`LeverageManager`), protective SL/TP order convergence.
 - **Control Plane**: Telegram bot (aiogram 3.30) with captcha-gated access requests and admin approvals.
 - **Onboarding**: Direct V3 credentials or Telegram Mini App (Vite 8 + React 19 + TypeScript) with EIP-712 `ApproveAgent` / `approveBuilder` on chain 56 (configured `CT_MAX_FEE_RATE=0.0001`, absolute Futures cap `0.001` fail-closed).
-- **Follower Mini App (Stage 3 Part 2 — CLOSED)**: 4-tab AppShell (`Главная`, `Позиции`, `Активность`, `Настройки`), read-only positions with SL coverage/risk USDT, redacted activity timeline, honest settings, notifications double-tap toggle gate (`createToggleGate`), native BackButton/Haptics. P2.0–P2.7 ACCEPTED/CLOSED (2026-09-04); owner acceptance 9/9 in `docs/reports/acceptance-p27/`.
+- **Follower Mini App**: 4-tab AppShell (`Главная`, `Позиции`, `Активность`, `Настройки`), read-only positions with SL coverage/risk USDT, redacted activity timeline, honest settings, notifications double-tap toggle gate (`createToggleGate`), native BackButton/Haptics. Execution journal: `docs/reports/STAGE3_PART2_PROGRESS_2026-09.md`.
 - **Outbox & Shadow Engine**: Async SQLite notification delivery (`TelegramOutboxWorker`); in-memory `ShadowExchange` for load tests. App gate `CT_SHADOW_ACCOUNTS_ENABLED=true` ≠ test gate `CT_LOAD=1` — do not conflate.
 
 ---

@@ -1,8 +1,8 @@
 # Архитектура copytradeaster
 
-Статус: архитектура реализована и закрыта вместе со Stage 1–3 (всё в `main`). Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) подтверждены signed testnet-прогонами и закреплены ниже.
+Архитектура покрывает testnet-движок, Telegram-бота и Aster Code / Builder в одном процессе. Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) закрыты инвариантами ниже; подтверждение — signed testnet-прогоны (сводка в `ENGINE_TEST_STATUS_2026-08.md`).
 
-Этот документ фиксирует архитектуру всех реализованных этапов: testnet-движок, Telegram-бот и Aster Code / Builder. Торговое ядро не менялось при переходе между этапами. Load-gate дополнение проверено 2026-08-23 на testnet.
+Торговое ядро едино для всех этапов: testnet-движок, Telegram-бот и Aster Code / Builder — внешние интерфейсы вокруг него.
 
 Исходные условия:
 
@@ -130,8 +130,8 @@ Signing details:
 `aster/user_stream.py` (`UserStream`) держит соединение, listenKey, keepalive,
 reconnect и приём raw events; `master/projector.py` (`MasterProjector`)
 преобразует Aster payloads во внутреннее состояние проекта, ведёт
-copy_trades-эпизоды и эмитит дельты в coordinator. Отдельный
-`master/observer.py` не понадобился (см. §17).
+copy_trades-эпизоды и эмитит дельты в coordinator. Отдельного
+`master/observer.py` нет: граница `UserStream` + `MasterProjector` — достаточная (см. §17).
 
 ### `risk/`
 
@@ -170,9 +170,9 @@ worker (`Semaphore(2)` + pacing, приоритет trading traffic в обще�
 depends_on_action_id` с входом и защитой: FAILED prerequisite блокирует
 риск-увеличивающие действия плана, но никогда — закрытие/отмены.
 
-Stage 2 пока не меняет `marginType` перед входом. Isolated enforcement отложен
-до отдельной реальной проверки Aster testnet; текущий режим аккаунта сохраняется
-без скрытой подмены.
+Ядро не меняет `marginType` перед входом: текущий режим аккаунта сохраняется
+без скрытой подмены; isolated включается только по результату отдельной
+проверки на Aster testnet.
 
 ### `trading/`
 
@@ -225,7 +225,7 @@ Durable account identity (P2.6): `accounts` несут `identity_source`
 permissions) + exact-match `GET /builder` (`userAddress`, `builderAddress`,
 `maxFeeRate` == cap). Commit Builder-атомарен (credentials + validation +
 `identity_source=builder` + snapshot); direct/replacement/disconnect
-атомарно чистят proof (`identity_source=direct`, поля NULL). Race закрыт
+атомарно чистят proof (`identity_source=direct`, поля NULL). Race исключён
 `account_version` (mismatch → `IDENTITY_CHANGED` без commit). Disconnect —
 local-only: remote Agent/Builder revoke не выполняется и не заявляется.
 Reauthorization — same-signer reuse Part 1 wallet/EIP-712 flow, без ротации
@@ -234,15 +234,12 @@ signer; после неё account остаётся paused.
 ### `onboarding/`
 
 Способ получения `TradingIdentity`. Два независимых адаптера: `direct`
-(прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). В Stage 1
-direct-набор принимается CLI-импортом (`cli/main.py`) и складывается в
-`credentials/`. В Stage 2 появился `onboarding/direct`; независимый
-durable `onboarding/builder` реализован в Stage 3 (часть 1).
-
-Stage 2 direct-path реализован в `onboarding/direct.py`: локальная проверка
-адресов/key pair, подписанный `GET /fapi/v3/agent`, balance/position/open-order
-preflight и atomic paused commit через `application/adapters.py`. Trading core
-не знает, каким способом credentials появились.
+(прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). Direct
+принимается CLI-импортом (`cli/main.py`) и `onboarding/direct.py`: локальная
+проверка адресов/key pair, подписанный `GET /fapi/v3/agent`,
+balance/position/open-order preflight и atomic paused commit через
+`application/adapters.py`. Trading core не знает, каким способом
+credentials появились.
 
 ### `notifications/`
 
@@ -360,7 +357,7 @@ plan:
 
 Повторный `reconcile()` при уже совпадающем состоянии должен создавать **0 новых команд**.
 
-Инвариант конвергенции защиты (правило 9 planner, добавлено 2026-08-23):
+Инвариант конвергенции защиты (правило 9 planner):
 после reconciliation на одной follower-leg остаётся **ровно один** bot-owned
 Stop и **ровно один** bot-owned TP. Дубликатные условные ордера слота
 (остаток FAILED dependent cancel после CONFIRMED replacement) снапшот отдаёт в
@@ -372,7 +369,7 @@ Stop и **ровно один** bot-owned TP. Дубликатные услов�
 `depends_on_action_id`. При FAILED/UNKNOWN статусе `SET_LEVERAGE` исполнитель переводит
 зависимые действия в `BLOCKED` (fail-closed), при этом закрытия (`MARKET_CLOSE`) и
 отмены ордеров никогда не зависят от плеча и исполняются безусловно.
-Семантика нулевого таргета (добавлено 2026-08-23, третий проход ревью):
+Семантика нулевого таргета:
 
 ```text
 qty=0 при живом эпизоде мастера ≠ всегда «намеренный флэт».
@@ -523,7 +520,7 @@ Strategy Orders не должны быть фундаментом follower execu
 - если мастер расширил Stop — follower position при необходимости сокращается;
 - если Stop стал ближе — автоматически наращивать позицию не нужно.
 
-`entry deviation` остаётся внутренним safety gate legacy runtime и не является
+`entry deviation` остаётся внутренним safety gate ядра и не является
 настройкой follower в Bot/Mini App. Единственный пользовательский risk control —
 `risk_percent`.
 
@@ -561,9 +558,9 @@ connect/migrate → bootstrap configured admins/recovery floor
 
 Shutdown идёт в обратной зависимости: закрыть admission/drain Telegram
 handlers → остановить и осушить outbox при живых Bot/DB → `App.stop()` → один
-раз закрыть Bot session. Первый Stage 2 запуск ставит notification recovery
-floor и не рассылает исторические Stage 1 confirmations; следующие запуски
-восстанавливают недоставленные confirmed commands после этого floor.
+раз закрыть Bot session. На старте процесс ставит notification recovery
+floor: исторические confirmations не рассылаются, восстанавливаются только
+недоставленные confirmed commands после этого floor.
 
 Операционный лог — отдельный локальный durable sink, не SQLite и не outbox:
 `setup_logging()` всегда поднимает console handler и bounded
@@ -685,75 +682,13 @@ reconcile()
 
 ## 16. Этапы развития без смены архитектуры
 
-### Этап 1 — backend/testnet
+Торговое ядро едино для всех этапов; Telegram, CLI и Builder onboarding — внешние интерфейсы вокруг него (§1, §4). Risk, planner, reconciler и master flow между этапами не меняются.
 
-Реализуются:
+- Этап 1 — backend/testnet: `domain aster master risk trading storage credentials cli`; master + testnet followers без Telegram.
+- Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; `marginType` этап не меняет.
+- Этап 3 — Aster Code / Builder: + `onboarding/builder`, `miniapp` (aiohttp-транспорт под `/miniapp/`: 21 POST `/miniapp/api/*` + собранный Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow SessionGate/BuilderWizard/Recovery/Success). Builder metadata передаётся в Aster requests вместе с ордерами; account-specific `builder + feeRate` — через `BuilderAttributionProvider` (journal payload от attribution не зависит). Транспортные хендлеры знают только application use cases и typed public codes.
 
-```text
-domain
-aster
-master
-risk
-trading
-storage
-credentials
-cli
-```
-
-Master + несколько testnet followers, без Telegram.
-
-### Этап 2 — Telegram
-
-Реализованы:
-
-```text
-telegram
-notifications
-onboarding/direct
-application
-```
-
-Один asyncio process, long polling, SQLite WAL; Redis/webhook и отдельный
-backend не нужны масштабу 10–30 (максимум около 100) пользователей. Bot и
-Mini App переиспользуют application service. Trading core не меняется.
-
-Фактический контур включает captcha + durable access approval, direct V3
-onboarding с typed errors, inline dashboard/status/risk/notifications/account,
-admin controls, follower pause/resume, автоматический symbol leverage и
-notification outbox. Пользователь меняет только риск на Stop; follower
-emergency запрещён, а `marginType` этап не меняет. Актуальный readiness verdict:
-`reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`.
-
-### Этап 3 — Aster Code / Builder
-
-Добавлено (CLOSED, смержено в `main`):
-
-```text
-onboarding/builder
-miniapp             # aiohttp-транспорт Mini App (тот же процесс)
-```
-
-Часть 1 (закрыта 2026-09-01): Telegram
-WebApp-сессия с server-side HMAC-проверкой подписанного initData и TTL по
-`auth_date`, Builder-онбординг по пользовательской подписи кошелька
-(combined `approveAgent`, main-ключ не входит в систему), минимальный home
-с pause/resume на общем `UserApplicationService`. Транспорт
-(`miniapp/server.py`) смонтирован под `/miniapp/`: JSON API + собранный Vite
-бандл; frontend в `miniapp/` (Vite+React+TS, токены UX-плана; wallet-адаптер
-injected EIP-1193 + опциональный WalletConnect за `VITE_WC_PROJECT_ID`).
-Транспортные хендлеры не знают ни Aster, ни storage — только application
-use cases и typed public codes.
-
-Часть 2 (закрыта 2026-09-04): 4-табовый AppShell follower Mini App
-(Главная/Позиции/Активность/Настройки; nested: Risk/Notifications/SystemStatus/
-AccountBuilder/Security/Help; flow вне shell: SessionGate/BuilderWizard/
-BuilderAttemptRecovery/SuccessScreen), 21 POST `/miniapp/api/*`,
-account-specific `builder + feeRate` в copy-engine
-через `BuilderAttributionProvider` (journal payload не зависит от attribution).
-
-Builder metadata передаётся в Aster requests вместе с ордерами.
-
-Risk, planner, reconciler и master flow не меняются.
+Детали исполнения и acceptance — в `docs/reports/`: Stage 2 — `STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`; Stage 3 Part 1 — `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`; Part 2 — `STAGE3_PART2_PROGRESS_2026-09.md`.
 
 ## 17. Filesystem tree
 
@@ -868,11 +803,9 @@ copytradeaster/
 └── data/                           # SQLite БД и артефакты load-прогонов (git-ignored)
 ```
 
-Tree отражает фактическую структуру после Stage 3 (всё смержено в `main`).
-Отдельный `master/observer.py` не понадобился: рабочая граница `UserStream` +
-`MasterProjector` уже остаётся ясной, а механическое выделение файла не меняет
-архитектуру. `onboarding/builder`, `trading/builder_attribution.py` и 4-табовый
-`miniapp/` (21 POST `/miniapp/api/*`) реализованы и закрыты в Stage 3.
+Tree отражает фактическую структуру. Отдельного `master/observer.py` нет:
+граница `UserStream` + `MasterProjector` — достаточная, механическое выделение
+файла архитектуру не меняет.
 
 ## 18. Архитектурные правила проекта
 
