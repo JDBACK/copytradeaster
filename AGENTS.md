@@ -62,7 +62,7 @@ copytradeaster/
 │   ├── miniapp/               # aiohttp server (HMAC initData auth, 21 POST /miniapp/api/*, static host)
 │   └── cli/                   # main.py CLI dispatcher (11 subcommands)
 ├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest); map: miniapp/AGENTS.md
-│   ├── src/screens/           # Home, Positions (PositionCard), Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard/Recovery, SessionGate
+│   ├── src/screens/           # Home, Positions (PositionCard), Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard/Recovery, SessionGate, SuccessScreen, InfoScreens (Security/Help)
 │   ├── src/components/        # AppShell.tsx + ui.tsx (Brand/TrustRail/Sheet/Row/ErrorBox; SVG icons inline)
 │   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
 │   └── src/api.ts             # Typed API client with 15s AbortController timeout
