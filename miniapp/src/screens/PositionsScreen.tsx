@@ -29,12 +29,15 @@ export function PositionsScreen({
   accountMasked,
   active = true,
   warm = true,
+  invalidateSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   active?: boolean
   /** Gate for the first fetch: shell warmup or the user's first tap. */
   warm?: boolean
+  /** Shell-owned mutation counter; see useWarmRevalidation. */
+  invalidateSignal?: number
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
@@ -47,9 +50,9 @@ export function PositionsScreen({
     active,
     ttlMs: HOME_REVALIDATE_MS,
     busy: load.kind === 'loading' || refreshing,
-    onRefresh: (reason: WarmReason) => {
-      void fetchPositions(reason === 'retry' ? 'foreground' : 'background', false)
-    },
+    invalidateSignal,
+    onRefresh: (reason: WarmReason) =>
+      fetchPositions(reason === 'retry' ? 'foreground' : 'background', false),
   })
 
   const fetchPositions = useCallback(

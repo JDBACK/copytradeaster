@@ -34,6 +34,7 @@ export function SettingsScreen({
   onNotConnected,
   active = true,
   warm = true,
+  invalidateSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
@@ -42,6 +43,8 @@ export function SettingsScreen({
   active?: boolean
   /** Gate for the first fetch: shell warmup or the user's first tap. */
   warm?: boolean
+  /** Shell-owned mutation counter; see useWarmRevalidation. */
+  invalidateSignal?: number
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
 
@@ -53,9 +56,8 @@ export function SettingsScreen({
     active,
     ttlMs: HOME_REVALIDATE_MS,
     busy: load.kind === 'loading',
-    onRefresh: (reason: WarmReason) => {
-      void refresh(reason === 'retry' ? 'foreground' : 'background')
-    },
+    invalidateSignal,
+    onRefresh: (reason: WarmReason) => refresh(reason === 'retry' ? 'foreground' : 'background'),
   })
 
   const refresh = useCallback(

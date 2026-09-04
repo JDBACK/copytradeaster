@@ -47,6 +47,27 @@ export function AppShell({
   // stale frames. Until then they fetch on first tap (previous cold path).
   const [warmReady, setWarmReady] = useState(false)
   const handleHomeReady = useCallback(() => setWarmReady(true), [])
+  // Mutation-driven invalidation: a successful save on one screen marks the
+  // already-warmed snapshots of other tabs suspect. Counters only — no data
+  // store, no unmount, no skeleton: each screen consumes its counter through
+  // useWarmRevalidation as one background refresh (immediately when active,
+  // on next activation otherwise).
+  const [invalidations, setInvalidations] = useState<Record<RootTab, number>>({
+    home: 0,
+    positions: 0,
+    activity: 0,
+    settings: 0,
+  })
+  const invalidate = useCallback((tabs: RootTab[]) => {
+    setInvalidations((prev) => {
+      const next = { ...prev }
+      for (const tab of tabs) next[tab] += 1
+      return next
+    })
+  }, [])
+  const handleHomeMutated = useCallback(() => {
+    invalidate(['settings', 'activity'])
+  }, [invalidate])
   const contentRef = useRef<HTMLDivElement | null>(null)
   const scrollTops = useRef<Record<RootTab, number>>({
     home: 0,
@@ -93,7 +114,10 @@ export function AppShell({
 
   useLayoutEffect(() => {
     const el = contentRef.current
-    if (el) el.scrollTop = scrollTops.current[route.tab] ?? 0
+    // A nested screen always opens at the top; the root slot underneath is
+    // restored on the way back. Without this the nested content inherits the
+    // root scrollTop it was opened from.
+    if (el) el.scrollTop = nested ? 0 : (scrollTops.current[route.tab] ?? 0)
   }, [route.tab, nested])
 
   const homeActive = route.tab === 'home' && !nested
@@ -111,6 +135,8 @@ export function AppShell({
             onNotConnected={onNotConnected}
             active={homeActive}
             onReady={handleHomeReady}
+            onMutated={handleHomeMutated}
+            invalidateSignal={invalidations.home}
           />
         </div>
         <div hidden={!!nested || route.tab !== 'positions'}>
@@ -119,6 +145,7 @@ export function AppShell({
             accountMasked={accountMasked}
             active={positionsActive}
             warm={warmReady || visited.has('positions')}
+            invalidateSignal={invalidations.positions}
           />
         </div>
         <div hidden={!!nested || route.tab !== 'activity'}>
@@ -127,6 +154,7 @@ export function AppShell({
             accountMasked={accountMasked}
             active={activityActive}
             warm={warmReady || visited.has('activity')}
+            invalidateSignal={invalidations.activity}
           />
         </div>
         <div hidden={!!nested || route.tab !== 'settings'}>
@@ -137,6 +165,7 @@ export function AppShell({
             onNotConnected={onNotConnected}
             active={settingsActive}
             warm={warmReady || visited.has('settings')}
+            invalidateSignal={invalidations.settings}
           />
         </div>
         {nested && (
@@ -145,6 +174,7 @@ export function AppShell({
             auth={auth}
             accountMasked={accountMasked}
             onNotConnected={onNotConnected}
+            onInvalidate={invalidate}
           />
         )}
       </div>
@@ -173,18 +203,37 @@ export function NestedRoute({
   auth,
   accountMasked,
   onNotConnected,
+  onInvalidate,
 }: {
   nested: NestedScreen
   auth: AuthContext
   accountMasked?: string | null
   onNotConnected?: () => void
+  /** Mutation-driven invalidation sink; defaults to a no-op for direct renders. */
+  onInvalidate?: (tabs: RootTab[]) => void
 }) {
   const handleNotConnected = onNotConnected ?? (() => {})
+  const notify = onInvalidate ?? (() => {})
   switch (nested.kind) {
     case 'risk':
-      return <RiskScreen auth={auth} accountMasked={accountMasked} />
+      // A saved risk percent is read by Home and Settings from their own
+      // dashboard snapshots — both go stale here, without unmount or skeleton.
+      return (
+        <RiskScreen
+          auth={auth}
+          accountMasked={accountMasked}
+          onSaved={() => notify(['home', 'settings'])}
+        />
+      )
     case 'notifications':
-      return <NotificationsScreen auth={auth} accountMasked={accountMasked} />
+      // Settings renders the toggle state from its dashboard snapshot.
+      return (
+        <NotificationsScreen
+          auth={auth}
+          accountMasked={accountMasked}
+          onSaved={() => notify(['settings'])}
+        />
+      )
     case 'system-status':
       return <SystemStatusScreen auth={auth} accountMasked={accountMasked} />
     case 'account-builder':

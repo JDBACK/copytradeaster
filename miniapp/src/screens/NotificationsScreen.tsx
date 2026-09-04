@@ -23,12 +23,21 @@ import { formatTime } from '../format'
 export function NotificationsScreen({
   auth,
   accountMasked,
+  onSaved,
 }: {
   auth: AuthContext
   accountMasked?: string | null
+  /** Fired after a successful save so the shell can stale dependent tabs. */
+  onSaved?: () => void
 }) {
   const [state, dispatch] = useReducer(reduceNotifications, undefined, initialNotificationsState)
   const [initError, setInitError] = useState<string | null>(null)
+  // Latest onSaved without re-keying the save callback: NestedRoute builds
+  // its arrow inline, so a dep would churn identity every shell render.
+  const onSavedRef = useRef(onSaved)
+  useEffect(() => {
+    onSavedRef.current = onSaved
+  })
   // Synchronous double-tap lock, created once per screen lifetime: state.saving
   // only exists after a re-render, so two taps in one tick must be gated here.
   const gate = useRef<ToggleGate | null>(null)
@@ -56,6 +65,7 @@ export function NotificationsScreen({
         const dto = await api.setNotifications(auth, next)
         dispatch({ type: 'save_succeeded', dto })
         hapticNotify('success')
+        onSavedRef.current?.()
       } catch (err) {
         dispatch({
           type: 'save_failed',

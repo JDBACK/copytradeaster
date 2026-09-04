@@ -23,6 +23,7 @@ import type {
   ActivityItemDTO,
   ActivityPageDTO,
   DashboardDTO,
+  NotificationSettingsDTO,
   PositionPageDTO,
   PositionSummaryDTO,
   RiskDTO,
@@ -628,5 +629,226 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     nowSpy.mockRestore()
     await screen.findByText('Нет открытых позиций')
     expect(positionsSpy).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Corrective: mutation-driven invalidation', () => {
+  function notificationsDto(
+    overrides: Partial<NotificationSettingsDTO> = {},
+  ): NotificationSettingsDTO {
+    return { enabled: true, last_delivery_at: null, pending: 0, failed: 0, ...overrides }
+  }
+
+  it('Risk save stales Home and Settings: instant old UI, one background refresh, new value', async () => {
+    const back = installBackButton()
+    const bgGate = deferred<DashboardDTO>()
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockResolvedValueOnce(dashboard({ risk_percent: '0.01' }))
+      .mockResolvedValueOnce(dashboard({ risk_percent: '0.01' }))
+      .mockReturnValue(bgGate.promise)
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    const setter = vi
+      .spyOn(api, 'setRiskPercent')
+      .mockResolvedValue(riskDto({ risk_percent: '0.02' }))
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('button', { name: /риск на stop.*1%/i })).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+    fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
+    await screen.findByText(/сохранено · 2,0%/i)
+    expect(setter).toHaveBeenCalledTimes(1)
+
+    back.press()
+    const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
+    expect(isHidden(restoredHeading)).toBe(false)
+    // Old UI instantly: exactly one background refresh, hanging on the gate.
+    await act(async () => {})
+    expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
+    expect(screen.getByRole('button', { name: /риск на stop.*1%/i })).toBeDefined()
+
+    bgGate.resolve(dashboard({ risk_percent: '0.02' }))
+    await screen.findByRole('button', { name: /риск на stop.*2%/i })
+    // Settles quiet: invalidation fires once, never loops.
+    await act(async () => {})
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+
+    // Home was staled by the same save: one background dashboard(true).
+    fireEvent.click(tabButton('Главная'))
+    await screen.findByText('Риск на стоп')
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(4)
+    expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, true])
+  })
+
+  it('Notifications save stales Settings: one background refresh on return', async () => {
+    const back = installBackButton()
+    const bgGate = deferred<DashboardDTO>()
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockResolvedValueOnce(dashboard())
+      .mockResolvedValueOnce(dashboard())
+      .mockReturnValue(bgGate.promise)
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'notifications').mockResolvedValue(notificationsDto())
+    const saver = vi
+      .spyOn(api, 'setNotifications')
+      .mockResolvedValue(notificationsDto({ enabled: false }))
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(screen.getByRole('button', { name: /уведомления/i }))
+    const toggle = await screen.findByRole('switch', { name: 'Уведомления о сделках' })
+    fireEvent.click(toggle)
+    await act(async () => {})
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(saver).toHaveBeenCalledTimes(1)
+
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+    await act(async () => {})
+    expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    bgGate.resolve(dashboard())
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('Home pause stales Settings and Activity despite a fresh TTL', async () => {
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockResolvedValue(dashboard({ copy_state: 'active' }))
+    const activitySpy = vi
+      .spyOn(api, 'activity')
+      .mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    const pauser = vi
+      .spyOn(api, 'pause')
+      .mockResolvedValue(dashboard({ copy_state: 'paused' }))
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /поставить на паузу/i }))
+    await screen.findByRole('button', { name: /возобновить/i })
+    expect(pauser).toHaveBeenCalledTimes(1)
+
+    // Fresh TTL everywhere, yet Settings revalidates on the mutation signal.
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    await act(async () => {})
+    expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(tabButton('Активность'))
+    await screen.findByText('Показаны только данные без секретов')
+    await act(async () => {})
+    expect(activitySpy).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Corrective: single-flight background revalidation', () => {
+  it('rapid Home reactivation while a background refresh hangs starts no second request', async () => {
+    const gate = deferred<DashboardDTO>()
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockResolvedValueOnce(dashboard())
+      .mockReturnValue(gate.promise)
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+
+    const { rerender } = render(<HomeScreen auth={AUTH} onNotConnected={noop} active={true} />)
+    await screen.findByText('Риск на стоп')
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+
+    const t0 = Date.now()
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + HOME_REVALIDATE_MS + 5_000)
+    rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={false} />)
+    rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={true} />)
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+
+    // Bounce again while the refresh hangs: single-flight swallows it.
+    rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={false} />)
+    rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={true} />)
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+
+    // Settle, age again: the next refresh is allowed.
+    nowSpy.mockRestore()
+    gate.resolve(dashboard({ open_positions: 5 }))
+    await screen.findByText('5')
+    const t1 = Date.now()
+    const nowSpy2 = vi.spyOn(Date, 'now').mockReturnValue(t1 + HOME_REVALIDATE_MS + 5_000)
+    rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={false} />)
+    rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={true} />)
+    nowSpy2.mockRestore()
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('Positions bounces while its background refresh hangs: still one request', async () => {
+    const gate = deferred<PositionPageDTO>()
+    const positionsSpy = vi
+      .spyOn(api, 'positions')
+      .mockResolvedValueOnce(positionPage({ positions: [], count: 0 }))
+      .mockReturnValue(gate.promise)
+    const { rerender } = render(<PositionsScreen auth={AUTH} active={true} warm={true} />)
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+
+    const t0 = Date.now()
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + HOME_REVALIDATE_MS + 5_000)
+    rerender(<PositionsScreen auth={AUTH} active={false} warm={true} />)
+    rerender(<PositionsScreen auth={AUTH} active={true} warm={true} />)
+    await act(async () => {})
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    rerender(<PositionsScreen auth={AUTH} active={false} warm={true} />)
+    rerender(<PositionsScreen auth={AUTH} active={true} warm={true} />)
+    await act(async () => {})
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    nowSpy.mockRestore()
+
+    gate.resolve(positionPage({ positions: [], count: 0 }))
+    await act(async () => {})
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Corrective: nested screens open at the top', () => {
+  it('nested opens scrolled to top; back restores the root position', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    const scroller = document.querySelector('.shell-content') as HTMLElement | null
+    expect(scroller).not.toBeNull()
+    scroller!.scrollTop = 300
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    expect(scroller!.scrollTop).toBe(0)
+
+    scroller!.scrollTop = 150
+    back.press()
+    const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
+    expect(isHidden(restoredHeading)).toBe(false)
+    expect(scroller!.scrollTop).toBe(300)
   })
 })

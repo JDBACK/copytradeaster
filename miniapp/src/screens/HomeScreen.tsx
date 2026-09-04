@@ -38,12 +38,18 @@ export function HomeScreen({
   onNotConnected,
   active = true,
   onReady,
+  onMutated,
+  invalidateSignal,
 }: {
   auth: AuthContext
   onNotConnected: () => void
   active?: boolean
   /** Fired once when the screen first reaches ready (drives shell warmup). */
   onReady?: () => void
+  /** Fired after a successful pause/resume so the shell can stale dependents. */
+  onMutated?: () => void
+  /** Shell-owned mutation counter; see useWarmRevalidation. */
+  invalidateSignal?: number
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [acting, setActing] = useState(false)
@@ -57,9 +63,10 @@ export function HomeScreen({
     active,
     ttlMs: HOME_REVALIDATE_MS,
     busy: load.kind === 'loading' || (load.kind === 'ready' && load.positionsPending),
+    invalidateSignal,
     onRefresh: (reason: WarmReason) => {
-      if (reason === 'retry') void fetchAll('foreground')
-      else void fetchAll('background')
+      if (reason === 'retry') return fetchAll('foreground')
+      return fetchAll('background')
     },
   })
 
@@ -151,6 +158,7 @@ export function HomeScreen({
           ? { ...prev, dashboard }
           : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
       )
+      onMutated?.()
     } catch (err) {
       hapticNotify('error')
       setError(err instanceof ApiError ? err.code : 'network_error')
@@ -191,6 +199,7 @@ export function HomeScreen({
           ? { ...prev, dashboard }
           : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
       )
+      onMutated?.()
     } catch (err) {
       hapticNotify('error')
       setError(err instanceof ApiError ? err.code : 'network_error')

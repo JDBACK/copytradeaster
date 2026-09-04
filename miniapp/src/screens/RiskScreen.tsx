@@ -336,9 +336,12 @@ export function RiskRuler({
 export function RiskScreen({
   auth,
   accountMasked,
+  onSaved,
 }: {
   auth: AuthContext
   accountMasked?: string | null
+  /** Fired after a successful save so the shell can stale dependent tabs. */
+  onSaved?: () => void
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   // Last server-confirmed fraction; the only save truth.
@@ -472,6 +475,7 @@ export function RiskScreen({
       setLoad({ kind: 'ready', dto: next })
       flashToast(`Сохранено · ${formatRiskPercent(next.risk_percent)}`)
       hapticNotify('success')
+      onSaved?.()
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.code : 'network_error')
       hapticNotify('error')

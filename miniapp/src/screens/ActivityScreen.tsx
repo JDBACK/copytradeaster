@@ -38,12 +38,15 @@ export function ActivityScreen({
   accountMasked,
   active = true,
   warm = true,
+  invalidateSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   active?: boolean
   /** Gate for the first fetch: shell warmup or the user's first tap. */
   warm?: boolean
+  /** Shell-owned mutation counter; see useWarmRevalidation. */
+  invalidateSignal?: number
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [filter, setFilter] = useState<ActivityFilter>('all')
@@ -61,13 +64,15 @@ export function ActivityScreen({
     active,
     ttlMs: ACTIVITY_REVALIDATE_MS,
     busy: load.kind === 'loading' || loadingMore,
+    invalidateSignal,
     onRefresh: (reason: WarmReason) => {
       // Revalidation must not reset the client-side pagination position:
       // a silent page-0 refresh replaces the accumulated timeline, so it
       // only applies while nothing was appended yet. A paginated timeline
       // skips the refresh; the next activation past TTL retries the skip.
-      if (load.kind === 'ready' && load.page > 0) return
-      void fetchPage(filter, 0, false, reason === 'revalidate')
+      // The same guard covers invalidation: appended pages are never reset.
+      if (load.kind === 'ready' && load.page > 0) return undefined
+      return fetchPage(filter, 0, false, reason === 'revalidate')
     },
   })
 
