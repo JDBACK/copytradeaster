@@ -61,18 +61,30 @@ export function AppShell({
 
   const handleTab = useCallback(
     (tab: RootTab) => {
-      const el = contentRef.current
-      if (el) scrollTops.current[route.tab] = el.scrollTop
+      // The tab slot is written only when the tab itself is the visible
+      // surface. From under a nested screen the container shows the nested
+      // content — writing its scrollTop into the tab slot would corrupt it.
+      if (route.nested.length === 0) {
+        const el = contentRef.current
+        if (el) scrollTops.current[route.tab] = el.scrollTop
+      }
       setRoute((current) => selectTab(current, tab))
       setVisited((prev) => (prev.has(tab) ? prev : new Set([...prev, tab])))
       hapticImpact('light')
     },
-    [route.tab],
+    [route.tab, route.nested.length],
   )
 
-  const openNested = useCallback((screen: NestedScreen) => {
-    setRoute((current) => pushNested(current, screen))
-  }, [])
+  const openNested = useCallback(
+    (screen: NestedScreen) => {
+      // Opening nested hides the root tab: persist its scroll now, otherwise
+      // the restore effect below would put back a stale value on return.
+      const el = contentRef.current
+      if (el) scrollTops.current[route.tab] = el.scrollTop
+      setRoute((current) => pushNested(current, screen))
+    },
+    [route.tab],
+  )
 
   useLayoutEffect(() => {
     const el = contentRef.current

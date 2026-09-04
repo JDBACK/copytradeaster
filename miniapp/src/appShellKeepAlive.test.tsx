@@ -265,7 +265,82 @@ describe('AppShell keep-alive', () => {
     expect(isHidden(restoredHeading)).toBe(false)
     expect(dashboardSpy).toHaveBeenCalledTimes(2)
   })
+
+  it('nested open saves the root scroll; back restores it, not the nested one', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    const scroller = document.querySelector('.shell-content') as HTMLElement | null
+    expect(scroller).not.toBeNull()
+    scroller!.scrollTop = 200
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    // Scrolling the nested screen must not leak into the tab slot.
+    scroller!.scrollTop = 50
+
+    back.press()
+    const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
+    expect(isHidden(restoredHeading)).toBe(false)
+    expect(scroller!.scrollTop).toBe(200)
+  })
+
+  it('switching tabs from under nested never writes the nested scroll into a tab slot', async () => {
+    installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    const scroller = document.querySelector('.shell-content') as HTMLElement | null
+    expect(scroller).not.toBeNull()
+    scroller!.scrollTop = 200
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    scroller!.scrollTop = 50
+
+    fireEvent.click(tabButton('Позиции'))
+    await screen.findByText('Открытые позиции · 1')
+
+    fireEvent.click(tabButton('Настройки'))
+    const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
+    expect(isHidden(restoredHeading)).toBe(false)
+    expect(scroller!.scrollTop).toBe(200)
+  })
 })
+function installBackButton(): { press: () => void } {
+  let handler: (() => void) | null = null
+  ;(window as unknown as { Telegram?: unknown }).Telegram = {
+    WebApp: {
+      BackButton: {
+        show: vi.fn(),
+        hide: vi.fn(),
+        onClick: vi.fn((cb: () => void) => {
+          handler = cb
+        }),
+        offClick: vi.fn(() => {
+          handler = null
+        }),
+      },
+    },
+  }
+  return {
+    press: () => {
+      act(() => {
+        handler?.()
+      })
+    },
+  }
+}
+
 
 describe('HomeScreen loading lifecycle', () => {
   it('a late first response never overwrites a newer one', async () => {
