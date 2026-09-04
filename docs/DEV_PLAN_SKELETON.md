@@ -539,8 +539,9 @@ Scope намеренно ограничен safety-hardening существую�
 - [x] **Package A — Economic idempotency (CLOSED 2026-09-04):** PM-B1, единая
   fail-closed UNKNOWN resolution policy для runtime/boot, history + position proof,
   residual-only reconciliation и signed SIGKILL recovery.
-- [ ] **Package B — Master recovery correctness:** PM-B2/PM-B3, dirty/generation,
-  queue invalidation, reconnect recovery и startup entry admission.
+- [x] **Package B — Master recovery correctness (CLOSED 2026-09-04):** PM-B2/PM-B3,
+  completed-generation cutover, Aster-time cutoff, dirty/age/overflow recovery,
+  reconnect handling и two-snapshot startup entry admission.
 - [ ] **Package C — Mainnet profile:** PM-B4, immutable network context и
   production-App composition/preflight без реальных order writes.
 - [ ] **Package D — Risk invariants:** PM-B5/PM-B6/PM-B7, точная причина zero,
@@ -551,7 +552,6 @@ Scope намеренно ограничен safety-hardening существую�
   restart/SIGKILL, App E2E, multi-follower isolation, load и финальный audit.
 
 Mainnet rollout запрещён, пока каждый blocker не закрыт кодом, тестами и
-записанным evidence. Следующий активный пакет: **B / PM-B2 + PM-B3**.
-Текущий checkpoint находится в ветке `codex/live-copy-tests-hardening`:
-Package A закрыт, Package B частично реализован и помечен **WIP / NOT GREEN**;
-точная точка продолжения записана в журнале.
+записанным evidence. Следующий активный пакет: **C / PM-B4**.
+Текущая ветка `codex/live-copy-tests-hardening`: Packages A–B закрыты;
+signed Snapshot/WS/startup qualification остаётся в Package F и Mainnet не разрешает.

@@ -69,6 +69,7 @@ class UserStream:
         first = True
         while not stop.is_set():
             connected = False
+            disconnected_notified = False
             try:
                 listen_key = await self._client.start_listen_key(self._account_id)
                 url = f"{self._ws_base}/{listen_key}"
@@ -83,20 +84,39 @@ class UserStream:
                     # tagged with the pre-rebuild generation while the callback
                     # obtains the post-connect REST snapshot.
                     session_task = asyncio.create_task(self._session(ws, stop))
+                    boundary_task: asyncio.Task[None] | None = None
                     try:
                         if self._on_connected is not None:
-                            await self._on_connected()
+                            boundary_task = asyncio.create_task(self._on_connected())
+                            done, _ = await asyncio.wait(
+                                {session_task, boundary_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if session_task in done and not boundary_task.done():
+                                if stop.is_set():
+                                    return
+                                # Do not let a slow post-connect REST boundary
+                                # open entry admission after the socket already
+                                # died. App observes disconnect before the
+                                # boundary callback reaches its admission check.
+                                await self._safe_on_disconnected()
+                                disconnected_notified = True
+                            await boundary_task
                         await session_task
                     finally:
+                        if boundary_task is not None:
+                            boundary_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError, Exception):
+                                await boundary_task
                         session_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
                             await session_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect loop boundary
                 log.warning("user stream error: %s: %s", type(exc).__name__, exc, exc_info=True)
             finally:
-                if connected and not stop.is_set():
+                if connected and not disconnected_notified and not stop.is_set():
                     await self._safe_on_disconnected()
             if stop.is_set():
                 break
@@ -149,7 +169,7 @@ class UserStream:
                 if raw.get("e") == "listenKeyExpired":
                     log.warning("listenKeyExpired - rotating listen key")
                     return
-                await self._on_event(StreamEvent(raw=raw, received_at=time.time()))
+                await self._on_event(StreamEvent(raw=raw, received_at=time.monotonic()))
         finally:
             keepalive.cancel()
             with contextlib.suppress(asyncio.CancelledError):

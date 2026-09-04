@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -45,6 +46,8 @@ from copytradeaster.trading.registry import FollowerRegistry
 log = get_logger(__name__)
 CLOCK_DRIFT_MAX_MS = 2000
 MASTER_RESNAPSHOT_EVERY_SWEEPS = 10  # ~10x reconcile_interval; heals projector drift
+MASTER_BOUNDARY_MAX_PASSES = 3
+MASTER_INGEST_MAX_AGE_S = 5.0
 INGEST_QUEUE_MAX = 1000
 STREAM_READY_TIMEOUT_S = 30.0
 TESTNET_REST_URL = "https://fapi.asterdex-testnet.com"
@@ -56,6 +59,7 @@ _SAFE_FRAGMENT = re.compile(r"[^A-Za-z0-9_.:-]+")
 class MasterIngestEnvelope:
     raw: dict
     generation: int
+    received_at: float
 
 
 def _safe_fragment(value: object, fallback: str = "unknown") -> str:
@@ -252,18 +256,21 @@ class App:
             basis=self.basis,
             snapshot_symbols=set(cfg.follower_snapshot_symbols) or None,
             leverage=self.leverage,
-            entry_admission=lambda: self._entry_admission_ready,
+            entry_admission=self._master_entry_admitted,
         )
         self.reconciler = Reconciler(self.coordinator)
         self.stream: UserStream | None = None
         self.stop_event = asyncio.Event()
         self._stream_ready = asyncio.Event()
         self._stream_connected = False
+        self._stream_epoch = 0
         self._entry_admission_ready = False
         self._ingest_queue: asyncio.Queue[MasterIngestEnvelope] = asyncio.Queue(
             maxsize=INGEST_QUEUE_MAX
         )
         self._ingest_dropped = 0
+        self._master_event_seq = 0
+        self._master_boundary_active = False
         self._master_recovery_requested = asyncio.Event()
         self._master_recovery_reason = "master-dirty"
         self._master_recovery_task: asyncio.Task | None = None
@@ -312,6 +319,14 @@ class App:
     def _filters(self) -> dict:
         return self._filters_cache
 
+    def _master_entry_admitted(self) -> bool:
+        """Process-local proof required for any follower risk increase."""
+        return (
+            self._entry_admission_ready
+            and self._stream_connected
+            and not self.projector.dirty_symbols
+        )
+
     async def _emit_notification(
         self,
         *,
@@ -356,6 +371,7 @@ class App:
         cfg = self.cfg
         self._entry_admission_ready = False
         self._stream_connected = False
+        self._stream_epoch = 0
         self._stream_ready.clear()
         self._ready = False
         setup_logging(
@@ -497,11 +513,16 @@ class App:
             on_connected=self._on_stream_connected,
             on_disconnected=self._on_stream_disconnected,
         )
+        # Consume immediately: UserStream starts recv before its connected
+        # callback so frames can accumulate while the post-connect REST
+        # boundary runs. The generation boundary makes those frames harmless;
+        # delaying the consumer until READY would hide queue pressure and
+        # prevent the boundary from observing a non-quiescent stream.
+        self._ingest_task = asyncio.create_task(self._ingest_loop())
         stream_task = asyncio.create_task(self.stream.run(self.stop_event))
         self._stream_task = stream_task
         stream_ready = await self._wait_for_stream_startup()
         self._sweep_task = asyncio.create_task(self._periodic_sweep())
-        self._ingest_task = asyncio.create_task(self._ingest_loop())
         if not stream_ready:
             # The engine remains alive for close-only REST sweeps and future WS
             # retries, but it is deliberately not READY for new exposure.
@@ -620,34 +641,55 @@ class App:
                 return
 
     async def _consume(self, envelope: MasterIngestEnvelope) -> None:
+        # Match Coordinator's 5s master-freshness convention: equality is
+        # accepted, only age strictly greater than the budget is stale.
+        if max(time.monotonic() - envelope.received_at, 0.0) > MASTER_INGEST_MAX_AGE_S:
+            self._mark_master_dirty(envelope.raw, "ingest-backlog-stale")
+            return
         await self.projector.apply_raw(envelope.raw, generation=envelope.generation)
 
     async def _on_stream_event(self, event) -> None:
         """Async adapter required by UserStream's awaited callback contract."""
-        self._enqueue(event.raw)
+        self._enqueue(event.raw, received_at=event.received_at)
 
     async def _on_stream_connected(self) -> None:
         self._stream_connect_count += 1
+        self._stream_epoch = getattr(self, "_stream_epoch", 0) + 1
         self._stream_connected = True
         self.projector.mark_dirty("*")
         await self._establish_master_boundary("stream-connected")
 
     async def _on_stream_disconnected(self) -> None:
+        self._stream_epoch = getattr(self, "_stream_epoch", 0) + 1
         self._stream_connected = False
         self.projector.mark_dirty("*")
         await self._set_master_not_ready("stream-disconnected")
 
-    def _enqueue(self, raw: dict) -> None:
+    def _enqueue(self, raw: dict, *, received_at: float | None = None) -> None:
         """Queue one frame with the current authoritative generation."""
         q = self._ingest_queue
-        if q.qsize() >= q.maxsize:
+        self._master_event_seq = getattr(self, "_master_event_seq", 0) + 1
+        if q.full():
             dropped: MasterIngestEnvelope | None = None
             with contextlib.suppress(asyncio.QueueEmpty):
                 dropped = q.get_nowait()
+                q.task_done()
             self._ingest_dropped += 1
             if dropped is not None:
                 self._mark_master_dirty(dropped.raw, "ingest-overflow")
-        q.put_nowait(MasterIngestEnvelope(raw=raw, generation=self.projector.generation))
+        q.put_nowait(
+            MasterIngestEnvelope(
+                raw=raw,
+                generation=self.projector.generation,
+                received_at=time.monotonic() if received_at is None else received_at,
+            )
+        )
+        if getattr(self, "_master_boundary_active", False):
+            # The REST reads and follower close-only sweep were not quiescent.
+            # Close local entry admission synchronously and coalesce a new
+            # authoritative boundary; the queued frame keeps its old
+            # generation and cannot mutate the eventual snapshot.
+            self._mark_master_dirty(raw, "event-during-master-boundary")
 
     def _mark_master_dirty(self, raw: dict, reason: str) -> None:
         self.projector.mark_dirty(*symbols_for_raw(raw))
@@ -656,7 +698,18 @@ class App:
         self._stream_ready.clear()
         self._master_recovery_reason = reason
         self._master_recovery_requested.set()
-        task = self._master_recovery_task
+        if getattr(self, "_master_boundary_active", False):
+            # The active boundary observes event_seq/dirty and performs the
+            # next coalesced pass itself. Its finally block schedules recovery
+            # only if a later event remains unconsumed.
+            return
+        self._ensure_master_recovery_task()
+
+    def _ensure_master_recovery_task(self) -> None:
+        stop_event = getattr(self, "stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return
+        task = getattr(self, "_master_recovery_task", None)
         if task is None or task.done():
             self._master_recovery_task = asyncio.create_task(self._master_recovery_loop())
 
@@ -678,10 +731,29 @@ class App:
         await self.settings.set_flag("ready", "false")
         await self.settings.set_flag("degraded", reason)
 
-    async def _publish_master_ready(self) -> None:
-        was_ready = self._ready
+    async def _publish_master_ready(
+        self,
+        *,
+        was_ready: bool,
+        stream_epoch: int,
+        event_seq: int,
+    ) -> bool:
+        """Publish READY only if the proven boundary is still current."""
+        await self.settings.clear_degraded()
         await self.settings.set_flag("ready", "true")
+        if (
+            not self._stream_connected
+            or getattr(self, "_stream_epoch", 0) != stream_epoch
+            or getattr(self, "_master_event_seq", 0) != event_seq
+            or self.projector.dirty_symbols
+        ):
+            await self._set_master_not_ready("master-changed-before-ready")
+            return False
+        # No await between the final proof and the process-local admission
+        # commit: this is the linearization point for startup/reconnect entry.
+        self._entry_admission_ready = True
         self._ready = True
+        self._stream_ready.set()
         if not was_ready:
             await self._emit_notification(
                 event_key=f"app:{self._notification_token}:ready",
@@ -690,6 +762,7 @@ class App:
                 text="Движок готов к работе.",
             )
         log.info("READY master_generation=%d", self.projector.generation)
+        return True
 
     @staticmethod
     def _reconcile_succeeded(report) -> bool:
@@ -702,28 +775,85 @@ class App:
             lock = asyncio.Lock()
             self._master_boundary_lock = lock
         async with lock:
-            await self._set_master_not_ready(reason)
-            await self.projector.rebuild_full(self.master_client, "main")
+            was_ready = self._ready
+            self._master_boundary_active = True
+            try:
+                await self._set_master_not_ready(reason)
+                stream_epoch = getattr(self, "_stream_epoch", 0)
+                for attempt in range(1, MASTER_BOUNDARY_MAX_PASSES + 1):
+                    recovery_requested = getattr(self, "_master_recovery_requested", None)
+                    if recovery_requested is not None:
+                        recovery_requested.clear()
+                    event_seq = getattr(self, "_master_event_seq", 0)
+                    await self.projector.rebuild_full(self.master_client, "main")
 
-            close_only = await self.reconciler.reconcile(
-                self.projector.state, reason="post-stream-close-only"
-            )
-            if not self._reconcile_succeeded(close_only) or await self.commands.in_flight():
-                raise RuntimeError("close-only follower reconciliation incomplete")
-            if not self._stream_connected:
+                    close_only = await self.reconciler.reconcile(
+                        self.projector.state, reason="post-stream-close-only"
+                    )
+                    if not self._reconcile_succeeded(close_only) or await self.commands.in_flight():
+                        raise RuntimeError("close-only follower reconciliation incomplete")
+                    if (
+                        not self._stream_connected
+                        or getattr(self, "_stream_epoch", 0) != stream_epoch
+                    ):
+                        return False
+                    if (
+                        getattr(self, "_master_event_seq", 0) != event_seq
+                        or self.projector.dirty_symbols
+                    ):
+                        log.info(
+                            "master boundary pass %d/%d was not quiescent; retrying",
+                            attempt,
+                            MASTER_BOUNDARY_MAX_PASSES,
+                        )
+                        self.projector.mark_dirty("*")
+                        continue
+
+                    # PM-B3 requires the entry snapshot after the potentially
+                    # slow close-only follower sweep. This second REST cutover
+                    # is the state used for risk-increasing reconciliation.
+                    await self.projector.rebuild_full(self.master_client, "main")
+                    if (
+                        not self._stream_connected
+                        or getattr(self, "_stream_epoch", 0) != stream_epoch
+                        or getattr(self, "_master_event_seq", 0) != event_seq
+                        or self.projector.dirty_symbols
+                    ):
+                        self.projector.mark_dirty("*")
+                        continue
+
+                    # This assignment is adjacent to the quiescence proof and
+                    # contains no await. Events after it belong to the new
+                    # generation and are normal live-stream work.
+                    self._entry_admission_ready = True
+                    entry = await self.reconciler.reconcile(
+                        self.projector.state, reason="post-stream-entry"
+                    )
+                    self._entry_admission_ready = False
+                    if not self._reconcile_succeeded(entry) or await self.commands.in_flight():
+                        raise RuntimeError("entry follower reconciliation incomplete")
+                    if (
+                        not self._stream_connected
+                        or getattr(self, "_stream_epoch", 0) != stream_epoch
+                        or getattr(self, "_master_event_seq", 0) != event_seq
+                        or self.projector.dirty_symbols
+                    ):
+                        self.projector.mark_dirty("*")
+                        continue
+                    return await self._publish_master_ready(
+                        was_ready=was_ready,
+                        stream_epoch=stream_epoch,
+                        event_seq=event_seq,
+                    )
+
+                self.projector.mark_dirty("*")
+                await self._set_master_not_ready("master-boundary-not-quiescent")
                 return False
-
-            self._entry_admission_ready = True
-            entry = await self.reconciler.reconcile(
-                self.projector.state, reason="post-stream-entry"
-            )
-            if not self._reconcile_succeeded(entry) or await self.commands.in_flight():
-                self._entry_admission_ready = False
-                raise RuntimeError("entry follower reconciliation incomplete")
-            self._stream_ready.set()
-            await self.settings.clear_degraded()
-            await self._publish_master_ready()
-            return True
+            finally:
+                self._master_boundary_active = False
+                recovery_requested = getattr(self, "_master_recovery_requested", None)
+                if recovery_requested is not None and recovery_requested.is_set():
+                    self._ensure_master_recovery_task()
 
     async def _ingest_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -732,6 +862,8 @@ class App:
                 await self._consume(envelope)
             except Exception as exc:  # noqa: BLE001 - one bad event must not kill ingest
                 log.error("ingest processing failed: %s", exc)
+            finally:
+                self._ingest_queue.task_done()
 
     async def _on_delta(self, delta) -> None:
         # A user-data event is a trigger, not an authoritative market quote.

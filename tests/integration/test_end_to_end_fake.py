@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from copytradeaster.app import App
 from copytradeaster.domain.models import (
     AccountState,
     ActionKind,
@@ -34,6 +35,7 @@ from copytradeaster.storage.repositories import (
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.planner import build_plan
+from copytradeaster.trading.reconciler import ReconcileReport
 from tests.integration.fake_aster import FakeAster, FakeOrder, btc_filters
 
 D1 = D
@@ -162,6 +164,72 @@ async def open_master_long(projector, fake, E=1000, qty="1"):
         order_trade(E=E, x="TRADE", X="FILLED", l=qty, z=qty, ap="65000", L="65000", q=qty)
     )
     await projector.apply_raw(stop_new(E=E + 10, c="m-stop", sp="64500"))
+
+
+async def test_app_boundary_rejects_pre_snapshot_queued_trade(env):
+    """Real App envelope + Projector + SQLite + FakeAster boundary.
+
+    The REST state already contains the fill. A WS frame queued before the
+    boundary must be audit-processed without adding the fill a second time.
+    """
+    projector, _, fake, db, _, _ = env
+    fake.positions[("main", "BTCUSDT:BOTH")] = D("1")
+    fake.entry_prices[("main", "BTCUSDT:BOTH")] = D("65000")
+    phases: list[str] = []
+
+    class Reconciler:
+        async def reconcile(self, state, reason):
+            phases.append(reason)
+            return ReconcileReport(per_account={"copyc1": 0})
+
+    class Commands:
+        async def in_flight(self):
+            return []
+
+    app = App.__new__(App)
+    app.master_client = fake
+    app.projector = projector
+    app.reconciler = Reconciler()
+    app.commands = Commands()
+    app.settings = SettingsRepo(db)
+    app._ingest_queue = asyncio.Queue(maxsize=4)
+    app._ingest_dropped = 0
+    app._master_event_seq = 0
+    app._master_boundary_active = False
+    app._stream_connected = True
+    app._stream_epoch = 1
+    app._entry_admission_ready = False
+    app._stream_ready = asyncio.Event()
+    app._ready = False
+    app._notification_token = "integration-boundary"
+    app._emit_notification = lambda **kwargs: asyncio.sleep(0)
+
+    app._enqueue(
+        order_trade(
+            E=1000,
+            x="TRADE",
+            X="FILLED",
+            l="1",
+            z="1",
+            ap="65000",
+            L="65000",
+            q="1",
+            t=900,
+        )
+    )
+    assert await app._establish_master_boundary("integration") is True
+
+    envelope = app._ingest_queue.get_nowait()
+    await app._consume(envelope)
+    app._ingest_queue.task_done()
+
+    key = PositionKey("BTCUSDT", PosSide.BOTH)
+    assert projector.state.positions[key].qty == D("1")
+    assert phases == ["post-stream-close-only", "post-stream-entry"]
+    row = await db.fetchone(
+        "SELECT processed_at FROM master_events WHERE event_type='ORDER_TRADE_UPDATE'"
+    )
+    assert row is not None and row["processed_at"] is not None
 
 
 class TestOpenAndClose:

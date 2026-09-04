@@ -2,11 +2,13 @@
 
 Проект: `JDBACK/copytradeaster`
 Исходный audit baseline: `3c38db34f42d7a61c334367edbc434e6fbb97c8a`
-Текущий рабочий срез: ветка `codex/live-copy-tests-hardening`, checkpoint `918bf46`
+Рабочая ветка: `codex/live-copy-tests-hardening`; `918bf46` — исходный
+WIP-checkpoint Package B, а текущий факт исполнения вести по журналу ниже.
 Подробное текущее состояние: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md)
-Отчёт для следующей сессии: [PRE_MAINNET_HARDENING_HANDOFF_2026-09.md](reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md)
+Исторический WIP-handoff: [PRE_MAINNET_HARDENING_HANDOFF_2026-09.md](reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md)
 
-Статус на 2026-09-04: **Package A сделан; Package B — WIP / NOT GREEN; Packages C–F не начинались.**
+Статус на 2026-09-04: **Packages A–B сделаны и закрыты offline-
+acceptance; Packages C–F не начинались. Mainnet по-прежнему запрещён.**
 
 Обозначения: `[x]` — сделано и подтверждено; `[~]` — частично/WIP; `[ ]` — осталось.
 
@@ -104,11 +106,13 @@ Runtime recovery и boot recovery должны использовать одну
 
 ---
 
-## PM-B2 — Master snapshot / WS queue recovery boundary — WIP / NOT GREEN
+## PM-B2 — Master snapshot / WS queue recovery boundary — DONE 2026-09-04
 
-Статус: `[~]` красная race-репродукция выполнена; в ветке есть частичная реализация
-generation/dirty, concurrent WS receive, overflow/disconnect recovery. После production-
-изменений focused tests ещё не доведены до зелёного состояния.
+Статус: `[x]` generation публикуется только после завершённого REST snapshot;
+pre-boundary frames не мутируют state, delayed frames проверяются по Aster
+server-time cutoff, overflow/старый backlog ставят dirty и запускают
+coalesced authoritative recovery. Offline unit/replay/integration acceptance зелёный;
+signed Testnet proof остаётся в финальном Package F.
 
 ### Проблема
 
@@ -165,10 +169,12 @@ generation/dirty, concurrent WS receive, overflow/disconnect recovery. Посл�
 
 ---
 
-## PM-B3 — Startup stale-entry gate — WIP / NOT GREEN
+## PM-B3 — Startup stale-entry gate — DONE 2026-09-04
 
-Статус: `[~]` process-local entry admission и close-only startup boundary добавлены
-частично; acceptance-тесты и полный post-change gate ещё не подтверждены.
+Статус: `[x]` startup/reconnect admission открывается только после live WS,
+первого authoritative snapshot, close-only follower sweep, второго финального
+snapshot и entry reconcile без in-flight commands. Disconnect/dirty закрывают
+admission синхронно; REST-only fallback остаётся close-only.
 
 ### Проблема
 

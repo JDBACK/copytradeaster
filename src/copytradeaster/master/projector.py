@@ -226,6 +226,7 @@ class MasterProjector:
                     await self._on_account_update(raw.get("a", {}), event_id)
                 elif event_type == "ACCOUNT_CONFIG_UPDATE":
                     await self._on_config_update(raw, event_id)
+                    critical_reason = "account-config-update"
                 elif event_type == "MARGIN_CALL":
                     await self._on_margin_call(raw, event_id)
                     critical_reason = "margin_call"
@@ -244,11 +245,11 @@ class MasterProjector:
         stale OPEN episode (which would poison sizing and the own-fill guard).
         """
         async with self._state_lock:
-            # Increment at boundary START. Frames received during REST reads are
-            # tagged with this generation, then rejected by the completion
-            # cutoff; frames already queued retain the previous generation.
-            self._generation += 1
-            generation = self._generation
+            # Publish the next generation only after every authoritative read
+            # and durable episode sync has completed. Frames received while
+            # the boundary is in flight retain the previous generation and
+            # therefore cannot mutate the completed snapshot.
+            generation = self._generation + 1
             self.mark_dirty("*")
 
             balances = await client.balance(account_id)
@@ -304,14 +305,19 @@ class MasterProjector:
                     take_profit=tp,
                     unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
                 )
-            completed_at_ms = int(time.time() * 1000)
-            self.state = MasterState(
+            # E timestamps are in Aster server time. A local wall-clock cutoff
+            # is unsafe within the allowed clock-drift window: a client clock
+            # behind Aster could accept a delayed pre-snapshot fill as new.
+            completed_at_ms = await client.server_time()
+            snapshot_state = MasterState(
                 available_usdt=available,
                 positions=positions,
                 event_time=completed_at_ms,
                 generation=generation,
             )
-            await self._sync_episodes_from_snapshot(held_keys)
+            await self._sync_episodes_from_snapshot(held_keys, state=snapshot_state)
+            self.state = snapshot_state
+            self._generation = generation
             self._authoritative_cutoff_ms = completed_at_ms
             self._last_event_time = completed_at_ms
             self._dirty_symbols.clear()
@@ -342,16 +348,22 @@ class MasterProjector:
         if refreshed:
             self.state.event_time = int(time.time() * 1000)
 
-    async def _sync_episodes_from_snapshot(self, held_keys: set[PositionKey]) -> None:
+    async def _sync_episodes_from_snapshot(
+        self,
+        held_keys: set[PositionKey],
+        *,
+        state: MasterState | None = None,
+    ) -> None:
         """Close OPEN episodes whose exchange position is gone; open one where
         the exchange holds a position without an active episode. A direction
         mismatch (position sign flipped while we were away) closes the stale
         episode and opens a new one for the new side."""
+        snapshot = state or self.state
         seen: dict[tuple[str, str], PositionKey] = {
             (k.symbol, k.pos_side.value): k for k in held_keys
         }
         for key in held_keys:
-            pos = self.state.positions.get(key)
+            pos = snapshot.positions.get(key)
             pos_sign = 0 if pos is None or pos.qty == 0 else (1 if pos.qty > 0 else -1)
             active = await self._trades.active_trade(key.symbol, key.pos_side.value)
             if active is not None and pos_sign != 0:
@@ -585,11 +597,13 @@ class MasterProjector:
         if ac is not None:
             symbol = str(ac.get("s", ""))
             leverage = int(ac.get("l", 0))
+            changed = False
             for key, pos in self.state.positions.items():
                 if key.symbol == symbol:
                     pos.leverage = leverage
-                    await self._emit(frozenset({symbol}))
-                    break
+                    changed = True
+            if changed:
+                await self._emit(frozenset({symbol}))
         ai = body.get("ai")
         if ai is not None and bool(ai.get("d")):
             log.warning("position mode switch detected - full rebuild required")

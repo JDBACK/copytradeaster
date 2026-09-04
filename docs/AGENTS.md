@@ -34,8 +34,8 @@
     corrective gate после независимого аудита: план, полный журнал и evidence.
 13. `docs/plan_live_test.md` — исходный pre-mainnet hardening plan с текущими
     статусами Package A–F; подробный факт исполнения — в отчёте ниже.
-14. `docs/reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` — короткий handoff
-    для следующей сессии: репо, ветка, план, сделанное, остаток и особенности.
+14. `docs/reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` — исторический
+    WIP-checkpoint Package B на `918bf46`; текущую правду брать из пунктов 3, 5 и 13.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.
 
@@ -83,8 +83,8 @@
 | `STAGE3_PART1_REMEDIATION_IMPLEMENTATION_PROMPT_2026-09.md` | Готовый промпт исполнителю Part 1 remediation (ветка `codex/stage-3-mini-app-part1`): обязательное чтение, diff-база, критерии приёмки. Исторический, исполнение закрыто файлом выше |
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Исходный implementation plan follower Mini App: восемь подчастей P2.0–P2.7, конкретные файлы, Testnet acceptance gates и anti-overengineering boundaries (2026-09-01). Статус внутри — `PLAN READY / IMPLEMENTATION NOT STARTED`; факт исполнения — строкой ниже |
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
-| `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` | **Открытый append-only журнал pre-mainnet hardening: Packages A–F, safety blockers PM-B1..PM-B8, тестовые поверхности и evidence (STARTED 2026-09-04; Package A CLOSED, Package B WIP).** |
-| `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | Handoff для следующей сессии по ветке `codex/live-copy-tests-hardening`: repo/branch/plan/done/remaining/working conventions (2026-09-04) |
+| `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` | **Открытый append-only журнал pre-mainnet hardening: Packages A–F, safety blockers PM-B1..PM-B8, тестовые поверхности и evidence (STARTED 2026-09-04; Packages A–B CLOSED, Package C next).** |
+| `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | Исторический WIP-handoff Package B на checkpoint `918bf46`; актуальный факт исполнения — в `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` (2026-09-04) |
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 

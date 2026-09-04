@@ -9,9 +9,11 @@ import pytest
 
 import copytradeaster.app as app_module
 from copytradeaster.app import (
+    MASTER_INGEST_MAX_AGE_S,
     TESTNET_REST_URL,
     TESTNET_WS_URL,
     App,
+    MasterIngestEnvelope,
     validate_shadow_boot,
 )
 from copytradeaster.aster.shadow import ShadowExchange
@@ -331,6 +333,25 @@ def test_app_composes_leverage_control_plane(tmp_path):
     )
 
 
+def test_master_entry_admission_requires_ready_connected_and_clean_projection():
+    app = App.__new__(App)
+    app._entry_admission_ready = True
+    app._stream_connected = True
+    app.projector = SimpleNamespace(dirty_symbols=frozenset())
+    assert app._master_entry_admitted() is True
+
+    app.projector.dirty_symbols = frozenset({"BTCUSDT"})
+    assert app._master_entry_admitted() is False
+
+    app.projector.dirty_symbols = frozenset()
+    app._stream_connected = False
+    assert app._master_entry_admitted() is False
+
+    app._stream_connected = True
+    app._entry_admission_ready = False
+    assert app._master_entry_admitted() is False
+
+
 @pytest.mark.asyncio
 async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):
     app = App.__new__(App)
@@ -359,6 +380,7 @@ async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):
 
 def test_ingest_overflow_marks_dropped_symbol_dirty_and_requests_recovery():
     app = App.__new__(App)
+    app.projector = SimpleNamespace(generation=7)
     app._ingest_queue = asyncio.Queue(maxsize=1)
     app._ingest_dropped = 0
     marked: list[tuple[dict, str]] = []
@@ -371,3 +393,42 @@ def test_ingest_overflow_marks_dropped_symbol_dirty_and_requests_recovery():
 
     assert app._ingest_dropped == 1
     assert marked == [(first, "ingest-overflow")]
+    queued = app._ingest_queue.get_nowait()
+    assert queued.raw == second
+    assert queued.generation == 7
+
+
+@pytest.mark.asyncio
+async def test_ingest_backlog_age_matches_master_freshness_boundary(monkeypatch):
+    """`== 5s` stays valid; `> 5s` is stale and requires a REST boundary."""
+    app = App.__new__(App)
+    applied: list[tuple[dict, int]] = []
+    marked: list[tuple[dict, str]] = []
+
+    class Projector:
+        async def apply_raw(self, raw, *, generation):
+            applied.append((raw, generation))
+
+    app.projector = Projector()
+    app._mark_master_dirty = lambda raw, reason: marked.append((raw, reason))
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
+    at_boundary = {"e": "ACCOUNT_UPDATE", "E": 1}
+    over_boundary = {"e": "ACCOUNT_UPDATE", "E": 2}
+
+    await app._consume(
+        MasterIngestEnvelope(
+            raw=at_boundary,
+            generation=3,
+            received_at=100.0 - MASTER_INGEST_MAX_AGE_S,
+        )
+    )
+    await app._consume(
+        MasterIngestEnvelope(
+            raw=over_boundary,
+            generation=3,
+            received_at=100.0 - MASTER_INGEST_MAX_AGE_S - 0.001,
+        )
+    )
+
+    assert applied == [(at_boundary, 3)]
+    assert marked == [(over_boundary, "ingest-backlog-stale")]

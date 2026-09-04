@@ -139,6 +139,9 @@ class TestPersistedBasis:
         projector2, coordinator2 = build_stack(db, fake)
 
         class MasterSnapshot:
+            async def server_time(self):
+                return await fake.server_time()
+
             async def balance(self, account_id):
                 return await fake.balance(account_id)
 

@@ -345,14 +345,24 @@ class TestAppStartupGap:
         from copytradeaster.trading.reconciler import ReconcileReport
 
         calls: list[str] = []
+        notifications: list[str] = []
 
         class Projector:
             state = object()
+
+            def __init__(self):
+                self.generation = 0
+                self.dirty_symbols = frozenset()
+
+            def mark_dirty(self, *symbols):
+                self.dirty_symbols = frozenset(symbols)
 
             async def rebuild_full(self, client, account_id):
                 assert client is master_client and account_id == "main"
                 assert not app._stream_ready.is_set()
                 calls.append("rebuild")
+                self.generation += 1
+                self.dirty_symbols = frozenset()
 
         class Reconciler:
             async def reconcile(self, state, reason):
@@ -378,6 +388,9 @@ class TestAppStartupGap:
             async def set_flag(self, key, value):
                 self.flags.append((key, value))
 
+            async def clear_degraded(self):
+                self.flags.append(("degraded", "clear"))
+
         master_client = object()
         app = App.__new__(App)
         app.master_client = master_client
@@ -390,10 +403,19 @@ class TestAppStartupGap:
         app._entry_admission_ready = False
         app._ready = False
         app._notification_token = "startup-test"
-        app._emit_notification = lambda **kwargs: asyncio.sleep(0)
+
+        async def emit_notification(**kwargs):
+            notifications.append(kwargs["kind"])
+
+        app._emit_notification = emit_notification
 
         await app._on_stream_connected()
-        assert calls == ["rebuild", "post-stream-close-only", "post-stream-entry"]
+        assert calls == [
+            "rebuild",
+            "post-stream-close-only",
+            "rebuild",
+            "post-stream-entry",
+        ]
         assert app._entry_admission_ready is True
         assert app._ready is True
         assert app._stream_ready.is_set() and app._stream_connect_count == 1
@@ -402,12 +424,266 @@ class TestAppStartupGap:
         assert calls == [
             "rebuild",
             "post-stream-close-only",
+            "rebuild",
             "post-stream-entry",
             "rebuild",
             "post-stream-close-only",
+            "rebuild",
             "post-stream-entry",
         ]
         assert app._stream_connect_count == 2
+        assert notifications == ["engine.ready"]
+
+    async def test_boundary_repeats_snapshot_before_entry_when_stream_was_not_quiescent(self):
+        from copytradeaster.app import App
+        from copytradeaster.trading.reconciler import ReconcileReport
+
+        calls: list[str] = []
+
+        class Projector:
+            state = object()
+
+            def __init__(self):
+                self.generation = 0
+                self.dirty_symbols = frozenset()
+
+            def mark_dirty(self, *symbols):
+                self.dirty_symbols = frozenset(symbols)
+
+            async def rebuild_full(self, client, account_id):
+                self.generation += 1
+                self.dirty_symbols = frozenset()
+                calls.append(f"rebuild-{self.generation}")
+                if self.generation == 1:
+                    # A frame arrived after this pass began. The first REST
+                    # result cannot be the admission boundary.
+                    app._enqueue(
+                        {
+                            "e": "ORDER_TRADE_UPDATE",
+                            "E": 10,
+                            "o": {"s": "BTCUSDT", "x": "TRADE"},
+                        }
+                    )
+
+        class Reconciler:
+            async def reconcile(self, state, reason):
+                calls.append(reason)
+                return ReconcileReport(per_account={"copyc1": 0})
+
+        class Commands:
+            async def in_flight(self):
+                return []
+
+        class Settings:
+            async def set_flag(self, key, value):
+                return None
+
+            async def clear_degraded(self):
+                return None
+
+        app = App.__new__(App)
+        app.master_client = object()
+        app.projector = Projector()
+        app.reconciler = Reconciler()
+        app.commands = Commands()
+        app.settings = Settings()
+        app._stream_connected = True
+        app._stream_epoch = 1
+        app._master_event_seq = 0
+        app._ingest_queue = asyncio.Queue(maxsize=4)
+        app._ingest_dropped = 0
+        app._master_recovery_requested = asyncio.Event()
+        app._master_recovery_task = None
+        app.stop_event = asyncio.Event()
+        app._entry_admission_ready = False
+        app._stream_ready = asyncio.Event()
+        app._ready = False
+        app._notification_token = "quiescence-test"
+        app._emit_notification = lambda **kwargs: asyncio.sleep(0)
+
+        assert await app._establish_master_boundary("test") is True
+        assert calls == [
+            "rebuild-1",
+            "post-stream-close-only",
+            "rebuild-2",
+            "post-stream-close-only",
+            "rebuild-3",
+            "post-stream-entry",
+        ]
+        assert app._entry_admission_ready is True
+        assert app._ready is True
+        assert app._master_recovery_task is None
+        assert not app._master_recovery_requested.is_set()
+
+    async def test_disconnect_during_close_only_boundary_never_runs_entry_phase(self):
+        from copytradeaster.app import App
+        from copytradeaster.trading.reconciler import ReconcileReport
+
+        calls: list[str] = []
+
+        class Projector:
+            state = object()
+            generation = 0
+            dirty_symbols = frozenset()
+
+            def mark_dirty(self, *symbols):
+                self.dirty_symbols = frozenset(symbols)
+
+            async def rebuild_full(self, client, account_id):
+                self.generation += 1
+                self.dirty_symbols = frozenset()
+                calls.append("rebuild")
+
+        class Reconciler:
+            async def reconcile(self, state, reason):
+                calls.append(reason)
+                if reason == "post-stream-close-only":
+                    app._stream_connected = False
+                    app._stream_epoch += 1
+                return ReconcileReport(per_account={"copyc1": 0})
+
+        class Commands:
+            async def in_flight(self):
+                return []
+
+        class Settings:
+            async def set_flag(self, key, value):
+                return None
+
+            async def clear_degraded(self):
+                raise AssertionError("disconnected boundary cannot clear degraded")
+
+        app = App.__new__(App)
+        app.master_client = object()
+        app.projector = Projector()
+        app.reconciler = Reconciler()
+        app.commands = Commands()
+        app.settings = Settings()
+        app._stream_connected = True
+        app._stream_epoch = 1
+        app._master_event_seq = 0
+        app._entry_admission_ready = False
+        app._stream_ready = asyncio.Event()
+        app._ready = False
+        app._notification_token = "disconnect-test"
+        app._emit_notification = lambda **kwargs: asyncio.sleep(0)
+
+        assert await app._establish_master_boundary("test") is False
+        assert calls == ["rebuild", "post-stream-close-only"]
+        assert app._entry_admission_ready is False
+        assert app._ready is False
+        assert not app._stream_ready.is_set()
+
+    async def test_inflight_after_close_only_boundary_blocks_entry_admission(self):
+        from copytradeaster.app import App
+        from copytradeaster.trading.reconciler import ReconcileReport
+
+        calls: list[str] = []
+
+        class Projector:
+            state = object()
+            generation = 0
+            dirty_symbols = frozenset()
+
+            def mark_dirty(self, *symbols):
+                self.dirty_symbols = frozenset(symbols)
+
+            async def rebuild_full(self, client, account_id):
+                self.generation += 1
+                self.dirty_symbols = frozenset()
+                calls.append("rebuild")
+
+        class Reconciler:
+            async def reconcile(self, state, reason):
+                calls.append(reason)
+                return ReconcileReport(per_account={"copyc1": 1})
+
+        class Commands:
+            async def in_flight(self):
+                return [object()]
+
+        class Settings:
+            async def set_flag(self, key, value):
+                return None
+
+        app = App.__new__(App)
+        app.master_client = object()
+        app.projector = Projector()
+        app.reconciler = Reconciler()
+        app.commands = Commands()
+        app.settings = Settings()
+        app._stream_connected = True
+        app._stream_epoch = 1
+        app._master_event_seq = 0
+        app._entry_admission_ready = False
+        app._stream_ready = asyncio.Event()
+        app._ready = False
+
+        with pytest.raises(RuntimeError, match="close-only follower reconciliation incomplete"):
+            await app._establish_master_boundary("test")
+
+        assert calls == ["rebuild", "post-stream-close-only"]
+        assert app._entry_admission_ready is False
+        assert app._ready is False
+
+    async def test_boundary_pass_limit_stays_fail_closed_under_continuous_events(self, monkeypatch):
+        import copytradeaster.app as app_module
+        from copytradeaster.app import App
+        from copytradeaster.trading.reconciler import ReconcileReport
+
+        calls: list[str] = []
+
+        class Projector:
+            state = object()
+            generation = 0
+            dirty_symbols = frozenset()
+
+            def mark_dirty(self, *symbols):
+                self.dirty_symbols = frozenset(symbols)
+
+            async def rebuild_full(self, client, account_id):
+                self.generation += 1
+                self.dirty_symbols = frozenset()
+                calls.append("rebuild")
+                app._master_event_seq += 1
+
+        class Reconciler:
+            async def reconcile(self, state, reason):
+                calls.append(reason)
+                return ReconcileReport(per_account={"copyc1": 0})
+
+        class Commands:
+            async def in_flight(self):
+                return []
+
+        class Settings:
+            async def set_flag(self, key, value):
+                return None
+
+        monkeypatch.setattr(app_module, "MASTER_BOUNDARY_MAX_PASSES", 2)
+        app = App.__new__(App)
+        app.master_client = object()
+        app.projector = Projector()
+        app.reconciler = Reconciler()
+        app.commands = Commands()
+        app.settings = Settings()
+        app._stream_connected = True
+        app._stream_epoch = 1
+        app._master_event_seq = 0
+        app._entry_admission_ready = False
+        app._stream_ready = asyncio.Event()
+        app._ready = False
+
+        assert await app._establish_master_boundary("test") is False
+        assert calls == [
+            "rebuild",
+            "post-stream-close-only",
+            "rebuild",
+            "post-stream-close-only",
+        ]
+        assert app.projector.dirty_symbols == frozenset({"*"})
+        assert app._entry_admission_ready is False
+        assert app._ready is False
 
 
 class TestCliDispatch:

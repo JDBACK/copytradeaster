@@ -165,6 +165,60 @@ async def test_disconnect_callback_runs_before_reconnect_backoff():
         await asyncio.wait_for(task, timeout=2)
 
 
+async def test_disconnect_during_connected_boundary_is_reported_before_boundary_finishes():
+    """A socket that dies during the REST boundary must close admission before
+    the connected callback can finish and publish READY."""
+    disconnected = asyncio.Event()
+    boundary_observed_disconnect = asyncio.Event()
+
+    async def on_connected() -> None:
+        await asyncio.wait_for(disconnected.wait(), timeout=0.5)
+        boundary_observed_disconnect.set()
+
+    async def on_disconnected() -> None:
+        disconnected.set()
+
+    stream = make_stream(
+        FakeClient(["lk1"]),
+        FlakyFactory(0, [FakeWS(['{"e":"listenKeyExpired","E":5}'])]),
+        lambda event: asyncio.sleep(0),
+        on_connected=on_connected,
+        on_disconnected=on_disconnected,
+        backoff_base_s=1,
+        backoff_max_s=1,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(stream.run(stop))
+    try:
+        await asyncio.wait_for(boundary_observed_disconnect.wait(), timeout=1)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+
+
+async def test_connected_boundary_failure_reports_disconnect_and_stops_admission_cycle():
+    disconnected = asyncio.Event()
+    stop = asyncio.Event()
+
+    async def on_connected() -> None:
+        raise RuntimeError("snapshot unavailable")
+
+    async def on_disconnected() -> None:
+        disconnected.set()
+        stop.set()
+
+    stream = make_stream(
+        FakeClient(["lk1"]),
+        FlakyFactory(0, [FakeWS([])]),
+        lambda event: asyncio.sleep(0),
+        on_connected=on_connected,
+        on_disconnected=on_disconnected,
+    )
+
+    await asyncio.wait_for(stream.run(stop), timeout=1)
+    assert disconnected.is_set()
+
+
 async def test_listen_key_expired_rotates_and_reconnects():
     events: list[StreamEvent] = []
     reconnected: list[int] = []

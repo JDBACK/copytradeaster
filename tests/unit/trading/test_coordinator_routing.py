@@ -251,6 +251,13 @@ async def test_runtime_entry_admission_blocks_open_but_not_user_pause_state(env)
 
     assert all(fr.client.placed == [] for fr in followers)
 
+    # The process-local startup/reconnect gate is not a durable user pause:
+    # risk-reducing convergence must remain available while entries are shut.
+    key = PositionKey("BTCUSDT")
+    followers[0].client.positions[key] = {"qty": D("0.05"), "stop": D("64500")}
+    await coordinator.on_master_delta(delta_of(MasterState(available_usdt=D(1), positions={})))
+    assert any(order["type"] == "MARKET" for order in followers[0].client.placed)
+
 
 async def test_production_recompute_uses_exchange_symbol_maximum(env):
     coordinator, followers, _, _ = env

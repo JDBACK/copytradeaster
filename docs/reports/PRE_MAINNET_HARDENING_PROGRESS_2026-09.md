@@ -4,7 +4,7 @@
 Источник плана: owner-provided `Pre-Mainnet Hardening Plan`
 Audit baseline плана: `3c38db34f42d7a61c334367edbc434e6fbb97c8a`
 Рабочий кодовый срез на старте: `0db6c8476d9e623824129b028e2223fc64c32187`
-Статус: **Package A / PM-B1 CLOSED — Package B WIP checkpoint, NOT GREEN**
+Статус: **Packages A–B CLOSED — Package C / PM-B4 next**
 Рабочая ветка: `codex/live-copy-tests-hardening`
 
 Этот файл — append-only журнал исполнения нового pre-mainnet gate. Актуальные
@@ -80,7 +80,7 @@ query-unavailable и partial-fill сценариев в текущем конт�
 - [x] Package A: доказать отсутствие обхода через Builder DIRECT fallback.
 - [x] Package A: unit + Fake negative + integration regression gate.
 - [x] Package A: signed Testnet fault injection + restart/SIGKILL evidence.
-- [ ] Package B: master dirty/generation/queue/startup gate.
+- [x] Package B: master dirty/generation/queue/startup gate.
 - [ ] Package C: immutable `AsterNetworkProfile` + Mainnet preflight.
 - [ ] Package D: zero/protection/leverage-liquidation invariants.
 - [ ] Package E: production snapshot envelope + health convergence + launch cap.
@@ -179,12 +179,51 @@ disconnect закрывают только process-local increases, а startup �
 
 Точка продолжения Package B:
 
-- [ ] Исправить READY transition: не терять pre-boundary state и не слать
+- [x] Исправить READY transition: не терять pre-boundary state и не слать
   повторные READY notifications на каждом boundary.
-- [ ] Обновить app-lifecycle fakes под `mark_dirty`, envelope/generation и
+- [x] Обновить app-lifecycle fakes под `mark_dirty`, envelope/generation и
   `clear_degraded`.
-- [ ] Запустить шесть focused race-tests после implementation, исправить все
+- [x] Запустить шесть focused race-tests после implementation, исправить все
   падения и добавить negative/repeated reconnect cases.
-- [ ] После focused green запустить полный `not testnet` suite с coverage,
+- [x] После focused green запустить полный `not testnet` suite с coverage,
   `ruff check`, `ruff format --check` и `git diff --check`.
-- [ ] Только после этого закрывать Package B и переходить к Package C.
+- [x] Только после этого закрывать Package B и переходить к Package C.
+
+## 2026-09-04 — Package B / PM-B2 + PM-B3 закрыт offline
+
+После checkpoint шесть исходных красных race-регрессий доведены до green,
+а соседние error/boundary/repeated cases добавлены по реальному контракту.
+
+Реализовано:
+
+- `MasterProjector` публикует новую generation только после всех REST-чтений
+  и durable episode sync; неудачный snapshot сохраняет прежние state/
+  generation и оставляет master dirty;
+- frames, полученные до/во время boundary, не могут мутировать новый state;
+  delayed current-generation mutation сверяется с cutoff в Aster server-time;
+- граница выбрана явно: `< cutoff` разрешал бы event в той же millisecond;
+  `<= cutoff` считает его не доказанно post-snapshot и требует rebuild, что
+  соответствует fail-closed wording PM-B2;
+- `UserStream` запускает receive до connected-boundary callback и сообщает
+  disconnect до завершения медленного callback;
+- App envelope несёт generation + monotonic receive time; queue overflow и backlog
+  старше 5 s синхронно закрывают local entry gate, ставят dirty и
+  coalesce recovery; `age == 5s` ещё fresh, `age > 5s` stale — это совпадает
+  с существующим Coordinator master-freshness contract;
+- startup/reconnect boundary ограничен тремя coalesced passes: master snapshot →
+  close-only follower sweep → финальный master snapshot → entry reconcile; при
+  continuous events, disconnect, dirty или in-flight commands READY не публикуется;
+- process-local admission требует одновременно READY, live stream и clean
+  projector; closes/reductions проходят при закрытом gate;
+- `ACCOUNT_CONFIG_UPDATE` обновляет обе HEDGE legs и запрашивает authoritative
+  rebuild; position-mode update больше не остаётся только log-line.
+
+Проверены целые затронутые unit/replay/integration files, отдельная
+App + real Projector + SQLite + FakeAster queue/rebuild integration и полный
+hermetic backend suite с documentary coverage gate. Актуальные счётчики
+хранятся только в `../ENGINE_TEST_STATUS_2026-08.md`; ruff, format,
+compileall и diff-check clean.
+
+Package B acceptance закрыт на offline/hermetic уровне. Signed Testnet Snapshot/WS,
+startup-change и reconnect-resnapshot failure scenarios остаются в Package F;
+это не является Mainnet readiness verdict. Следующий пакет — C / PM-B4.

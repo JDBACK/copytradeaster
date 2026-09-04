@@ -492,6 +492,25 @@ Read/write cursors закрываются сразу после операции
 
 Master user-data WebSocket обязателен.
 
+`UserStream` запускает socket receive до post-connect callback: frames, уже
+накопившиеся у Aster, попадают в bounded App queue параллельно REST
+boundary. Disconnect callback вызывается до завершения медленного
+post-connect callback, чтобы он не мог открыть entry admission для уже
+мёртвого socket.
+
+Authoritative master boundary имеет process-local generation. `MasterProjector`
+публикует новую generation только после всех REST reads и durable episode
+sync. Envelope, полученный до этого cutover, audit-персистится, но не
+мутирует новый state. Delayed event той же generation сверяет exchange
+`E` с cutoff в Aster server-time; `E <= cutoff` не считается доказанно
+post-snapshot, отбрасывается и делает master dirty.
+
+Queue overflow и envelope с monotonic age `> 5s` закрывают process-local
+entry admission и запрашивают coalesced REST recovery. Не более трёх
+непрерывных boundary passes делаются за один вызов; при непрерывном
+потоке система остаётся close-only/dirty и повторяет recovery по
+периодическому sweep, не крутя бесконечный REST-loop.
+
 Для followers на первом этапе достаточно:
 
 ```text
@@ -551,20 +570,34 @@ BOOT
  ↓
 load local state
  ↓
-master REST snapshot
- ↓
-follower snapshots
- ↓
 resolve SENDING/SUBMITTED/UNKNOWN commands
+ ↓
+master REST snapshot
  ↓
 seed leverage candidate catalog (fail-closed if unavailable)
  ↓
-reconciliation
+startup follower reconciliation (entry gate closed; close/reduce/protect only)
+ ↓
+start ingest + master WS receive
+ ↓
+post-connect master REST snapshot
+ ↓
+close-only follower reconciliation
+ ↓
+final master REST snapshot
+ ↓
+open process-local entry admission + entry reconciliation
  ↓
 READY
 ```
 
-Только после `READY` разрешаются новые follower entries. Boot recovery применяет тот же
+Новые follower entries разрешаются только при одновременных `READY`, live
+master stream и clean projector. Если WS недоступен, процесс остаётся живым
+для authoritative REST close/reduce/protection sweeps, но не публикует READY и не
+открывает exposure. Disconnect, dirty projection, continuous boundary events или
+in-flight commands закрывают admission, но не блокируют risk-reducing actions.
+
+Boot recovery применяет тот же
 `FOUND / PROVEN_NOT_EXECUTED / UNRESOLVED` контракт, что и runtime. Legacy MARKET-row
 без `recovery_context` не может быть признан неисполненным: он остаётся in-flight и
 останавливает boot fail-closed.

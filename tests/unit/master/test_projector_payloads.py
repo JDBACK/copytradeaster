@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -313,6 +314,9 @@ class TestDedupAndOrder:
             position_side = PosSide.BOTH
 
         class Client:
+            async def server_time(self):
+                return 2000
+
             async def balance(self, account_id):
                 return [Balance()]
 
@@ -339,6 +343,122 @@ class TestDedupAndOrder:
 
         key = PositionKey("BTCUSDT", PosSide.BOTH)
         assert projector.state.positions[key].qty == D("0.002")
+
+    async def test_frame_received_during_rebuild_keeps_previous_generation(self, deps):
+        """The generation cutover is the completed snapshot, not its start."""
+        projector, _, _ = deps
+        balance_read_started = asyncio.Event()
+        release_balance = asyncio.Event()
+
+        class Balance:
+            asset = "USDT"
+            available_balance = D("500")
+
+        class Position:
+            symbol = "BTCUSDT"
+            position_amt = D("0.002")
+            entry_price = D("65000")
+            mark_price = D("65000")
+            leverage = 5
+            liquidation_price = D("30000")
+            position_side = PosSide.BOTH
+
+        class Client:
+            async def server_time(self):
+                return 2000
+
+            async def balance(self, account_id):
+                balance_read_started.set()
+                await release_balance.wait()
+                return [Balance()]
+
+            async def position_risk(self, account_id, symbol=None):
+                return [Position()]
+
+            async def open_orders(self, account_id, symbol=None):
+                return []
+
+        previous_generation = projector.generation
+        rebuild = asyncio.create_task(projector.rebuild_full(Client(), "main"))
+        await balance_read_started.wait()
+        received_generation = projector.generation
+        assert received_generation == previous_generation
+
+        release_balance.set()
+        await rebuild
+        assert projector.generation == previous_generation + 1
+
+        await projector.apply_raw(
+            order_trade(
+                E=3000,
+                x="TRADE",
+                X="FILLED",
+                l="0.002",
+                z="0.002",
+                ap="65000",
+                L="65000",
+                q="0.002",
+                t=45,
+            ),
+            generation=received_generation,
+        )
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        assert projector.state.positions[key].qty == D("0.002")
+
+    async def test_server_cutoff_is_inclusive_when_local_clock_is_behind(self, deps, monkeypatch):
+        """E == snapshot server time is ambiguous, so fail closed as stale.
+
+        Using `< cutoff` would accept equality; `<= cutoff` is required because
+        millisecond timestamps cannot prove that the event happened after the
+        snapshot. A local cutoff would also be wrong within permitted drift.
+        """
+        projector, _, _ = deps
+        monkeypatch.setattr("copytradeaster.master.projector.time.time", lambda: 1.0)
+
+        class Balance:
+            asset = "USDT"
+            available_balance = D("500")
+
+        class Position:
+            symbol = "BTCUSDT"
+            position_amt = D("0.002")
+            entry_price = D("65000")
+            mark_price = D("65000")
+            leverage = 5
+            liquidation_price = D("30000")
+            position_side = PosSide.BOTH
+
+        class Client:
+            async def server_time(self):
+                return 2000
+
+            async def balance(self, account_id):
+                return [Balance()]
+
+            async def position_risk(self, account_id, symbol=None):
+                return [Position()]
+
+            async def open_orders(self, account_id, symbol=None):
+                return []
+
+        await projector.rebuild_full(Client(), "main")
+        await projector.apply_raw(
+            order_trade(
+                E=2000,
+                x="TRADE",
+                X="FILLED",
+                l="0.002",
+                z="0.002",
+                ap="65000",
+                L="65000",
+                q="0.002",
+                t=46,
+            )
+        )
+
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        assert projector.state.positions[key].qty == D("0.002")
+        assert projector.dirty_symbols == frozenset({"BTCUSDT"})
 
 
 class TestAccountUpdate:
@@ -374,6 +494,60 @@ class TestConfigUpdate:
         )
         key = PositionKey("BTCUSDT", PosSide.BOTH)
         assert projector.state.positions[key].leverage == 10
+
+    async def test_hedge_leverage_change_updates_both_legs_and_requests_rebuild(self, deps):
+        projector, _, _ = deps
+        reasons: list[str] = []
+
+        async def on_critical(reason: str) -> None:
+            reasons.append(reason)
+
+        projector._on_critical = on_critical
+        await projector.apply_raw(
+            order_trade(
+                E=1000,
+                x="TRADE",
+                X="FILLED",
+                S="BUY",
+                l="0.002",
+                L="65000",
+                ps="LONG",
+                t=80,
+            )
+        )
+        await projector.apply_raw(
+            order_trade(
+                E=1001,
+                x="TRADE",
+                X="FILLED",
+                S="SELL",
+                l="0.003",
+                L="65000",
+                ps="SHORT",
+                t=81,
+            )
+        )
+        reasons.clear()
+
+        await projector.apply_raw(
+            {"e": "ACCOUNT_CONFIG_UPDATE", "E": 3000, "ac": {"s": "BTCUSDT", "l": 10}}
+        )
+
+        assert projector.state.positions[PositionKey("BTCUSDT", PosSide.LONG)].leverage == 10
+        assert projector.state.positions[PositionKey("BTCUSDT", PosSide.SHORT)].leverage == 10
+        assert reasons == ["account-config-update"]
+
+    async def test_position_mode_change_requests_authoritative_rebuild(self, deps):
+        projector, _, _ = deps
+        reasons: list[str] = []
+
+        async def on_critical(reason: str) -> None:
+            reasons.append(reason)
+
+        projector._on_critical = on_critical
+        await projector.apply_raw({"e": "ACCOUNT_CONFIG_UPDATE", "E": 3001, "ai": {"d": True}})
+
+        assert reasons == ["account-config-update"]
 
 
 class TestMarginCall:
@@ -422,6 +596,22 @@ class TestMarginCall:
 
 
 class TestRebuildFull:
+    async def test_failed_snapshot_keeps_previous_generation_and_master_dirty(self, deps):
+        projector, _, _ = deps
+        previous_state = projector.state
+        previous_generation = projector.generation
+
+        class Client:
+            async def balance(self, account_id):
+                raise RuntimeError("snapshot unavailable")
+
+        with pytest.raises(RuntimeError, match="snapshot unavailable"):
+            await projector.rebuild_full(Client(), "main")
+
+        assert projector.state is previous_state
+        assert projector.generation == previous_generation
+        assert projector.dirty_symbols == frozenset({"*"})
+
     async def test_snapshot_backfills_legacy_zero_direction(self, deps):
         projector, _, db = deps
         trade_id = await CopyTradeRepo(db).open_trade("BTCUSDT", "BOTH", None, direction=0)
@@ -440,6 +630,9 @@ class TestRebuildFull:
             position_side = PosSide.BOTH
 
         class Client:
+            async def server_time(self):
+                return 2000
+
             async def balance(self, account_id):
                 return [Balance()]
 
@@ -488,6 +681,9 @@ class TestRebuildFull:
                 self.orig_qty = D("0.002")
 
         class FakeClient:
+            async def server_time(self):
+                return 2000
+
             async def balance(self, account_id):
                 return [FakeBalanceDTO()]
 
@@ -529,6 +725,9 @@ class TestRebuildFull:
             position_side = PosSide.BOTH
 
         class Client:
+            async def server_time(self):
+                return 2000
+
             async def balance(self, account_id):
                 return [Balance()]
 
@@ -574,6 +773,9 @@ class TestRebuildFull:
             orig_qty = D("0.002")
 
         class Client:
+            async def server_time(self):
+                return 2000
+
             async def balance(self, account_id):
                 return [Balance()]
 

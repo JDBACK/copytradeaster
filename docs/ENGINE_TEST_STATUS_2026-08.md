@@ -3,14 +3,32 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-04):** Stage 1–3 CLOSED; Pre-Mainnet Package A / PM-B1 CLOSED,
-> Package B ещё не закрыт, поэтому Mainnet gate открыт. Offline **1107 passed / 2
+> **TL;DR (2026-09-04):** Stage 1–3 CLOSED; Pre-Mainnet Packages A–B CLOSED,
+> Package C / PM-B4 next, Mainnet gate по-прежнему не пройден. Offline **1126 passed / 2
 > skipped / 45 deselected**, coverage **87%**; frontend 168/17 (последний неизменённый
 > gate); full testnet 42/1 (последний полный gate) + focused PM-B1 signed fault/
 > SIGKILL **2 passed**; ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
+
+- **Pre-Mainnet Package B / PM-B2 + PM-B3 — CLOSED offline (2026-09-04,
+  ветка `codex/live-copy-tests-hardening`):** authoritative master boundary теперь
+  публикует generation только после completed REST snapshot + episode sync,
+  а delayed current-generation frames сверяются с Aster server-time cutoff
+  (`E <= cutoff` fail-closed). `UserStream` читает frames параллельно connected
+  callback и публикует disconnect до его завершения. Queue generation,
+  overflow, backlog `> 5s`, dirty state и bounded coalescing закрывают local
+  entry gate. Startup/reconnect делает master snapshot → close-only follower sweep →
+  финальный master snapshot → entry reconcile; admission требует READY + live WS +
+  clean projector, а disconnect/continuous events/in-flight commands оставляют его
+  закрытым. HEDGE leverage config обновляет обе legs и запускает
+  authoritative rebuild. Целые затронутые unit/replay/integration files:
+  **166 passed**; App + real Projector + SQLite + FakeAster race integration включена.
+  Полный offline gate: **1126 passed / 2 skipped / 45 deselected**, coverage **87%**;
+  ruff check/format, compileall и diff-check clean. Signed Snapshot/WS/startup proof остаётся
+  в Package F, поэтому Mainnet ещё не разрешён. Детали и TODO:
+  `reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
 
 - **Pre-Mainnet Package A / PM-B1 — CLOSED (2026-09-04):** устранён duplicate
   economic mutation после response-lost MARKET. Additive migration #33 хранит
