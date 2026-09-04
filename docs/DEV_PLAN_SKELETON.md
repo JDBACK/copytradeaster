@@ -1,8 +1,11 @@
 # Каркас плана разработки копитрейд-бота на AsterDex
 
-Статус: Stage 1 и Stage 2 закрыты; автоматическая и живая приёмка Stage 2 в
-Telegram (включая resume/copy cycle на реальном тестнете) успешно завершена
-24.08.2026. Видение — три этапа (раздел 4). Полный фактологический бэкграунд — в
+Статус: Stage 1, Stage 2 и Stage 3 (Part 1 + Part 2, P2.0–P2.7 с corrective)
+закрыты; всё смержено в `main`. Сверх исходного видения сделаны: RAM
+leverage control-plane, notification outbox, captcha-доступ, Builder
+attestation, System Status и 4-табовый follower Mini App (21 POST
+`/miniapp/api/*`). Видение трёх этапов — раздел 4 (исторический план,
+факт — чеклисты ниже). Полный фактологический бэкграунд — в
 [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
 ## 1. Стек
 
@@ -41,7 +44,7 @@ pydantic v2            — схемы ордеров/событий/конфиг
 | Тема | Суть | Сноска в ресерче | Ссылка (URL) |
 |---|---|---|---|
 | Версия API | V3 — Recommended; V1 — Legacy (новые V1 не выдаются с 25.03.2026) | §1 | [API Docs index](https://github.com/asterdex/api-docs/blob/master/README.md) |
-| Ключи V3 | user + signer + private key + nonce + EIP-712; два signing context (trading 1666/714, registration 56/101) | §1, §5 | [Futures API V3](https://github.com/asterdex/api-docs/blob/master/V3%28Recommended%29/EN/aster-finance-futures-api-v3.md), [API Wallet](https://www.asterdex.com/en/api-wallet) |
+| Ключи V3 | user + signer + private key + nonce + EIP-712; два signing context (trading 1666/714, registration 56 EVM — scope бота; API знает и 101 для Solana) | §1, §5 | [Futures API V3](https://github.com/asterdex/api-docs/blob/master/V3%28Recommended%29/EN/aster-finance-futures-api-v3.md), [API Wallet](https://www.asterdex.com/en/api-wallet) |
 | Права агента | canSpotTrade / canPerpTrade / canWithdraw / expired / ipWhitelist; canWithdraw=false для копитрейда | §1 | [Agent endpoints](https://asterdex.github.io/aster-api-website/asterCode/endpoints/) |
 | Торговля | balance, positionRisk, leverage, marginType, open/close, partial close, SL/TP, trailing | §2, §4 | [Futures API V3](https://github.com/asterdex/api-docs/blob/master/V3%28Recommended%29/EN/aster-finance-futures-api-v3.md) |
 | Перестановка SL/TP | Обычный — cancel+new; Strategy OCO/OTOCO — API умеет, WS-поведение при ручной смене требует теста | §2, §3 | [Futures API V3](https://github.com/asterdex/api-docs/blob/master/V3%28Recommended%29/EN/aster-finance-futures-api-v3.md), [User Data Streams](https://asterdex.github.io/aster-api-website/futures-v3/user-data-streams/) |
@@ -209,9 +212,9 @@ Inline-first UX brief и решение по Scenes Wizard:
 Stage 2 полностью закрыт для testnet scope.
 ### Этап 3 — Builder (Aster Code)
 
-- Онбординг через ApproveAgent + ApproveBuilder вместо прямого ввода ключей; signer-ы создаёт и хранит билдер.
-- Монетизация: builder fee (кап 0.001 futures).
-- Торговое ядро и стрим не меняются — меняется только источник кредов.
+- Онбординг через ApproveAgent + ApproveBuilder вместо прямого ввода ключей; signer-ы создаёт и хранит билдер. **Сделано** (Part 1, CLOSED 2026-09-01).
+- Монетизация: builder fee (кап 0.001 futures). **Сделано на тестнете** (P2.7, CLOSED 2026-09-04; mainnet-вывод комиссий — открыт).
+- Торговое ядро и стрим не менялись — меняется только источник кредов. **Уточнение по факту:** planner/coordinator/reconciler не менялись, но Executor и `PlaceOrderRequest` получили account-specific `builder + feeRate` (`BuilderAttributionProvider`, journal payload от attribution не зависит).
 
 #### UI/UX preparation Mini App (2026-08-26)
 
@@ -280,7 +283,7 @@ Stage 2 полностью закрыт для testnet scope.
 - [x] Выполнить ручную Telegram + WalletConnect/TokenPocket приёмку и получить
   current-HEAD evidence состояний из R9.
 
-#### Stage 3 Part 2 — оставшийся follower Mini App (план 2026-09-01)
+#### Stage 3 Part 2 — follower Mini App: CLOSED (2026-09-04)
 
 Отдельного исполнимого Part 2 до этого не существовало: общий design-only
 документ описывал восемь экранов, но не учитывал уже закрытый Part 1 и
@@ -357,13 +360,11 @@ formatters, navigation, DOM/layout и security regression, но не замен�
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,
 биржевая сверка каждого ордера по clientOrderId) — в
 `ENGINE_TEST_STATUS_2026-08.md`. Найденные живым прогоном баги исправлены
-(фантомное переоткрытие позиции из-за направления филла, двойной учёт
-ACCOUNT_UPDATE, отсутствие копирования TP, STALE-guard против гонок,
-лимитные флейворы STOP/TAKE_PROFIT).
-Builder-e2e (approveBuilder ждёт `main private key` в wallet.txt) оставлен для
-Stage 3; зеркало висящих лимиток мастера — кандидат в этап 2.
+Builder-e2e (approveAgent + builder одной подписью → order с feeRate → flat)
+сделан в Stage 3 (Part 1 live e2e + P2.7 engine proof); зеркало висящих
+лимиток мастера не делалось — открытый бэклог (ядро копирует fill, не заявки).
 
-Критерий перехода: этап 1 закрыт, когда проходят все signed-сценарии раздела «Как проводить тесты»; этап 2 — когда онбординг и уведомления работают на тестнете с ключами, введёнными через бота.
+Критерии перехода выполнены: этап 1 закрыт signed-сценариями раздела «Как проводить тесты»; этап 2 — онбордингом и уведомлениями на тестнете; этап 3 — Builder-онбордингом, Mini App и builder fee на тестнете. Mainnet — вне закрытого scope.
 
 ### Corrective gate после независимого аудита (2026-08-23)
 
@@ -478,22 +479,23 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 
 ## 5. MVP vs Продакшн
 
-### MVP (проверить весь бэкенд)
+### MVP (проверить весь бэкенд) — **сделан и закрыт signed-приёмкой**
 
 - Telegram-бот: подключение ключей (прямой ввод V3-набора), настройка риска (% депозита на стоп), уведомления.
 - Слежение за мастером через user-data WS (события ордеров/позиций/баланса).
 - Исполнение на аккаунтах фолловеров: открытие, закрытие, частичное закрытие, SL/TP, плечо.
 - Расчёт размера позиции от риска на стоп; риск-ревард.
 - Хранение: SQLite (WAL) + зашифрованное хранилище ключей.
-- Вся работа на тестнете, затем малый реальный объём.
+- Вся работа на тестнете (mainnet-объём — вне закрытого scope).
 
-### Продакшн (обвязка)
+### Продакшн (обвязка) — статус по пунктам на 2026-09-04
 
-- Онбординг через Aster Code / Builder: мини-апп/страница с кошельком, подпись ApproveAgent+ApproveBuilder.
-- Монетизация: builder fee, вывод комиссий (Builder Center) — при доступности на mainnet.
-- Sub-accounts для изоляции copy-средств.
-- PostgreSQL, бэкапы, мониторинг, rate-limit менеджмент, авто-переподключение со snapshot-recovery.
-- Масштаб: лимиты весовых rate limits Астера → пулы/очереди команд.
+- Онбординг через Aster Code / Builder: мини-апп/страница с кошельком, подпись ApproveAgent+ApproveBuilder. **Сделано на тестнете** (Part 1 + P2.7).
+- Монетизация: builder fee — **сделан на тестнете**; вывод комиссий (Builder Center) на mainnet — **открыт**.
+- Sub-accounts для изоляции copy-средств. **Открыто** (в коде нет).
+- PostgreSQL и бэкапы. **Открыто** (SQLite WAL — текущий scope; в коде нет asyncpg/postgres).
+- Мониторинг. **Частично**: rotating file log 0600 + console + onboarding audit (`logging_utils.py`); внешней системы нет.
+- Rate-limit менеджмент, авто-переподключение со snapshot-recovery, пулы/очереди команд. **Сделано**: sliding-window limiter в `aster/`, `UserStream` reconnect + `rebuild_full`, per-account mutation locks, outbox worker.
 
 ## 6. Как проводить тесты
 
@@ -521,7 +523,7 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 ## Открытые вопросы (не блокеры)
 
 - Поведение user-data stream при ручной перестановке Strategy OCO/OTOCO в UI Астера — подтверждается signed testnet-тестом.
-- Builder-веб-интерфейс на тестнете отсутствует (только API-маршруты) — для теста онбординга нужен свой мини-апп или скрипт.
+- Builder-веб-интерфейс на тестнете отсутствует (только API-маршруты) — для теста онбординга сделан свой мини-апп (`miniapp/`, Stage 3 CLOSED). Вопрос закрыт.
 - Финальные лимиты rate limits на тестнете могут отличаться от mainnet (sentinel -2) — смотреть mainnet exchangeInfo перед продом.
 
 ---

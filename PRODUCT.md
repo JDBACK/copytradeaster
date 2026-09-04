@@ -4,7 +4,7 @@
 
 ## Platform
 
-Private Telegram bot (current); Telegram Mini App/web (future).
+Private Telegram bot (current); Telegram Mini App (current, Stage 3 Part 2 CLOSED 2026-09-04: 4-tab follower AppShell поверх того же application layer).
 
 ## Users
 
@@ -41,7 +41,7 @@ reconciliation восстанавливают правильное состоя�
 - текущий интерфейс Stage 2 — private Telegram chat;
 - основной способ управления — inline screens и buttons под сообщением;
 - slash-команды остаются только входом, recovery и shortcut-механизмом;
-- будущий Telegram Mini App предоставляет те же пользовательские возможности
+- Telegram Mini App предоставляет те же пользовательские возможности
   через общий application layer, а не отдельную бизнес-реализацию;
 - Stage 2 работает только с Aster futures testnet;
 - один Python/asyncio process и SQLite WAL обслуживают bot и trading core.
@@ -64,8 +64,8 @@ reconciliation восстанавливают правильное состоя�
 - emergency actions доступны только администратору на application/UI boundary;
 - Telegram handlers не вызывают trading endpoints напрямую;
 - trading core Stage 1 не переписывается;
-- mainnet, Builder, WebApp wallet signatures и monetization относятся к более
-  позднему этапу;
+- Builder onboarding (ApproveAgent + ApproveBuilder, signer хранит билдер) и
+  builder fee в copy-engine — реализованы и закрыты (Stage 3, mainnet и monetization по-прежнему позже);
 - direct private-key input через Telegram является testnet-only и не считается
   production-secure onboarding.
 
@@ -90,8 +90,9 @@ reconciliation восстанавливают правильное состоя�
 - актуальное исследование aiogram:
   `docs/reports/STAGE2_AIOGRAM_RESEARCH_2026-08.md`.
 
-Готового логотипа, визуальной системы или утверждённого дизайна Mini App в
-репозитории нет; будущая работа не должна их выдумывать как уже существующие.
+Визуальная система Mini App утверждена и реализована: Aster dark theme,
+`miniapp/src/index.css` токены, UX-план и owner acceptance скриншоты
+(`docs/reports/acceptance-p27/`); новую работу сверять с ними, а не выдумывать.
 
 ## Product Principles
 

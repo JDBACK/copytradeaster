@@ -31,7 +31,7 @@ Signed testnet-сценарии требуют локальных testnet creden
 .venv/bin/python -m copytradeaster run-bot
 ```
 
-Начальная точка документации — [docs/docs_map.md](docs/docs_map.md). Текущий
+Начальная точка документации — [docs/AGENTS.md](docs/AGENTS.md). Текущий
 статус торгового ядра ведётся только в
 [docs/ENGINE_TEST_STATUS_2026-08.md](docs/ENGINE_TEST_STATUS_2026-08.md).
 Фактический scope и честный readiness verdict Stage 2 — в

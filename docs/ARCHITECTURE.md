@@ -1,8 +1,8 @@
 # Архитектура copytradeaster
 
-Статус: базовая архитектура утверждена 21.08.2026 как целевой ориентир. Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) подтверждаются signed testnet-прогонами до закрепления деталей.
+Статус: архитектура реализована и закрыта вместе со Stage 1–3 (всё в `main`). Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) подтверждены signed testnet-прогонами и закреплены ниже.
 
-Этот документ фиксирует архитектуру сразу для всех текущих этапов: testnet-движок, Telegram-бот и Aster Code / Builder. Цель — не менять торговое ядро при переходе между этапами. Load-gate дополнение проверено 2026-08-23 на testnet.
+Этот документ фиксирует архитектуру всех реализованных этапов: testnet-движок, Telegram-бот и Aster Code / Builder. Торговое ядро не менялось при переходе между этапами. Load-gate дополнение проверено 2026-08-23 на testnet.
 
 Исходные условия:
 
@@ -29,7 +29,7 @@
 - CQRS/event-sourcing frameworks;
 - отдельный service/class под каждый endpoint или каждую торговую операцию.
 
-Telegram, CLI и будущий Builder onboarding — внешние интерфейсы вокруг одного торгового ядра.
+Telegram, CLI и Builder onboarding — внешние интерфейсы вокруг одного торгового ядра.
 
 ## 2. Главный принцип копирования
 
@@ -61,8 +61,9 @@ ASTER MASTER
      │ user-data WebSocket
      ▼
 ┌────────────────┐
-│ Master Observer│
+│   UserStream   │
 └───────┬────────┘
+        │ master user-data WS (`aster/user_stream.py`)
         ▼
 ┌────────────────┐
 │ Master Projector│
@@ -118,8 +119,7 @@ Telegram и Builder не находятся внутри этого потока
 - weighted rate limits.
 
 Signing details:
-
-- Контексты EIP-712: trading — chainId 1666 (mainnet) / 714 (testnet); registration (ApproveAgent / ApproveBuilder) — 56 (EVM) / 101 (Solana).
+- Контексты EIP-712: trading — chainId 1666 (mainnet) / 714 (testnet); registration (ApproveAgent / ApproveBuilder) — только 56 (BSC; `CT_REGISTRATION_CHAIN_ID` валидатором отвергает всё остальное).
 - Nonce signer-ключа персистентен: хранится в storage, инкрементируется и сохраняется ДО отправки подписи; после рестарта восстанавливается из БД, а не из памяти.
 - При retry после 503/timeout сначала проверяется фактическое состояние биржи (clientOrderId / open orders), затем переподпись с актуальным nonce.
 
@@ -127,11 +127,11 @@ Signing details:
 
 Получает события master account и строит нормализованное состояние.
 
-В Stage 1 соединение, listenKey, keepalive, reconnect и приём raw events
-обеспечивает `aster/user_stream.py` (`UserStream`); `master/projector.py`
-(`MasterProjector`) преобразует Aster payloads во внутреннее состояние проекта,
-ведёт copy_trades-эпизоды и эмитит дельты в coordinator. Выделение
-`master/observer.py` — этап 2 (план см. §16).
+`aster/user_stream.py` (`UserStream`) держит соединение, listenKey, keepalive,
+reconnect и приём raw events; `master/projector.py` (`MasterProjector`)
+преобразует Aster payloads во внутреннее состояние проекта, ведёт
+copy_trades-эпизоды и эмитит дельты в coordinator. Отдельный
+`master/observer.py` не понадобился (см. §17).
 
 ### `risk/`
 
@@ -197,7 +197,7 @@ production execution path. Миграции — упорядоченный сп�
 `storage/database.py` (`MIGRATIONS`), репозитории — `storage/repositories.py`.
 Финальный hybrid gate: 30 slots (3 REAL + 27 SHADOW), 100 циклов, 12 302
 подтверждённые команды (пост-фикс rerun 20260823: 12 207/12 207);
-подробности в `reports/HYBRID_LOAD_TEST_REPORT_2026-08.md`.
+подробности в `docs/reports/HYBRID_LOAD_TEST_REPORT_2026-08.md`.
 
 ### `credentials/`
 
@@ -259,12 +259,12 @@ account. `UserApplicationService` не сворачивает `OnboardingError` 
 `ValidationError`: наружу передаётся только typed
 `OnboardingApplicationError.code` (`OnboardingErrorCode`). Exchange status,
 адреса и private key не переходят через application boundary. Telegram и
-будущая Mini App сами маппят enum в безопасный actionable copy.
+Mini App сами маппят enum в безопасный actionable copy.
 
 ### `application/` и `telegram/`
 
-`UserApplicationService` — единая бизнес-граница для Telegram Bot и будущей
-Mini App: authorization/ownership, dashboard/status, direct credentials, risk,
+`UserApplicationService` — единая бизнес-граница для Telegram Bot и Mini
+App: authorization/ownership, dashboard/status, direct credentials, risk,
 pause/resume, notifications, account lifecycle и admin controls. Concrete
 `AppStage2RuntimeAdapter` связывает её с готовым Stage 1 core; Telegram handlers
 зависят только от `ApplicationProtocol`.
@@ -330,7 +330,7 @@ TradingIdentity
 SymbolFilters
 QtyDecision
 ```
-Отдельно полезна внутренняя сущность `CopyTrade` / `trade_id`, чтобы отличать два последовательных торговых эпизода по одному символу после `close → reopen`.
+Отдельно полезна внутренняя сущность `CopyTrade` / `trade_id`, чтобы отличать два последовательных торговых эпизода по одному символу после `close → reopen`. В реализации эпизод живёт в storage (`copy_trades` + `CopyTradeRepo`), а не в `domain/models.py`: `trade_id` связывает планы, действия и линки.
 
 Для Hedge mode `PositionKey` обязательно различает LONG и SHORT.
 
@@ -432,7 +432,7 @@ PENDING → SENDING → SUBMITTED → CONFIRMED
 
 `503` или timeout после отправки финансовой команды трактуется как `UNKNOWN`, а не как гарантированный fail. Перед retry сначала проверяется состояние биржи / clientOrderId.
 
-Собственный `command_key` является долговременной идемпотентностью сервиса; `newClientOrderId` используется как внешний correlation id, но не заменяет внутренний журнал.
+Собственный `command_key` является долговременной идемпотентностью сервиса; `newClientOrderId` используется как внешний correlation id, но не заменяет внутренний журнал. `BLOCKED` — ephemeral-результат исполнителя для действий с упавшим prerequisite (в журнале не персистится; шесть статусов выше — весь CHECK).
 
 ### P2.7 Builder attribution (account-specific `builder + feeRate`)
 
@@ -624,12 +624,12 @@ notification_outbox
 - `agent_validations` — последняя безопасная signed Agent snapshot;
 - `notification_outbox` — recipient-specific delivery journal без secrets.
 
-(В реализации также есть `app_state` — персистентные runtime флаги: `ready`,
-`ready_heartbeat_s`, `ready_runtime_uuid`, `allow_new_entries`, `emergency_active`,
-`degraded_error`; `sync_basis` — per-follower sizing reference с
+В реализации также есть `app_state` — персистентные runtime флаги (`ready`,
+`runtime_id`, `started_at`, `heartbeat_at`, `allow_new_entries`,
+`emergency_active`, `emergency_operation_id`, `degraded`, `degraded_active`,
+`degraded_reason`); `sync_basis` — per-follower sizing reference с
 `zero_target`-маркером намеренного dust-flat и `issued_target` для
-идемпотентности ревизий; `nonce_store` — атомарная выдача nonces.)
-Подробная схема появляется только по мере реализации конкретного этапа.
+идемпотентности ревизий; `nonce_store` — атомарная выдача nonces.
 
 ## 14. Ошибки и safety state
 
@@ -715,7 +715,7 @@ application
 
 Один asyncio process, long polling, SQLite WAL; Redis/webhook и отдельный
 backend не нужны масштабу 10–30 (максимум около 100) пользователей. Bot и
-будущая Mini App переиспользуют application service. Trading core не меняется.
+Mini App переиспользуют application service. Trading core не меняется.
 
 Фактический контур включает captcha + durable access approval, direct V3
 onboarding с typed errors, inline dashboard/status/risk/notifications/account,
@@ -726,14 +726,14 @@ emergency запрещён, а `marginType` этап не меняет. Акту
 
 ### Этап 3 — Aster Code / Builder
 
-Добавляется:
+Добавлено (CLOSED, смержено в `main`):
 
 ```text
 onboarding/builder
 miniapp             # aiohttp-транспорт Mini App (тот же процесс)
 ```
 
-Часть 1 (реализуется в ветке `codex/stage-3-mini-app-part1`): Telegram
+Часть 1 (закрыта 2026-09-01): Telegram
 WebApp-сессия с server-side HMAC-проверкой подписанного initData и TTL по
 `auth_date`, Builder-онбординг по пользовательской подписи кошелька
 (combined `approveAgent`, main-ключ не входит в систему), минимальный home
@@ -744,7 +744,14 @@ injected EIP-1193 + опциональный WalletConnect за `VITE_WC_PROJECT
 Транспортные хендлеры не знают ни Aster, ни storage — только application
 use cases и typed public codes.
 
-и builder metadata в Aster requests.
+Часть 2 (закрыта 2026-09-04): 4-табовый AppShell follower Mini App
+(Главная/Позиции/Активность/Настройки; nested: Risk/Notifications/SystemStatus/
+AccountBuilder/Security/Help; flow вне shell: SessionGate/BuilderWizard/
+BuilderAttemptRecovery/SuccessScreen), 21 POST `/miniapp/api/*`,
+account-specific `builder + feeRate` в copy-engine
+через `BuilderAttributionProvider` (journal payload не зависит от attribution).
+
+Builder metadata передаётся в Aster requests вместе с ордерами.
 
 Risk, planner, reconciler и master flow не меняются.
 
@@ -755,13 +762,13 @@ copytradeaster/
 │
 ├── pyproject.toml
 ├── AGENTS.md                       # правила работы агентов с репо
-├── miniapp/                        # Mini App frontend (Vite+React+TS, Stage 3 part 1)
-│   ├── src/screens/                #   session gate, builder wizard, success, home
+├── miniapp/                        # Mini App frontend (Vite+React+TS, Stage 3: 4-tab shell)
+│   ├── src/screens/                #   Home, Positions, Activity, Settings; nested Risk, Notifications, SystemStatus, AccountBuilder, Security, Help; flow SessionGate, BuilderWizard/Recovery, SuccessScreen
 │   ├── src/wallet.ts               #   injected EIP-1193 + WalletConnect adapter
 │   └── dist/                       #   собранный бандл (раздаёт бот, git-ignored)
 ├── scripts/                        # operational scripts (tunnel, mini app preview, load tests)
-├── docs/                           # документация; карта — docs/docs_map.md
-│   ├── docs_map.md                 # что где лежит и когда читать
+├── docs/                           # документация; карта — docs/AGENTS.md
+│   ├── AGENTS.md                   # карта доков: что где лежит и когда читать
 │   ├── ARCHITECTURE.md             # этот файл
 │   ├── DEV_PLAN_SKELETON.md        # roadmap + чеклисты этапов
 │   ├── ENGINE_TEST_STATUS_2026-08.md  # ЕДИНЫЙ живой статус движка
@@ -805,8 +812,8 @@ copytradeaster/
 │       │   ├── executor.py        # durable command execution + retry/recovery
 │       │   ├── reconciler.py      # periodic full sweep
 │       │   ├── leverage.py        # LeverageManager: RAM candidate catalog + confirmed state
+│       │   ├── builder_attribution.py # Builder fee attribution (DIRECT/VALID/UNAVAILABLE)
 │       │   └── registry.py        # FollowerRegistry: dynamic follower runtime
-│       │
 │       ├── storage/                # SQLite: миграции + репозитории
 │       │   ├── database.py        # aiosqlite, WAL, write_lock, MIGRATIONS
 │       │   └── repositories.py    # CopyTradeRepo / SyncBasisRepo / CommandRepo ...
@@ -824,6 +831,7 @@ copytradeaster/
 │       │   └── worker.py          # bounded Telegram delivery/retry
 │       │
 │       ├── onboarding/
+│       │   ├── builder.py         # 4-state Builder onboarding (PREPARED..COMMITTED)
 │       │   ├── direct.py          # signed V3 preflight, testnet-only
 │       │   ├── errors.py          # typed OnboardingErrorCode / OnboardingError
 │       │   ├── models.py          # DirectOnboardingRequest / EphemeralKeyProvider / AgentValidation
@@ -860,10 +868,11 @@ copytradeaster/
 └── data/                           # SQLite БД и артефакты load-прогонов (git-ignored)
 ```
 
-Tree отражает фактическую структуру после Stage 2. Отдельный
-`master/observer.py` не понадобился: рабочая граница `UserStream` +
+Tree отражает фактическую структуру после Stage 3 (всё смержено в `main`).
+Отдельный `master/observer.py` не понадобился: рабочая граница `UserStream` +
 `MasterProjector` уже остаётся ясной, а механическое выделение файла не меняет
-архитектуру. `onboarding/builder` и `miniapp/` реализованы в Stage 3 (часть 1).
+архитектуру. `onboarding/builder`, `trading/builder_attribution.py` и 4-табовый
+`miniapp/` (21 POST `/miniapp/api/*`) реализованы и закрыты в Stage 3.
 
 ## 18. Архитектурные правила проекта
 
