@@ -54,6 +54,10 @@ export function useWarmRevalidation(args: {
   const seenSignalRef = useRef(0)
   const staleRef = useRef(false)
   const inflightRef = useRef(false)
+  // Success generation: background loaders swallow transport errors and
+  // always resolve, so settle alone cannot prove the snapshot updated. Only
+  // a real markFresh() call advances the generation.
+  const freshGenerationRef = useRef(0)
   const liveRef = useRef(args)
   useEffect(() => {
     liveRef.current = args
@@ -63,6 +67,7 @@ export function useWarmRevalidation(args: {
   const markFresh = useCallback(() => {
     loadedAtRef.current = Date.now()
     freshRef.current = true
+    freshGenerationRef.current += 1
   }, [])
 
   useEffect(() => {
@@ -78,24 +83,24 @@ export function useWarmRevalidation(args: {
     if (!staleRef.current && Date.now() - loadedAtRef.current < live.ttlMs) return
     staleRef.current = false
     inflightRef.current = true
+    const generationBefore = freshGenerationRef.current
+    const settle = () => {
+      inflightRef.current = false
+      // No markFresh() since launch means the refresh changed nothing
+      // (background loaders keep the stale UI on failure): stay stale so
+      // the next activation retries instead of waiting out the TTL.
+      if (freshGenerationRef.current === generationBefore) staleRef.current = true
+    }
     let result: void | Promise<unknown>
     try {
       result = live.onRefresh(freshRef.current ? 'revalidate' : 'retry')
     } catch {
-      inflightRef.current = false
-      staleRef.current = true
+      settle()
       return
     }
-    // Both handlers clear: the derived promise always settles fulfilled,
-    // so a rejecting onRefresh can never surface as unhandled.
-    Promise.resolve(result).then(
-      () => {
-        inflightRef.current = false
-      },
-      () => {
-        inflightRef.current = false
-      },
-    )
+    // Both handlers settle: the derived promise always fulfills, so a
+    // rejecting onRefresh can never surface as unhandled.
+    Promise.resolve(result).then(settle, settle)
   }, [args.active, args.invalidateSignal])
 
   return { markFresh }

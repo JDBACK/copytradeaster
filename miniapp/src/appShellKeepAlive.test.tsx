@@ -19,6 +19,7 @@ import { AppShell } from './components/AppShell'
 import { ActivityScreen } from './screens/ActivityScreen'
 import { HOME_REVALIDATE_MS, HomeScreen } from './screens/HomeScreen'
 import { PositionsScreen } from './screens/PositionsScreen'
+import { SettingsScreen } from './screens/SettingsScreen'
 import type {
   ActivityItemDTO,
   ActivityPageDTO,
@@ -850,5 +851,50 @@ describe('Corrective: nested screens open at the top', () => {
     const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
     expect(isHidden(restoredHeading)).toBe(false)
     expect(scroller!.scrollTop).toBe(300)
+  })
+})
+
+describe('Corrective: retry after a failed invalidation refresh', () => {
+  function settings(active: boolean, invalidateSignal = 0) {
+    return (
+      <SettingsScreen
+        auth={AUTH}
+        onOpen={noop}
+        onNotConnected={noop}
+        active={active}
+        warm={true}
+        invalidateSignal={invalidateSignal}
+      />
+    )
+  }
+
+  it('failed background refresh stays stale: fast return retries, then quiet', async () => {
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockResolvedValueOnce(dashboard())
+      .mockRejectedValueOnce(new ApiError(500, 'network_error', 'down'))
+      .mockResolvedValue(dashboard())
+    const { rerender } = render(settings(true))
+    await screen.findByText('Настройки копирования')
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+
+    // Mutation lands while away; the background refresh fails silently.
+    rerender(settings(false, 1))
+    rerender(settings(true, 1))
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    // Stale UI kept: ready content, no skeleton, no error screen.
+    expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
+    expect(screen.getByText('Настройки копирования')).toBeDefined()
+
+    // Fast return with a fresh TTL: immediate retry, then quiet — no loop.
+    rerender(settings(false, 1))
+    rerender(settings(true, 1))
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    rerender(settings(false, 1))
+    rerender(settings(true, 1))
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(3)
   })
 })
