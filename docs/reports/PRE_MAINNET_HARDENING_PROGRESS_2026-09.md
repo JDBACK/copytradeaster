@@ -4,7 +4,7 @@
 Источник плана: owner-provided `Pre-Mainnet Hardening Plan`
 Audit baseline плана: `3c38db34f42d7a61c334367edbc434e6fbb97c8a`
 Рабочий кодовый срез на старте: `0db6c8476d9e623824129b028e2223fc64c32187`
-Статус: **Packages A–B CLOSED — Package C / PM-B4 next**
+Статус: **Packages A–B IMPLEMENTED / SIGNED LIVE QUALIFICATION IN PROGRESS**
 Рабочая ветка: `codex/live-copy-tests-hardening`
 
 Этот файл — append-only журнал исполнения нового pre-mainnet gate. Актуальные
@@ -80,7 +80,9 @@ query-unavailable и partial-fill сценариев в текущем конт�
 - [x] Package A: доказать отсутствие обхода через Builder DIRECT fallback.
 - [x] Package A: unit + Fake negative + integration regression gate.
 - [x] Package A: signed Testnet fault injection + restart/SIGKILL evidence.
-- [x] Package B: master dirty/generation/queue/startup gate.
+- [x] Package B: master dirty/generation/queue/startup implementation + offline gate.
+- [ ] Package A: добить всю signed Testnet UNKNOWN-matrix из owner plan.
+- [ ] Package B: добить всю signed Testnet Snapshot/WS + Startup matrix.
 - [ ] Package C: immutable `AsterNetworkProfile` + Mainnet preflight.
 - [ ] Package D: zero/protection/leverage-liquidation invariants.
 - [ ] Package E: production snapshot envelope + health convergence + launch cap.
@@ -227,3 +229,29 @@ compileall и diff-check clean.
 Package B acceptance закрыт на offline/hermetic уровне. Signed Testnet Snapshot/WS,
 startup-change и reconnect-resnapshot failure scenarios остаются в Package F;
 это не является Mainnet readiness verdict. Следующий пакет — C / PM-B4.
+
+## 2026-09-04 — owner correction: fake-only acceptance запрещён
+
+Предыдущий verdict `Package B CLOSED offline` не считается финальным
+acceptance. По уточнённому owner contract все сценарии плана, где
+важны Aster REST/WS, signing, order/position/protection, reconnect, restart
+или limiter semantics, должны пройти на реальном Aster Testnet с
+реальными testnet-кошельками.
+
+FakeAster/MockTransport/Shadow остаются supplemental regression tools и не
+закрывают package. Детерминированные response-loss, 429 и network/query
+failures инжектируются вокруг реального `AsterClient`, но exchange
+mutation/read/state остаются живыми. Shadow разрешён только в
+исходно заданном load gate вместе с 3–5 REAL followers.
+
+Текущая честная квалификация:
+
+- Package A implementation/offline green; live response-lost + real `allOrders`
+  и отдельный real SIGKILL green, остальная UNKNOWN live-matrix открыта;
+- Package B implementation/offline green; production `App` на backup-копии
+  SQLite прошёл реальный Aster Testnet цикл: WS-gated READY,
+  master MARKET + STOP, convergence четырёх REAL followers, forced
+  listenKey close/reconnect/resnapshot, неизменность follower qty/Stop без
+  дублей и финальный flat cleanup; focused result `1 passed`;
+- оставшиеся B Snapshot/WS и slow-startup scenarios ещё не закрыты,
+  поэтому переход к Package C пока не разрешён.

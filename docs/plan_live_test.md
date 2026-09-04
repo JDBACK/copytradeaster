@@ -7,10 +7,26 @@ WIP-checkpoint Package B, а текущий факт исполнения вес
 Подробное текущее состояние: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md)
 Исторический WIP-handoff: [PRE_MAINNET_HARDENING_HANDOFF_2026-09.md](reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md)
 
-Статус на 2026-09-04: **Packages A–B сделаны и закрыты offline-
-acceptance; Packages C–F не начинались. Mainnet по-прежнему запрещён.**
+Статус на 2026-09-04: **Packages A–B реализованы и offline-green,
+но их полная signed Testnet qualification ещё не закрыта; Packages C–F
+не начинались. Mainnet по-прежнему запрещён.**
 
 Обозначения: `[x]` — сделано и подтверждено; `[~]` — частично/WIP; `[ ]` — осталось.
+
+## Обязательная live-qualification policy
+
+Ни один package не получает финальный `CLOSED` только по unit,
+FakeAster, MockTransport или offline integration. Каждый сценарий этого
+плана, где важны REST/WS, signing, order, position, protection,
+reconnect, restart, limiter или exchange response, обязан пройти на
+реальном Aster Testnet с реальными testnet-кошельками.
+
+Offline fakes остаются быстрыми детерминированными regression-
+тестами, но не acceptance evidence. Для response-loss, 429 и network/query
+failure допустим детерминированный fault injector вокруг
+реального `AsterClient`: exchange mutation/read/state должны оставаться
+реальными. `ShadowExchange` допустим только в load gate вместе
+с обязательными 3–5 REAL followers, как задано исходным планом.
 
 ## Цель
 
@@ -106,13 +122,13 @@ Runtime recovery и boot recovery должны использовать одну
 
 ---
 
-## PM-B2 — Master snapshot / WS queue recovery boundary — DONE 2026-09-04
+## PM-B2 — Master snapshot / WS queue recovery boundary — LIVE QUALIFICATION IN PROGRESS
 
-Статус: `[x]` generation публикуется только после завершённого REST snapshot;
+Статус: `[~]` implementation/offline acceptance готовы: generation публикуется только после завершённого REST snapshot;
 pre-boundary frames не мутируют state, delayed frames проверяются по Aster
 server-time cutoff, overflow/старый backlog ставят dirty и запускают
-coalesced authoritative recovery. Offline unit/replay/integration acceptance зелёный;
-signed Testnet proof остаётся в финальном Package F.
+coalesced authoritative recovery. Реальный App/WS/reconnect цикл зелёный;
+остальная signed Testnet Snapshot/WS matrix ещё открыта.
 
 ### Проблема
 
@@ -169,12 +185,13 @@ signed Testnet proof остаётся в финальном Package F.
 
 ---
 
-## PM-B3 — Startup stale-entry gate — DONE 2026-09-04
+## PM-B3 — Startup stale-entry gate — LIVE QUALIFICATION IN PROGRESS
 
-Статус: `[x]` startup/reconnect admission открывается только после live WS,
+Статус: `[~]` implementation/offline acceptance готовы: startup/reconnect admission открывается только после live WS,
 первого authoritative snapshot, close-only follower sweep, второго финального
 snapshot и entry reconcile без in-flight commands. Disconnect/dirty закрывают
-admission синхронно; REST-only fallback остаётся close-only.
+admission синхронно; REST-only fallback остаётся close-only. Signed
+Testnet slow-startup/master-change acceptance ещё открыт.
 
 ### Проблема
 

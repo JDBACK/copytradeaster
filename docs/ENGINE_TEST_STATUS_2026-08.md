@@ -3,16 +3,19 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-04):** Stage 1–3 CLOSED; Pre-Mainnet Packages A–B CLOSED,
-> Package C / PM-B4 next, Mainnet gate по-прежнему не пройден. Offline **1126 passed / 2
+> **TL;DR (2026-09-04):** Stage 1–3 CLOSED; Pre-Mainnet Packages A–B implemented/
+> offline-green, но owner-required signed live qualification ещё идёт; Mainnet gate
+> не пройден. Offline **1126 passed / 2
 > skipped / 45 deselected**, coverage **87%**; frontend 168/17 (последний неизменённый
 > gate); full testnet 42/1 (последний полный gate) + focused PM-B1 signed fault/
-> SIGKILL **2 passed**; ruff/oxlint clean.
+> SIGKILL **2 passed** + focused PM-B2/B3 real App/WS/reconnect **1 passed**;
+> ruff/oxlint clean. Fake-only evidence не закрывает pre-mainnet package.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
 
-- **Pre-Mainnet Package B / PM-B2 + PM-B3 — CLOSED offline (2026-09-04,
+- **Pre-Mainnet Package B / PM-B2 + PM-B3 — IMPLEMENTED / LIVE QUALIFICATION
+  IN PROGRESS (2026-09-04,
   ветка `codex/live-copy-tests-hardening`):** authoritative master boundary теперь
   публикует generation только после completed REST snapshot + episode sync,
   а delayed current-generation frames сверяются с Aster server-time cutoff
@@ -26,11 +29,15 @@
   authoritative rebuild. Целые затронутые unit/replay/integration files:
   **166 passed**; App + real Projector + SQLite + FakeAster race integration включена.
   Полный offline gate: **1126 passed / 2 skipped / 45 deselected**, coverage **87%**;
-  ruff check/format, compileall и diff-check clean. Signed Snapshot/WS/startup proof остаётся
-  в Package F, поэтому Mainnet ещё не разрешён. Детали и TODO:
+  ruff check/format, compileall и diff-check clean. Focused signed Testnet:
+  production `App`, real master WS/MARKET/STOP, 4 REAL followers, forced
+  listenKey reconnect/resnapshot, unchanged follower qty/Stop без дублей
+  и flat cleanup — **1 passed**. Остальная Snapshot/WS/startup live-matrix
+  открыта, поэтому package и Mainnet ещё не закрыты. Детали и TODO:
   `reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
 
-- **Pre-Mainnet Package A / PM-B1 — CLOSED (2026-09-04):** устранён duplicate
+- **Pre-Mainnet Package A / PM-B1 — IMPLEMENTED / LIVE QUALIFICATION PARTIAL
+  (2026-09-04):** устранён duplicate
   economic mutation после response-lost MARKET. Additive migration #33 хранит
   pre-position/expected delta до `SENDING`; current query + `allOrders` +
   `positionRisk` дают явный `FOUND / PROVEN_NOT_EXECUTED / UNRESOLVED`; только
@@ -42,7 +49,9 @@
   clean. Focused signed Aster Testnet: accepted response-lost с принудительно скрытым
   current lookup и real `allOrders`, затем отдельный Python worker с настоящим
   `SIGKILL` после принятого MARKET и boot/WAL recovery — **2 passed**, в обоих случаях
-  один economic order; финальный account audit flat/0 open orders. Полный контракт и
+  один economic order; финальный account audit flat/0 open orders.
+  MARKET_CLOSE, partial outcome и полная query-unavailable live-matrix ещё
+  открыты. Полный контракт и
   TODO следующих пакетов — `reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
 
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /

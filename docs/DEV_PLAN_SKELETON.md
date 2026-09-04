@@ -536,12 +536,14 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 Scope намеренно ограничен safety-hardening существующего modular monolith;
 инфраструктурная перестройка и новые типы торговых продуктов не входят.
 
-- [x] **Package A — Economic idempotency (CLOSED 2026-09-04):** PM-B1, единая
+- [ ] **Package A — Economic idempotency (IMPLEMENTED / LIVE PARTIAL 2026-09-04):** PM-B1, единая
   fail-closed UNKNOWN resolution policy для runtime/boot, history + position proof,
-  residual-only reconciliation и signed SIGKILL recovery.
-- [x] **Package B — Master recovery correctness (CLOSED 2026-09-04):** PM-B2/PM-B3,
+  residual-only reconciliation и signed SIGKILL recovery; полная owner-plan
+  signed UNKNOWN matrix ещё не закрыта.
+- [ ] **Package B — Master recovery correctness (IMPLEMENTED / LIVE IN PROGRESS):** PM-B2/PM-B3,
   completed-generation cutover, Aster-time cutoff, dirty/age/overflow recovery,
-  reconnect handling и two-snapshot startup entry admission.
+  reconnect handling и two-snapshot startup entry admission; реальный
+  App/WS/reconnect цикл green, остальная signed race-matrix открыта.
 - [ ] **Package C — Mainnet profile:** PM-B4, immutable network context и
   production-App composition/preflight без реальных order writes.
 - [ ] **Package D — Risk invariants:** PM-B5/PM-B6/PM-B7, точная причина zero,
@@ -552,6 +554,6 @@ Scope намеренно ограничен safety-hardening существую�
   restart/SIGKILL, App E2E, multi-follower isolation, load и финальный audit.
 
 Mainnet rollout запрещён, пока каждый blocker не закрыт кодом, тестами и
-записанным evidence. Следующий активный пакет: **C / PM-B4**.
-Текущая ветка `codex/live-copy-tests-hardening`: Packages A–B закрыты;
-signed Snapshot/WS/startup qualification остаётся в Package F и Mainnet не разрешает.
+записанным evidence. Следующая активная работа: **signed Testnet
+qualification Packages A–B перед C / PM-B4**. Текущая ветка
+`codex/live-copy-tests-hardening`; fake-only acceptance не закрывает package.
