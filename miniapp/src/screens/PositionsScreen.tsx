@@ -3,6 +3,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
@@ -26,18 +27,33 @@ type LoadState =
 export function PositionsScreen({
   auth,
   accountMasked,
+  active = true,
+  warm = true,
 }: {
   auth: AuthContext
   accountMasked?: string | null
+  active?: boolean
+  /** Gate for the first fetch: shell warmup or the user's first tap. */
+  warm?: boolean
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
 
   const seq = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+  const startedRef = useRef(false)
+
+  const { markFresh } = useWarmRevalidation({
+    active,
+    ttlMs: HOME_REVALIDATE_MS,
+    busy: load.kind === 'loading' || refreshing,
+    onRefresh: (reason: WarmReason) => {
+      void fetchPositions(reason === 'retry' ? 'foreground' : 'background', false)
+    },
+  })
 
   const fetchPositions = useCallback(
-    async (refresh = false) => {
+    async (mode: 'foreground' | 'background', refresh = false) => {
       const my = ++seq.current
       abortRef.current?.abort()
       const controller = new AbortController()
@@ -46,23 +62,30 @@ export function PositionsScreen({
       try {
         const data = await api.positions(auth, refresh, { signal: controller.signal })
         if (seq.current !== my) return
+        markFresh()
         setLoad({ kind: 'ready', data })
       } catch (err) {
         if (err instanceof ApiError && err.code === 'aborted') return
         if (seq.current !== my) return
-        setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
+        // Background refresh never wipes ready UI; the next activation
+        // past TTL retries automatically.
+        if (mode === 'foreground') {
+          setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
+        }
       } finally {
         if (refresh) setRefreshing(false)
       }
     },
-    [auth],
+    [auth, markFresh],
   )
 
   useEffect(() => {
+    if (!warm || startedRef.current) return
+    startedRef.current = true
     // oxlint-disable-next-line react/set-state-in-effect
-    void fetchPositions(false)
+    void fetchPositions('foreground', false)
     return () => abortRef.current?.abort()
-  }, [fetchPositions])
+  }, [warm, fetchPositions])
 
   if (load.kind === 'loading') {
     return (
@@ -98,7 +121,7 @@ export function PositionsScreen({
         />
         <ErrorBox title={copy.title} hint={copy.hint} />
         <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void fetchPositions(true)}>
+          <button type="button" className="btn btn-secondary" onClick={() => void fetchPositions('foreground', true)}>
             Повторить
           </button>
         </div>
@@ -153,7 +176,7 @@ export function PositionsScreen({
             type="button"
             className="btn btn-secondary btn-inline"
             disabled={refreshing}
-            onClick={() => void fetchPositions(true)}
+            onClick={() => void fetchPositions('foreground', true)}
           >
             {refreshing ? 'Обновляем…' : 'Обновить'}
           </button>
@@ -172,7 +195,7 @@ export function PositionsScreen({
             type="button"
             className="btn btn-secondary"
             disabled={refreshing}
-            onClick={() => void fetchPositions(true)}
+            onClick={() => void fetchPositions('foreground', true)}
           >
             {refreshing ? 'Обновляем…' : 'Обновить данные'}
           </button>

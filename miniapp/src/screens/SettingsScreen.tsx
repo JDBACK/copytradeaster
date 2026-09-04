@@ -7,6 +7,7 @@
  * and stale/degraded never reads «Всё работает». */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import { formatPercent } from '../format'
 import type { NestedScreen } from '../navigation'
@@ -31,45 +32,70 @@ export function SettingsScreen({
   accountMasked,
   onOpen,
   onNotConnected,
+  active = true,
+  warm = true,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   onOpen: (screen: NestedScreen) => void
   onNotConnected: () => void
+  active?: boolean
+  /** Gate for the first fetch: shell warmup or the user's first tap. */
+  warm?: boolean
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
 
   const seq = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+  const startedRef = useRef(false)
 
-  const refresh = useCallback(async () => {
-    const my = ++seq.current
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-    try {
-      const dashboard = await api.dashboard(auth, false, { signal: controller.signal })
-      if (seq.current !== my) return
-      if (dashboard.copy_state === 'empty') {
-        // The shell is only rendered for connected accounts; an empty
-        // dashboard means the session desynced — route back to onboarding.
-        onNotConnected()
-        return
+  const { markFresh } = useWarmRevalidation({
+    active,
+    ttlMs: HOME_REVALIDATE_MS,
+    busy: load.kind === 'loading',
+    onRefresh: (reason: WarmReason) => {
+      void refresh(reason === 'retry' ? 'foreground' : 'background')
+    },
+  })
+
+  const refresh = useCallback(
+    async (mode: 'foreground' | 'background') => {
+      const my = ++seq.current
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+      try {
+        const dashboard = await api.dashboard(auth, false, { signal: controller.signal })
+        if (seq.current !== my) return
+        if (dashboard.copy_state === 'empty') {
+          // The shell is only rendered for connected accounts; an empty
+          // dashboard means the session desynced — route back to onboarding.
+          onNotConnected()
+          return
+        }
+        markFresh()
+        setLoad({ kind: 'ready', dashboard })
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'aborted') return
+        if (seq.current !== my) return
+        // Background refresh never wipes ready UI; the next activation
+        // past TTL retries automatically.
+        if (mode === 'foreground') {
+          setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
+        }
       }
-      setLoad({ kind: 'ready', dashboard })
-    } catch (err) {
-      if (err instanceof ApiError && err.code === 'aborted') return
-      if (seq.current !== my) return
-      setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-    }
-  }, [auth, onNotConnected])
+    },
+    [auth, onNotConnected, markFresh],
+  )
 
   useEffect(() => {
+    if (!warm || startedRef.current) return
+    startedRef.current = true
     // Initial fetch only: refresh() awaits before its first setState.
     // oxlint-disable-next-line react/set-state-in-effect
-    void refresh()
+    void refresh('foreground')
     return () => abortRef.current?.abort()
-  }, [refresh])
+  }, [warm, refresh])
 
   if (load.kind === 'loading') {
     return (
@@ -110,7 +136,7 @@ export function SettingsScreen({
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
         <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh()}>
+          <button type="button" className="btn btn-secondary" onClick={() => void refresh('foreground')}>
             Повторить
           </button>
         </div>

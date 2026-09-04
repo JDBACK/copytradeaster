@@ -42,6 +42,11 @@ export function AppShell({
   const [visited, setVisited] = useState<ReadonlySet<RootTab>>(
     () => new Set<RootTab>([initialRoute().tab]),
   )
+  // Raised once Home reaches ready: its dashboard(true) refresh populates the
+  // cached snapshot, so the other tabs' cheap reads stop returning empty or
+  // stale frames. Until then they fetch on first tap (previous cold path).
+  const [warmReady, setWarmReady] = useState(false)
+  const handleHomeReady = useCallback(() => setWarmReady(true), [])
   const contentRef = useRef<HTMLDivElement | null>(null)
   const scrollTops = useRef<Record<RootTab, number>>({
     home: 0,
@@ -92,36 +97,48 @@ export function AppShell({
   }, [route.tab, nested])
 
   const homeActive = route.tab === 'home' && !nested
+  const positionsActive = route.tab === 'positions' && !nested
+  const activityActive = route.tab === 'activity' && !nested
+  const settingsActive = route.tab === 'settings' && !nested
 
   return (
     <div className="shell">
       {banner}
       <div className="shell-content" ref={contentRef}>
-        {visited.has('home') && (
-          <div hidden={!homeActive}>
-            <HomeScreen auth={auth} onNotConnected={onNotConnected} active={homeActive} />
-          </div>
-        )}
-        {visited.has('positions') && (
-          <div hidden={!!nested || route.tab !== 'positions'}>
-            <PositionsScreen auth={auth} accountMasked={accountMasked} />
-          </div>
-        )}
-        {visited.has('activity') && (
-          <div hidden={!!nested || route.tab !== 'activity'}>
-            <ActivityScreen auth={auth} accountMasked={accountMasked} />
-          </div>
-        )}
-        {visited.has('settings') && (
-          <div hidden={!!nested || route.tab !== 'settings'}>
-            <SettingsScreen
-              auth={auth}
-              accountMasked={accountMasked}
-              onOpen={openNested}
-              onNotConnected={onNotConnected}
-            />
-          </div>
-        )}
+        <div hidden={!homeActive}>
+          <HomeScreen
+            auth={auth}
+            onNotConnected={onNotConnected}
+            active={homeActive}
+            onReady={handleHomeReady}
+          />
+        </div>
+        <div hidden={!!nested || route.tab !== 'positions'}>
+          <PositionsScreen
+            auth={auth}
+            accountMasked={accountMasked}
+            active={positionsActive}
+            warm={warmReady || visited.has('positions')}
+          />
+        </div>
+        <div hidden={!!nested || route.tab !== 'activity'}>
+          <ActivityScreen
+            auth={auth}
+            accountMasked={accountMasked}
+            active={activityActive}
+            warm={warmReady || visited.has('activity')}
+          />
+        </div>
+        <div hidden={!!nested || route.tab !== 'settings'}>
+          <SettingsScreen
+            auth={auth}
+            accountMasked={accountMasked}
+            onOpen={openNested}
+            onNotConnected={onNotConnected}
+            active={settingsActive}
+            warm={warmReady || visited.has('settings')}
+          />
+        </div>
         {nested && (
           <NestedRoute
             nested={nested}

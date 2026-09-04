@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ACTIVITY_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import {
   ACTIVITY_TIME_LABELS,
@@ -35,9 +36,14 @@ const FILTERS: { id: ActivityFilter; label: string }[] = [
 export function ActivityScreen({
   auth,
   accountMasked,
+  active = true,
+  warm = true,
 }: {
   auth: AuthContext
   accountMasked?: string | null
+  active?: boolean
+  /** Gate for the first fetch: shell warmup or the user's first tap. */
+  warm?: boolean
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [filter, setFilter] = useState<ActivityFilter>('all')
@@ -45,14 +51,23 @@ export function ActivityScreen({
   const [now] = useState(() => new Date())
   const seq = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+  const fetchedRef = useRef<{ filter: ActivityFilter } | null>(null)
 
   const groups = useMemo(
     () => groupActivityByDay(load.kind === 'ready' ? load.items : [], now),
     [load, now],
   )
+  const { markFresh } = useWarmRevalidation({
+    active,
+    ttlMs: ACTIVITY_REVALIDATE_MS,
+    busy: load.kind === 'loading' || loadingMore,
+    onRefresh: (reason: WarmReason) => {
+      void fetchPage(filter, 0, false, reason === 'revalidate')
+    },
+  })
 
   const fetchPage = useCallback(
-    async (active: ActivityFilter, page: number, append: boolean) => {
+    async (active: ActivityFilter, page: number, append: boolean, silent = false) => {
       const my = ++seq.current
       abortRef.current?.abort()
       const controller = new AbortController()
@@ -60,6 +75,7 @@ export function ActivityScreen({
       try {
         const data = await api.activity(auth, active, page, { signal: controller.signal })
         if (seq.current !== my) return
+        markFresh()
         setLoad((prev) => {
           if (!append) {
             return { kind: 'ready', data, items: [...data.items], page }
@@ -72,9 +88,11 @@ export function ActivityScreen({
       } catch (err) {
         if (err instanceof ApiError && err.code === 'aborted') return
         if (seq.current !== my) return
-        if (append) {
+        if (append || silent) {
           // Keep the previous page visible; surface failure on the next manual
-          // load.  Avoids wiping already-displayed timeline rows.
+          // load.  Avoids wiping already-displayed timeline rows. A silent
+          // background refresh retries automatically on the next activation
+          // past TTL.
         } else {
           setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
         }
@@ -82,15 +100,20 @@ export function ActivityScreen({
         setLoadingMore(false)
       }
     },
-    [auth],
+    [auth, markFresh],
   )
 
   useEffect(() => {
+    // First fetch only: shell warmup or the user's first tap, whichever is
+    // earlier; filter changes below refetch through the same gate record.
+    if (!warm) return
+    if (fetchedRef.current && fetchedRef.current.filter === filter) return
+    fetchedRef.current = { filter }
     // oxlint-disable-next-line react/set-state-in-effect
     setLoad({ kind: 'loading' })
-    void fetchPage(filter, 0, false)
+    void fetchPage(filter, 0, false, false)
     return () => abortRef.current?.abort()
-  }, [filter, fetchPage])
+  }, [warm, filter, fetchPage])
 
   const handleFilter = useCallback((next: ActivityFilter) => {
     setFilter(next)

@@ -13,9 +13,12 @@ import '@testing-library/jest-dom/vitest'
 import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { api } from './api'
+import { api, ApiError } from './api'
+import App from './App'
 import { AppShell } from './components/AppShell'
+import { ActivityScreen } from './screens/ActivityScreen'
 import { HOME_REVALIDATE_MS, HomeScreen } from './screens/HomeScreen'
+import { PositionsScreen } from './screens/PositionsScreen'
 import type {
   ActivityItemDTO,
   ActivityPageDTO,
@@ -146,27 +149,40 @@ function tabButton(name: string): HTMLElement {
 }
 
 describe('AppShell keep-alive', () => {
-  it('Home → Positions → Home refetches nothing on the warm return', async () => {
+  it('startup budget is session-free shell: Home 2 + warmup 3, then zero on every leg', async () => {
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
+    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
 
     await screen.findByText('Риск на стоп')
-    expect(dashboardSpy).toHaveBeenCalledTimes(1)
-    expect(positionsSpy).toHaveBeenCalledTimes(1)
-
-    fireEvent.click(tabButton('Позиции'))
-    await screen.findByText('Открытые позиции · 1')
-    // Cold first visit of the Positions tab: exactly one positions fetch.
+    // Shell warmup settles: settings and activity prefetched while hidden.
+    await screen.findByText('Настройки копирования')
+    await screen.findByText('Показаны только данные без секретов')
+    // Home dashboard(true) + preview positions(false); warmup adds settings
+    // dashboard(false), positions(false) and activity(all, 0).
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
     expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(activitySpy).toHaveBeenCalledTimes(1)
 
-    fireEvent.click(tabButton('Главная'))
-    const homeMarker = await screen.findByText('Риск на стоп')
-    expect(isHidden(homeMarker)).toBe(false)
-    // Warm return: no skeleton phase, no new requests on any leg.
+    // Full second round over all four tabs: zero new requests, no skeletons.
+    for (const [tab, marker] of [
+      ['Позиции', 'Открытые позиции · 1'],
+      ['Активность', 'Показаны только данные без секретов'],
+      ['Настройки', 'Настройки копирования'],
+      ['Главная', 'Риск на стоп'],
+    ] as const) {
+      fireEvent.click(tabButton(tab))
+      const markerEl = await screen.findByText(marker)
+      expect(isHidden(markerEl)).toBe(false)
+    }
     expect(screen.queryByLabelText('Загрузка состояния')).toBeNull()
-    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(screen.queryByLabelText('Загрузка позиций')).toBeNull()
+    expect(screen.queryByLabelText('Загрузка журнала')).toBeNull()
+    expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
     expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(activitySpy).toHaveBeenCalledTimes(1)
   })
 
   it('Activity keeps filter, items and page across a Settings detour', async () => {
@@ -420,5 +436,171 @@ describe('HomeScreen loading lifecycle', () => {
     await screen.findByText('5')
     expect(dashboardSpy).toHaveBeenCalledTimes(2)
     expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, true])
+  })
+})
+
+describe('Part 2A: shell warmup and activation revalidation', () => {
+  function mockTelegramSession() {
+    ;(window as unknown as { Telegram?: unknown }).Telegram = {
+      WebApp: {
+        initData: 'test-init',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        setHeaderColor: vi.fn(),
+        setBackgroundColor: vi.fn(),
+      },
+    }
+  }
+
+  it('full startup budget is session 1 + Home 2 + warmup 3', async () => {
+    mockTelegramSession()
+    const sessionSpy = vi.spyOn(api, 'session').mockResolvedValue({
+      user_id: 777,
+      access_state: 'approved',
+      environment: 'testnet',
+      connection_state: 'connected',
+      account_connected: true,
+      account_masked: '0xABC…DEF',
+    })
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
+    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
+    render(<App />)
+
+    await screen.findByText('Настройки копирования')
+    await screen.findByText('Показаны только данные без секретов')
+    expect(sessionSpy).toHaveBeenCalledTimes(1)
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('warmup waits until Home reaches ready', async () => {
+    const dashboardGate = deferred<DashboardDTO>()
+    const positionsGate = deferred<PositionPageDTO>()
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockReturnValue(dashboardGate.promise)
+    const positionsSpy = vi.spyOn(api, 'positions').mockReturnValue(positionsGate.promise)
+    const activitySpy = vi
+      .spyOn(api, 'activity')
+      .mockResolvedValue(activityPage({ items: [], has_next: false }))
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    await act(async () => {})
+    // Home still loading: no snapshot yet, hidden tabs stay quiet.
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).toHaveBeenCalledTimes(0)
+    expect(activitySpy).toHaveBeenCalledTimes(0)
+
+    dashboardGate.resolve(dashboard())
+    await screen.findByText('Риск на стоп')
+    positionsGate.resolve(positionPage({ positions: [], count: 0 }))
+    await screen.findByText('Настройки копирования')
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('an early tap fetches immediately and warmup never doubles it', async () => {
+    const dashboardGate = deferred<DashboardDTO>()
+    vi.spyOn(api, 'dashboard').mockReturnValue(dashboardGate.promise)
+    const positionsSpy = vi
+      .spyOn(api, 'positions')
+      .mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    // Home still loading, user taps Positions: cold path, no waiting.
+    fireEvent.click(tabButton('Позиции'))
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+
+    dashboardGate.resolve(dashboard())
+    await screen.findByText('Настройки копирования')
+    // Home preview added its own read; warmup skipped the visited tab.
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('positions activation refetches exactly once past TTL, never within', async () => {
+    const t0 = Date.now()
+    const positionsSpy = vi
+      .spyOn(api, 'positions')
+      .mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    const { rerender } = render(<PositionsScreen auth={AUTH} />)
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+
+    rerender(<PositionsScreen auth={AUTH} active={false} />)
+    rerender(<PositionsScreen auth={AUTH} active={true} />)
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+
+    rerender(<PositionsScreen auth={AUTH} active={false} />)
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + HOME_REVALIDATE_MS + 5_000)
+    rerender(<PositionsScreen auth={AUTH} active={true} />)
+    nowSpy.mockRestore()
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(positionsSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
+  })
+
+  it('activity keeps its 60 s floor: 35 s is free, 65 s refetches once', async () => {
+    const t0 = Date.now()
+    const activitySpy = vi
+      .spyOn(api, 'activity')
+      .mockResolvedValue(activityPage({ items: [], has_next: false }))
+    const { rerender } = render(<ActivityScreen auth={AUTH} />)
+    await screen.findByText('Безопасный журнал действий')
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+
+    const bounce = async (ageMs: number) => {
+      rerender(<ActivityScreen auth={AUTH} active={false} />)
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + ageMs)
+      rerender(<ActivityScreen auth={AUTH} active={true} />)
+      nowSpy.mockRestore()
+      await screen.findByText('Безопасный журнал действий')
+    }
+    await bounce(35_000)
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+    await bounce(65_000)
+    expect(activitySpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('activation never fires while the first fetch is still in flight', async () => {
+    const gate = deferred<PositionPageDTO>()
+    const positionsSpy = vi.spyOn(api, 'positions').mockReturnValue(gate.promise)
+    const { rerender } = render(<PositionsScreen auth={AUTH} active={true} />)
+    expect(screen.getByLabelText('Загрузка позиций')).toBeDefined()
+
+    rerender(<PositionsScreen auth={AUTH} active={false} />)
+    rerender(<PositionsScreen auth={AUTH} active={true} />)
+    await act(async () => {})
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+
+    gate.resolve(positionPage({ positions: [], count: 0 }))
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('failed warmup shows error UI with retry, activation past TTL retries', async () => {
+    const positionsSpy = vi
+      .spyOn(api, 'positions')
+      .mockRejectedValueOnce(new ApiError(500, 'network_error', 'down'))
+      .mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    const { rerender } = render(<PositionsScreen auth={AUTH} active={false} warm={false} />)
+    // Gated: the loading frame shows, but no request leaves.
+    expect(screen.getByLabelText('Загрузка позиций')).toBeDefined()
+    expect(positionsSpy).toHaveBeenCalledTimes(0)
+    // Warmup fires and fails while hidden: error UI waits for the opener.
+    rerender(<PositionsScreen auth={AUTH} active={false} warm={true} />)
+    await screen.findByRole('button', { name: 'Повторить' })
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+
+    // Opening the tab past TTL retries automatically and lands ready.
+    const t0 = Date.now()
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + HOME_REVALIDATE_MS + 5_000)
+    rerender(<PositionsScreen auth={AUTH} active={true} warm={true} />)
+    nowSpy.mockRestore()
+    await screen.findByText('Нет открытых позиций')
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
   })
 })
