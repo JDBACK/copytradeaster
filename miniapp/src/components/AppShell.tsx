@@ -2,7 +2,7 @@
  * persistent bottom navigation.  Gate/Wizard/Recovery/Success stay outside
  * the shell; nested screens use the Telegram BackButton. */
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { AuthContext } from '../api'
 import {
   ROOT_TABS,
@@ -39,6 +39,16 @@ export function AppShell({
 }) {
   const [route, setRoute] = useState(initialRoute)
   const nested = currentNested(route)
+  const [visited, setVisited] = useState<ReadonlySet<RootTab>>(
+    () => new Set<RootTab>([initialRoute().tab]),
+  )
+  const contentRef = useRef<HTMLDivElement | null>(null)
+  const scrollTops = useRef<Record<RootTab, number>>({
+    home: 0,
+    positions: 0,
+    activity: 0,
+    settings: 0,
+  })
 
   useEffect(() => {
     if (nested) {
@@ -49,44 +59,64 @@ export function AppShell({
     return () => setBackButton(false)
   }, [nested])
 
-  const handleTab = useCallback((tab: RootTab) => {
-    setRoute((current) => selectTab(current, tab))
-    hapticImpact('light')
-  }, [])
+  const handleTab = useCallback(
+    (tab: RootTab) => {
+      const el = contentRef.current
+      if (el) scrollTops.current[route.tab] = el.scrollTop
+      setRoute((current) => selectTab(current, tab))
+      setVisited((prev) => (prev.has(tab) ? prev : new Set([...prev, tab])))
+      hapticImpact('light')
+    },
+    [route.tab],
+  )
 
   const openNested = useCallback((screen: NestedScreen) => {
     setRoute((current) => pushNested(current, screen))
   }, [])
 
+  useLayoutEffect(() => {
+    const el = contentRef.current
+    if (el) el.scrollTop = scrollTops.current[route.tab] ?? 0
+  }, [route.tab, nested])
+
+  const homeActive = route.tab === 'home' && !nested
+
   return (
     <div className="shell">
       {banner}
-      <div className="shell-content">
-        {nested ? (
+      <div className="shell-content" ref={contentRef}>
+        {visited.has('home') && (
+          <div hidden={!homeActive}>
+            <HomeScreen auth={auth} onNotConnected={onNotConnected} active={homeActive} />
+          </div>
+        )}
+        {visited.has('positions') && (
+          <div hidden={!!nested || route.tab !== 'positions'}>
+            <PositionsScreen auth={auth} accountMasked={accountMasked} />
+          </div>
+        )}
+        {visited.has('activity') && (
+          <div hidden={!!nested || route.tab !== 'activity'}>
+            <ActivityScreen auth={auth} accountMasked={accountMasked} />
+          </div>
+        )}
+        {visited.has('settings') && (
+          <div hidden={!!nested || route.tab !== 'settings'}>
+            <SettingsScreen
+              auth={auth}
+              accountMasked={accountMasked}
+              onOpen={openNested}
+              onNotConnected={onNotConnected}
+            />
+          </div>
+        )}
+        {nested && (
           <NestedRoute
             nested={nested}
             auth={auth}
             accountMasked={accountMasked}
             onNotConnected={onNotConnected}
           />
-        ) : (
-          <>
-            {route.tab === 'home' && <HomeScreen auth={auth} onNotConnected={onNotConnected} />}
-            {route.tab === 'positions' && (
-              <PositionsScreen auth={auth} accountMasked={accountMasked} />
-            )}
-            {route.tab === 'activity' && (
-              <ActivityScreen auth={auth} accountMasked={accountMasked} />
-            )}
-            {route.tab === 'settings' && (
-              <SettingsScreen
-                auth={auth}
-                accountMasked={accountMasked}
-                onOpen={openNested}
-                onNotConnected={onNotConnected}
-              />
-            )}
-          </>
         )}
       </div>
       <nav className="bottom-nav" aria-label="Основная навигация">

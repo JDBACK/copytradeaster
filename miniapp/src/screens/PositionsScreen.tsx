@@ -2,7 +2,7 @@
  * Строго read-only экран для просмотра открытых позиций фолловера.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
@@ -33,13 +33,23 @@ export function PositionsScreen({
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
 
+  const seq = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+
   const fetchPositions = useCallback(
     async (refresh = false) => {
+      const my = ++seq.current
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
       if (refresh) setRefreshing(true)
       try {
-        const data = await api.positions(auth, refresh)
+        const data = await api.positions(auth, refresh, { signal: controller.signal })
+        if (seq.current !== my) return
         setLoad({ kind: 'ready', data })
       } catch (err) {
+        if (err instanceof ApiError && err.code === 'aborted') return
+        if (seq.current !== my) return
         setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
       } finally {
         if (refresh) setRefreshing(false)
@@ -51,6 +61,7 @@ export function PositionsScreen({
   useEffect(() => {
     // oxlint-disable-next-line react/set-state-in-effect
     void fetchPositions(false)
+    return () => abortRef.current?.abort()
   }, [fetchPositions])
 
   if (load.kind === 'loading') {

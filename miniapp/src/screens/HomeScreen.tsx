@@ -1,7 +1,7 @@
 /** Minimal Home (эталон 02-home-active, part-1 scope): состояние, риск,
  * открытые позиции, freshness и одна primary action — pause/resume. */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import { describeError } from '../errors'
 import { formatPercent } from '../format'
@@ -17,35 +17,77 @@ import type { ConfirmationDTO, DashboardDTO, PositionSummaryDTO } from '../types
 import { Brand, ErrorBox, Sheet } from '../components/ui'
 import { PositionCard } from './PositionsScreen'
 
+export const HOME_REVALIDATE_MS = 30_000
+
 type LoadState =
   | { kind: 'loading' }
-  | { kind: 'ready'; dashboard: DashboardDTO; firstPosition: PositionSummaryDTO | null }
+  | {
+      kind: 'ready'
+      dashboard: DashboardDTO
+      firstPosition: PositionSummaryDTO | null
+      positionsPending: boolean
+    }
   | { kind: 'error'; code: string }
 
-export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotConnected: () => void }) {
+export function HomeScreen({
+  auth,
+  onNotConnected,
+  active = true,
+}: {
+  auth: AuthContext
+  onNotConnected: () => void
+  active?: boolean
+}) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [acting, setActing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pendingConfirmation, setPendingConfirmation] = useState<ConfirmationDTO | null>(null)
+  const seq = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+  const loadedAtRef = useRef(0)
 
   const refresh = useCallback(
     async (isUserTriggered = false) => {
+      const my = ++seq.current
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+      const signal = controller.signal
       if (isUserTriggered) setActing(true)
       try {
-        const dashboard = await api.dashboard(auth, true)
+        const dashboard = await api.dashboard(auth, true, { signal })
+        if (seq.current !== my) return
         if (dashboard.copy_state === 'empty') {
           onNotConnected()
           return
         }
-        // Read positions cheaply from cached snapshot refreshed by dashboard
-        const posPage = await api.positions(auth, false).catch(() => null)
+        // Partial-ready: paint the dashboard before the cheap positions read,
+        // keeping the previous preview (if any) instead of flashing.
+        setLoad((prev) => ({
+          kind: 'ready',
+          dashboard,
+          firstPosition: prev.kind === 'ready' ? prev.firstPosition : null,
+          positionsPending: true,
+        }))
+        // Read positions cheaply from cached snapshot refreshed by dashboard.
+        // The dashboard refresh above must stay strictly before this read —
+        // never Promise.all: positions must see the refreshed snapshot.
+        const posPage = await api.positions(auth, false, { signal }).catch((err: unknown) => {
+          if (err instanceof ApiError && err.code === 'aborted') throw err
+          return null
+        })
+        if (seq.current !== my) return
+        loadedAtRef.current = Date.now()
         setLoad({
           kind: 'ready',
           dashboard,
           firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
+          positionsPending: false,
         })
         setError(null)
       } catch (err) {
+        if (err instanceof ApiError && err.code === 'aborted') return
+        if (seq.current !== my) return
         setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
       } finally {
         if (isUserTriggered) setActing(false)
@@ -53,12 +95,68 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
     },
     [auth, onNotConnected],
   )
+
+  const refreshBackground = useCallback(async () => {
+    const my = ++seq.current
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const signal = controller.signal
+    try {
+      const dashboard = await api.dashboard(auth, true, { signal })
+      if (seq.current !== my) return
+      if (dashboard.copy_state === 'empty') {
+        onNotConnected()
+        return
+      }
+      setLoad((prev) => ({
+        kind: 'ready',
+        dashboard,
+        firstPosition: prev.kind === 'ready' ? prev.firstPosition : null,
+        positionsPending: true,
+      }))
+      const posPage = await api.positions(auth, false, { signal }).catch((err: unknown) => {
+        if (err instanceof ApiError && err.code === 'aborted') throw err
+        return null
+      })
+      if (seq.current !== my) return
+      loadedAtRef.current = Date.now()
+      setLoad({
+        kind: 'ready',
+        dashboard,
+        firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
+        positionsPending: false,
+      })
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'aborted') return
+      if (seq.current !== my) return
+      // Warm failure keeps the stale UI and only fills the error slot.
+      setError(err instanceof ApiError ? err.code : 'network_error')
+    }
+  }, [auth, onNotConnected])
+
   useEffect(() => {
     // Initial data fetch: refresh() only sets state after await (async), so
     // this is the standard external-system sync, not a cascading render.
     // oxlint-disable-next-line react/set-state-in-effect
     void refresh()
+    return () => abortRef.current?.abort()
   }, [refresh])
+
+  // Mirror for the warm-activation effect below: it must fire only on active
+  // transitions (plan: useEffect on [active]). Depending on `load` would
+  // retrigger on every partial-ready flip while loadedAt is still stale and
+  // spawn a self-sustaining background-refresh loop.
+  const loadRef = useRef(load)
+  useEffect(() => {
+    loadRef.current = load
+  })
+
+  useEffect(() => {
+    if (!active || loadRef.current.kind !== 'ready') return
+    if (Date.now() - loadedAtRef.current < HOME_REVALIDATE_MS) return
+    void refreshBackground()
+  }, [active, refreshBackground])
 
   async function pause() {
     setActing(true)
@@ -66,10 +164,11 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
     try {
       const dashboard = await api.pause(auth)
       hapticImpact('medium')
+      loadedAtRef.current = Date.now()
       setLoad((prev) =>
         prev.kind === 'ready'
           ? { ...prev, dashboard }
-          : { kind: 'ready', dashboard, firstPosition: null },
+          : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
       )
     } catch (err) {
       hapticNotify('error')
@@ -105,10 +204,11 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
       const dashboard = await api.resume(auth, confirmation)
       hapticNotify('success')
       setPendingConfirmation(null)
+      loadedAtRef.current = Date.now()
       setLoad((prev) =>
         prev.kind === 'ready'
           ? { ...prev, dashboard }
-          : { kind: 'ready', dashboard, firstPosition: null },
+          : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
       )
     } catch (err) {
       hapticNotify('error')
@@ -252,13 +352,17 @@ export function HomeScreen({ auth, onNotConnected }: { auth: AuthContext; onNotC
         </div>
       </div>
 
-      {load.firstPosition && (
+      {load.firstPosition ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div className="section-label" style={{ marginTop: 2 }}>
             Активная позиция
           </div>
           <PositionCard position={load.firstPosition} />
         </div>
+      ) : (
+        load.positionsPending && (
+          <div className="skeleton" style={{ minHeight: 96 }} aria-label="Загрузка позиций" />
+        )
       )}
 
       {view.actionLabel === 'pause' && (

@@ -7,7 +7,7 @@
  * internal exception text.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import {
   ACTIVITY_TIME_LABELS,
@@ -43,6 +43,8 @@ export function ActivityScreen({
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [loadingMore, setLoadingMore] = useState(false)
   const [now] = useState(() => new Date())
+  const seq = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
 
   const groups = useMemo(
     () => groupActivityByDay(load.kind === 'ready' ? load.items : [], now),
@@ -51,8 +53,13 @@ export function ActivityScreen({
 
   const fetchPage = useCallback(
     async (active: ActivityFilter, page: number, append: boolean) => {
+      const my = ++seq.current
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
       try {
-        const data = await api.activity(auth, active, page)
+        const data = await api.activity(auth, active, page, { signal: controller.signal })
+        if (seq.current !== my) return
         setLoad((prev) => {
           if (!append) {
             return { kind: 'ready', data, items: [...data.items], page }
@@ -63,6 +70,8 @@ export function ActivityScreen({
           return { ...prev, data, items: [...prev.items, ...data.items], page }
         })
       } catch (err) {
+        if (err instanceof ApiError && err.code === 'aborted') return
+        if (seq.current !== my) return
         if (append) {
           // Keep the previous page visible; surface failure on the next manual
           // load.  Avoids wiping already-displayed timeline rows.
@@ -80,6 +89,7 @@ export function ActivityScreen({
     // oxlint-disable-next-line react/set-state-in-effect
     setLoad({ kind: 'loading' })
     void fetchPage(filter, 0, false)
+    return () => abortRef.current?.abort()
   }, [filter, fetchPage])
 
   const handleFilter = useCallback((next: ActivityFilter) => {

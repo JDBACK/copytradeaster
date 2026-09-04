@@ -6,7 +6,7 @@
  * Values come from the authoritative DashboardDTO — nothing is hardcoded
  * and stale/degraded never reads «Всё работает». */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import { formatPercent } from '../format'
 import type { NestedScreen } from '../navigation'
@@ -39,9 +39,17 @@ export function SettingsScreen({
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
 
+  const seq = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+
   const refresh = useCallback(async () => {
+    const my = ++seq.current
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
-      const dashboard = await api.dashboard(auth, false)
+      const dashboard = await api.dashboard(auth, false, { signal: controller.signal })
+      if (seq.current !== my) return
       if (dashboard.copy_state === 'empty') {
         // The shell is only rendered for connected accounts; an empty
         // dashboard means the session desynced — route back to onboarding.
@@ -50,6 +58,8 @@ export function SettingsScreen({
       }
       setLoad({ kind: 'ready', dashboard })
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'aborted') return
+      if (seq.current !== my) return
       setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
     }
   }, [auth, onNotConnected])
@@ -58,6 +68,7 @@ export function SettingsScreen({
     // Initial fetch only: refresh() awaits before its first setState.
     // oxlint-disable-next-line react/set-state-in-effect
     void refresh()
+    return () => abortRef.current?.abort()
   }, [refresh])
 
   if (load.kind === 'loading') {
