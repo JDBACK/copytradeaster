@@ -117,7 +117,6 @@ class TestOpenRules:
         assert "reduceOnly" not in stop_action.payload
         assert stop_action.payload["closePosition"] == "true"
         assert stop_action.payload["workingType"] == "MARK_PRICE"
-        assert stop_action.payload["priceProtect"] == "false"
 
     def test_short_open_side_sell(self):
         t = TargetPosition(KEY, D("-0.05"), D(65500), None, 20)

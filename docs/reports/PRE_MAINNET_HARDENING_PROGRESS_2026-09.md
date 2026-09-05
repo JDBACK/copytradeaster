@@ -267,3 +267,368 @@ C → D → E → F. Код A/B и offline-тесты не откатывать:
 Документ `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` переписан как
 актуальная задача с полной живой матрицей A/B и обязательным
 flat/no-open-orders audit до и после каждого сценария.
+
+## 2026-09-04 — Package A LIVE-CLOSED: UNKNOWN-matrix 5/5 + builder corrective green + REAL-05 PASS
+
+HEAD `388f0e7`, run DB `data/pm-a-live-20260904T234500Z.sqlite3`, REAL Aster
+Testnet. Live execution serialized by orchestrator (no live runs from docs agents).
+
+Live invocations:
+
+- `CT_TESTNET=1 pytest tests/testnet/test_pre_mainnet_unknown_live.py -v` — **5/5 green**;
+- `CT_TESTNET=1 pytest tests/testnet/test_builder_stale_corrective_live.py -v` — **1 passed за 53.67s**;
+- unified campaign re-ran pre-existing proofs: response-lost PASS, SIGKILL-SENDING PASS, REAL-05 boot PASS на copyc3 за 10.53s (после ретаргета с saturated main; детали ниже).
+
+Per-test results (`test_pre_mainnet_unknown_live.py`, BTCUSDT, QTY `0.002` / QTY_RED `0.001`):
+
+- A1 CLOSE response-lost via real `allOrders` (7.7s-class): accepted CLOSE, response
+  отброшен, current-order lookup скрыт; resolver нашёл FILLED COID через реальный
+  `allOrders` (`history:FILLED`), `place_order` ровно 1, позиция flat.
+- A2 all-reads-down UNKNOWN hold: current + history + position reads все down;
+  команда осталась UNKNOWN под исходным COID, zero retry (`place_calls == 1`),
+  при том что биржа реально приняла order (fail-closed доказан).
+- A3 partial via real `positionRisk` delta residual-only: оба order lookup скрыты,
+  единственным evidence был реальный position delta; CONFIRMED через
+  `position-progress`, `place_calls == 1`, остаток ровно `QTY − QTY_RED`, без
+  continuation order.
+- A4 proven-not-executed exactly-one retry на copyc3: первый send уронен до биржи
+  (pre-send transport loss), реальные current/history/position reads доказали
+  отсутствие; resend ровно один под новым COID (`first + "r2"`, `send_attempts == 2`,
+  `real_sends == 1`, `attempts == 2`), history подтверждает fill нового COID и
+  отсутствие первого. main/copyc1 BTCUSDT `allOrders` saturated 1000/1000, поэтому
+  отсутствие там недоказуемо by design (fail-closed UNRESOLVED); copyc3 — 67 rows.
+- A5 SIGKILL-in-UNKNOWN boot CONFIRM без resend: worker принял реальный MARKET и умер
+  настоящим SIGKILL до resolution (`returncode == -SIGKILL`); boot нашёл ровно 1
+  SENDING row с recovery context, `report.confirmed == 1, unresolved == 0`, тот же
+  `order_id` до/после, ровно 1 match в `all_orders(limit=1000)` — второго economic
+  order нет.
+
+Builder corrective (`test_builder_stale_corrective_live.py`): файл был зелёным на bare
+App, после чего Package B admission gate в `32fe56d` закрыл entries; entry leg заменён
+прямыми REAL seeded legs, reduction assertions intact — green 53.67s.
+
+Audits: каждый новый live test заканчивается `finally` flatten + независимым signed
+audit flat/zero-orders (position flat + `open_orders == []`) — flat/zero везде.
+
+Deterministic-COID lesson: `command_key_of` игнорирует planner coid; тесты с одинаковой
+формой payload ДОЛЖНЫ использовать distinct `ExecutionAction` revision (A-file uses 1–5).
+
+Unified campaign complete: A1–A5 new 5/5, pre-existing response-lost PASS,
+SIGKILL-SENDING PASS, REAL-05 boot PASS на copyc3 за 10.53s, builder-stale PASS.
+REAL-05 root cause подтверждён: main BTCUSDT `allOrders` saturated 1000/1000,
+missing-COID leg поднимал `-1000` saturated-window вместо доказательства
+отсутствия (fail-closed, тот же феномен, что в A4); fix тронул только
+`tests/testnet/test_signed_scenarios.py` (aid params + ретаргет REAL-05 на
+copyc3, 67 rows), prod code не менялся. Оркестратор подтвердил REAL-05 green —
+PM-B1/Package A записаны как LIVE-CLOSED.
+
+## 2026-09-05 — Package B LIVE-COMPLETE: Snapshot/WS/Startup 6/6 на финальном дереве
+
+REAL Aster Testnet, финальное дерево (все harness fixes ниже уже применены).
+REAL-06 run DB `data/pm-b-live-20260905T002000Z.sqlite3`. Live execution
+serialized by orchestrator; второй App никогда не запускался параллельно.
+
+Live invocation:
+
+- `CT_TESTNET=1 pytest tests/testnet/test_pre_mainnet_master_live.py -v`
+
+Per-node results (каждый заканчивается flat/zero-open-orders audit):
+
+- S1 rebuild-holds-queue — green за 100s;
+- S2 stale-cutoff — green за 44s;
+- W1 reconnect-gap — green за 83s;
+- W2 failed-resnapshot — green за 68s;
+- P1 startup-transient — green за 45s;
+- REAL-06 App/WS/reconnect — green за 134s.
+
+Harness-vs-prod verdicts (все четыре — harness, prod не менялся):
+
+- settle gate — partial-fill race в harness teardown/setup;
+- `_wait_stable` quiescence gates — harness ждал устойчивости перед assertions;
+- HEDGE nonzero-key counting — подсчёт legs в harness;
+- deterministic-COID revisions — уроки A-file (revisions 1–5, unique revision
+  per submit) применены к B-live submits.
+
+Audits: каждый live test заканчивается `finally` flatten + signed
+flat/zero-orders audit — flat/zero везде. PM-B2/PM-B3 записаны как
+LIVE-COMPLETE.
+
+## 2026-09-05 — Package C LIVE-COMPLETE: NetworkProfile 3/3 за 12s
+
+REAL Aster Testnet. Prod scope: immutable `AsterNetworkProfile` (testnet 714 /
+mainnet 1666, mixed-combo fail-closed) + unified mainnet preflight +
+onboarding `from_profile`.
+
+Live invocation:
+
+- `CT_TESTNET=1 pytest tests/testnet/test_pre_mainnet_network_live.py -v` — **3/3 green за 12s**:
+  composition (настоящий production `App` в MAINNET profile, согласованный
+  network context, без order writes), mode-failure block, in-flight block.
+
+Harness-vs-prod verdict (harness, prod guard не тронут): явный
+`testnet_ip_whitelist_override=False` kwarg для MAINNET-profile Settings —
+live `.env` override сохранён, prod guard untouched.
+
+Audits: flat/zero-open-orders везде. PM-B4 записан как LIVE-COMPLETE.
+
+## 2026-09-05 — Package D LIVE-COMPLETE: ZeroReason/naked/liquidation 6/6 за 386s
+
+REAL Aster Testnet, один 386s run. Prod scope: ZeroReason taxonomy (sticky
+ТОЛЬКО `PROPORTIONAL_REDUCTION_DUST`), PM-B6 naked-flatten, PM-B7 operator
+cap + liquidation invariant + fresh-entry leverage gate
+(`LIQUIDATION_MMR_CUSHION=0.01`).
+
+Live invocation:
+
+- `CT_TESTNET=1 pytest tests/testnet/test_pre_mainnet_risk_live.py -v` — **6/6 green за 386s**:
+  Dust-1 (master 0.008 shaping), Dust-2, Dust-3 (SHORT-leg fix — harness,
+  prod не менялся), Protection-cancel/naked legs (manual follower Stop
+  cancellation → recovery/flatten), liquidation-hold.
+
+Key finds:
+
+- S1 open→flatten livelock на ~200x найден live и закрыт entry gate (prod fix).
+- liquidation-violation flatten ACTION доказан unshapeable в cross-only
+  multi-asset реальности — theorem sketch: нужен risk >~100.5% против
+  RiskPolicy cap 100%; isolated отвергнут биржей с -4168 на copyc1 И на
+  tg-8264892202 (probed live). Тест утверждает честный hold contract + live
+  evaluation evidence (branch-verdict logs с реальными inputs), а не flatten.
+- TEMP probe добавлен и удалён; ноль TEMP sites осталось (проверено grep).
+
+Offline hygiene (тот же пакет): 3 routing assertions ужаты 200→44, `priceProtect`
+удалён из planner contract (wire его никогда не нёс) + 2 offline pins удалены;
+gate count — только в `../ENGINE_TEST_STATUS_2026-08.md` (блок Package D).
+
+Audits: каждый live test заканчивается flat/zero-open-orders — flat/zero
+везде, второй App не запускался. PM-B5/PM-B6/PM-B7 записаны как LIVE-COMPLETE.
+
+## 2026-09-05 — Package E status: E1 prod DONE un-run-live, E2 LIMIT partial + isolation PENDING
+
+E1 prod DONE (live ещё не гонялся): metrics.py p50/p95/p99 + snapshot,
+symbol-aware snapshot scope, max_followers=10 cap, health convergence gate
+вместо clear-on-clean-sweep, ONE_WAY-only v1 mainnet boot refusal, удаление
+`priceProtect` из planner contract (см. Package D hygiene выше).
+
+E2 live files написаны (`tests/testnet/test_pre_mainnet_limit_live.py`,
+`tests/testnet/test_pre_mainnet_isolation_live.py`):
+
+- `CT_TESTNET=1 pytest tests/testnet/test_pre_mainnet_limit_live.py -v` — LIMIT:
+  **2 passed** (L1 entry, L3 reduction/convergence) + L2 honest skip: биржа
+  дважды исполнила full, а для residual row нужен real partial — честный skip,
+  НЕ green.
+- `CT_TESTNET=1 pytest tests/testnet/test_pre_mainnet_isolation_live.py -v` —
+  isolation: первый прогон **0/3** — verdict: harness (naked master), engine
+  корректно fail-closed (prod verdict правильный); fixed (master STOPs added),
+  rerun IN FLIGHT на момент записи — isolation PENDING RERUN, НЕ green.
+
+Audits: flat/zero-open-orders везде, второй App не запускался.
+
+## 2026-09-05 — Package F OPEN + owner decisions
+
+Package F OPEN: hybrid load 3–5 REAL + 100 SHADOW + restart/SIGTERM/SIGKILL
+wrapper ещё не написан; финальный полный campaign + audit pending.
+
+Owner decisions, записанные в кампанию:
+
+- uv migration ПОСЛЕ F (frozen toolchain during gates);
+- main/copyc1 BTCUSDT allOrders saturated 1000/1000 — negative-proof legs идут
+  на copyc3, fail-closed by design;
+- deterministic-COID revision lesson: revisions 1–5 / unique revision per
+  submit (см. Package A).
+
+## 2026-09-05 — Package E LIVE-COMPLETE + load rescope/envelope + phantom-fill fix
+
+E2 closed: isolation **3/3 LIVE-COMPLETE за 633s** на финальном дереве
+(`tests/testnet/test_pre_mainnet_isolation_live.py`: F1 429-transport через
+`FollowerRuntime.client`, F2 injected −2015 + degraded-доказательство, F3
+control-plane-denial после fresh-cycle heal). LIMIT: L1/L3 green, L2 honest
+skip (биржа дважды full-fill вместо partial — residual row не shapeable).
+Audits: flat/zero-open-orders везде, второй App не запускался.
+
+Load gate RESCOPED 3 REAL + 10 SHADOW (файл
+`tests/testnet/test_pre_mainnet_load_live.py`, только константа + derivation в
+комментарии): load12 (103 ноги) измерил 17–37s свипы против 5s freshness —
+~103×~7 ≈ 721+ weight/sweep против бюджета 40/s →
+stale→dirty→3-pass-boundary congestion collapse (followers churn на flapping
+master view). Потолок ≈ 40×5/7 ≈ 28 абсолютный → v1 cap 10 с запасом
+(совпадает с `max_followers=10`); mainnet-бюджеты шире — cap растёт по
+измеренному envelope без изменения кода.
+
+Phantom-fill 65000 (shadow-only bounce open→RISK_CAP-flatten ~1s): TEMP-трейс
+(`TEMP target ... qty=0.000 zero=RISK_CAP master_qty=0.004 current=0.006
+cap=0.000 cap_stop=77932 avail=1000 risk=0.01 entry=65000`) доказал fills по
+дефолту — WS-дельты проектора несут mark_price=0, синк цены в shadow
+no-op'ился. Движок корректен (резал безумную ногу: стоп 77932 выше входа
+65000). Фикс: `App._sync_shadow_marks` — REST-marks со sweep/boundary/startup
+rebuild (prod, `src/copytradeaster/app.py`, offline-verified, live не гонялся
+отдельно — проверяется самим load gate). TEMP-строки добавлены и удалены
+(grep=0), сломанный throwaway `scripts/probe_hedge_shadow.py` удалён.
+Побочная находка (JUSTIFIED, без фикса): `ShadowExchange` default
+`auto_trigger=True` метит OTM-стопы EXPIRED через flatten-cascade
+(`_fill_market` expires NEW conditionals при new_qty=0) — исчезает с фиксом
+marks; load идёт с `False` и не affected.
+
+Load rerun IN FLIGHT (`/tmp/load15.log`, 3 REAL + 10 SHADOW, 100 cycles +
+restart/SIGTERM/SIGKILL + metrics/journal/audit). Дальше: финальный
+flat-аудит → полный офлайн-гигиенический прогон + triage 2 fake-flip reds →
+ruff → вердикт MAINNET.
+
+## 2026-09-05 — Owner decision: HEDGE возвращается в скоуп (Package G)
+
+Owner не подтверждал пометку DROPPED на full-HEDGE matrix (формулировка
+`MAINNET v1 = ONE_WAY only` — из приложенного owner-плана, выбор без явного
+«да»). Решение: проверить всё до прода — HEDGE-матрица (6 пунктов) возвращена
+как Package G после F; ONE_WAY-only boot refusal остаётся до green матрицы +
+flat-аудита. Код не переписывается — только live-приёмка (несколько часов
+прогонов).
+
+## 2026-09-05 — Load gate: 3 падения обвязки, фазная переразбивка, -4226
+
+Движок ни разу не подвёл (60→80 зелёных циклов, рестарты чистые); падала
+обвязка теста, каждый баг чинен раз и навсегда:
+
+- Run 1 (2:07): SIGTERM-фаза читала ПЕРВУЮ строку stdout воркера и требовала
+  `LOAD_APP_READY` — туда раньше прилетает лог движка. Фикс: skip-until-marker
+  с дедлайном (один сайт).
+- Run 2 (2:58): 80 циклов + graceful + SIGTERM + SIGKILL зелёные; финал P8a
+  нашёл 1 SENDING (response-loss на последнем send драйвера, 5226 CONFIRMED).
+  Фикс: P7b — prod `resolve_boot_unknowns` перед аудитом (fail-closed
+  сохранён: unresolvable всё равно роняет gate).
+- Run 3 (2:58): P6 SIGKILL-фаза — три бага разом: (а) executor переписывает
+  coid на `ct<command_key>`, а тест ждал `hl-kill-*` в `_sending_visible`
+  (вечное ожидание → fail); (б) тот же mismatch в single-fill сверке;
+  (в) `CYCLES` вообще не определён (P7 NameError). Фиксы: poll любой SENDING
+  строки, match по coid из строки журнала, `CYCLES = 100`, bounded re-probe
+  в resolve (saturated-main allOrders лагодает).
+- Run 4 (5:30): транзиентный reject стопов `-4226` (код без текста, первое
+  появление за кампанию; повтор в run 5) — движок корректно FAILED →
+  degraded → replan → heal; но flap съел бюджет cycle-wait. Мониторится.
+
+Owner-приказ: gate переразбит на фазы (`CT_LOAD_PHASES` =
+a,restart,b,sigterm,c,sigkill,d,audit — любая подвыборка) + масштаб циклов
+(`CT_LOAD_SCALE`, дефолт 1.0 = 30/60/80/100). Каждый блок самодостаточен
+(рестарты сравнивают журнал внутри окна, аудит сначала флаттит). Файл
+`tests/testnet/test_pre_mainnet_load_live.py`. Идёт шейкдаун 0.2 (~20
+циклов, все фазы), затем полный gate 1.0 для протокола.
+
+## 2026-09-05 — Load gate GREEN на 0.2 (все фазы), полный 1.0 запущен
+
+`loadgate6` (CT_LOAD_SCALE=0.2, все фазы): **1 passed за 41:41, exit 0** —
+graceful restart, SIGTERM, SIGKILL с single economic fill, P7b tail-resolve,
+journal без висяков, метрики p50/p95/p99, финальный signed audit. Независимый
+аудит следом: main/copyc1/copyc2/copyc3 flat, ноль ордеров.
+
+По ходу: детерминированный `command_key` (sha256, святое Package A) даёт
+одинаковые coid киллера в разных прогонах на свежих DB — биржа исполнила оба;
+сверка single-fill теперь scoped по `update_time >= t0_run` (доказательство в
+пределах прогона). Прод-ограничение зафиксировано: кросс-DB reuse ключей
+защищён только долговечностью prod-DB (по построению).
+
+Запущен `loadgate7` — полный gate 1.0 (100 циклов) для протокола (~3ч).
+
+## 2026-09-05 — Full 1.0 run убит часовым testnet-brownout (не движок)
+
+`loadgate7` (1.0): 34 цикла зелёных, затем TimeoutError reduce cycle 35.
+Лог-доказательства вранья дата-плейна ~1ч: drift в обе стороны
+(`stream=0.000/exchange=0.004` И `stream=0.004/exchange=0`), boundary
+1/3+2/3 `not quiescent` пачками, `sweep holds degraded (not-ready)` почти
+час. Фолловеры зеркалили фантомы (flatten/reopen) — корректно, но сходимость
+невозможна, когда биржа показывает то 0, то 0.004. Финал fail-closed чистый
+(только driver residual 0.002, сглажен; все 4 flat). REST-проверка после:
+3 стабильных чтения — brownout кончился. Запущен `loadgate8` (1.0).
+
+## 2026-09-05 — Load gate FULL GREEN 1.0 (100 циклов, все фазы)
+
+`loadgate8` (CT_LOAD_SCALE=1.0, all): **1 passed за 3:39:15, exit 0** —
+100 циклов 3 REAL + 10 SHADOW, graceful restart, SIGTERM, SIGKILL с single
+economic fill, P7b tail-resolve, journal без висяков, метрики p50/p95/p99,
+финальный signed audit. Независимый аудит следом: все 4 flat, ноль ордеров.
+Package F CLOSED. Остаток C–F: офлайн-гигиена + fake-flip triage + ruff +
+вердикт v1; затем Package G (HEDGE).
+
+## 2026-09-05 — Offline hygiene: ruff clean, 5 reds triaged, v1 VERDICT
+
+Ruff: `check` + `format` зелёные (было 99 ошибок — все кампанейские, HEAD был
+чист). По пути: `metrics_snapshot` suppress-блоки, realistic fake liq ниже.
+
+Офлайн (unit, 1068 тестов): 4 детерминированных reds найдены и починены,
+подтверждено green:
+
+- 2× `TestMasterFlipEpisodeSemantics` (fake): НЕ fake-divergence, а настоящая
+  регрессия кампании — доказано worktree-бисекцией (HEAD green, revert
+  coordinator → green). Корень: FakeAster врал `liquidationPrice=100`, и
+  PM-B7 safety-net (`_post_execution_converge`, LIQUIDATION_VIOLATION) сносил
+  только что открытый SHORT (100 <= 65500×1.005). Живой Dust-3 был зелен,
+  потому что биржа даёт настоящий liq. Фикс — честность фейка:
+  `FakeAster.position_risk` считает `entry×(1∓1/leverage)` по стороне.
+  Плюс в тестах: DAG-drain вместо `sleep(0)` (SET_LEVERAGE→OPEN→STOP за
+  несколько поколений экзекутора).
+- `TestHedgeLegFills::test_long_leg_sell_fill_closes_not_reopens`: AU (pa=0)
+  маркирует символ dirty, поздний TP-TRADE дропался как dirty-master-event
+  (B-дизайн: кадры не мутят состояние под перестройкой). Прод корректен
+  (границу лечит свип; живой TP-триггер green). Фикс теста: компрессия хила
+  (`_dirty_symbols.clear()` + комментарий; `mark_dirty()` без аргументов
+  ставит `*`, не чистит!).
+- `TestAppStartupGap::...blocks_entry_admission`: фейк `Commands.in_flight`
+  возвращал `[object()]`, а E1-код сабскриптит `row["account_id"]`. Фейк
+  обновлён до Row-shape (`{"account_id","status"}`), контракт тот же.
+
+Остаток: `test_testnet_ip_whitelist_override_is_fail_closed` — FLAKY
+(~3/8 полных прогонов; в изоляции/парах/остатке green, включая 6 подряд).
+Валидация чистая pydantic, без сети; прод не затронут. Подозрение —
+межмодульное состояние сюиты; чинить отдельным заходом, не блокер.
+
+**ВЕРДИКТ v1 (ONE_WAY-only scope): GO.** Live: A 5/5, B 6/6, C 3/3, D 6/6,
+E isolation 3/3 + LIMIT 2/3 (L2 honest skip), F 100 циклов green + flat
+везде. Launch cap 10 (замер). HEDGE остаётся под boot refusal до Package G.
+Известные ограничения: транзиентные -4226 на стопах (движок хилит корректно,
+нужен кодбук), часовые brownout тестнета (fail-closed держит), детерминированные
+coid при потере prod-DB (по построению), ShadowExchange default
+auto_trigger=True (load идёт с False), L2 skip (поведение биржи).
+
+## 2026-09-05 — Package G HEDGE live-matrix CLOSED, refusal снят
+
+Новый `tests/testnet/test_pre_mainnet_hedge_live.py` (7 тестов, 1 REAL
+follower copyc1 + main, каждый с finally flatten + signed flat audit):
+G0 pre-check flat green; G1 LONG+SHORT одновременно green (44s, economic
+sends >= 2); G2 асимметричные fills green; G3 стопы на ногах + replace
+SHORT-стопа green; G4 смена плеча мастера не дёргает ноги green; G5 partial
+close LONG green; G6 close LONG при целом SHORT green. Финальный независимый
+audit: FLAT-ALL на main/copyc1-3/tg (пусто + zero open orders).
+
+Находки по ходу (все закрыты):
+
+- Прод-баг #27 (мусорный liq биржи): тестнет отдал `liquidationPrice=25.5M`
+  на 80k LONG-ноге; PM-B7 safety-net (`_post_execution_converge`) трактовал
+  как авторитет → `LIQUIDATION_VIOLATION` → снос здоровой ноги со стопом +
+  переоткрытие следующим проходом (4 цикла на реальных комиссиях; SHORT не
+  мигал — 25M не цепляет SHORT-проверку). Фикс в
+  `Coordinator._liquidation_violated`: liq с невозможной стороны от входа
+  (LONG >= entry, SHORT <= entry) демотится в unknown, нога судится по
+  стоп-правилу. Мог ударить и в ONE_WAY — хедж выловил первым.
+- Гонка teardown в харнессе (не прод): flatten при живом движке —
+  переоткрытие ног между flatten и аудитом (два stranded-остатка, оба убраны
+  с FLAT-ALL). Фикс `_flatten_audit_stop`: main-first flatten + settle 3s +
+  stop движка + reconnect storage + аудит через audit-клиент.
+- Неверная премиса G4: `set_leverage` мастера НЕ едет на фолловера — плечом
+  владеет движок (LeverageManager, свои SET_LEVERAGE 32-34 в журнале).
+  Тест переписан на осмысленное свойство (смена плеча мастера: qty+стопы
+  стабильны, ноль новых MARKET-команд).
+- Урок -1106: HEDGE-закрытия несут только positionSide без reduceOnly
+  (как прод-планер); хелпер сначала слал reduceOnly — биржа отвергла.
+- Бейзлайн после тримма: движок делает one-shot convergence trim
+  (-0.005 → -0.004) секунды после открытия; захват бейзлайна только после
+  стабильности (`_stable_leg_qtys`), иначе вечный timeout.
+- Стартовый аудит нашёл чужие остатки (main LONG 0.004 + LONG-ноги на
+  copyc1-3 со стопами) — убраны до старта G, FLAT-ALL.
+
+ONE_WAY-only v1 mainnet boot refusal СНЯТ после green + flat (план требовал
+именно такой порядок): удалены `_MainnetHedgeViolation`,
+`_require_one_way_v1_config` и mainnet-ветки step 5 в `app.py`; везде единый
+warn-and-fix (mismatch → конвертация в конфиг-режим, нечитаемый режим →
+warn, кривые ордера по-прежнему реджектит биржа). Бут с финальным кодом
+проверен (G0 re-run green). Пинов refusal в тестах не было.
+
+Кампания A–G live закрыта полностью. Раннер субагентов мёртв весь день
+(`TypeError: rt.getWorkPoolYieldItems`) — Package G сделан оркестратором
+вручную.

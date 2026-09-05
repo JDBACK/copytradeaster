@@ -265,25 +265,25 @@ async def test_insufficient_margin_fails_cleanly(clients, creds):
 # --- acceptance-gate scenarios over the REAL exchange --------------------------
 
 
-async def _is_hedge(client) -> bool:
-    return bool(await client.get_position_mode("main"))
+async def _is_hedge(client, aid: str = "main") -> bool:
+    return bool(await client.get_position_mode(aid))
 
 
-async def _flatten_main(client) -> None:
+async def _flatten_main(client, aid: str = "main") -> None:
     """Best-effort flatten BTC position and clear protections before a scenario."""
     import contextlib
 
     from copytradeaster.aster.trading_api import PlaceOrderRequest
     from copytradeaster.domain.models import Side
 
-    for o in await client.open_orders("main", SYMBOL):
+    for o in await client.open_orders(aid, SYMBOL):
         with contextlib.suppress(Exception):
-            await client.cancel_order("main", SYMBOL, orig_client_order_id=o.client_order_id)
-    for p in await client.position_risk("main", SYMBOL):
+            await client.cancel_order(aid, SYMBOL, orig_client_order_id=o.client_order_id)
+    for p in await client.position_risk(aid, SYMBOL):
         if p.symbol == SYMBOL and p.position_amt != 0:
             with contextlib.suppress(Exception):
                 await client.place_order(
-                    "main",
+                    aid,
                     PlaceOrderRequest(
                         symbol=SYMBOL,
                         side=Side.SELL if p.position_amt > 0 else Side.BUY,
@@ -686,9 +686,13 @@ async def test_emergency_close_all_twice_uses_distinct_real_generations(clients,
         await flatten_copy()
 
 
-async def test_boot_recovery_real_found_and_not_found(clients, db):
+async def test_boot_recovery_real_found_and_not_found(clients, db, creds):
     """REAL-05: resolve a real resting conditional and an authoritative
-    missing clientOrderId without any duplicate placement."""
+    missing clientOrderId without any duplicate placement.
+
+    Runs on ``copyc3``: ``main``/``copyc1`` BTCUSDT ``allOrders`` windows are
+    saturated (1000/1000), so history absence is unprovable there by design
+    (fail-closed UNRESOLVED); ``copyc3`` admits real negative proof."""
     import json
 
     from copytradeaster.aster.trading_api import PlaceOrderRequest
@@ -696,14 +700,17 @@ async def test_boot_recovery_real_found_and_not_found(clients, db):
     from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo
     from copytradeaster.trading.executor import resolve_boot_unknowns
 
+    aid = "copyc3"
+    if aid not in creds.account_ids():
+        pytest.skip(f"{aid} credentials are required for signed boot recovery")
     client = clients["main"]
-    await _flatten_main(client)
-    hedge = await _is_hedge(client)
+    await _flatten_main(client, aid)
+    hedge = await _is_hedge(client, aid)
     position_side = PosSide.LONG if hedge else PosSide.BOTH
     stamp = time.time_ns()
     try:
         await client.place_order(
-            "main",
+            aid,
             PlaceOrderRequest(
                 symbol=SYMBOL,
                 side=Side.BUY,
@@ -714,13 +721,11 @@ async def test_boot_recovery_real_found_and_not_found(clients, db):
                 new_order_resp_type="RESULT",
             ),
         )
-        position = next(
-            p for p in await client.position_risk("main", SYMBOL) if p.position_amt != 0
-        )
+        position = next(p for p in await client.position_risk(aid, SYMBOL) if p.position_amt != 0)
         level = (position.entry_price - D("1800")).quantize(D("0.1"))
         found_coid = f"boot-found-{stamp}"[:36]
         await client.place_order(
-            "main",
+            aid,
             PlaceOrderRequest(
                 symbol=SYMBOL,
                 side=Side.SELL,
@@ -737,7 +742,7 @@ async def test_boot_recovery_real_found_and_not_found(clients, db):
         found_key = f"boot-found-key-{stamp}"
         await commands.insert(
             found_key,
-            "main",
+            aid,
             None,
             "PLACE_STOP",
             json.dumps({"symbol": SYMBOL}),
@@ -749,7 +754,7 @@ async def test_boot_recovery_real_found_and_not_found(clients, db):
         missing_coid = f"boot-missing-{stamp}"[:36]
         await commands.insert(
             missing_key,
-            "main",
+            aid,
             None,
             "PLACE_STOP",
             json.dumps({"symbol": SYMBOL}),
@@ -758,17 +763,17 @@ async def test_boot_recovery_real_found_and_not_found(clients, db):
         )
         await commands.set_status(missing_key, "UNKNOWN")
 
-        before = len(await client.open_orders("main", SYMBOL))
+        before = len(await client.open_orders(aid, SYMBOL))
         report = await resolve_boot_unknowns(
             lambda _account_id: client, commands, OrderLinkRepo(db)
         )
-        after = len(await client.open_orders("main", SYMBOL))
+        after = len(await client.open_orders(aid, SYMBOL))
         assert report.confirmed >= 1 and report.failed_not_found >= 1
         assert (await commands.get(found_key))["status"] == "CONFIRMED"
         assert (await commands.get(missing_key))["status"] == "FAILED"
         assert before == after
     finally:
-        await _flatten_main(client)
+        await _flatten_main(client, aid)
 
 
 async def test_real_app_ws_ready_reconnect_and_cleanup(clients, creds, settings):

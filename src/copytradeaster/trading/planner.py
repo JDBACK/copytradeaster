@@ -37,7 +37,6 @@ from copytradeaster.domain.models import (
 )
 
 DEFAULT_WORKING_TYPE: Final = "MARK_PRICE"
-PRICE_PROTECT: Final = "false"
 
 
 def _hedge(pos_side: PosSide) -> bool:
@@ -100,7 +99,6 @@ def _order_payload(
         payload["price"] = format(limit_price, "f")
     if working_type is not None:
         payload["workingType"] = working_type
-        payload["priceProtect"] = PRICE_PROTECT
     if close_position:
         payload["closePosition"] = "true"
         _apply_open_mode(payload, pos_side)

@@ -818,6 +818,11 @@ class TestHedgeLegFills:
         await projector.apply_raw(
             account_update(E=2000, P=[position_payload(pa="0", ep="65000", ps="LONG")])
         )
+        # The AU marks the symbol dirty (stream 0.002 vs pa 0); in production
+        # the sweep boundary heals before the late TRADE arrives. Compress that
+        # here so this unit test exercises the fill math, not the healer.
+        # (mark_dirty() with no args marks "*", so clear the set directly.)
+        projector._dirty_symbols.clear()
         await projector.apply_raw(
             order_trade(
                 E=2001,

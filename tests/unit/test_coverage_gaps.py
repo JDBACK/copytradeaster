@@ -600,7 +600,8 @@ class TestAppStartupGap:
 
         class Commands:
             async def in_flight(self):
-                return [object()]
+                # sqlite3.Row-shaped: production subscripts account_id/status.
+                return [{"account_id": "copyc1", "status": "SENDING"}]
 
         class Settings:
             async def set_flag(self, key, value):

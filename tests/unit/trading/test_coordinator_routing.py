@@ -272,7 +272,9 @@ async def test_production_recompute_uses_exchange_symbol_maximum(env):
     await coordinator.on_master_delta(delta_of(master_state(leverage=20)))
 
     assert calls == [("copyc1", "BTCUSDT")]
-    assert client.leverage_calls == [("BTCUSDT", 200)]
+    # PM-B7 entry gate: the 200x exchange maximum would breach the stop
+    # margin (65000/500+975 -> cap 44), so the entry lands capped, not at max.
+    assert client.leverage_calls == [("BTCUSDT", 44)]
 
 
 async def test_targets_public_seam_uses_client_maximum_when_supplied(env):
@@ -301,7 +303,7 @@ async def test_targets_public_seam_uses_client_maximum_when_supplied(env):
         client=client,
     )
     assert calls == ["BTCUSDT"]
-    assert targets and targets[0].leverage == 200
+    assert targets and targets[0].leverage == 44
 
 
 @pytest.mark.parametrize(
@@ -984,7 +986,7 @@ async def test_ready_manager_sizes_entry_without_network_reads(managed_env):
 
     kinds = [p["type"] for p in fr.client.placed]
     assert "MARKET" in kinds
-    assert fr.client.leverage_calls == [("BTCUSDT", 200)]
+    assert fr.client.leverage_calls == [("BTCUSDT", 44)]
     # Hot path stayed on RAM reads: no follower bracket GET, no extra POSTs.
     assert lev_clients["copyc1"].bracket_calls == []
     assert lev_clients["copyc1"].set_calls == []

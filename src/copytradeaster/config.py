@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from copytradeaster.aster.network_profile import AsterNetworkProfile
 from copytradeaster.logging_utils import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
@@ -35,8 +36,13 @@ class Settings(BaseSettings):
     orders_limit_per_10s: int = 300
     fee_buffer_pct: Decimal = Decimal("0.001")  # fee+slippage buffer on unit price
     working_type: str = "MARK_PRICE"  # trigger price type for follower protective orders
+    # v1 wire policy (Package E, single policy): priceProtect is NEVER sent on
+    # the wire. Deleted from the planner contract (behavior-neutral: the
+    # executor mapping and PlaceOrderRequest.to_params never carried it, so
+    # the exchange default already governed every STOP/TP order).
     position_mode: str = "ONE_WAY"  # ONE_WAY | HEDGE
     symbol_whitelist: list[str] = ["BTCUSDT", "ETHUSDT"]
+    trading_chain_id: int = 714  # EIP-712 trading domain (714 testnet, 1666 mainnet)
     registration_chain_id: int = 56  # EIP-712 domain for ApproveAgent/ApproveBuilder
     builder_address: str = ""  # empty -> approve_agent goes without builder
     builder_name: str = "copytradeaster"
@@ -70,6 +76,10 @@ class Settings(BaseSettings):
     # Explicit load-profile optimization. Empty keeps the authoritative
     # all-symbol follower snapshot used by normal production reconciliation.
     follower_snapshot_symbols: list[str] = []
+    # v1 launch cap: maximum followers in the runtime registry, derived from
+    # the measured weight envelope (scoped snapshot ≈ whitelist weight per
+    # follower per sweep). Enforced fail-closed at register_follower.
+    max_followers: int = 10
 
     # Stage 2 Telegram transport.  The token is optional for Stage 1 CLI/core
     # processes; Telegram runtime raises a clear error if it is not configured.
@@ -234,6 +244,13 @@ class Settings(BaseSettings):
             raise ValueError("CT_MAX_FEE_RATE must be in [0, 0.001]")
         return format(rate, "f")
 
+    @field_validator("trading_chain_id")
+    @classmethod
+    def _validate_trading_chain_id(cls, value: int) -> int:
+        if value not in {714, 1666}:
+            raise ValueError("CT_TRADING_CHAIN_ID must be 714 (testnet) or 1666 (mainnet)")
+        return value
+
     @field_validator("registration_chain_id")
     @classmethod
     def _validate_registration_chain_id(cls, value: int) -> int:
@@ -277,7 +294,7 @@ class Settings(BaseSettings):
             "weight_limit_per_min": self.weight_limit_per_min,
             "orders_limit_per_min": self.orders_limit_per_min,
             "orders_limit_per_10s": self.orders_limit_per_10s,
-            "registration_chain_id": self.registration_chain_id,
+            "max_followers": self.max_followers,
             "telegram_polling_timeout_s": self.telegram_polling_timeout_s,
             "telegram_tasks_concurrency_limit": self.telegram_tasks_concurrency_limit,
             "log_max_bytes": self.log_max_bytes,
@@ -318,6 +335,28 @@ class Settings(BaseSettings):
         ws_host = (urlparse(self.ws_user_base).hostname or "").lower().rstrip(".")
         return (
             rest_host == "fapi.asterdex-testnet.com" and ws_host == "fstream.asterdex-testnet.com"
+        )
+
+    @property
+    def is_mainnet(self) -> bool:
+        """Whether both exchange endpoints are the exact official mainnet hosts."""
+        rest_host = (urlparse(self.rest_base_url).hostname or "").lower().rstrip(".")
+        ws_host = (urlparse(self.ws_user_base).hostname or "").lower().rstrip(".")
+        return rest_host == "fapi.asterdex.com" and ws_host == "fstream.asterdex.com"
+
+    @property
+    def network_profile(self) -> AsterNetworkProfile:
+        """Single-injection network identity for App/credentials/client/onboarding.
+
+        Fail-closed: mixed combinations (mainnet hosts with the testnet trading
+        chain and vice versa, or any unofficial host) raise ``ValueError`` here
+        instead of composing a plausible-looking but wrong runtime.
+        """
+        return AsterNetworkProfile.resolve(
+            self.rest_base_url,
+            self.ws_user_base,
+            self.trading_chain_id,
+            self.registration_chain_id,
         )
 
     def telegram_token_value(self) -> str:

@@ -1,11 +1,15 @@
 # Scripts Guidelines
 
 Map of `scripts/`: what each script does, how to run it, which gates apply.
-Everything except `dev-up.sh`, `preview_miniapp_engine.py` (backup-copy preview),
-and `check_doc_links.py` is testnet-only and touches a real DB/exchange:
-read the usage before running. `__pycache__/` is noise, ignore it.
+Read each script's usage and gates before running. A local process or backup
+DB does not isolate exchange accounts: `dev-up.sh` starts the configured bot,
+and `preview_miniapp_engine.py` boots a real testnet engine using copied
+credentials. `verify_menu_button.py` uses Telegram's API; `--fix` writes remote
+configuration. `check_doc_links.py` is an offline repository check.
+Use existing task authorization for live operations; a docs/UI edit alone
+does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 
-## Launch and preview (safe, local)
+## Launch and preview (local processes, live services)
 
 | Script | Purpose | Run |
 |---|---|---|

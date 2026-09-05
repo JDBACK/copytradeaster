@@ -13,6 +13,8 @@ from urllib.parse import urlencode
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
+from copytradeaster.aster.network_profile import AsterNetworkProfile
+
 EIP712_DOMAIN_BASE = {
     "name": "AsterSignTransaction",
     "version": "1",
@@ -40,6 +42,25 @@ def next_nonce() -> int:
 def build_query_string(params: Sequence[tuple[str, str]]) -> str:
     """urlencoded query string; insertion order preserved — it IS the signed string."""
     return urlencode(list(params))
+
+
+def trading_chain_id_for_profile(profile: AsterNetworkProfile) -> int:
+    """Return the EIP-712 trading chain id carried by a network profile."""
+    return profile.trading_chain_id
+
+
+def assert_profile_chain(chain_id: int, profile: AsterNetworkProfile) -> None:
+    """Fail closed when a caller mixes a chain id with the wrong profile."""
+    if chain_id != profile.trading_chain_id:
+        raise ValueError(
+            f"refusing chain {chain_id} on {profile.name} profile (want {profile.trading_chain_id})"
+        )
+
+
+def sign_trading_with_profile(qs: str, private_key_hex: str, profile: AsterNetworkProfile) -> str:
+    """Sign a trading query string under the profile's chain id (no 0x prefix)."""
+    assert_profile_chain(profile.trading_chain_id, profile)
+    return sign_trading(qs, private_key_hex, profile.trading_chain_id)
 
 
 def sign_trading(qs: str, private_key_hex: str, chain_id: int) -> str:

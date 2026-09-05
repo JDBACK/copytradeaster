@@ -28,6 +28,7 @@ from copytradeaster.aster.management_api import (
     post_signed_registration,
 )
 from copytradeaster.aster.models import BuilderDTO
+from copytradeaster.aster.network_profile import is_official_combination
 from copytradeaster.aster.signing import (
     eip712_json_payload,
     next_nonce,
@@ -905,10 +906,9 @@ class BuilderOnboardingService:
 
     def _validate_config(self) -> None:
         parsed = urlsplit(self._config.base_url)
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or host != "fapi.asterdex-testnet.com":
-            raise OnboardingError(OnboardingErrorCode.TESTNET_REQUIRED)
-        if self._config.trading_chain_id != 714:
+        if parsed.scheme != "https" or not is_official_combination(
+            self._config.base_url, self._config.trading_chain_id
+        ):
             raise OnboardingError(OnboardingErrorCode.TESTNET_REQUIRED)
         if not self._config.builder_address:
             raise OnboardingError(OnboardingErrorCode.BUILDER_CONFIG_MISSING)

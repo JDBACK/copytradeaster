@@ -569,8 +569,11 @@ class MasterProjector:
         ORDER_TRADE_UPDATE TRADE deltas are the single mutator of positions -
         applying both the absolute snapshot and the delta double-counts the
         same fill (live incident: TP fill re-opened a closed position because
-        ACCOUNT_UPDATE preceded the TRADE event). Drift is logged and healed
-        by rebuild_full on reconnect/boot.
+        ACCOUNT_UPDATE preceded the TRADE event). Drift is logged and marks
+        the symbol dirty so the sweep's dirty_symbols boundary heals it
+        (F3: WS brownout drops FILL frames while ACCOUNT_UPDATEs arrive);
+        reconnect/boot and the periodic snapshot boundary are the remaining
+        healing paths.
         """
         for b in a.get("B", []):
             if str(b.get("a")) == "USDT":
@@ -584,12 +587,18 @@ class MasterProjector:
             if projected != qty:
                 log.warning(
                     "master position drift %s/%s: stream=%s exchange=%s "
-                    "(will reconcile on next reconnect)",
+                    "(marked dirty; sweep boundary will heal)",
                     symbol,
                     key.pos_side.value,
                     projected,
                     qty,
                 )
+                # F3 brownout hole: without this mark the drift healed only via
+                # reconnect or the every-Nth-sweep boundary. Dirty symbols
+                # already trigger the authoritative boundary in the sweep, so
+                # this only shortens healing latency — no new paths.
+                if symbol:
+                    self.mark_dirty(symbol)
         await self._events.mark_processed(event_id)
 
     async def _on_config_update(self, body: dict, event_id: int) -> None:

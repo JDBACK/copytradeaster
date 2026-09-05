@@ -54,7 +54,6 @@ def stop_action(coid="ct-bbb", stop="64000"):
             "stopPrice": stop,
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
-            "priceProtect": "false",
             "newOrderRespType": "ACK",
         },
         client_order_id=coid,

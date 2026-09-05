@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from copytradeaster.aster.models import BalanceDTO, OrderDTO, PositionDTO
+from copytradeaster.aster.network_profile import AsterNetworkProfile
 
 
 def mask_address(address: str) -> str:
@@ -54,6 +55,18 @@ class DirectOnboardingConfig:
     expiry_safety_margin_ms: int = 5 * 60 * 1000
     expected_position_mode: str | None = None
     master_user_address: str | None = None
+
+    @classmethod
+    def from_profile(
+        cls, profile: AsterNetworkProfile, **overrides: object
+    ) -> DirectOnboardingConfig:
+        """Build a config bound to one network profile (single injection)."""
+        fields: dict[str, object] = {
+            "base_url": profile.rest_base_url,
+            "trading_chain_id": profile.trading_chain_id,
+        }
+        fields.update(overrides)
+        return cls(**fields)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +232,19 @@ class BuilderOnboardingConfig:
     expiry_safety_margin_ms: int = 5 * 60 * 1000
     expected_position_mode: str | None = None
     master_user_address: str | None = None
+
+    @classmethod
+    def from_profile(
+        cls, profile: AsterNetworkProfile, **overrides: object
+    ) -> BuilderOnboardingConfig:
+        """Build a config bound to one network profile (single injection)."""
+        fields: dict[str, object] = {
+            "base_url": profile.rest_base_url,
+            "trading_chain_id": profile.trading_chain_id,
+            "registration_chain_id": profile.registration_chain_id,
+        }
+        fields.update(overrides)
+        return cls(**fields)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)

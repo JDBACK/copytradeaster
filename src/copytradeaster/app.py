@@ -20,6 +20,7 @@ from copytradeaster.config import Settings
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.logging_utils import DEFAULT_LOG_PATH, get_logger, setup_logging
 from copytradeaster.master.projector import MasterProjector, symbols_for_raw
+from copytradeaster.metrics import EngineMetrics
 from copytradeaster.notifications.console import ConsoleNotifier
 from copytradeaster.notifications.formatter import format_confirmed_action
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
@@ -40,12 +41,19 @@ from copytradeaster.trading.builder_attribution import BuilderAttributionProvide
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.leverage import LeverageManager
-from copytradeaster.trading.reconciler import Reconciler
+from copytradeaster.trading.reconciler import Reconciler, build_snapshot_scope
 from copytradeaster.trading.registry import FollowerRegistry
 
 log = get_logger(__name__)
 CLOCK_DRIFT_MAX_MS = 2000
-MASTER_RESNAPSHOT_EVERY_SWEEPS = 10  # ~10x reconcile_interval; heals projector drift
+# Teardown bounds: every stop() step is joined with STOP_STEP_TIMEOUT_S and
+# stop() itself with STOP_TOTAL_TIMEOUT_S, so a failed boot (half-constructed
+# tasks, stuck joins) can never hang teardown — the impl keeps running in the
+# background while the caller is released.
+STOP_STEP_TIMEOUT_S = 5.0
+STOP_TOTAL_TIMEOUT_S = 30.0
+MASTER_RESNAPSHOT_EVERY_SWEEPS = 4  # ~4x reconcile_interval (~110s at 27s cadence;
+# 10x reached ~270s — slower than test timeouts)
 MASTER_BOUNDARY_MAX_PASSES = 3
 MASTER_INGEST_MAX_AGE_S = 5.0
 INGEST_QUEUE_MAX = 1000
@@ -185,9 +193,17 @@ class App:
         # router and App share the same connection without late mutation of
         # notifier internals or a second SQLite connection.
         self.db = db if db is not None else Database(cfg.db_path)
+        # Load-gate recorder: limiter weight/wait, reconcile durations, and
+        # ingest age/depth are observed here and asserted live via
+        # metrics_snapshot(). Constructed before the limiter so every
+        # acquire is recorded from boot.
+        self.metrics = EngineMetrics()
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
         self.limiter = RateLimits(
-            cfg.weight_limit_per_min, cfg.orders_limit_per_min, cfg.orders_limit_per_10s
+            cfg.weight_limit_per_min,
+            cfg.orders_limit_per_min,
+            cfg.orders_limit_per_10s,
+            metrics=self.metrics,
         )
         self.credentials = SqliteCredentials(
             self.db, cfg.encryption_key_bytes(), trading_chain_id=714
@@ -258,7 +274,7 @@ class App:
             leverage=self.leverage,
             entry_admission=self._master_entry_admitted,
         )
-        self.reconciler = Reconciler(self.coordinator)
+        self.reconciler = Reconciler(self.coordinator, metrics=self.metrics)
         self.stream: UserStream | None = None
         self.stop_event = asyncio.Event()
         self._stream_ready = asyncio.Event()
@@ -269,6 +285,8 @@ class App:
             maxsize=INGEST_QUEUE_MAX
         )
         self._ingest_dropped = 0
+        # Distinct envelope generations currently queued (load-gate gauge).
+        self._pending_generations: dict[int, int] = {}
         self._master_event_seq = 0
         self._master_boundary_active = False
         self._master_recovery_requested = asyncio.Event()
@@ -430,13 +448,15 @@ class App:
                 f"boot recovery required: {len(in_flight)} in-flight command(s) unresolved"
             )
 
-        # 5. bootstrap position modes + snapshots
+        # 5. bootstrap position modes + snapshots. Package G closed the HEDGE
+        # live matrix, so the v1 ONE_WAY-only mainnet refusal is gone: every
+        # profile uses warn-and-fix (a mismatch is converted to the
+        # configured mode; an unreadable mode warns, and wrong-sided orders
+        # still fail closed at the exchange).
         want_hedge = cfg.position_mode == "HEDGE"
+        mode_is_hedge: bool | None = None
         try:
             mode_is_hedge = await self.master_client.get_position_mode("main")
-            if mode_is_hedge != want_hedge:
-                log.warning("position mode mismatch on master - setting %s", cfg.position_mode)
-                await self.master_client.set_position_mode("main", want_hedge)
         except Exception as exc:  # noqa: BLE001 - Testnet may fail account config reads
             # Do not turn a broken metadata endpoint into a total outage.  An
             # order carrying the wrong positionSide is rejected by Aster, so
@@ -453,6 +473,9 @@ class App:
                     f"несовместимым режимом будут отклонены биржей (категория: {category})."
                 ),
             )
+        if mode_is_hedge is not None and mode_is_hedge != want_hedge:
+            log.warning("position mode mismatch on master - setting %s", cfg.position_mode)
+            await self.master_client.set_position_mode("main", want_hedge)
         for fr in self.followers:
             if fr.execution_mode == "SHADOW":
                 continue
@@ -481,6 +504,8 @@ class App:
         exchange_info = await self.master_client.exchange_info(force=True)
         self._filters_cache = exchange_info.tradable_filters()
         await self.projector.rebuild_full(self.master_client, "main")
+        # Feed REST marks to shadows (phantom-fill fix); WS deltas carry mark 0.
+        self._sync_shadow_marks()
 
         # 6. leverage control-plane: seed the candidate catalog BEFORE follower
         # reconciliation so restart reconstruction from positionRisk validates
@@ -499,7 +524,9 @@ class App:
             severity=NotificationSeverity.INFO,
             text="Запущена стартовая сверка позиций.",
         )
-        await self.reconciler.reconcile(self.projector.state, reason="startup")
+        await self._record_sweep_failures(
+            await self.reconciler.reconcile(self.projector.state, reason="startup")
+        )
         self._leverage_task = asyncio.create_task(self.leverage.run(self.stop_event))
 
         # 7. streams + periodic sweep
@@ -561,7 +588,12 @@ class App:
             await self.stop()
 
     async def stop(self) -> None:
-        """Idempotent, concurrent-safe teardown for READY and partial boots."""
+        """Idempotent, concurrent-safe teardown for READY and partial boots.
+
+        Never hangs: _stop_impl bounds every step, and this wrapper bounds the
+        total wait, so a failed boot always releases the teardown caller while
+        the impl finishes in the background.
+        """
         if not hasattr(self, "_stop_lock"):
             self._stop_lock = asyncio.Lock()
         if not hasattr(self, "_stop_task"):
@@ -570,62 +602,97 @@ class App:
             if self._stop_task is None:
                 self._stop_task = asyncio.create_task(self._stop_impl())
             task = self._stop_task
-        await asyncio.shield(task)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=STOP_TOTAL_TIMEOUT_S)
+        except TimeoutError:
+            # The impl task survives the shield and keeps releasing resources;
+            # the caller must never hang teardown waiting for it.
+            log.error(
+                "stop timed out after %ss; background teardown continues", STOP_TOTAL_TIMEOUT_S
+            )
+
+    @staticmethod
+    async def _bounded(label: str, coro, timeout_s: float = STOP_STEP_TIMEOUT_S) -> None:
+        """Await one teardown step with a hard bound; failures stay local."""
+        try:
+            await asyncio.wait_for(coro, timeout=timeout_s)
+        except Exception as exc:  # noqa: BLE001 - teardown steps never propagate
+            log.warning("stop step %s failed: %s", label, _error_category(exc))
 
     async def _stop_impl(self) -> None:
         if getattr(self, "_stop_complete", False):
             return
         log.info("stopping...")
-        self._ready = False
-        self._entry_admission_ready = False
-        self._stream_connected = False
-        stop_event = getattr(self, "stop_event", None)
-        task_names = (
-            "_sweep_task",
-            "_ingest_task",
-            "_heartbeat_task",
-            "_stream_task",
-            "_leverage_task",
-            "_master_recovery_task",
-        )
-        if stop_event is not None:
-            stop_event.set()
-        coordinator = getattr(self, "coordinator", None)
-        if coordinator is not None:
-            with contextlib.suppress(Exception):
-                await coordinator.close_generation_admission()
-            with contextlib.suppress(Exception):
-                await coordinator.close_postfill_admission()
+        try:
+            self._ready = False
+            self._entry_admission_ready = False
+            self._stream_connected = False
+            stop_event = getattr(self, "stop_event", None)
+            if stop_event is not None:
+                stop_event.set()
+            coordinator = getattr(self, "coordinator", None)
+            if coordinator is not None:
+                await self._bounded(
+                    "close-generation-admission", coordinator.close_generation_admission()
+                )
+                await self._bounded(
+                    "close-postfill-admission", coordinator.close_postfill_admission()
+                )
 
-        tasks = []
-        for name in task_names:
-            task = getattr(self, name, None)
-            setattr(self, name, None)
-            if task is not None:
-                tasks.append(task)
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+            task_names = (
+                "_sweep_task",
+                "_ingest_task",
+                "_heartbeat_task",
+                "_stream_task",
+                "_leverage_task",
+                "_master_recovery_task",
+            )
+            tasks = []
+            for name in task_names:
+                # Half-constructed boots leave these missing/None; detach first
+                # so a concurrent stop() never double-joins the same task.
+                task = getattr(self, name, None)
+                setattr(self, name, None)
+                if task is not None:
+                    task.cancel()
+                    tasks.append(task)
+            if tasks:
+                # One bound for the whole join: a task stuck in an
+                # un-cancellable await cannot hang teardown. gather with
+                # return_exceptions never raises from children; the wait_for
+                # bounds the wait itself.
+                await self._bounded(
+                    "join-tasks",
+                    asyncio.gather(*tasks, return_exceptions=True),
+                )
 
-        settings = getattr(self, "settings", None)
-        if settings is not None:
-            with contextlib.suppress(Exception):
-                await settings.set_flag("ready", "false")
-        if coordinator is not None:
-            with contextlib.suppress(Exception):
-                await coordinator.drain_postfill_tasks()
-        http = getattr(self, "http", None)
-        if http is not None:
-            with contextlib.suppress(Exception):
-                await http.aclose()
-        db = getattr(self, "db", None)
-        if db is not None:
-            with contextlib.suppress(Exception):
-                await db.close()
-        self._stop_complete = True
-        log.info("stopped")
+            settings = getattr(self, "settings", None)
+            if settings is not None:
+                await self._bounded("ready-false", settings.set_flag("ready", "false"))
+            if coordinator is not None:
+                await self._bounded(
+                    "drain-postfill",
+                    coordinator.drain_postfill_tasks(),
+                    timeout_s=STOP_STEP_TIMEOUT_S + 5.0,
+                )
+            # Release the master listenKey BEFORE closing HTTP: the DELETE
+            # needs the socket pool, and an unreleased key holds the
+            # exchange-side stream open after a failed boot. Best-effort and
+            # bounded; fakes without close_listen_key are skipped.
+            if getattr(self, "stream", None) is not None:
+                master_client = getattr(self, "master_client", None)
+                close_key = getattr(master_client, "close_listen_key", None)
+                if callable(close_key):
+                    await self._bounded("close-listen-key", close_key("main"))
+            http = getattr(self, "http", None)
+            if http is not None:
+                await self._bounded("http-close", http.aclose())
+            db = getattr(self, "db", None)
+            if db is not None:
+                await self._bounded("db-close", db.close())
+        finally:
+            self._stop_complete = True
+            log.info("stopped")
 
     async def _heartbeat_loop(self) -> None:
         interval = min(max(self.cfg.reconcile_interval_s / 2, 1.0), 10.0)
@@ -643,7 +710,11 @@ class App:
     async def _consume(self, envelope: MasterIngestEnvelope) -> None:
         # Match Coordinator's 5s master-freshness convention: equality is
         # accepted, only age strictly greater than the budget is stale.
-        if max(time.monotonic() - envelope.received_at, 0.0) > MASTER_INGEST_MAX_AGE_S:
+        age_s = max(time.monotonic() - envelope.received_at, 0.0)
+        metrics = getattr(self, "metrics", None)
+        if metrics is not None:
+            metrics.observe_ingest_age(age_s)
+        if age_s > MASTER_INGEST_MAX_AGE_S:
             self._mark_master_dirty(envelope.raw, "ingest-backlog-stale")
             return
         await self.projector.apply_raw(envelope.raw, generation=envelope.generation)
@@ -676,14 +747,30 @@ class App:
                 q.task_done()
             self._ingest_dropped += 1
             if dropped is not None:
+                pending_overflow = getattr(self, "_pending_generations", None)
+                if pending_overflow is not None:
+                    self._release_pending_generation(
+                        pending_overflow, getattr(dropped, "generation", None)
+                    )
                 self._mark_master_dirty(dropped.raw, "ingest-overflow")
+        generation = self.projector.generation
         q.put_nowait(
             MasterIngestEnvelope(
                 raw=raw,
-                generation=self.projector.generation,
+                generation=generation,
                 received_at=time.monotonic() if received_at is None else received_at,
             )
         )
+        pending = getattr(self, "_pending_generations", None)
+        if pending is not None:
+            pending[generation] = pending.get(generation, 0) + 1
+        metrics = getattr(self, "metrics", None)
+        if metrics is not None:
+            metrics.set_ingest(
+                q.qsize(),
+                len(pending) if pending is not None else 0,
+                getattr(self, "_ingest_dropped", 0),
+            )
         if getattr(self, "_master_boundary_active", False):
             # The REST reads and follower close-only sweep were not quiescent.
             # Close local entry admission synchronously and coalesce a new
@@ -768,6 +855,25 @@ class App:
     def _reconcile_succeeded(report) -> bool:
         return all(created >= 0 for created in report.per_account.values())
 
+    @staticmethod
+    def _reachable_followers(report) -> set[str]:
+        """Accounts whose sweep read+recompute succeeded (no -1, no failure)."""
+        per_account = getattr(report, "per_account", None) or {}
+        failures = getattr(report, "failures", None) or {}
+        return {aid for aid, n in per_account.items() if n >= 0 and aid not in failures}
+
+    async def _unsettled_for(self, account_ids: set[str]) -> list:
+        """In-flight commands scoped to reachable accounts only.
+
+        A faulted follower's unsettled rows must not freeze healthy ones;
+        its closes retry every sweep once its reads heal.
+        """
+        if not account_ids:
+            return []
+        return [
+            row for row in await self.commands.in_flight() if str(row["account_id"]) in account_ids
+        ]
+
     async def _establish_master_boundary(self, reason: str) -> bool:
         """Rebuild master and validate followers before admitting increases."""
         lock = getattr(self, "_master_boundary_lock", None)
@@ -786,11 +892,29 @@ class App:
                         recovery_requested.clear()
                     event_seq = getattr(self, "_master_event_seq", 0)
                     await self.projector.rebuild_full(self.master_client, "main")
+                    # REST snapshot carries real marks; WS deltas carry mark 0.
+                    self._sync_shadow_marks()
 
                     close_only = await self.reconciler.reconcile(
                         self.projector.state, reason="post-stream-close-only"
                     )
-                    if not self._reconcile_succeeded(close_only) or await self.commands.in_flight():
+                    # F2 isolation bug: a faulted follower (-2015 on every read)
+                    # aborted the whole boundary here, freezing healthy ones.
+                    # Per-follower failures are tolerated — recorded via degraded
+                    # and excluded from completion, which is computed over
+                    # REACHABLE followers only. Only master-side read failures
+                    # (rebuild_full/reconcile raising) abort the boundary. A
+                    # faulted follower has no readable snapshot so it gets no
+                    # entries (sizing impossible); its closes retry every sweep.
+                    await self._record_sweep_failures(close_only)
+                    reachable = self._reachable_followers(close_only)
+                    faulted = set(getattr(close_only, "per_account", None) or {}) - reachable
+                    if faulted:
+                        log.info(
+                            "boundary tolerating faulted followers: %s",
+                            ",".join(sorted(_safe_fragment(a) for a in faulted)),
+                        )
+                    if await self._unsettled_for(reachable):
                         raise RuntimeError("close-only follower reconciliation incomplete")
                     if (
                         not self._stream_connected
@@ -813,6 +937,8 @@ class App:
                     # slow close-only follower sweep. This second REST cutover
                     # is the state used for risk-increasing reconciliation.
                     await self.projector.rebuild_full(self.master_client, "main")
+                    # Entry cutover carries the freshest REST marks.
+                    self._sync_shadow_marks()
                     if (
                         not self._stream_connected
                         or getattr(self, "_stream_epoch", 0) != stream_epoch
@@ -830,7 +956,12 @@ class App:
                         self.projector.state, reason="post-stream-entry"
                     )
                     self._entry_admission_ready = False
-                    if not self._reconcile_succeeded(entry) or await self.commands.in_flight():
+                    # Same tolerance as close-only: a faulted follower gets no
+                    # entries (its recompute raised before planning) while
+                    # healthy followers converge; only reachable in-flight
+                    # blocks admission.
+                    await self._record_sweep_failures(entry)
+                    if await self._unsettled_for(self._reachable_followers(entry)):
                         raise RuntimeError("entry follower reconciliation incomplete")
                     if (
                         not self._stream_connected
@@ -840,11 +971,17 @@ class App:
                     ):
                         self.projector.mark_dirty("*")
                         continue
-                    return await self._publish_master_ready(
+                    published = await self._publish_master_ready(
                         was_ready=was_ready,
                         stream_epoch=stream_epoch,
                         event_seq=event_seq,
                     )
+                    if published:
+                        # _publish clears degraded on proof; re-raise tolerated
+                        # fault flags so they stay visible until healed.
+                        await self._record_sweep_failures(close_only)
+                        await self._record_sweep_failures(entry)
+                    return published
 
                 self.projector.mark_dirty("*")
                 await self._set_master_not_ready("master-boundary-not-quiescent")
@@ -855,9 +992,27 @@ class App:
                 if recovery_requested is not None and recovery_requested.is_set():
                     self._ensure_master_recovery_task()
 
+    @staticmethod
+    def _release_pending_generation(pending: dict[int, int], generation) -> None:
+        """Decrement one queued envelope's generation count (overflow/consume)."""
+        if generation is None:
+            return
+        try:
+            key = int(generation)
+        except (TypeError, ValueError):
+            return
+        left = pending.get(key, 0) - 1
+        if left <= 0:
+            pending.pop(key, None)
+        else:
+            pending[key] = left
+
     async def _ingest_loop(self) -> None:
         while not self.stop_event.is_set():
             envelope = await self._ingest_queue.get()
+            pending = getattr(self, "_pending_generations", None)
+            if pending is not None:
+                self._release_pending_generation(pending, getattr(envelope, "generation", None))
             try:
                 await self._consume(envelope)
             except Exception as exc:  # noqa: BLE001 - one bad event must not kill ingest
@@ -966,6 +1121,130 @@ class App:
                 event_key,
             )
 
+    def _sync_shadow_marks(self) -> None:
+        """Push REST-snapshot marks into the shadow feed (phantom-fill fix).
+
+        WS-trade projector positions carry mark_price=0, and
+        ShadowExchange.set_market_price ignores non-positive prices, so the
+        WS-delta sync alone leaves the shadow market at the 65000 default
+        forever while BTC trades ~80k — shadow MARKET fills then execute at
+        the phantom price and post_fill_cap flattens the leg as insane
+        (measured RISK_CAP ~1s after every shadow open). The boundary/startup
+        REST snapshots carry real marks; sync them here. Non-positive marks
+        are skipped by set_market_price. The WS-delta sync stays as-is.
+        """
+        exchange = getattr(self, "shadow_exchange", None)
+        state = getattr(getattr(self, "projector", None), "state", None)
+        positions = getattr(state, "positions", None) or {}
+        if exchange is None or not positions:
+            return
+        for position in positions.values():
+            mark = getattr(position, "mark_price", None)
+            if mark is None:
+                continue
+            exchange.set_market_price(mark)
+
+    async def _sweep_snapshot_scope(self) -> set[str] | None:
+        """Scoped production snapshot: whitelist + master episodes + open copy episodes.
+
+        Replaces the weight-40 all-symbol openOrders read per follower per sweep
+        with per-symbol weight-1 reads. Returns None (authoritative all-symbol)
+        when the scope would be empty or unreadable — a sweep must never read
+        nothing. The periodic boundary pass below always reconciles all-symbol,
+        which is the bounded fallback healing any symbol a scoped sweep misses.
+        """
+        try:
+            open_rows = await self.trades.all_open()
+        except Exception as exc:  # noqa: BLE001 - fail closed to authoritative
+            log.warning("sweep scope unreadable (%s); using all-symbol snapshot", exc)
+            return None
+        master_symbols = [str(key.symbol) for key in self.projector.state.positions]
+        episode_symbols = [str(row["symbol"]) for row in open_rows]
+        scope = build_snapshot_scope(
+            whitelist=self.cfg.symbol_whitelist,
+            master_symbols=master_symbols,
+            episode_symbols=episode_symbols,
+        )
+        return scope or None
+
+    async def _record_sweep_failures(self, report) -> list[str]:
+        """Raise the degraded flag for every per-follower sweep failure.
+
+        F2 gap: a follower whose reads+writes all raise (e.g. -2015) leaves
+        no journal row, so without this the sweep was silent. Called on EVERY
+        sweep (set-before-evaluate) with account + secret-safe error category
+        only — no keys, signatures, or payloads. No order-flow change.
+        """
+        failures = getattr(report, "failures", None) or {}
+        if not failures:
+            # Foreign reports (doubles) may carry -1 without categories.
+            per_account = getattr(report, "per_account", None) or {}
+            failures = {aid: "error" for aid, n in per_account.items() if n < 0}
+        recorded: list[str] = []
+        for account_id in sorted(failures):
+            reason = (
+                f"follower:{_safe_fragment(account_id)}"
+                f":sweep-failed:{_safe_fragment(failures[account_id])}"
+            )
+            await self.settings.set_flag("degraded", reason)
+            recorded.append(reason)
+        return recorded
+
+    async def _sweep_hold_reason(self, report) -> str | None:
+        """Authoritative convergence proof required before clearing degraded.
+
+        BUG FIX: an exception-free sweep is NOT convergence. Degraded clears
+        only when a sweep proves every follower converged with zero new
+        commands (actual == target, so protections present and no unresolved
+        divergence — any gap would have produced a corrective command), the
+        master is clean, no command is in-flight/UNKNOWN/FAILED, and the
+        leverage control-plane has no outstanding work. Liquidation safety is
+        covered transitively: a liq-driven protection or close would itself be
+        a nonzero command. Returns None when proven, else the itemized hold.
+        """
+        try:
+            # Fresh sweep failures hold first: a sweep that just recorded a
+            # failure can never clear degraded, even if every other proof held.
+            failures = getattr(report, "failures", None) or {}
+            if not failures:
+                per_account = getattr(report, "per_account", None) or {}
+                failures = {aid: "error" for aid, n in per_account.items() if n < 0}
+            if failures:
+                shown = ",".join(
+                    f"{_safe_fragment(a)}:{_safe_fragment(c)}"
+                    for a, c in sorted(failures.items())[:5]
+                )
+                return f"sweep-failed:{shown}"
+            if not self._ready:
+                return "not-ready"
+            diverged = {
+                aid: n for aid, n in (getattr(report, "per_account", None) or {}).items() if n != 0
+            }
+            if diverged:
+                shown = ",".join(
+                    f"{_safe_fragment(a)}={n}" for a, n in sorted(diverged.items())[:5]
+                )
+                return f"unconverged:{shown}"
+            if self.projector.dirty_symbols:
+                shown = ",".join(
+                    sorted(_safe_fragment(s) for s in self.projector.dirty_symbols)[:5]
+                )
+                return f"master-dirty:{shown}"
+            in_flight = await self.commands.in_flight()
+            if in_flight:
+                statuses = ",".join(sorted({str(row["status"]) for row in in_flight}))
+                return f"in-flight:{statuses}:{len(in_flight)}"
+            recent = await self.commands.recent(500)
+            failed = [str(row["command_key"]) for row in recent if str(row["status"]) == "FAILED"]
+            if failed:
+                return f"failed-commands:{len(failed)}:{','.join(failed[:3])}"
+            pending = self.leverage.pending_count()
+            if pending:
+                return f"leverage-pending:{pending}"
+            return None
+        except Exception as exc:  # noqa: BLE001 - a broken gate holds degraded, never clears
+            return f"gate-error:{_error_category(exc)}"
+
     async def _periodic_sweep(self) -> None:
         sweep_count = 0
         while not self.stop_event.is_set():
@@ -985,16 +1264,27 @@ class App:
                 ):
                     # Without a live stream this stays close-only. With a live
                     # stream the two-phase boundary may reopen local increases.
+                    # The boundary reconciles with the authoritative all-symbol
+                    # snapshot, which is also the bounded fallback healing any
+                    # symbol a scoped production sweep could not see.
                     await self._establish_master_boundary("periodic-snapshot")
                     continue
-                report = await self.reconciler.reconcile(self.projector.state, reason="sweep")
-                if (
-                    self._ready
-                    and self._reconcile_succeeded(report)
-                    and not self.projector.dirty_symbols
-                    and not await self.commands.in_flight()
-                ):
+                # State marks (REST-sourced) keep shadows tracking between
+                # boundaries; WS-delta zeros are skipped by the sync guard.
+                self._sync_shadow_marks()
+                scope = await self._sweep_snapshot_scope()
+                report = await self.reconciler.reconcile(
+                    self.projector.state, reason="sweep", snapshot_scope=scope
+                )
+                # Set-before-evaluate: record per-follower failures BEFORE the
+                # hold check, so a sweep that just failed can never clear.
+                # The hold check re-reads report.failures as a second latch.
+                await self._record_sweep_failures(report)
+                hold_reason = await self._sweep_hold_reason(report)
+                if hold_reason is None:
                     await self.settings.clear_degraded()
+                else:
+                    log.info("sweep holds degraded (%s)", hold_reason)
             except Exception as exc:  # noqa: BLE001
                 log.error("periodic sweep failed: %s", exc)
 
@@ -1064,6 +1354,14 @@ class App:
         if self.follower_registry.get(account_id) is not None:
             raise ValueError(
                 f"follower {account_id!r} already registered; use follower_lifecycle()"
+            )
+        # v1 launch cap (CT_MAX_FOLLOWERS, default 10), derived from the
+        # measured weight envelope. Fail closed before any DB/client work.
+        cap = self.cfg.max_followers
+        if len(self.follower_registry.snapshot()) >= cap:
+            raise ValueError(
+                f"follower cap reached ({cap}); unregister a follower"
+                f" before registering {account_id!r}"
             )
         row = await self.db.fetchone(
             "SELECT * FROM accounts WHERE id=? AND role='follower' AND enabled=1",
@@ -1145,6 +1443,31 @@ class App:
             account_ids=[account_id],
             reason=reason,
         )
+
+    def metrics_snapshot(self) -> dict:
+        """Bounded load-gate view: p50/p95/p99 per series plus live gauges.
+
+        The load gate asserts weight/min, reconcile/follower durations,
+        limiter waits, ingest queue age/depth, and pending generations here.
+        """
+        metrics = getattr(self, "metrics", None)
+        if metrics is None:
+            return {}
+        queue = getattr(self, "_ingest_queue", None)
+        pending = getattr(self, "_pending_generations", None)
+        if queue is not None:
+            # Gauges must never break the gate read.
+            with contextlib.suppress(Exception):
+                metrics.set_ingest(
+                    queue.qsize(),
+                    len(pending) if pending is not None else 0,
+                    getattr(self, "_ingest_dropped", 0),
+                )
+        postfill = getattr(getattr(self, "coordinator", None), "_postfill_tasks", None)
+        # Gauges must never break the gate read.
+        with contextlib.suppress(Exception):
+            metrics.set_postfill_pending(len(postfill) if postfill is not None else 0)
+        return metrics.snapshot()
 
 
 def now_ms() -> int:

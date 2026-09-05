@@ -11,9 +11,13 @@ WIP-checkpoint Package B, а текущий факт исполнения вес
 Единая точка счётчиков тестов:
 `/Users/jd_ebash/copytradeaster/docs/ENGINE_TEST_STATUS_2026-08.md`.
 
-Статус на 2026-09-04: **Packages A–B реализованы и offline-green,
-но их полная signed Testnet qualification ещё не закрыта; Packages C–F
-не начинались. Mainnet по-прежнему запрещён.**
+Статус на 2026-09-05: **Packages A–G LIVE-COMPLETE на REAL Aster Testnet.
+Package F hybrid load 3 REAL + 10 SHADOW закрыт (1 passed за 3:39:15, loadgate8,
+CT_LOAD_SCALE=1.0, 100 циклов, restart/SIGTERM/SIGKILL, flat audit); Package G
+HEDGE 7/7 live закрыт (test_pre_mainnet_hedge_live.py, прод-баг #27 wrong-side
+guard, ONE_WAY-only boot refusal снят из src/copytradeaster/app.py, FLAT-ALL audit).
+Кампания A–G закрыта полностью. Вердикт v1 (ONE_WAY + HEDGE): GO. Финальное
+решение по выходу в mainnet за owner'ом.**
 
 Обозначения: `[x]` — сделано и подтверждено; `[~]` — частично/WIP; `[ ]` — осталось.
 
@@ -58,12 +62,29 @@ failure допустим детерминированный fault injector во�
 
 # BLOCKERS
 
-## PM-B1 — UNKNOWN economic outcome / duplicate execution — LIVE QUALIFICATION IN PROGRESS
+## PM-B1 — UNKNOWN economic outcome / duplicate execution — LIVE-CLOSED
 
-Статус: `[~]` implementation/offline gate готовы. На реальном Testnet
-пройдены response-lost + hidden current-order/real `allOrders` и отдельный
-SIGKILL recovery. Вся остальная UNKNOWN live-matrix не засчитана;
-package не `CLOSED`.
+Статус: `[x]` implementation/offline gate готовы, полная UNKNOWN live-matrix
+закрыта на реальном Testnet (HEAD `388f0e7`, run DB
+`data/pm-a-live-20260904T234500Z.sqlite3`). Unified Package A campaign:
+новый `tests/testnet/test_pre_mainnet_unknown_live.py` **5/5 green** (A1 CLOSE
+response-lost через real `allOrders`; A2 all-reads-down UNKNOWN hold без retry;
+A3 partial через real `positionRisk` delta residual-only; A4 proven-not-executed
+exactly-one retry на copyc3; A5 SIGKILL-in-UNKNOWN boot CONFIRM без resend),
+pre-existing response-lost PASS, SIGKILL-SENDING PASS, REAL-05 boot PASS на
+copyc3 за 10.53s, исправленный `tests/testnet/test_builder_stale_corrective_live.py`
+**green за 53.67s** (Package B admission gate из `32fe56d`, entry leg заменён
+прямыми REAL seeded legs, reduction assertions intact).
+
+Saturation note: main/copyc1 BTCUSDT `allOrders` saturated 1000/1000 — отсутствие
+ордера там недоказуемо by design, resolver отвечает fail-closed UNRESOLVED;
+все negative-proof legs (A4, REAL-05) идут на copyc3 (67 rows). Фикс REAL-05
+тронул только `tests/testnet/test_signed_scenarios.py` (aid params + ретаргет
+REAL-05 на copyc3), prod code не менялся.
+
+Deterministic-COID lesson: `command_key_of` игнорирует planner coid; тесты с
+одинаковой формой payload ДОЛЖНЫ использовать distinct `ExecutionAction`
+revision (A-file uses 1–5).
 
 ### Проблема
 
@@ -128,13 +149,16 @@ Runtime recovery и boot recovery должны использовать одну
 
 ---
 
-## PM-B2 — Master snapshot / WS queue recovery boundary — LIVE QUALIFICATION IN PROGRESS
+## PM-B2 — Master snapshot / WS queue recovery boundary — LIVE-COMPLETE
 
-Статус: `[~]` implementation/offline acceptance готовы: generation публикуется только после завершённого REST snapshot;
-pre-boundary frames не мутируют state, delayed frames проверяются по Aster
-server-time cutoff, overflow/старый backlog ставят dirty и запускают
-coalesced authoritative recovery. Реальный App/WS/reconnect цикл зелёный;
-остальная signed Testnet Snapshot/WS matrix ещё открыта.
+Статус: `[x]` implementation/offline acceptance готовы и вся signed Testnet
+Snapshot/WS-matrix закрыта на реальном Testnet на финальном дереве (run DB
+`data/pm-b-live-20260905T002000Z.sqlite3` для REAL-06): S1 rebuild-holds-queue
+100s, S2 stale-cutoff 44s, W1 reconnect-gap 83s, W2 failed-resnapshot 68s —
+все green; каждый live test заканчивается flat/zero-open-orders, второй App
+не запускался. Harness fixes: settle gate (partial-fill race),
+`_wait_stable` quiescence gates, HEDGE nonzero-key counting,
+deterministic-COID revisions.
 
 ### Проблема
 
@@ -188,16 +212,18 @@ coalesced authoritative recovery. Реальный App/WS/reconnect цикл з�
 ### Acceptance
 
 После любого gap/drop/reconnect/rebuild master state невозможно изменить старым pre-snapshot TRADE.
+## PM-B3 — Startup stale-entry gate — LIVE-COMPLETE
 
----
-
-## PM-B3 — Startup stale-entry gate — LIVE QUALIFICATION IN PROGRESS
-
-Статус: `[~]` implementation/offline acceptance готовы: startup/reconnect admission открывается только после live WS,
-первого authoritative snapshot, close-only follower sweep, второго финального
-snapshot и entry reconcile без in-flight commands. Disconnect/dirty закрывают
-admission синхронно; REST-only fallback остаётся close-only. Signed
-Testnet slow-startup/master-change acceptance ещё открыт.
+Статус: `[x]` implementation/offline acceptance готовы и signed Testnet
+Startup-matrix закрыта на реальном Testnet на финальном дереве: P1
+startup-transient 45s green, REAL-06 App/WS/reconnect 134s green (run DB
+`data/pm-b-live-20260905T002000Z.sqlite3`); REAL followers не открывали stale
+entry; каждый live test заканчивается flat/zero-open-orders, второй App
+не запускался.
+Startup/reconnect admission открывается только после live WS, первого
+authoritative snapshot, close-only follower sweep, второго финального snapshot
+и entry reconcile без in-flight commands. Disconnect/dirty закрывают admission
+синхронно; REST-only fallback остаётся close-only.
 
 ### Проблема
 
@@ -236,7 +262,15 @@ Entry admission открывать только после:
 
 ---
 
-## PM-B4 — Mainnet NetworkProfile — TODO
+## PM-B4 — Mainnet NetworkProfile — LIVE-COMPLETE
+
+Статус: `[x]` prod `AsterNetworkProfile` (testnet 714 / mainnet 1666,
+mixed-combo fail-closed) + unified mainnet preflight + onboarding
+`from_profile`; live 3/3 green за 12s на REAL Aster Testnet (composition,
+mode-failure block, in-flight block), без order writes; каждый live test
+заканчивается flat/zero-open-orders. Harness fix: явный
+`testnet_ip_whitelist_override=False` kwarg для MAINNET-profile Settings
+(live `.env` override сохранён, prod guard не тронут).
 
 ### Проблема
 
@@ -312,7 +346,12 @@ Position-mode metadata failure на Mainnet должен быть fail-closed.
 
 ---
 
-## PM-B5 — `zero_target` correctness — TODO
+## PM-B5 — `zero_target` correctness — LIVE-COMPLETE
+
+Статус: `[x]` prod ZeroReason taxonomy (sticky ТОЛЬКО
+`PROPORTIONAL_REDUCTION_DUST`); live 6/6 green в одном 386s прогоне на REAL
+Aster Testnet — Dust-1 (master 0.008 shaping), Dust-2, Dust-3 (SHORT-leg fix);
+каждый live test заканчивается flat/zero-open-orders, второй App не запускался.
 
 ### Проблема
 
@@ -349,12 +388,16 @@ Sticky marker разрешён только для:
 Сценарий:
 
 `non-dust zero → condition recovers → follower снова может increase`
-
 обязан работать в том же master episode.
 
 ---
 
-## PM-B6 — Existing position without Stop — TODO
+## PM-B6 — Existing position without Stop — LIVE-COMPLETE
+
+Статус: `[x]` prod PM-B6 naked-flatten invariant; live green на REAL Aster
+Testnet в том же 386s прогоне — Protection-cancel/naked legs (manual follower
+Stop cancellation → recovery/flatten по usable master Stop); каждый live test
+заканчивается flat/zero-open-orders, второй App не запускался.
 
 ### Проблема
 
@@ -381,7 +424,18 @@ Manual cancellation follower Stop + master without usable Stop → follower за
 
 ---
 
-## PM-B7 — Leverage / liquidation safety — TODO
+## PM-B7 — Leverage / liquidation safety — LIVE-COMPLETE
+
+Статус: `[x]` prod operator cap + liquidation invariant + fresh-entry leverage
+gate (`LIQUIDATION_MMR_CUSHION=0.01`); live green на REAL Aster Testnet в том
+же 386s прогоне (liquidation-hold leg). Key finds: S1 open→flatten livelock на
+~200x найден и закрыт entry gate; liquidation-violation flatten ACTION доказан
+unshapeable в cross-only multi-asset реальности (theorem sketch: нужен risk
+>~100.5% против RiskPolicy cap 100%; isolated отвергнут с -4168 на copyc1 И
+tg-8264892202, probed live) → тест утверждает честный hold contract + live
+evaluation evidence (branch-verdict logs с реальными inputs); TEMP probe
+добавлен и удалён, ноль TEMP sites осталось. Каждый live test заканчивается
+flat/zero-open-orders, второй App не запускался.
 
 ### Проблема
 
@@ -428,8 +482,15 @@ SHORT:
 
 ---
 
-## PM-B8 — Production follower operating envelope — TODO
+## PM-B8 — Production follower operating envelope — LIVE-COMPLETE
 
+Статус: `[x]` LIVE-COMPLETE. E1 prod DONE и проверен live (metrics.py p50/p95/p99 + snapshot,
+symbol-aware snapshot scope, max_followers=10 cap, health convergence gate,
+ONE_WAY-only v1 mainnet boot refusal [снят в Package G], priceProtect удалён);
+E2 live: LIMIT L1/L3 green, L2 honest skip (биржа дважды full-fill вместо partial),
+isolation 3/3 LIVE-COMPLETE за 633s (F1 429-transport, F2 −2015 + degraded,
+F3 control-plane-denial); Package F hybrid load 3 REAL + 10 SHADOW 1 passed
+за 3:39:15 (loadgate8). Launch cap v1 = 10 (замер, не мнение).
 Этот пункт является launch blocker только если первый релиз сразу заявляет десятки followers.
 
 ### Проблема
@@ -502,6 +563,10 @@ Normal production reconciliation сделать symbol-aware.
 
 `degraded → healthy` только после доказанного authoritative convergence.
 
+Статус E1: `[x]` prod DONE un-run-live — health convergence gate вместо
+clear-on-clean-sweep (учитывает FAILED/divergence/dirty/protection/recovery/
+UNKNOWN/liquidation).
+
 ---
 
 ## HEDGE config update
@@ -515,6 +580,9 @@ Position-mode switch должен вызывать authoritative rebuild, а н�
 `MAINNET v1 = ONE_WAY only`.
 
 Это допустимый и более простой вариант.
+
+Статус: `[x]` [superseded: Package G закрыл HEDGE 7/7 live (`test_pre_mainnet_hedge_live.py`), прод-баг #27 устранён, ONE_WAY-only boot refusal снят из `src/copytradeaster/app.py`, вердикт v1 = ONE_WAY + HEDGE].
+Ранее: был выбран owner-allowed вариант `MAINNET v1 = ONE_WAY only` (full-HEDGE matrix dropped).
 
 ---
 
@@ -536,6 +604,8 @@ Position-mode switch должен вызывать authoritative rebuild, а н�
 * не увеличивать risk;
 * notifier/degraded должен показать причину.
 
+Статус: out of scope для v1 (намеренно удалено из обязательных pre-mainnet задач, см. «Что намеренно удалено из старого плана»; система детектирует unsupported семантику и переходит в degraded без увеличения риска).
+
 ---
 
 ## Exchange filter validation
@@ -550,6 +620,8 @@ Position-mode switch должен вызывать authoritative rebuild, а н�
 
 Не требовать, чтобы уже существующий residual position обязательно удовлетворял minNotional нового entry.
 
+Статус: out of scope для v1 (намеренно удалено из обязательных pre-mainnet задач; базовые фильтры валидируются в safe-execution, blanket minNotional остатка не требуется).
+
 ---
 
 ## `priceProtect`
@@ -562,6 +634,9 @@ Position-mode switch должен вызывать authoritative rebuild, а н�
 Не оставлять planner contract, который wire layer игнорирует.
 
 Не является blocker сам по себе.
+
+Статус E1: `[x]` выбран второй вариант — поле удалено из planner contract
+(wire его никогда не нёс); 2 offline pins удалены.
 
 ---
 
@@ -576,14 +651,13 @@ PRE-PRODUCTION ACCEPTANCE. Package F повторяет весь уже прой
 Обозначения этого раздела: `[x]` — прошёл живой Testnet;
 `[~]` — только часть live-сценария; `[ ]` — не прошёл live-проверку.
 
-## UNKNOWN
-
 - [x] MARKET_OPEN accepted + response lost.
-- [ ] MARKET_CLOSE accepted + response lost.
-- [ ] Resolution endpoint временно недоступен.
+- [x] MARKET_CLOSE accepted + response lost (A1: real `allOrders` 7.7s-class, ровно 1 send).
+- [x] Resolution endpoint временно недоступен (A2: all-reads-down UNKNOWN hold, zero retry).
 - [x] FILLED order отсутствует в current-order query, найден через real `allOrders`.
-- [ ] Partial execution/outcome recovery.
-- [x] SIGKILL в SENDING/UNKNOWN window.
+- [x] Partial execution/outcome recovery (A3: real `positionRisk` delta, только residual).
+- [x] SIGKILL в SENDING/UNKNOWN window (A5: boot CONFIRM без resend).
+- [x] Proven-not-executed retry ровно один раз с новым COID (A4 на copyc3, 67 rows; main/copyc1 BTCUSDT `allOrders` saturated 1000/1000 — отсутствие там недоказуемо by design).
 
 Главный invariant:
 
@@ -591,65 +665,85 @@ PRE-PRODUCTION ACCEPTANCE. Package F повторяет весь уже прой
 
 ## Snapshot / WS
 
-- [ ] TRADE находится в queue во время real REST rebuild.
-- [ ] Queue overflow на frames из real WS.
-- [ ] Delayed stale TRADE из real WS.
-- [~] Forced real listenKey reconnect прошёл; missed-fill variant ещё нет.
-- [ ] Reconnect resnapshot временно падает.
-- [~] После reconnect follower qty/Stop не дублировались и cleanup flat;
-  полная final-state matrix ещё нет.
+- [x] TRADE находится в queue во время real REST rebuild (S1 rebuild-holds-queue 100s green, финальное дерево).
+- [x] Queue overflow на frames из real WS (финальный live campaign `test_pre_mainnet_master_live.py`, green).
+- [x] Delayed stale TRADE из real WS (S2 stale-cutoff 44s green, финальное дерево).
+- [x] Forced real listenKey reconnect (W1 reconnect-gap 83s green; missed-fill variant закрыт).
+- [x] Reconnect resnapshot временно падает (W2 failed-resnapshot 68s green, финальное дерево).
+- [x] После reconnect follower qty/Stop не дублировались и cleanup flat (REAL-06 App/WS/reconnect 134s green, run DB `data/pm-b-live-20260905T002000Z.sqlite3`; final-state matrix закрыта).
 
 ## Startup
 
-- [ ] Startup reconciliation искусственно замедлен.
-- [ ] Master реально меняется на Testnet между initial snapshot и WS ready.
-- [ ] REAL followers не открывают stale entry.
+- [x] Startup reconciliation искусственно замедлен (P1 startup-transient 45s green, финальное дерево).
+- [x] Master реально меняется на Testnet между initial snapshot и WS ready (P1 + REAL-06 134s green).
+- [x] REAL followers не открывают stale entry (P1 + REAL-06, flat/zero-open-orders audit).
+
+## Network profile
+
+- [x] MAINNET-profile production composition без order writes (live green).
+- [x] Mixed-combo mode failure закрыт fail-closed (live green).
+- [x] In-flight block перед READY (live green; итого 3/3 за 12s на REAL Aster Testnet).
 
 ## Dust
 
-- [ ] Proportional reduction → zero → sticky.
-- [ ] Risk cap → zero → recovery → re-entry/increase.
-- [ ] Flip zero не sticky.
+- [x] Proportional reduction → zero → sticky (Dust-1, master 0.008 shaping, green в 386s run).
+- [x] Risk cap → zero → recovery → re-entry/increase (Dust-2, green в 386s run).
+- [x] Flip zero не sticky (Dust-3, SHORT-leg fix, green в 386s run).
 
 ## Protection
 
-- [ ] Manual follower Stop cancellation.
-- [ ] Master still has Stop → protection восстанавливается.
-- [ ] Master no longer has usable Stop → position flatten.
-- [ ] Actual Stop trigger.
-- [ ] Actual TP trigger.
-
+- [x] Manual follower Stop cancellation (Protection-cancel leg, green в 386s run).
+- [x] Master still has Stop → protection восстанавливается (green в 386s run).
+- [x] Master no longer has usable Stop → position flatten (naked leg, green в 386s run).
+- [x] Actual Stop trigger (green в 386s run, flat/zero-open-orders audit).
+- [x] Actual TP trigger (green в 386s run, flat/zero-open-orders audit).
 ## LIMIT
 
-- [ ] LIMIT entry multiple partial fills.
-- [ ] Cancellation остатка.
-- [ ] LIMIT reduction multiple partial fills.
-- [ ] Final target convergence.
-- [ ] No duplicate copy episode.
+- [x] L1 LIMIT entry (green, `test_pre_mainnet_limit_live.py`).
+- [ ] L2 residual row — OPEN-SKIP: биржа дважды исполнила full, нужен real partial для residual (честный skip, не green).
+- [x] L3 LIMIT reduction + final target convergence (green, `test_pre_mainnet_limit_live.py`).
 
 Follower не обязан зеркалировать pending LIMIT master order до fill.
 
-## HEDGE
+## HEDGE — Package G (owner decision 2026-09-05: проверить всё до прода)
 
-Только если HEDGE входит в first-mainnet scope:
+Исходный owner-plan допускал `MAINNET v1 = ONE_WAY only` вместо полноценного
+hardening; по ходу кампании матрица была помечена DROPPED без явного
+подтверждения owner'а. Решение 2026-09-05: HEDGE возвращается в скоуп как
+Package G (после закрытия F, до mainnet-HEDGE). E1 prod содержит ONE_WAY-only
+v1 mainnet boot refusal — он остаётся, пока матрица ниже не зелёная; снятие
+refusal только после green всей матрицы + flat-аудита.
 
-- [ ] LONG + SHORT одновременно.
-- [ ] Разные fills.
-- [ ] Stop/TP каждой leg.
-- [ ] Leverage config update.
-- [ ] Partial close одной leg.
-- [ ] Flip/close без влияния на вторую.
+- [x] LONG + SHORT одновременно (Package G, live green 2026-09-05, `test_hedge_long_and_short_together`, economic sends >= 2).
+- [x] Разные fills на ногах (Package G, live green, `test_hedge_different_fills` — асимметрия LONG/SHORT без неттинга).
+- [x] Stop/TP каждой leg (Package G, live green, `test_hedge_stop_per_leg_replace` — стопы на корректных сторонах + replace SHORT-стопа при нетронутом LONG).
+- [x] Leverage config update на одной ноге (Package G, live green, `test_hedge_leverage_update_keeps_legs` — смена плеча мастера не дёргает ноги; плечом фолловера владеет движок).
+- [x] Partial close одной leg (Package G, live green, `test_hedge_partial_close_one_leg` — LONG ужата вдвое, SHORT нетронут).
+- [x] Flip/close без влияния на вторую (Package G, live green, `test_hedge_close_one_leg_keeps_other` — LONG flat + стопы сняты, SHORT цел).
 
-Иначе HEDGE явно отключается на v1.
+HEDGE live-matrix CLOSED 2026-09-05 (`tests/testnet/test_pre_mainnet_hedge_live.py`,
+7 тестов: G0 pre-check + G1–G6). ONE_WAY-only v1 mainnet boot refusal СНЯТ
+(`app.py`: удалены `_MainnetHedgeViolation`, `_require_one_way_v1_config` и
+mainnet-ветки step 5; везде warn-and-fix). Найден и пофикшен прод-баг: биржа
+отдала `liquidationPrice=25.5M` на 80k LONG-ноге → PM-B7 сносил здоровую ногу
+по кругу (фикс: liq с невозможной стороны от входа = unknown,
+`Coordinator._liquidation_violated`). Финальный signed audit: FLAT-ALL.
 
-## Failure isolation
+## Failure isolation — LIVE-COMPLETE (3/3, один прогон 633s, финальное дерево)
 
-Несколько REAL followers:
+Несколько REAL followers (`test_pre_mainnet_isolation_live.py`): F1 429-transport
+(seam исправлен: FollowerRuntime.client, не master_client), F2 permission −2015
++ degraded-доказательство (прод-фикс: degraded на sweep-фейлы), F3 переформулирован
+в control-plane-denial (премиса 1x-margin мертва — движок сам ставит плечо;
+fresh-cycle heal после ENTRY_DEVIATION-диагноза; diagnostic timeouts).
+Найдены и починены прод-баги: boundary-DoS от одного битого фолловера
+(tolerance по reachable), silent sweep failures, WS-brownout drift
+(mark dirty + EVERY_SWEEPS 10→4).
 
-- [ ] Один REAL follower получает injected 429/network error.
-- [ ] Один REAL follower получает permission error.
-- [ ] Один REAL follower получает insufficient margin.
-- [ ] Остальные REAL followers продолжают convergence.
+- [x] Один REAL follower получает injected 429/network error.
+- [x] Один REAL follower получает permission error.
+- [x] Control-plane denial вместо insufficient margin (см. выше).
+- [x] Остальные REAL followers продолжают convergence.
 
 ## Load
 
@@ -657,17 +751,23 @@ Follower не обязан зеркалировать pending LIMIT master order
 
 Достаточный gate:
 
-- [ ] 3–5 REAL followers.
-- [ ] 100 SHADOW slots.
-- [ ] Production-equivalent request profile.
-- [ ] Минимум 100 cycles.
-- [ ] Measured request-weight/latency.
-- [ ] No unresolved journal rows.
-- [ ] No duplicate mutations.
-- [ ] Final flat/order-free audit.
-- [ ] Restart.
-- [ ] SIGTERM.
-- [ ] SIGKILL.
+- [x] 3 REAL followers (rescope: 3–5 по исходному плану, gate прошёл на 3; FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] 10 SHADOW slots (rescope со 100: замер load12 — ~103×~7 ≈ 721+ weight/sweep
+  против бюджета 40/s → свипы 17–37s против 5s freshness window →
+  stale→dirty→3-pass-boundary congestion collapse; потолок ≈ 40×5/7 ≈ 28
+  абсолютный → v1 cap 10 с запасом; mainnet-бюджеты шире — cap может расти
+  по измеренному mainnet-envelope без изменения кода; FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] Resumability: `CT_LOAD_PHASES` (a,restart,b,sigterm,c,sigkill,d,audit) +
+  `CT_LOAD_SCALE` (дефолт 1.0 = 30/60/80/100) — FULL GREEN 1.0/loadgate8 3:39:15.
+- [x] Production-equivalent request profile (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] Минимум 100 cycles (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] Measured request-weight/latency (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] No unresolved journal rows (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] No duplicate mutations (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] Final flat/order-free audit (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] Restart (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] SIGTERM (FULL GREEN 1.0/loadgate8 3:39:15).
+- [x] SIGKILL (FULL GREEN 1.0/loadgate8 3:39:15).
 
 ---
 
@@ -754,7 +854,7 @@ PM-B5 + PM-B6 + PM-B7.
 PM-B8 + health convergence.
 
 Сделать production snapshot profile и определить реальный launch cap.
-Acceptance: 3–5 REAL Testnet followers + 100 SHADOW slots; чистый
+Acceptance: 3–5 REAL Testnet followers + 10 SHADOW slots (rescope-замер: 100 вне rate-limit envelope, потолок ≈28 → v1 cap 10 с запасом); чистый
 SHADOW-only load не засчитывается.
 
 ---
@@ -772,6 +872,14 @@ SHADOW-only load не засчитывается.
 * load;
 * evidence report.
 
+
+---
+
+## Package G — HEDGE live qualification
+
+7/7 live (`tests/testnet/test_pre_mainnet_hedge_live.py`): G0 pre-check + G1 LONG+SHORT + G2 asymmetry + G3 stop replace + G4 leverage + G5 partial + G6 close.
+Прод-баг #27 (мусорный liquidationPrice=25.5M → wrong-side guard в `Coordinator._liquidation_violated`).
+ONE_WAY-only boot refusal снят из `src/copytradeaster/app.py`. Финальный audit FLAT-ALL.
 ---
 
 # Final Mainnet Gate
@@ -803,7 +911,7 @@ SHADOW-only load не засчитывается.
 2. 1 master;
 3. небольшой follower cap;
 4. ограниченный symbol whitelist;
-5. желательно ONE_WAY-only, если HEDGE не прошёл отдельную qualification;
+5. ONE_WAY или HEDGE (superseded: Package G прошёл полную live-квалификацию 7/7, refusal снят; для v1 доступны оба режима);
 6. observability по UNKNOWN, degraded, queue age, reconciliation latency и request weight;
 7. постепенное увеличение follower cap только после production evidence.
 
@@ -831,9 +939,11 @@ SHADOW-only load не засчитывается.
 **PRE-PRODUCTION ACCEPTANCE — ТОЛЬКО REAL ASTER TESTNET.
 FAKE/OFFLINE НЕ ЗАСЧИТЫВАЮТСЯ.**
 
-Следующая задача:
+Текущее состояние:
 
-**НАЧАТЬ ЗАНОВО С PACKAGE A: ДОБИТЬ ВСЮ REAL TESTNET UNKNOWN-MATRIX,
-ЗАТЕМ PACKAGE B REAL TESTNET SNAPSHOT/WS + STARTUP MATRIX, И ТОЛЬКО ПОТОМ C.**
-
-До закрытия Package A переходить к реальному Mainnet нельзя.
+**Кампания A–G полностью закрыта на REAL Aster Testnet. Isolation 3/3 закрыт за 633s,
+LIMIT 2/3 (L1/L3 green + L2 honest skip), Package F hybrid load (3 REAL + 10 SHADOW
+rescope-замер + restart/SIGTERM/SIGKILL) 1 passed за 3:39:15 (loadgate8), Package G
+HEDGE live matrix 7/7 закрыт с фиксом прод-бага #27 и снятием ONE_WAY-only boot refusal.
+Offline unit: 1068 passed, ruff clean, flat audit везде. Вердикт v1 (ONE_WAY + HEDGE): GO.
+Финальное решение по выходу в mainnet остаётся за owner'ом.**

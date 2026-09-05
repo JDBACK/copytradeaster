@@ -39,7 +39,13 @@ class SlidingWindowLimiter:
 
 class RateLimits:
     """Windows default to the exchange contract (60s / 60s / 10s); the keyword
-    overrides exist for fast tests only."""
+    overrides exist for fast tests only.
+
+    ``metrics`` is an optional :class:`EngineMetrics`-shaped recorder
+    (duck-typed to avoid an import cycle). When present, every acquire records
+    limiter wait seconds by kind plus the request weight, so the load gate can
+    assert weight/min and limiter backpressure from live traffic.
+    """
 
     def __init__(
         self,
@@ -50,6 +56,7 @@ class RateLimits:
         weight_window_s: float = 60.0,
         orders_min_window_s: float = 60.0,
         orders_10s_window_s: float = 10.0,
+        metrics=None,
     ) -> None:
         self._request_window = SlidingWindowLimiter(weight_per_min, weight_window_s)
         self._orders_per_min = orders_per_min
@@ -57,11 +64,18 @@ class RateLimits:
         self._orders_min_window_s = orders_min_window_s
         self._orders_10s_window_s = orders_10s_window_s
         self._order_windows: dict[str, tuple[SlidingWindowLimiter, SlidingWindowLimiter]] = {}
+        self._metrics = metrics
 
     async def acquire_request(self, weight: int) -> None:
+        start = time.monotonic()
         await self._request_window.acquire(weight)
+        metrics = self._metrics
+        if metrics is not None:
+            metrics.observe_limiter_wait("request", time.monotonic() - start)
+            metrics.observe_request_weight(weight)
 
     async def acquire_order(self, account_id: str) -> None:
+        start = time.monotonic()
         windows = self._order_windows.get(account_id)
         if windows is None:
             windows = (
@@ -71,3 +85,6 @@ class RateLimits:
             self._order_windows[account_id] = windows
         await windows[0].acquire(1)
         await windows[1].acquire(1)
+        metrics = self._metrics
+        if metrics is not None:
+            metrics.observe_limiter_wait("order", time.monotonic() - start)

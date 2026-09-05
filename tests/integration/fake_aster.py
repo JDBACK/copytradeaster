@@ -271,14 +271,22 @@ class FakeAster:
             ps = PosSide(side_key.rsplit(":", 1)[1])
             if symbol is not None and sym != symbol:
                 continue
+            entry = self.entry_prices.get((account, side_key), self.fill_price)
+            leverage = self.leverages.get(account, 20) or 20
+            # Realistic cross liquidation: entry*(1 -/+ 1/leverage) by side.
+            # A hardcoded placeholder (e.g. 100) trips the PM-B7
+            # liquidation-vs-stop safety net on every leg; the fake must not
+            # lie about geometry the engine is required to respect.
+            side_sign = D(1) if qty > 0 else D(-1)
+            liq = (entry * (D(1) - side_sign / D(leverage))).quantize(D("0.1"))
             out.append(
                 PositionDTO(
                     symbol=sym,
                     positionAmt=qty,
-                    entryPrice=self.entry_prices.get((account, side_key), self.fill_price),
+                    entryPrice=entry,
                     markPrice=self.price,
-                    leverage=self.leverages.get(account, 20),
-                    liquidationPrice=D(100),
+                    leverage=leverage,
+                    liquidationPrice=liq if liq > 0 else D(0),
                     marginType="cross",
                     positionSide=ps,
                     unRealizedProfit=D(0),

@@ -540,25 +540,45 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 Scope намеренно ограничен safety-hardening существующего modular monolith;
 инфраструктурная перестройка и новые типы торговых продуктов не входят.
 
-- [ ] **Package A — Economic idempotency (IMPLEMENTED / LIVE PARTIAL 2026-09-04):** PM-B1, единая
+- [x] **Package A — Economic idempotency (LIVE-CLOSED 2026-09-04):** PM-B1, единая
   fail-closed UNKNOWN resolution policy для runtime/boot, history + position proof,
-  residual-only reconciliation и signed SIGKILL recovery; полная owner-plan
-  signed UNKNOWN matrix ещё не закрыта.
-- [ ] **Package B — Master recovery correctness (IMPLEMENTED / LIVE IN PROGRESS):** PM-B2/PM-B3,
+  residual-only reconciliation и signed SIGKILL recovery; вся owner-plan
+  signed UNKNOWN matrix закрыта на REAL Aster Testnet (5/5 + REAL-05 + builder
+  corrective).
+- [x] **Package B — Master recovery correctness (LIVE-COMPLETE 2026-09-05):** PM-B2/PM-B3,
   completed-generation cutover, Aster-time cutoff, dirty/age/overflow recovery,
-  reconnect handling и two-snapshot startup entry admission; реальный
-  App/WS/reconnect цикл green, остальная signed race-matrix открыта.
-- [ ] **Package C — Mainnet profile:** PM-B4, immutable network context и
-  production-App composition/preflight без реальных order writes.
-- [ ] **Package D — Risk invariants:** PM-B5/PM-B6/PM-B7, точная причина zero,
-  отсутствие naked exposure, leverage cap и liquidation-vs-stop policy.
-- [ ] **Package E — Production scale:** PM-B8, symbol-aware snapshots,
-  authoritative degraded convergence, метрики и доказанный launch cap.
-- [ ] **Package F — Final signed qualification:** Testnet fault injection,
-  restart/SIGKILL, App E2E, multi-follower isolation, load и финальный audit.
-
+  reconnect handling и two-snapshot startup entry admission; вся signed
+  Snapshot/WS + Startup matrix закрыта на REAL Aster Testnet (S1 100s / S2 44s /
+  W1 83s / W2 68s / P1 45s + REAL-06 134s, финальное дерево).
+- [x] **Package C — Mainnet profile (LIVE-COMPLETE 2026-09-05):** PM-B4, immutable
+  network context (`AsterNetworkProfile` testnet 714 / mainnet 1666,
+  mixed-combo fail-closed), unified mainnet preflight и onboarding
+  `from_profile`; live 3/3 за 12s на REAL Testnet без order writes.
+- [x] **Package D — Risk invariants (LIVE-COMPLETE 2026-09-05):** PM-B5/PM-B6/PM-B7,
+  ZeroReason taxonomy (sticky только `PROPORTIONAL_REDUCTION_DUST`), naked-flatten,
+  operator cap + liquidation invariant + fresh-entry leverage gate; вся
+  Dust/Protection matrix закрыта live 6/6 за 386s; liquidation-violation flatten
+  доказан unshapeable → честный hold contract; MAINNET v1 = ONE_WAY only
+  (full-HEDGE matrix dropped, owner-allowed restriction [superseded: Package G закрыл HEDGE 7/7, v1 = ONE_WAY + HEDGE]).
+- [x] **Package E — Production scale (LIVE-COMPLETE 2026-09-05):** PM-B8 + health
+  convergence. E1 prod DONE + live-проверен нагрузкой (metrics percentiles,
+  symbol-aware scope, max_followers=10 подтверждён envelope-замером,
+  ONE_WAY-only boot refusal [superseded: снят в Package G], priceProtect удалён); E2 LIMIT 2 passed (L1/L3) +
+  L2 honest skip, isolation 3/3 за 633s (F1 429-transport, F2 −2015 + degraded,
+  F3 control-plane-denial). Launch cap v1 = 10 (замер, не мнение).
+- [x] **Package F — Final signed qualification (LIVE-COMPLETE 2026-09-05):**
+  hybrid load 3 REAL + 10 SHADOW **1 passed за 3:39:15** (100 циклов,
+  restart/SIGTERM/SIGKILL, journal чист, метрики, flat везде). Gate
+  ре-usable: `CT_LOAD_PHASES` + `CT_LOAD_SCALE`.
+- [x] **Package G — HEDGE live matrix (LIVE-COMPLETE 2026-09-05):** 7/7 live
+  (`test_pre_mainnet_hedge_live.py`); прод-баг #27 (мусорный liq 25.5M →
+  wrong-side guard); ONE_WAY-only boot refusal СНЯТ после green + FLAT-ALL.
 Mainnet rollout запрещён, пока каждый blocker не закрыт кодом, тестами и
-записанным evidence. Следующая активная работа: **НАЧАТЬ ЗАНОВО С
-PACKAGE A И ДОБИТЬ ВСЮ SIGNED REAL TESTNET-МАТРИЦУ A–B ДО C / PM-B4**.
+записанным evidence. Кампания A–G live закрыта полностью.
+ВЕРДИКТ v1 (ONE_WAY + HEDGE): GO.
+Owner decisions: uv migration ПОСЛЕ F (frozen toolchain during gates);
+main/copyc1 BTCUSDT allOrders saturated 1000/1000 — negative-proof legs на
+copyc3, fail-closed by design.
+
 Текущая ветка
 `codex/live-copy-tests-hardening`; fake-only acceptance не закрывает package.

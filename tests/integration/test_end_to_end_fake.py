@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -959,7 +960,12 @@ class TestMasterFlipEpisodeSemantics:
 
         # master protects the SHORT leg (BUY stop above the market) ...
         await projector.apply_raw(stop_new(E=1210, c="m-stop-s", sp="65500", S="BUY"))
-        await asyncio.sleep(0)
+        # The flip close + SHORT open + stop placement settle over several
+        # executor generations (SET_LEVERAGE -> MARKET_OPEN -> PLACE_STOP DAG);
+        # drain for convergence instead of assuming a single tick.
+        _deadline = time.monotonic() + 10
+        while follower_qty(fake, fid) >= 0 and time.monotonic() < _deadline:
+            await asyncio.sleep(0.05)
         # ... and the follower opens the SHORT on the next pass
         qty = follower_qty(fake, fid)
         assert qty < 0, "follower must open the reversed side after a flip"
@@ -1028,9 +1034,11 @@ class TestMasterFlipEpisodeSemantics:
             "the flip's new episode must clear the sticky marker"
         )
 
-        # short protection -> follower enters the reversed side
+        # short protection -> follower enters the reversed side (drain the DAG, see above)
         await projector.apply_raw(stop_new(E=1260, c="m-stop-s", sp="65500", S="BUY"))
-        await asyncio.sleep(0)
+        _deadline = time.monotonic() + 10
+        while follower_qty(fake, fid) >= 0 and time.monotonic() < _deadline:
+            await asyncio.sleep(0.05)
         assert follower_qty(fake, fid) < 0, "SHORT entry must not be blocked by the old marker"
 
 

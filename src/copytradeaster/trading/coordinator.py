@@ -42,6 +42,7 @@ from copytradeaster.domain.models import (
     SymbolFilters,
     TargetPosition,
     TargetState,
+    ZeroReason,
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.master.projector import MasterDelta, MasterState
@@ -77,6 +78,7 @@ TP_TYPES = ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
 POSTFILL_RECOMPUTE_DEBOUNCE_S = 2.0
 NOTIFICATION_KEY_CACHE_MAX = 4096
 _SAFE_FRAGMENT = re.compile(r"[^A-Za-z0-9_.:-]+")
+LIQUIDATION_MMR_CUSHION = Decimal("0.01")
 
 
 def _safe_fragment(value: object, fallback: str = "unknown") -> str:
@@ -126,6 +128,7 @@ def _canonical_target(t: TargetPosition) -> str:
             # dust-flat and a transitional flip-zero with identical qty must
             # not share command keys
             "hold_flat_until_episode_end": t.hold_flat_until_episode_end,
+            "zero_reason": None if t.zero_reason is None else t.zero_reason.value,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -191,11 +194,21 @@ class Coordinator:
         working_type: str,
         on_notify: Callable[[str], Awaitable[None]] | None = None,
         stale_master_ms: int = 5000,
+        notifier: Notifier | NotificationCallback | None = None,
         basis: SyncBasisRepo | None = None,
         snapshot_symbols: set[str] | None = None,
-        notifier: Notifier | NotificationCallback | None = None,
         leverage: LeverageManager | None = None,
         entry_admission: Callable[[], bool] | None = None,
+        # PM-B7 operator safety rails (configurable; defaults keep legacy sizing).
+        # operator_max_leverage caps every leverage the coordinator resolves or
+        # reuses (control-plane confirmed, exchange maximum, policy/master) -
+        # an operator ceiling independent of per-follower RiskPolicy.
+        # liquidation_buffer_pct is the required relative margin between the
+        # protective stop and the authoritative liquidation price: LONG needs
+        # liquidation < stop*(1-buffer), SHORT mirrored. A violated leg is
+        # reduced/flattened, never re-leveraged.
+        operator_max_leverage: int | None = None,
+        liquidation_buffer_pct: Decimal | str | int = Decimal("0.005"),
     ) -> None:
         self._registry = (
             followers if isinstance(followers, FollowerRegistry) else FollowerRegistry(followers)
@@ -236,6 +249,17 @@ class Coordinator:
         # per-account state). None keeps the legacy test seam where the target
         # leverage resolves from the client/policy without a control plane.
         self._leverage = leverage
+        if operator_max_leverage is not None and operator_max_leverage <= 0:
+            raise ValueError("operator_max_leverage must be positive")
+        self._operator_max_leverage = operator_max_leverage
+        buffer = (
+            liquidation_buffer_pct
+            if isinstance(liquidation_buffer_pct, Decimal)
+            else Decimal(str(liquidation_buffer_pct))
+        )
+        if not Decimal(0) <= buffer < Decimal(1):
+            raise ValueError("liquidation_buffer_pct must be in [0, 1)")
+        self._liquidation_buffer_pct = buffer
         # Process-local startup/reconnect boundary. It is independent of the
         # user's durable pause: false blocks only new/increased exposure while
         # closes, reductions and protection convergence continue.
@@ -692,7 +716,32 @@ class Coordinator:
             if action.kind == ActionKind.MARKET_OPEN and result.status == "CONFIRMED"
         }
         unsafe_opened = opened_keys & unresolved_stop_keys
-        if not unsafe_opened:
+        # PM-B6/B7: the same safety net covers PRE-EXISTING legs in the
+        # authoritative post-fill snapshot: a naked leg (no usable master
+        # stop AND no own stop) or a liquidation-vs-stop violated leg is
+        # flattened even though no market action just opened it. Never
+        # invent a stop level here (stop_price=None).
+        safety_reasons: dict[PositionKey, ZeroReason] = {
+            key: ZeroReason.SAFETY_UNPROTECTED_ENTRY for key in unsafe_opened
+        }
+        for key, pos in verified.positions.items():
+            if pos.qty == 0 or key.symbol not in self._whitelist:
+                continue
+            mpos = master.positions.get(key)
+            if mpos is None or mpos.qty == 0:
+                continue  # master-closed legs converge through reconciliation
+            master_stop = mpos.stop.stop_price if mpos.stop else None
+            if not self._stop_usable(mpos, master_stop) and pos.stop is None:
+                safety_reasons.setdefault(key, ZeroReason.SAFETY_NAKED)
+                continue
+            effective = (
+                master_stop
+                if self._stop_usable(mpos, master_stop)
+                else (pos.stop.stop_price if pos.stop is not None else None)
+            )
+            if effective is not None and self._liquidation_violated(pos, effective):
+                safety_reasons.setdefault(key, ZeroReason.LIQUIDATION_VIOLATION)
+        if not safety_reasons:
             return results
 
         zero_targets = [
@@ -702,8 +751,10 @@ class Coordinator:
                 stop_price=None,
                 tp_price=None,
                 leverage=verified.positions[key].leverage,
+                hold_flat_until_episode_end=False,
+                zero_reason=safety_reasons[key],
             )
-            for key in sorted(unsafe_opened, key=lambda k: (k.symbol, k.pos_side.value))
+            for key in sorted(safety_reasons, key=lambda k: (k.symbol, k.pos_side.value))
             if key in verified.positions and verified.positions[key].qty != 0
         ]
         if zero_targets:
@@ -718,7 +769,7 @@ class Coordinator:
                 fr.account_id, zero_targets, close_plan, verified
             )
             results.extend(await self._executor.submit(close_plan, client=fr.client))
-        reason = ",".join(f"{key.symbol}:{key.pos_side.value}" for key in unsafe_opened)
+        reason = ",".join(f"{key.symbol}:{key.pos_side.value}" for key in safety_reasons)
         await self._app_flags.set_flag(
             "degraded", f"{fr.account_id}:unprotected-entry-flattened:{reason}"
         )
@@ -767,12 +818,19 @@ class Coordinator:
             if t.qty == 0:
                 mpos = master.positions.get(key)
                 master_still_open = mpos is not None and mpos.qty != 0
-                if t.hold_flat_until_episode_end and master_still_open:
+                if (
+                    t.hold_flat_until_episode_end
+                    and t.zero_reason is ZeroReason.PROPORTIONAL_REDUCTION_DUST
+                    and master_still_open
+                ):
                     # Sticky dust-flat INSIDE an open master episode: the
                     # same-direction proportional target rounded down to zero.
                     # Persist the marker instead of clearing the row, or the
                     # next recompute would see "master open + follower flat"
                     # and immediately re-open the position just closed.
+                    # ONLY the dust reason latches: risk-cap / stop-move /
+                    # flip / stale / manual / safety zeros clear below so the
+                    # same episode may re-enter once its cause clears (Dust-2).
                     await self._basis.mark_zero_target(account_id, key.symbol, key.pos_side.value)
                 else:
                     # Either the master episode really ended, or this zero is
@@ -910,6 +968,7 @@ class Coordinator:
                         stop_price=None,
                         tp_price=None,
                         leverage=actual.positions[key].leverage,
+                        zero_reason=ZeroReason.MASTER_CLOSED,
                     )
                 )
         for key, master_pos in master.positions.items():
@@ -982,7 +1041,9 @@ class Coordinator:
                         self._leverage.request_prepare(account_id, key.symbol)
                         skips.append(await self._skip_record(key, SkipReason.LEVERAGE_NOT_READY))
                         continue
-                    leverage = self._leverage.confirmed(account_id, key.symbol)
+                    leverage = self._apply_operator_cap(
+                        self._leverage.confirmed(account_id, key.symbol)
+                    )
                 else:
                     # Legacy test seam without a composed control plane.
                     leverage = await self._target_leverage(
@@ -992,6 +1053,12 @@ class Coordinator:
                         policy,
                         client=client,
                     )
+                # PM-B7 entry gate: never open at a leverage whose estimated
+                # liquidation already breaches the stop margin - post-fill
+                # would instantly flatten it and the transient zero would
+                # re-open it in a loop. Unviable sizing fails closed below
+                # via the margin check (INSUFFICIENT_MARGIN skip, no loop).
+                leverage = self._entry_leverage_for_stop(expected, master_stop, policy, leverage)
                 decision = entry_quantity(
                     policy,
                     actual.available_usdt,
@@ -1054,12 +1121,50 @@ class Coordinator:
                         tp_price=None,
                         leverage=follower_pos.leverage,
                         hold_flat_until_episode_end=False,
+                        zero_reason=ZeroReason.FLIP_CLOSE,
+                    )
+                )
+                continue
+            if effective_stop is None and current_abs > 0:
+                # PM-B6: naked existing leg - the follower holds quantity with
+                # no usable master stop AND no own stop. Safety-flatten NOW;
+                # never invent a stop level (stop_price=None). Transient: the
+                # same episode may re-enter once protection returns.
+                targets.append(
+                    TargetPosition(
+                        key=key,
+                        qty=Decimal(0),
+                        stop_price=None,
+                        tp_price=None,
+                        leverage=follower_pos.leverage,
+                        hold_flat_until_episode_end=False,
+                        zero_reason=ZeroReason.SAFETY_NAKED,
+                    )
+                )
+                continue
+            if effective_stop is not None and self._liquidation_violated(
+                follower_pos, effective_stop
+            ):
+                # PM-B7: the authoritative liquidation price breaches the
+                # stop margin (LONG needs liquidation < stop-margin, SHORT
+                # mirrored). Flatten the violated leg; never re-leverage it.
+                targets.append(
+                    TargetPosition(
+                        key=key,
+                        qty=Decimal(0),
+                        stop_price=None,
+                        tp_price=None,
+                        leverage=follower_pos.leverage,
+                        hold_flat_until_episode_end=False,
+                        zero_reason=ZeroReason.LIQUIDATION_VIOLATION,
                     )
                 )
                 continue
 
             prev_abs = await self._prev_master_abs(account_id, key)
             master_abs = abs(master_qty)
+            from_reduce = False
+            stop_move_branch = False
             if prev_abs is not None and master_abs > prev_abs:
                 # branch b: master increased -> state-based risk cap; growth is
                 # forbidden against a stale view for the same reason as branch a
@@ -1069,6 +1174,7 @@ class Coordinator:
                 # magnitude DROPPED vs the persisted reference (incl. restart
                 # recovery, where the snapshot may carry no protective order):
                 # the missed reduction must replay regardless of stop state
+                from_reduce = True
                 target_abs = scaled_reduce(
                     current_abs,
                     prev_abs,
@@ -1091,10 +1197,12 @@ class Coordinator:
                     self._fee_buffer,
                 )
                 target_abs = min(current_abs, max(cap_moved, Decimal(0)))
+                stop_move_branch = True
             else:
                 # branch c fallback: no ref yet -> reference equals current
                 # master magnitude, i.e. nothing to do size-wise
                 reference = prev_abs if prev_abs else master_abs
+                from_reduce = True
                 target_abs = scaled_reduce(
                     current_abs,
                     reference,
@@ -1114,13 +1222,29 @@ class Coordinator:
                 target_abs = current_abs
             # post-fill protection: never hold more than the real risk cap from
             # the ACTUAL follower entry and the effective stop distance
+            # PM-B5 explicit zero taxonomy. ONLY a proportional same-direction
+            # reduction rounded down to zero (branch c / fallback) latches the
+            # sticky dust marker. A zero from the state-based risk cap
+            # (branch b / post-fill clamp) or a stop-move recompute (branch
+            # d/e) is transient and MUST allow same-episode re-entry (Dust-2).
+            pre_cap_dust = target_abs == 0 and current_abs > 0 and from_reduce
+            # The cap clamp below cannot change provenance: pre-cap dust stays
+            # sticky dust, a fresh cap zero stays transient.
             if effective_stop is not None and cap < current_abs and master_fresh:
                 target_abs = min(target_abs, cap)
-            # A proportional reduction of the SAME direction rounded down to
-            # zero is the ONLY sticky dust-flat case. The post-fill cap can
-            # also produce a transient zero (e.g. fresh stop far away right
-            # after entry); it must NOT latch - the next pass recomputes it.
-            dust_flat = target_abs == 0 and current_abs > 0
+            if target_abs == 0 and current_abs > 0:
+                if pre_cap_dust:
+                    zero_reason = ZeroReason.PROPORTIONAL_REDUCTION_DUST
+                    dust_flat = True
+                elif stop_move_branch:
+                    zero_reason = ZeroReason.STOP_MOVE
+                    dust_flat = False
+                else:
+                    zero_reason = ZeroReason.RISK_CAP
+                    dust_flat = False
+            else:
+                zero_reason = None
+                dust_flat = False
             target_stop, target_stop_type = self._target_stop_for_existing(
                 master_pos, master_stop, master_stop_type, follower_pos
             )
@@ -1131,7 +1255,8 @@ class Coordinator:
                     # account-confirmed value instead of a network read.
                     confirmed = self._leverage.confirmed(account_id, key.symbol)
                     if confirmed is not None:
-                        leverage = confirmed
+                        capped = self._apply_operator_cap(confirmed)
+                        leverage = capped if capped is not None else confirmed
                 else:
                     # Legacy test seam without a composed control plane.
                     # Existing-leg reductions, closes and protection updates
@@ -1155,6 +1280,7 @@ class Coordinator:
                     tp_type=master_tp_type,
                     leverage=leverage,
                     hold_flat_until_episode_end=dust_flat,
+                    zero_reason=zero_reason,
                 )
             )
         return targets, skips
@@ -1182,14 +1308,15 @@ class Coordinator:
                 value = await resolver(account_id, symbol)
                 if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                     raise ValueError("invalid exchange maximum leverage")
-                return value
+                return self._apply_operator_cap(value)
             if isinstance(client, AsterClient):
                 raise RuntimeError("AsterClient maximum leverage operation is unavailable")
-        return (
+        resolved = (
             min(master_pos.leverage, policy.max_leverage)
             if master_pos.leverage > 0
             else policy.max_leverage
         )
+        return self._apply_operator_cap(resolved)
 
     async def _skip_record(self, key: PositionKey, reason: SkipReason) -> SkipRecord:
         """Attach the durable master episode id when one is available."""
@@ -1201,6 +1328,79 @@ class Coordinator:
             pos_side=key.pos_side,
             trade_id=trade_id,
         )
+
+    def _apply_operator_cap(self, leverage: int | None) -> int | None:
+        """Clamp a resolved leverage to the operator safety ceiling (PM-B7).
+
+        None (unconfigured ceiling, or unknown control-plane value) passes
+        through untouched; a non-positive incoming value is never raised.
+        """
+        if leverage is None:
+            return None
+        if self._operator_max_leverage is not None and leverage > self._operator_max_leverage:
+            return self._operator_max_leverage
+        return leverage
+
+    def _liquidation_violated(self, follower_pos: PositionState, stop: Decimal) -> bool:
+        """True when the authoritative liquidation price breaches the stop
+        margin (PM-B7): LONG requires liquidation < stop*(1-buffer), SHORT
+        mirrored. Unknown/zero liquidation or stop never counts as a
+        violation - the leg is judged by the naked-stop rule instead.
+
+        Package G live finding: the exchange can report a liquidation price
+        on the IMPOSSIBLE side of the entry (testnet returned 25.5M on an
+        80k LONG leg - a LONG can only liquidate below its entry). Such a
+        quote is garbage, not authority: treating it as real flattens a
+        healthy protected leg and the next pass reopens it (open -> flatten
+        churn on real fees). A wrong-side quote is demoted to unknown.
+        """
+        liq = follower_pos.liquidation_price
+        if liq <= 0 or stop <= 0 or follower_pos.qty == 0:
+            return False
+        is_short = follower_pos.qty < 0 or follower_pos.key.pos_side == PosSide.SHORT
+        entry = follower_pos.entry_price
+        if entry > 0:
+            if is_short and liq <= entry:
+                return False
+            if not is_short and liq >= entry:
+                return False
+        buffer = self._liquidation_buffer_pct
+        if is_short:
+            return liq <= stop * (Decimal(1) + buffer)
+        return liq >= stop * (Decimal(1) - buffer)
+
+    def _entry_leverage_for_stop(
+        self,
+        expected_entry: Decimal,
+        stop_price: Decimal,
+        policy: RiskPolicy,
+        leverage: int | None,
+    ) -> int | None:
+        """Cap entry leverage so estimated liquidation satisfies the stop margin.
+
+        The post-fill invariant reads the authoritative liquidation price;
+        this gate keeps a fresh entry from opening what that net would
+        instantly flatten (open -> flatten livelock). Estimated liquidation
+        distance is entry/leverage minus a maintenance-margin cushion; the
+        cap solves entry/lev >= stop_distance + entry*(buffer + cushion).
+        None (unknown control-plane value) stays None unless the cap binds
+        below the policy maximum; sub-1 caps clamp to 1 so the downstream
+        margin check fails closed with INSUFFICIENT_MARGIN instead of looping.
+        """
+        stop_distance = abs(expected_entry - stop_price)
+        if expected_entry <= 0 or stop_distance <= 0:
+            return leverage
+        per_unit = stop_distance + expected_entry * (
+            self._liquidation_buffer_pct + LIQUIDATION_MMR_CUSHION
+        )
+        invariant_cap = int(expected_entry // per_unit)
+        operator_cap = self._operator_max_leverage
+        cap = invariant_cap if operator_cap is None else min(invariant_cap, operator_cap)
+        if leverage is None:
+            if cap >= policy.max_leverage:
+                return None
+            return max(1, cap)
+        return max(1, min(leverage, cap))
 
     def _stop_usable(self, master_pos: PositionState, stop: Decimal | None) -> bool:
         """Usable = sits on the protective side of the CURRENT market price.

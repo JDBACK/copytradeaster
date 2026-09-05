@@ -5,17 +5,17 @@ Suite counters live only in `docs/ENGINE_TEST_STATUS_2026-08.md` — never copy 
 
 ## Suites
 
-- `unit/` — 58 files, hermetic: `tmp_path` SQLite + `respx` + in-memory fakes. Default run needs no network or keys.
-- `integration/` — 7 files + `fake_aster.py`: real stack (Projector→Coordinator→Planner→Executor→App/Service) over faked exchange edges.
-- `replay/` — 1 parametrized test × 6 JSON fixtures through `MasterProjector`.
-- `testnet/` — 15 live files + `support/builder_live.py`: signed runs against `fapi.asterdex-testnet.com`, double-gated by `pytest.mark.testnet` + `CT_TESTNET=1`.
+- `unit/` — hermetic: `tmp_path` SQLite + `respx` + in-memory fakes. Default run needs no network or keys.
+- `integration/` + `fake_aster.py` — real stack (Projector→Coordinator→Planner→Executor→App/Service) over faked exchange edges.
+- `replay/` — parametrized JSON fixtures through `MasterProjector`.
+- `testnet/` — live files (count lives only in `docs/ENGINE_TEST_STATUS_2026-08.md`) + `support/builder_live.py`: signed runs against `fapi.asterdex-testnet.com`, double-gated by `pytest.mark.testnet` + `CT_TESTNET=1`.
 
 ```bash
 pytest -q -m "not testnet"                              # offline (unit + integration + replay)
 pytest -q -m "not testnet" --cov=src/copytradeaster     # + coverage (>= 87% by eye, no fail_under)
 CT_TESTNET=1 pytest tests/testnet/ -v                   # signed live (needs wallet.txt, leave flat behind)
 CT_LOAD=1 pytest tests/integration/test_shadow_scale.py # scale preflight 30x100 + 100x20 (load marker unused)
-cd miniapp && pnpm test                                 # frontend Vitest (18 files)
+cd miniapp && pnpm test                                 # frontend Vitest
 ```
 
 ## unit/trading + risk + domain + master — trading core
@@ -139,6 +139,14 @@ Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): l
 | `test_builder_resume_live.py` | Pause/resume over MiniApp HTTP (L7–L8): live snapshot + HMAC initData |
 | `test_builder_stale_corrective_live.py` | Stale builder fee → direct fallback on risk-reducing close |
 | `test_builder_engine_attribution_live.py` | P2.7 proof: Builder vs direct routing through the production core with a `place_order` spy |
+| `test_pre_mainnet_unknown_live.py` | Package A UNKNOWN live matrix A1–A5 (CLOSE response-lost via real allOrders, all-reads-down hold, partial residual, proven-not-executed retry ×1 on copyc3, SIGKILL boot CONFIRM); flat/zero audit in `finally` |
+| `test_pre_mainnet_master_live.py` | Package B Snapshot/WS/Startup live matrix LIVE-COMPLETE (S1/S2/W1/W2/P1 + REAL-06 App/WS/reconnect); flat/zero audit in `finally` |
+| `test_pre_mainnet_network_live.py` | Package C NetworkProfile live 3/3 (MAINNET composition, mode-failure block, in-flight block), no order writes; flat/zero audit in `finally` |
+| `test_pre_mainnet_risk_live.py` | Package D ZeroReason/naked/liquidation live matrix 6/6 in one run (Dust-1/2/3, Protection-cancel/naked, liquidation-hold); flat/zero audit in `finally` |
+| `test_pre_mainnet_limit_live.py` | Package E2 LIMIT live: L1/L3 green, L2 honest skip (exchange filled full twice — needs partial for residual row); flat/zero audit in `finally` |
+| `test_pre_mainnet_isolation_live.py` | Package E2 isolation live 3/3 на финальном дереве (F1 429, F2 permission + degraded, F3 control-plane-denial); flat/zero audit в `finally` |
+| `test_pre_mainnet_load_live.py` | Package F hybrid load live (3 REAL + 10 SHADOW, 100 циклов, restart/SIGTERM/SIGKILL, loadgate8 3:39:15); flat/zero audit in `finally` |
+| `test_pre_mainnet_hedge_live.py` | Package G HEDGE live matrix 7/7 (G0 pre-check + G1 LONG+SHORT + G2 asymmetry + G3 stop replace + G4 leverage + G5 partial + G6 close, прод-баг #27); flat/zero audit in `finally` |
 | `test_live_status_acceptance.py` | P2.5 status: signed snapshot+agent reads, safe DTO + HTTP contract |
 | `test_live_positions_acceptance.py` | P2.1 positions: copy, stop-move, TP, partial, MISSING_STOP, flat audit |
 | `test_live_risk_acceptance.py` | P2.4 risk: 1% vs 3% legs, ratio check, forged-body 400, DB invariance |

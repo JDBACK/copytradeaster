@@ -253,11 +253,37 @@ async def test_stale_builder_fee_falls_back_direct_live(tmp_path):
             ),
         )
         await app.projector.rebuild_full(app.master_client, "main")
-        await app.reconcile_follower(builder_aid, reason="stale-open")
-        await app.reconcile_follower("copyc1", reason="stale-open")
-        b_open = [s for s in seen if s["aid"] == builder_aid and s["type"] == "MARKET"]
-        assert b_open, seen
-        assert all(s["builder"] is not None for s in b_open)
+        # NOTE (Package B entry admission): a bare, never-started App keeps
+        # process-local entry admission closed (READY + live WS + clean
+        # projector required), so the engine cannot drive the opening leg
+        # here. Seed both follower legs directly on the REAL exchange without
+        # builder fields (Builder MARKET-entry attribution itself is proven by
+        # the P2.7 live attribution gate); this test owns the reduction leg:
+        # stale BUILDER_VALID -> real -5026 -> exactly one DIRECT retry.
+        for aid in ("copyc1", builder_aid):
+            await _place(
+                app.master_client,
+                aid,
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.BUY,
+                    type="MARKET",
+                    quantity=MASTER_QTY,
+                    position_side=long_side,
+                    new_order_resp_type="RESULT",
+                    new_client_order_id=f"stale-f-{aid}-{ts}"[:36],
+                ),
+            )
+        seed_open = [s for s in seen if s["type"] == "MARKET"]
+        assert len(seed_open) == 2, seed_open
+        assert all(s["builder"] is None for s in seed_open)
+        for aid in ("copyc1", builder_aid):
+            qty = D("0")
+            for p in await app.master_client.position_risk(aid, SYMBOL):
+                if p.symbol == SYMBOL and p.position_side == long_side:
+                    qty = p.position_amt
+            assert qty == MASTER_QTY, (aid, qty)
+        seen.clear()
         snap = await app.db.fetchone("SELECT * FROM accounts WHERE id=?", (builder_aid,))
         assert snap is not None
         await app.db.execute_write(

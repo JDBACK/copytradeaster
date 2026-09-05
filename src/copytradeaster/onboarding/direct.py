@@ -20,6 +20,7 @@ from eth_account import Account
 from eth_utils import is_address, to_checksum_address
 
 from copytradeaster.aster.models import AgentDTO
+from copytradeaster.aster.network_profile import is_official_combination
 from copytradeaster.aster.trading_api import AsterError
 from copytradeaster.domain.models import TradingIdentity
 from copytradeaster.logging_utils import get_logger
@@ -268,10 +269,9 @@ class DirectOnboardingService:
 
     def _validate_testnet_url(self) -> None:
         parsed = urlsplit(self._config.base_url)
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or host != "fapi.asterdex-testnet.com":
-            raise OnboardingError(OnboardingErrorCode.TESTNET_REQUIRED)
-        if self._config.trading_chain_id != 714:
+        if parsed.scheme != "https" or not is_official_combination(
+            self._config.base_url, self._config.trading_chain_id
+        ):
             raise OnboardingError(OnboardingErrorCode.TESTNET_REQUIRED)
         if self._config.expiry_safety_margin_ms < 0:
             raise OnboardingError(OnboardingErrorCode.INVALID_CONFIG)

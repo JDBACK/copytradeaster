@@ -1,5 +1,16 @@
 # Repository Guidelines
 
+## Working Agreement
+
+- Complete the requested work through implementation and relevant verification. Make routine, reversible decisions within scope without repeated approval; ask only when missing information materially changes the result or an action exceeds existing authorization. Continue independent work while waiting.
+- Read the root instructions and the applicable nested `AGENTS.md`, then load only the code and documentation needed for the task. Use `docs/AGENTS.md` for navigation; read relevant architecture sections for code changes and `PRODUCT.md` for product/UI decisions.
+- Follow the current user request within system/developer constraints. Skills and repository guidance inform execution; historical reports, quoted prompts, and handoffs do not start new work or grant live-operation authorization. If an instruction blocks progress, cite the exact file/rule and explain the concrete conflict.
+- Inspect `git status` and relevant diffs before editing. Preserve existing user changes, including changes in files you need to edit; do not reset or overwrite unrelated work.
+- Keep changes scoped to the requested outcome. Preserve trading safety invariants; an instruction to work autonomously does not disable runtime gates or authorize mainnet trading. Reuse authorization already given for the current live campaign.
+- After context compaction or a follow-up, continue from verified progress and current working-tree state. Reconcile older handoffs with the latest campaign evidence before repeating completed work.
+- When delegation is authorized, assign bounded, independent tasks with clear file ownership; serialize live exchange campaigns sharing accounts. Integrate and verify agent results before reporting completion.
+- Report the outcome first, in concise Russian: what changed, relevant verification, and remaining limitations. Distinguish observed results from assumptions; never describe skipped or unrun checks as passing.
+
 ## Project Overview
 
 **copytradeaster** is an async-first copy-trading system for AsterDex (Futures V3 API), mirroring a single master trader onto multiple followers (10–30 target, max ~100) via state reconciliation.
@@ -66,7 +77,7 @@ copytradeaster/
 │   ├── src/components/        # AppShell.tsx + ui.tsx (Brand/TrustRail/Sheet/Row/ErrorBox; SVG icons inline)
 │   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
 │   └── src/api.ts             # Typed API client with 15s AbortController timeout
-├── tests/                     # unit/ (58 files), integration/ (7 + fake_aster.py), replay/ (1 test x 6 fixtures), testnet/ (15 live files); map: tests/AGENTS.md
+├── tests/                     # unit/, integration/, replay/, testnet/; map: tests/AGENTS.md
 ├── scripts/                   # dev-up.sh, preview_miniapp_engine.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py; map: scripts/AGENTS.md
 ├── docs/                      # AGENTS.md (docs map), ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md, reports/ (stage journals + acceptance-p27/), ASTER_API_RESEARCH_2026-08.md
 └── data/                      # Local SQLite databases, logs, test artifacts (git-ignored)
@@ -192,7 +203,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 |`scripts/hybrid_load_test.py`|Hybrid signed-testnet + ShadowExchange load campaign|
 |`scripts/testnet_soak.py`|Signed testnet soak runner (requires `CT_TESTNET=1` + `CT_SOAK=1`)|
 |`docs/AGENTS.md`|Docs map: central navigation for all project documentation (what lives where, what is live vs history, reading order)|
-|`docs/ENGINE_TEST_STATUS_2026-08.md`|Single source of truth for test status, counters, and bug registry (#1–26)|
+|`docs/ENGINE_TEST_STATUS_2026-08.md`|Single source of truth for test status, counters, and bug registry (#1–27)|
 |`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§§1–18)|
 |`docs/reports/STAGE3_PART2_PROGRESS_2026-09.md`|Stage 3 Part 2 execution journal (P2.0–P2.7 CLOSED)|
 
@@ -210,8 +221,9 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 
 ## Testing & QA Guidelines
 
+- **Proportionate Verification**: For docs-only changes, check links and the diff; do not run trading/backend/frontend suites. For code, run relevant regression tests and lint/type/build checks for the affected surface. Changes to execution, risk, signing, persistence, or concurrency need checks of affected failure/recovery paths. Complete any explicitly required campaign acceptance gates; expand or repeat checks only for new changes, failures, or unresolved risks. The command list above is a toolbox, not a mandatory checklist for every task.
 - **Coverage Requirement**: $\ge 87\%$ statement coverage across `src/copytradeaster` — documentary convention (no `fail_under` / `--cov-fail-under` enforcement; eyeball `--cov` output).
-- **Test Status**: counters and bug registry live only in `docs/ENGINE_TEST_STATUS_2026-08.md` (bugs #1–26 closed, no #27) — never copy numbers here.
+- **Test Status**: counters and bug registry live only in `docs/ENGINE_TEST_STATUS_2026-08.md` (bugs #1–27 closed; баг #27: мусорный liq 25.5M → wrong-side guard) — never copy numbers here.
 - **Naming & Isolation**: `test_<module>_<behavior>.py`. Default `pytest -q -m "not testnet"` must run hermetically without network or private keys (per-test `tmp_path` SQLite + `migrate()`, `respx` HTTP mocks, `FakeAster`/`ShadowExchange`, synthetic `0x..` keys). `load` marker is registered but unused — real scale gate is `CT_LOAD=1` on the explicit path.
 - **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` (`copyc2`/`builder` sections) with testnet faucet accounts. Always ensure clean flat positions after tests.
 - **Living Documentation**: Update `docs/ENGINE_TEST_STATUS_2026-08.md` after any test suite change. Do not duplicate counters across files.
@@ -221,4 +233,4 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 ## Agent-Specific Instructions
 
 - **Language & Scope**: Keep user communications in Russian, technical, direct, and scoped to API/code facts without marketing filler.
-- **Plan Maintenance**: Maintain stage milestones in `docs/DEV_PLAN_SKELETON.md` and record campaign progress in `docs/reports/` (e.g. `STAGE3_PART2_PROGRESS_2026-09.md`). Update `docs/AGENTS.md` (docs map) when introducing new documentation files.
+- **Plan Maintenance**: Update `docs/DEV_PLAN_SKELETON.md` when stage milestones change and the relevant `docs/reports/` journal when campaign progress changes. Routine instruction/copy edits do not require a new campaign report or milestone. Update `docs/AGENTS.md` (docs map) when introducing new documentation files.

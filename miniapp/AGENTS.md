@@ -90,7 +90,7 @@ cd miniapp
 pnpm install          # deps (@walletconnect lazy chunk needs VITE_WC_PROJECT_ID at runtime)
 pnpm dev              # HMR; needs backend on :8080 (VITE_API_TARGET override) — or real bot via dev-up.sh
 pnpm lint             # oxlint (no ESLint)
-pnpm test             # vitest run, 18 files
+pnpm test             # vitest run
 pnpm build            # tsc -b && vite build -> dist/ (git-ignored, served by bot at /miniapp/)
 pnpm preview          # vite preview
 ```
@@ -131,7 +131,7 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 ## Testing & QA
 
-18 test files, three styles:
+Three test styles (suite counters live in `docs/ENGINE_TEST_STATUS_2026-08.md`):
 
 - **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format` tests — import helpers directly.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/systemStatus/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
