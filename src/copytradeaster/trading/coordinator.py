@@ -23,6 +23,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from decimal import Decimal
@@ -209,6 +210,7 @@ class Coordinator:
         # reduced/flattened, never re-leveraged.
         operator_max_leverage: int | None = None,
         liquidation_buffer_pct: Decimal | str | int = Decimal("0.005"),
+        max_total_risk_pct: Decimal | None = None,
     ) -> None:
         self._registry = (
             followers if isinstance(followers, FollowerRegistry) else FollowerRegistry(followers)
@@ -234,6 +236,8 @@ class Coordinator:
         self._error_incidents: dict[str, int] = {}
         self._basis = basis
         self._snapshot_symbols = snapshot_symbols
+        self._snapshot_scope: ContextVar = ContextVar("snapshot_scope", default=snapshot_symbols)
+        self._max_total_risk_pct = max_total_risk_pct
         self._last_master_state: MasterState | None = None
         self._last_postfill_recompute: dict[str, float] = {}
         self._postfill_tasks: set[asyncio.Task] = set()
@@ -497,13 +501,18 @@ class Coordinator:
         delta: MasterDelta,
         *,
         master_fresh: bool | None = None,
-    ) -> None:
+    ) -> int:
         # Snapshot and mutation must be one per-follower generation. The
         # executor lock serializes exchange writes, but without this outer lock
         # a post-fill recompute could snapshot the same position concurrently
         # with a master-delta recompute and issue contradictory closes.
-        async with fr.lock:
-            await self._recompute_follower_locked(fr, delta, master_fresh=master_fresh)
+        async with fr.lock, self._executor.mutation_context(fr.account_id):
+            from copytradeaster.trading.executor import resolve_boot_unknowns
+
+            await resolve_boot_unknowns(
+                lambda _: fr.client, self.commands, self._links, only_account=fr.account_id
+            )
+            return await self._recompute_follower_locked(fr, delta, master_fresh=master_fresh)
 
     async def _recompute_follower_locked(
         self,
@@ -511,10 +520,10 @@ class Coordinator:
         delta: MasterDelta,
         *,
         master_fresh: bool | None = None,
-    ) -> None:
+    ) -> int:
         policy = await self._settings.get_policy(fr.account_id)
         if policy is None or not policy.enabled:
-            return
+            return -1
         actual = await self._snapshot(fr)
         targets, skips = await self._targets_for(
             fr.account_id,
@@ -561,7 +570,7 @@ class Coordinator:
         if not plan.actions:
             # already converged: remember the master magnitude we are in sync with
             await self._persist_refs(fr.account_id, targets, failed=False, master=delta.state)
-            return
+            return 0
         log.info(
             "[%s] plan: %s",
             fr.account_id,
@@ -587,6 +596,7 @@ class Coordinator:
         # reconciliation retries the complete safety transition.
         failed = any(r.status != "CONFIRMED" for r in results)
         await self._persist_refs(fr.account_id, targets, failed=failed, master=delta.state)
+        return len(results)
 
     @staticmethod
     def _skip_episode_token(skip: SkipRecord, master: MasterState) -> str:
@@ -848,17 +858,17 @@ class Coordinator:
     async def _snapshot(self, fr: FollowerRuntime) -> AccountState:
         balances = await fr.client.balance(fr.account_id)
         available = Decimal(0)
+        equity = Decimal(0)
         for b in balances:
             if b.asset == "USDT":
                 available = b.available_balance
+                equity = getattr(b, "balance", available) + getattr(b, "cross_un_pnl", Decimal(0))
                 break
         positions: dict[PositionKey, PositionState] = {}
-        if self._snapshot_symbols:
+        scope = self._snapshot_scope.get()
+        if scope:
             batches = await asyncio.gather(
-                *(
-                    fr.client.open_orders(fr.account_id, symbol=symbol)
-                    for symbol in sorted(self._snapshot_symbols)
-                )
+                *(fr.client.open_orders(fr.account_id, symbol=symbol) for symbol in sorted(scope))
             )
             orders = [order for batch in batches for order in batch]
         else:
@@ -936,6 +946,7 @@ class Coordinator:
         return AccountState(
             account_id=fr.account_id,
             available_usdt=available,
+            equity_usdt=equity,
             positions=positions,
             symbol_leverages=symbol_leverages,
             open_orders=[o.model_dump() for o in orders],
@@ -1283,6 +1294,17 @@ class Coordinator:
                     zero_reason=zero_reason,
                 )
             )
+        if self._max_total_risk_pct is not None:
+            from copytradeaster.risk.account_budget import reserve_account_budget
+
+            targets = reserve_account_budget(
+                actual,
+                targets,
+                master.positions,
+                self._filters_provider(),
+                max_total_risk_pct=self._max_total_risk_pct,
+                fee_buffer_pct=self._fee_buffer,
+            )
         return targets, skips
 
     async def _target_leverage(
@@ -1347,22 +1369,21 @@ class Coordinator:
         mirrored. Unknown/zero liquidation or stop never counts as a
         violation - the leg is judged by the naked-stop rule instead.
 
-        Package G live finding: the exchange can report a liquidation price
-        on the IMPOSSIBLE side of the entry (testnet returned 25.5M on an
-        80k LONG leg - a LONG can only liquidate below its entry). Such a
-        quote is garbage, not authority: treating it as real flattens a
-        healthy protected leg and the next pass reopens it (open -> flatten
-        churn on real fees). A wrong-side quote is demoted to unknown.
+        Entry price cannot identify an invalid liquidation quote: the mark
+        may have moved into profit and cross-HEDGE legs can share a price.
+        Compare only the adverse direction relative to the current mark.
+        A shared price in the other direction is evaluated on the other leg;
+        aggregate stop risk is reserved separately by the account budget.
         """
         liq = follower_pos.liquidation_price
         if liq <= 0 or stop <= 0 or follower_pos.qty == 0:
             return False
         is_short = follower_pos.qty < 0 or follower_pos.key.pos_side == PosSide.SHORT
-        entry = follower_pos.entry_price
-        if entry > 0:
-            if is_short and liq <= entry:
+        reference = follower_pos.mark_price or follower_pos.entry_price
+        if reference > 0:
+            if is_short and liq < reference:
                 return False
-            if not is_short and liq >= entry:
+            if not is_short and liq > reference:
                 return False
         buffer = self._liquidation_buffer_pct
         if is_short:
@@ -1746,12 +1767,16 @@ class Coordinator:
     def commands(self):
         return self._executor._commands
 
-    async def recompute_follower(self, fr: FollowerRuntime, delta: MasterDelta) -> None:
+    async def recompute_follower(
+        self, fr: FollowerRuntime, delta: MasterDelta, *, snapshot_scope: set[str] | None = None
+    ) -> int:
         if not await self._enter_generation():
-            return
+            return -1
+        token = self._snapshot_scope.set(snapshot_scope)
         try:
-            await self._recompute_follower(fr, delta)
+            return await self._recompute_follower(fr, delta)
         finally:
+            self._snapshot_scope.reset(token)
             await self._leave_generation()
 
     async def snapshot_follower(self, fr: FollowerRuntime) -> AccountState:

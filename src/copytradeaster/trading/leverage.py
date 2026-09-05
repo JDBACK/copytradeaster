@@ -130,8 +130,12 @@ class LeverageManager:
         refresh_after_s: float = CATALOG_REFRESH_S,
         maintenance_interval_s: float = MAINTENANCE_INTERVAL_S,
         pacing_s: float = PREPARE_PACING_S,
+        mutation_context: Callable | None = None,
+        operator_max_leverage: int | None = None,
     ) -> None:
         self._client_for = client_for
+        self._mutation_context = mutation_context
+        self._operator_max_leverage = operator_max_leverage
         self._symbols = tuple(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
         self._accounts = accounts
         self._catalog_account = catalog_account
@@ -182,14 +186,10 @@ class LeverageManager:
     def observe(self, account_id: str, symbol_leverages: Mapping[str, int]) -> None:
         """Fold authoritative positionRisk leverages into the confirmed map.
 
-        The exchange read wins over any cached guess for the VALUE. The
-        generation stamp, however, follows agreement: an observed value equal
-        to the current candidate proves the account sits exactly where this
-        catalog generation wants it (this is how a restart reconstructs
-        readiness without network writes). A DIFFERENT value keeps the pair
-        unready for NEW exposure until the worker re-provisions it - otherwise
-        any pre-downshift leverage found on the exchange would silently count
-        as prepared.
+        The candidate and operator setting are ceilings, not desired upshifts.
+        Any positive observed value below both ceilings validates this catalog
+        generation. In particular, a stop-driven downshift survives maintenance
+        and restart. Values above the ceiling remain unready for increases.
         """
         for symbol, raw in symbol_leverages.items():
             try:
@@ -207,7 +207,11 @@ class LeverageManager:
                 and current.catalog_revision == (candidate.revision if candidate else -1)
             ):
                 continue
-            agrees_with_candidate = candidate is not None and candidate.leverage == leverage
+            agrees_with_candidate = (
+                candidate is not None
+                and leverage <= candidate.leverage
+                and (self._operator_max_leverage is None or leverage <= self._operator_max_leverage)
+            )
             self._confirmed[key] = ConfirmedLeverage(
                 leverage=leverage,
                 confirmed_at=time.monotonic(),
@@ -341,7 +345,10 @@ class LeverageManager:
                 # A concurrent caller finished this exact preparation while we
                 # waited on the lock: reuse it, send nothing.
                 return current.leverage
-            return await self._prepare_locked(account_id, symbol)
+            async with contextlib.AsyncExitStack() as stack:
+                if self._mutation_context is not None:
+                    await stack.enter_async_context(self._mutation_context(account_id))
+                return await self._prepare_locked(account_id, symbol)
 
     async def _prepare_locked(self, account_id: str, symbol: str) -> int:
         candidate = self._candidate.get(symbol)
@@ -351,6 +358,16 @@ class LeverageManager:
         if candidate is None:
             raise LeverageError(f"{symbol}: candidate unavailable")
         client = self._client_for(account_id)
+        observed = await self._observed_leverage(client, account_id, symbol)
+        if observed is None:
+            self.invalidate(account_id, symbol)
+            raise LeverageError(f"{symbol}: configuration unreadable")
+        ceiling = min(candidate.leverage, self._operator_max_leverage or candidate.leverage)
+        desired = min(ceiling, observed)
+        if observed == desired:
+            self.observe(account_id, {symbol: observed})
+            return observed
+        candidate = CandidateLeverage(desired, candidate.observed_at, candidate.revision)
         try:
             await self._paced_set_leverage(client, account_id, symbol, candidate.leverage)
         except Exception as exc:  # noqa: BLE001 - classified below
@@ -418,7 +435,11 @@ class LeverageManager:
     ) -> int:
         try:
             response = await self._paced_bracket(client, account_id, symbol)
-            fallback = _max_initial_leverage(response)
+            fallback = min(
+                _max_initial_leverage(response),
+                self._candidate[symbol].leverage,
+                self._operator_max_leverage or self._candidate[symbol].leverage,
+            )
             await self._paced_set_leverage(client, account_id, symbol, fallback)
         except Exception as fallback_exc:  # noqa: BLE001 - fail closed
             category = _error_category(fallback_exc)

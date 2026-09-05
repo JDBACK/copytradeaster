@@ -632,3 +632,39 @@ warn, кривые ордера по-прежнему реджектит бир�
 Кампания A–G live закрыта полностью. Раннер субагентов мёртв весь день
 (`TypeError: rt.getWorkPoolYieldItems`) — Package G сделан оркестратором
 вручную.
+
+
+## 2026-09-05 — независимое ревью и corrective: код/тесты готовы, live ожидается
+
+Прежний GO для `2c89286` пересмотрен. Ревью воспроизвело обход UNKNOWN новой
+qty/revision, конфликт двух HEDGE leverage action_id, повышение worker-ом
+пониженного плеча, неработавшее production network wiring, гонку REAL-cap и
+ложный zero-proof на ограниченном окне journal. Проверка liquidation относительно
+entry также была неверна для profit/cross-HEDGE geometry.
+
+Исправления внесены в App/Coordinator/Planner/Executor/LeverageManager/Registry/
+Reconciler и Settings/adapters. Добавлен общий account risk/margin budget.
+Mainnet boot теперь вызывает read-only preflight и требует проверенного режима.
+Исторические FAILED не заменяют текущую сверку; master READY не стирает degraded
+без authoritative полного follower-proof.
+
+По дополнительной просьбе владельца подготовлен код live-квалификации:
+`test_engine_corrective_live.py` (LC1–LC6), расширены A2/A6, N1 и load;
+устранён неверный liquidation-hold theorem в D. Load использует production
+UNKNOWN resolver, обязательный opt-in и независимый cleanup в finally.
+Signed pytest-кампании сериализованы файловым замком. Новые сценарии сохраняют
+signed evidence; искусственно внесённые отказы и historical journal обозначены явно.
+
+Во время исходного ревью немаркированный load-файл попал в `not testnet` и
+непреднамеренно начал signed Testnet run. Он был остановлен; созданные позиции
+закрыты, независимый финальный signed audit подтвердил flat/zero-orders
+(`data/review-20260905/testnet-final-audit.json`). Исходный полный временный
+pytest-log не сохранился; `unintended-load.log` содержит обозначенные выдержки.
+Новый общий collection guard устраняет этот обход. В corrective-части signed
+торговля не запускалась; проверены offline suite и opt-out.
+
+Счётчики/coverage — только в `../ENGINE_TEST_STATUS_2026-08.md`.
+Документарная coverage-цель пока не достигнута; не объявляется пройденной.
+Следующему исполнителю остаётся запускать готовые сценарии и исправлять
+отклонения; mainnet остаётся NO-GO до новых доказательств. Точный порядок:
+[ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md](ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md).

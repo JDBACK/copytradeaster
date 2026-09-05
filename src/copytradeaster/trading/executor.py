@@ -190,7 +190,7 @@ def _order_field(order: object, name: str, default: object = None) -> object:
     return getattr(order, name, default)
 
 
-def _resolution_from_order(order: object, source: str) -> OrderResolution:
+def _resolution_from_order(order: object, source: str, *, market: bool = False) -> OrderResolution:
     status = str(_order_field(order, "status", "UNKNOWN")).upper()
     raw_executed = _order_field(order, "executed_qty")
     executed: Decimal | None = None
@@ -204,6 +204,13 @@ def _resolution_from_order(order: object, source: str) -> OrderResolution:
             ResolutionOutcome.PROVEN_NOT_EXECUTED,
             f"{source}:{status}:executed=0",
             order=order,
+        )
+    if (market or _order_field(order, "type") == "MARKET") and status not in {
+        "FILLED",
+        *NO_FILL_TERMINAL_STATUSES,
+    }:
+        return OrderResolution(
+            ResolutionOutcome.UNRESOLVED, f"{source}:market-{status}", order=order
         )
     executed_text = "unknown" if executed is None else format(executed, "f")
     return OrderResolution(
@@ -272,9 +279,9 @@ async def _resolve_exchange_outcome(
 
     Order history is the negative-evidence boundary.  For MARKET commands an
     unchanged authoritative position must agree with every history sample
-    before absence is considered proven.  Any expected-direction position
-    movement proves economic progress even if order lookup is unavailable;
-    inconsistent movement remains unresolved.
+    before absence is considered proven. Only the full expected position delta
+    proves completion without order history; partial or inconsistent movement
+    remains unresolved.
     """
     symbol = str(payload.get("symbol", ""))
     if not symbol:
@@ -298,7 +305,7 @@ async def _resolve_exchange_outcome(
         )
     else:
         if order is not None:
-            order_resolution = _resolution_from_order(order, "current")
+            order_resolution = _resolution_from_order(order, "current", market=is_market)
             if order_resolution.outcome != ResolutionOutcome.PROVEN_NOT_EXECUTED or not is_market:
                 return order_resolution
 
@@ -322,7 +329,7 @@ async def _resolve_exchange_outcome(
             )
         else:
             if order is not None:
-                order_resolution = _resolution_from_order(order, "history")
+                order_resolution = _resolution_from_order(order, "history", market=is_market)
                 if (
                     order_resolution.outcome != ResolutionOutcome.PROVEN_NOT_EXECUTED
                     or not is_market
@@ -356,9 +363,7 @@ async def _resolve_exchange_outcome(
                     observed_delta = actual - valid_context.pre_position_amt
                     if observed_delta != 0:
                         expected = valid_context.expected_delta
-                        progressed = observed_delta * expected > 0 and abs(observed_delta) <= abs(
-                            expected
-                        )
+                        progressed = observed_delta == expected
                         if progressed:
                             return OrderResolution(
                                 ResolutionOutcome.FOUND,
@@ -516,6 +521,9 @@ class Executor:
     async def _submit_locked(
         self, plan: ExecutionPlan, *, client: AsterClient | None = None
     ) -> list[CommandResult]:
+        ids = [a.action_id for a in plan.actions if a.action_id is not None]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate execution action_id")
         results: list[CommandResult] = []
         # Planner client-order ids are stable only within this plan. Together
         # with planner action ids they express the safety dependencies we need
@@ -610,6 +618,9 @@ class Executor:
 
     @asynccontextmanager
     async def _mutation_guard(self, account_id: str):
+        if self._mutation_owners.get(account_id) is asyncio.current_task():
+            yield
+            return
         lock = self._locks.setdefault(account_id, asyncio.Lock())
         async with lock:
             task = asyncio.current_task()
@@ -720,10 +731,23 @@ class Executor:
     ) -> CommandResult | None:
         key = command_key_of(plan, action)
         existing = await self._commands.get(key)
-        if existing is not None and existing["status"] in ("SENDING", "UNKNOWN"):
-            return CommandResult(key, str(existing["status"]), "boot resolution required")
-        if existing is not None and existing["status"] in ("CONFIRMED", "SUBMITTED"):
-            return CommandResult(key, str(existing["status"]), None)
+        if existing is not None and existing["status"] in (
+            "SENDING",
+            "UNKNOWN",
+            "SUBMITTED",
+            "CONFIRMED",
+        ):
+            # A historical confirmation is not proof of today's configuration.
+            outcome = await _resolve_set_leverage_boot(
+                lambda _: self._client_for(plan, client), self._commands, existing
+            )
+            if outcome == "confirmed":
+                return CommandResult(key, "CONFIRMED", None)
+            if outcome != "not_applied":
+                await self._commands.set_status(
+                    key, "UNKNOWN", last_error="leverage read unavailable"
+                )
+                return CommandResult(key, "UNKNOWN", "leverage read unavailable")
         if existing is None:
             await self._commands.insert(
                 key,
@@ -745,7 +769,11 @@ class Executor:
                 plan.account_id, action.payload["symbol"], int(action.payload["leverage"])
             )
         except AsterError as exc:
+            if exc.code in {-1000, -1006, -1007} or exc.http_status in {503, 504}:
+                return await self._degrade(plan, key, "leverage outcome unknown")
             return await self._fail(plan, key, exc)
+        except (TimeoutError, OSError):
+            return await self._degrade(plan, key, "leverage transport outcome unknown")
         await self._commands.set_status(key, "CONFIRMED")
         await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
@@ -827,6 +855,19 @@ class Executor:
                 if recovered is not None:
                     return recovered, False
                 existing = await self._commands.get(key)
+
+        if action.kind == ActionKind.MARKET_OPEN:
+            # A changed target/revision is not permission to bypass an older outcome.
+            for pending in await self._commands.in_flight():
+                if pending["account_id"] != plan.account_id or pending["command_key"] == key:
+                    continue
+                payload = json.loads(str(pending["payload"]))
+                if payload.get("symbol") == action.symbol or pending["kind"] in {
+                    ActionKind.MARKET_OPEN.value,
+                    ActionKind.MARKET_CLOSE.value,
+                    ActionKind.SET_LEVERAGE.value,
+                }:
+                    return CommandResult(key, "BLOCKED", "unresolved account exposure"), False
 
         attempts = int(existing["attempts"]) if existing is not None else 0
         attempt = attempts + 1
@@ -1060,7 +1101,12 @@ class Executor:
     ) -> CommandResult:
         conditional = action.kind in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP)
         if not conditional:
-            # MARKET RESULT response carries final fill data
+            resolution = _resolution_from_order(order, "result", market=True)
+            if resolution.outcome == ResolutionOutcome.UNRESOLVED:
+                return await self._mark_unresolved(plan, key, "SUBMITTED", resolution.reason)
+            if resolution.outcome == ResolutionOutcome.PROVEN_NOT_EXECUTED:
+                await self._commands.set_status(key, "FAILED", last_error=resolution.reason)
+                return CommandResult(key, "FAILED", resolution.reason)
             await self._commands.set_status(key, "CONFIRMED", client_order_id=coid)
             await self._record_link(plan, action, coid)
             await self._notify_confirmed(plan.account_id, action, key)
@@ -1145,6 +1191,8 @@ async def resolve_boot_unknowns(
     clients: Callable[[str], AsterClient],
     commands: CommandRepo,
     links: OrderLinkRepo | None = None,
+    *,
+    only_account: str | None = None,
 ) -> BootResolutionReport:
     """Boot-time resolution of every in-flight command: UNKNOWN / SENDING / SUBMITTED.
 
@@ -1159,6 +1207,8 @@ async def resolve_boot_unknowns(
     unresolved_without_coid = 0
     unresolved_economic = 0
     for row in rows:
+        if only_account is not None and row["account_id"] != only_account:
+            continue
         key = str(row["command_key"])
         account_id = str(row["account_id"])
         coid = row["client_order_id"]

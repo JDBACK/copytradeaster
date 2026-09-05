@@ -303,7 +303,7 @@ async def test_market_response_lost_unavailable_recovery_never_resends(env):
     assert row["status"] == "UNKNOWN"
 
 
-async def test_market_partial_fill_response_lost_confirms_progress_without_full_retry(env):
+async def test_market_partial_fill_response_lost_holds_unknown_without_full_retry(env):
     executor, client, commands, _links, _settings = env
 
     async def partial_fill_response_lost(account_id, req):
@@ -317,10 +317,10 @@ async def test_market_partial_fill_response_lost_confirms_progress_without_full_
     client.place_order = partial_fill_response_lost  # type: ignore[method-assign]
     results = await executor.submit(plan_of(open_action()))
 
-    assert results[0].status == "CONFIRMED"
+    assert results[0].status == "UNKNOWN"
     assert client.place_calls == 1
     row = await commands.get(results[0].command_key)
-    assert "position-progress:observed=0.02:expected=0.05" in row["last_error"]
+    assert "position-inconsistent:observed=0.02:expected=0.05" in row["last_error"]
 
 
 async def test_market_close_accepted_response_lost_uses_signed_position_delta(env):
@@ -359,10 +359,10 @@ async def test_market_close_partial_fill_response_lost_never_retries_full_quanti
     client.place_order = partial_close_response_lost  # type: ignore[method-assign]
     results = await executor.submit(plan_of(close_action()))
 
-    assert results[0].status == "CONFIRMED"
+    assert results[0].status == "UNKNOWN"
     assert client.place_calls == 1
     row = await commands.get(results[0].command_key)
-    assert "position-progress:observed=-0.02:expected=-0.05" in row["last_error"]
+    assert "position-inconsistent:observed=-0.02:expected=-0.05" in row["last_error"]
 
 
 async def test_market_close_unavailable_recovery_stays_unknown_without_retry(env):

@@ -465,7 +465,7 @@ class DirectOnboardingAdapter(OnboardingPort):
             master_user_address = app.credentials.identity("main").user
         config = DirectOnboardingConfig(
             base_url=app.cfg.rest_base_url,
-            trading_chain_id=714,
+            trading_chain_id=app.cfg.network_profile.trading_chain_id,
             expected_egress_ips=tuple(app.cfg.aster_egress_ips),
             require_agent_ip_whitelist=app.cfg.require_agent_ip_whitelist and not override,
             expiry_safety_margin_ms=5 * 60 * 1000,
@@ -579,7 +579,7 @@ class BuilderOnboardingAdapter:
             master_user_address = app.credentials.identity("main").user
         config = BuilderOnboardingConfig(
             base_url=app.cfg.rest_base_url,
-            trading_chain_id=714,
+            trading_chain_id=app.cfg.network_profile.trading_chain_id,
             registration_chain_id=app.cfg.registration_chain_id,
             builder_address=app.cfg.builder_address,
             builder_name=app.cfg.builder_name,
@@ -794,7 +794,7 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
     def _permission_config(self, *, require_whitelist: bool) -> DirectOnboardingConfig:
         return DirectOnboardingConfig(
             base_url=self.cfg.rest_base_url,
-            trading_chain_id=714,
+            trading_chain_id=self.cfg.network_profile.trading_chain_id,
             expected_egress_ips=tuple(self.cfg.aster_egress_ips),
             require_agent_ip_whitelist=require_whitelist,
             expiry_safety_margin_ms=5 * 60 * 1000,

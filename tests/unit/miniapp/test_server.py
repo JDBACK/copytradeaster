@@ -365,6 +365,7 @@ async def test_dev_session_rejects_other_user_and_mainnet_base(fake_app):
         await client.close()
 
     mainnet = _settings(
+        trading_chain_id=1666,
         rest_base_url="https://fapi.asterdex.com",
         ws_user_base="wss://fstream.asterdex.com/ws",
         allow_mainnet=True,

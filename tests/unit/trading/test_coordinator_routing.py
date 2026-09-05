@@ -1014,6 +1014,7 @@ async def test_increase_clamped_while_not_ready_keeps_reductions(managed_env):
     policy = await SettingsRepo(db).get_policy("copyc1")
     actual = await coordinator.snapshot_follower(fr)
 
+    manager.invalidate("copyc1", "BTCUSDT")
     targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
     # Growth blocked: target stays at the CURRENT size instead of growing to
     # the risk cap; the leg is NOT skipped and preparation got enqueued.

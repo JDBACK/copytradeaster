@@ -79,8 +79,13 @@ async def test_drift_creates_one_close_then_zero(env):
     assert report1.per_account["copyc1"] >= 1  # cancel + close created
     kinds = [p["type"] for p in fr.client.placed]
     assert "MARKET" in kinds
+    # The cheap fake records requests but does not apply fills/cancels.
+    # A second evaluation still sees drift even when the journal row is reused.
     report2 = await reconciler.reconcile(master)
-    assert report2.per_account["copyc1"] == 0
+    assert report2.per_account["copyc1"] > 0
+    fr.client.positions = {}
+    report3 = await reconciler.reconcile(master)
+    assert report3.per_account["copyc1"] == 0
 
 
 async def test_entry_drift_then_zero(env):

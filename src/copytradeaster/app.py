@@ -206,7 +206,9 @@ class App:
             metrics=self.metrics,
         )
         self.credentials = SqliteCredentials(
-            self.db, cfg.encryption_key_bytes(), trading_chain_id=714
+            self.db,
+            cfg.encryption_key_bytes(),
+            trading_chain_id=cfg.network_profile.trading_chain_id,
         )
         self.settings = SettingsRepo(self.db)
         self.events = MasterEventRepo(self.db)
@@ -215,7 +217,7 @@ class App:
         self.commands = CommandRepo(self.db)
         self.nonces = NonceStore(self.db)
         self.basis = SyncBasisRepo(self.db)
-        self.follower_registry = FollowerRegistry()
+        self.follower_registry = FollowerRegistry(max_real_followers=cfg.max_followers)
         self.shadow_exchange = ShadowExchange(
             hedge=cfg.position_mode == "HEDGE",
             auto_trigger_conditionals=cfg.shadow_auto_trigger_conditionals,
@@ -256,6 +258,8 @@ class App:
             symbols=tuple(cfg.symbol_whitelist),
             accounts=self._real_follower_ids,
             catalog_account="main",
+            mutation_context=self.executor.mutation_context,
+            operator_max_leverage=cfg.operator_max_leverage,
         )
         self.coordinator = Coordinator(
             followers=self.follower_registry,
@@ -273,6 +277,8 @@ class App:
             snapshot_symbols=set(cfg.follower_snapshot_symbols) or None,
             leverage=self.leverage,
             entry_admission=self._master_entry_admitted,
+            operator_max_leverage=cfg.operator_max_leverage,
+            max_total_risk_pct=cfg.max_total_risk_pct,
         )
         self.reconciler = Reconciler(self.coordinator, metrics=self.metrics)
         self.stream: UserStream | None = None
@@ -341,6 +347,7 @@ class App:
         """Process-local proof required for any follower risk increase."""
         return (
             self._entry_admission_ready
+            and len(self._real_follower_ids()) <= self.cfg.max_followers
             and self._stream_connected
             and not self.projector.dirty_symbols
         )
@@ -384,6 +391,42 @@ class App:
             )
 
     # --- boot -------------------------------------------------------------------------
+
+    async def _mainnet_preflight(self) -> None:
+        from copytradeaster.onboarding.models import DirectOnboardingConfig
+        from copytradeaster.onboarding.preflight import run_mainnet_preflight
+
+        cfg = self.cfg
+        for account_id in ["main", *self._real_follower_ids()]:
+            identity = self.credentials.identity(account_id)
+            account = await self.db.fetchone("SELECT * FROM accounts WHERE id=?", (account_id,))
+            builder = (
+                cfg.builder_address
+                if account is not None and account["identity_source"] == "builder"
+                else ""
+            )
+            report = await run_mainnet_preflight(
+                profile=cfg.network_profile,
+                settings=cfg,
+                reads=self._client_for(account_id),
+                commands=self.commands,
+                account_id=account_id,
+                expected_signer_address=identity.signer,
+                user_address=identity.user,
+                agent_config=DirectOnboardingConfig.from_profile(
+                    cfg.network_profile,
+                    expected_egress_ips=tuple(cfg.aster_egress_ips),
+                    require_agent_ip_whitelist=cfg.require_agent_ip_whitelist,
+                    expected_position_mode=cfg.position_mode,
+                ),
+                builder_address=builder,
+                builder_max_fee_rate=cfg.max_fee_rate,
+                now_ms=now_ms,
+            )
+            if report.blocked:
+                raise RuntimeError(
+                    f"mainnet preflight {account_id}: {','.join(report.blocked_names())}"
+                )
 
     async def start(self) -> None:
         cfg = self.cfg
@@ -448,16 +491,18 @@ class App:
                 f"boot recovery required: {len(in_flight)} in-flight command(s) unresolved"
             )
 
-        # 5. bootstrap position modes + snapshots. Package G closed the HEDGE
-        # live matrix, so the v1 ONE_WAY-only mainnet refusal is gone: every
-        # profile uses warn-and-fix (a mismatch is converted to the
-        # configured mode; an unreadable mode warns, and wrong-sided orders
-        # still fail closed at the exchange).
+        if cfg.network_profile.is_mainnet:
+            await self._mainnet_preflight()
+
+        # 5. Mainnet requires a verified mode and never auto-converts it.
+        # Testnet retains its explicit warn-and-fix bootstrap behavior.
         want_hedge = cfg.position_mode == "HEDGE"
         mode_is_hedge: bool | None = None
         try:
             mode_is_hedge = await self.master_client.get_position_mode("main")
         except Exception as exc:  # noqa: BLE001 - Testnet may fail account config reads
+            if cfg.network_profile.is_mainnet:
+                raise RuntimeError("mainnet master position mode unreadable") from exc
             # Do not turn a broken metadata endpoint into a total outage.  An
             # order carrying the wrong positionSide is rejected by Aster, so
             # risk-increasing execution still fails closed at the exchange.
@@ -474,6 +519,8 @@ class App:
                 ),
             )
         if mode_is_hedge is not None and mode_is_hedge != want_hedge:
+            if cfg.network_profile.is_mainnet:
+                raise RuntimeError("mainnet master position mode changed after preflight")
             log.warning("position mode mismatch on master - setting %s", cfg.position_mode)
             await self.master_client.set_position_mode("main", want_hedge)
         for fr in self.followers:
@@ -483,9 +530,15 @@ class App:
                 client = fr.client
                 is_hedge = await client.get_position_mode(fr.account_id)
                 if is_hedge != want_hedge:
+                    if cfg.network_profile.is_mainnet:
+                        raise RuntimeError("mainnet follower mode changed after preflight")
                     log.warning("position mode mismatch on %s - fixing", fr.account_id)
                     await client.set_position_mode(fr.account_id, want_hedge)
             except Exception as exc:  # noqa: BLE001
+                if cfg.network_profile.is_mainnet:
+                    raise RuntimeError(
+                        f"mainnet follower mode unverified: {fr.account_id}"
+                    ) from exc
                 log.error("bootstrap failed for %s: %s", fr.account_id, exc)
                 category = _error_category(exc)
                 await self._emit_notification(
@@ -826,7 +879,6 @@ class App:
         event_seq: int,
     ) -> bool:
         """Publish READY only if the proven boundary is still current."""
-        await self.settings.clear_degraded()
         await self.settings.set_flag("ready", "true")
         if (
             not self._stream_connected
@@ -976,11 +1028,8 @@ class App:
                         stream_epoch=stream_epoch,
                         event_seq=event_seq,
                     )
-                    if published:
-                        # _publish clears degraded on proof; re-raise tolerated
-                        # fault flags so they stay visible until healed.
-                        await self._record_sweep_failures(close_only)
-                        await self._record_sweep_failures(entry)
+                    if published and await self._sweep_hold_reason(entry) is None:
+                        await self.settings.clear_degraded()
                     return published
 
                 self.projector.mark_dirty("*")
@@ -1217,6 +1266,8 @@ class App:
                 return f"sweep-failed:{shown}"
             if not self._ready:
                 return "not-ready"
+            if not getattr(report, "authoritative", False):
+                return "scoped-snapshot"
             diverged = {
                 aid: n for aid, n in (getattr(report, "per_account", None) or {}).items() if n != 0
             }
@@ -1225,6 +1276,9 @@ class App:
                     f"{_safe_fragment(a)}={n}" for a, n in sorted(diverged.items())[:5]
                 )
                 return f"unconverged:{shown}"
+            evaluated = set(getattr(report, "per_account", None) or {})
+            if {fr.account_id for fr in self.followers} - evaluated:
+                return "incomplete-follower-report"
             if self.projector.dirty_symbols:
                 shown = ",".join(
                     sorted(_safe_fragment(s) for s in self.projector.dirty_symbols)[:5]
@@ -1234,10 +1288,14 @@ class App:
             if in_flight:
                 statuses = ",".join(sorted({str(row["status"]) for row in in_flight}))
                 return f"in-flight:{statuses}:{len(in_flight)}"
-            recent = await self.commands.recent(500)
-            failed = [str(row["command_key"]) for row in recent if str(row["status"]) == "FAILED"]
-            if failed:
-                return f"failed-commands:{len(failed)}:{','.join(failed[:3])}"
+            if len(self._real_follower_ids()) > self.cfg.max_followers:
+                return "real-follower-cap-exceeded"
+            if any(
+                not self.leverage.is_ready(aid, symbol)
+                for aid in self._real_follower_ids()
+                for symbol in self.cfg.symbol_whitelist
+            ):
+                return "leverage-not-ready"
             pending = self.leverage.pending_count()
             if pending:
                 return f"leverage-pending:{pending}"
@@ -1354,14 +1412,6 @@ class App:
         if self.follower_registry.get(account_id) is not None:
             raise ValueError(
                 f"follower {account_id!r} already registered; use follower_lifecycle()"
-            )
-        # v1 launch cap (CT_MAX_FOLLOWERS, default 10), derived from the
-        # measured weight envelope. Fail closed before any DB/client work.
-        cap = self.cfg.max_followers
-        if len(self.follower_registry.snapshot()) >= cap:
-            raise ValueError(
-                f"follower cap reached ({cap}); unregister a follower"
-                f" before registering {account_id!r}"
             )
         row = await self.db.fetchone(
             "SELECT * FROM accounts WHERE id=? AND role='follower' AND enabled=1",

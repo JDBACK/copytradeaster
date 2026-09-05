@@ -337,6 +337,8 @@ def test_master_entry_admission_requires_ready_connected_and_clean_projection():
     app = App.__new__(App)
     app._entry_admission_ready = True
     app._stream_connected = True
+    app.cfg = SimpleNamespace(max_followers=10)
+    app.follower_registry = FollowerRegistry()
     app.projector = SimpleNamespace(dirty_symbols=frozenset())
     assert app._master_entry_admitted() is True
 

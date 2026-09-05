@@ -257,6 +257,10 @@ async def test_mainnet_profile_app_composition_no_orders(tmp_path) -> None:
         assert app.cfg.ws_user_base == profile.ws_user_base
         assert app.cfg.trading_chain_id == profile.trading_chain_id
         assert app.cfg.network_profile == profile
+        await app.db.connect()
+        await app.credentials.load()
+        for account_id in app.credentials.account_ids():
+            assert app.credentials.identity(account_id).chain_id == 1666
         # Onboarding binds to the same profile object, not copied strings.
         direct = DirectOnboardingConfig.from_profile(profile)
         builder = BuilderOnboardingConfig.from_profile(

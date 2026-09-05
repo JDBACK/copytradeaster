@@ -125,7 +125,14 @@ cd miniapp && pnpm test                                 # frontend Vitest
 
 ## testnet — signed live (testnet only)
 
-Gate: `pytestmark = [pytest.mark.testnet, skipif(CT_TESTNET != "1")]` in every file.
+Gate: root `tests/conftest.py` marks every path under `tests/testnet` and skips
+without `CT_TESTNET=1`, including newly added files. Per-file markers stay explicit.
+Signed load additionally requires `CT_LOAD=1`; subprocess workers check opt-in.
+A process-wide file lock serializes signed pytest campaigns on shared accounts.
+
+Corrective live package: `test_engine_corrective_live.py` (LC1–LC6), with signed
+evidence and unconditional audited cleanup. Run order and current qualification
+status: `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md`.
 Protocol: `wallet.txt` at repo root (git-ignored, never commit) with section blocks `main`/`copyc1..3`/`copyc2`/`builder`/`builder-gate`; `ensure_testnet_guard` (host + chains 714/56), pre/post `flatten` (cancel + MARKET-close to flat in `finally`), scratch DBs via `sqlite3.backup` (never touch prod).
 Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): label line, then `evm adress: 0x…` (user), `api wallet adress: 0x…` (signer), `privte key: 0x…` (66-hex signer key), optional `main privte key: 0x…`. Fund accounts from the testnet faucet (`https://www.asterdex-testnet.com/en/faucet`: 1000 test USDT + 1000 test ASTER once a day); example shape in `tests/unit/cli/test_wallet_parser.py:WALLET_FIXTURE`.
 

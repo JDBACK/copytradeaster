@@ -575,10 +575,24 @@ Scope намеренно ограничен safety-hardening существую�
   wrong-side guard); ONE_WAY-only boot refusal СНЯТ после green + FLAT-ALL.
 Mainnet rollout запрещён, пока каждый blocker не закрыт кодом, тестами и
 записанным evidence. Кампания A–G live закрыта полностью.
-ВЕРДИКТ v1 (ONE_WAY + HEDGE): GO.
+ВЕРДИКТ прежней кампании: GO для предыдущего дерева; superseded corrective-ревью ниже.
 Owner decisions: uv migration ПОСЛЕ F (frozen toolchain during gates);
 main/copyc1 BTCUSDT allOrders saturated 1000/1000 — negative-proof legs на
 copyc3, fail-closed by design.
 
 Текущая ветка
 `codex/live-copy-tests-hardening`; fake-only acceptance не закрывает package.
+
+
+## Corrective после независимого ревью, 2026-09-05
+
+- [x] Исправлены инварианты плеча, unresolved admission, общего риска, network
+  wiring, REAL-cap и достоверной сходимости; архитектура сохранена.
+- [x] Подготовлены и обновлены live-сценарии для изменённого движка; выполнена
+  офлайн-проверка кода тестов и opt-out gate.
+- [ ] Выполнена signed-квалификация исправленного дерева и полный load.
+- [ ] Закрыты отклонения, coverage-ограничение и сформулирован новый GO/NO-GO.
+
+Текущий verdict: **NO-GO для mainnet до повторной квалификации**.
+Исполнителю остаются прогоны и исправления по фактам:
+[ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md).

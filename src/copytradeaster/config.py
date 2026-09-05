@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     # the measured weight envelope (scoped snapshot ≈ whitelist weight per
     # follower per sweep). Enforced fail-closed at register_follower.
     max_followers: int = 10
+    operator_max_leverage: int | None = None
+    max_total_risk_pct: Decimal = Decimal("0.10")
 
     # Stage 2 Telegram transport.  The token is optional for Stage 1 CLI/core
     # processes; Telegram runtime raises a clear error if it is not configured.
@@ -276,6 +278,10 @@ class Settings(BaseSettings):
     def _validate_miniapp_dev_guard(self) -> "Settings":
         if self.miniapp_dev_unsigned and self.miniapp_dev_user_id is None:
             raise ValueError("CT_MINIAPP_DEV_UNSIGNED requires an explicit CT_MINIAPP_DEV_USER_ID")
+        if self.operator_max_leverage is not None and self.operator_max_leverage <= 0:
+            raise ValueError("CT_OPERATOR_MAX_LEVERAGE must be positive")
+        if not Decimal(0) < self.max_total_risk_pct <= Decimal(1):
+            raise ValueError("CT_MAX_TOTAL_RISK_PCT must be in (0, 1]")
         return self
 
     @model_validator(mode="after")
@@ -323,6 +329,11 @@ class Settings(BaseSettings):
                 "Stage 1 refuses non-testnet REST/WS URLs; "
                 "CT_ALLOW_MAINNET is a future-stage override"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_network_profile(self) -> "Settings":
+        _ = self.network_profile
         return self
 
     def encryption_key_bytes(self) -> bytes:

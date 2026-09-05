@@ -151,7 +151,9 @@ class AccountState(_DecimalStrict):
     # Appended LAST so historical positional constructions keep their meaning.
     symbol_leverages: dict[str, int] = field(default_factory=dict)
 
-    _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("available_usdt",)
+    equity_usdt: Decimal | None = None
+
+    _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("available_usdt", "equity_usdt")
 
 
 @dataclass(frozen=True, slots=True)

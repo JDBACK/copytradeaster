@@ -72,16 +72,29 @@ from copytradeaster.storage.repositories import (
     SettingsRepo,
 )
 
+pytestmark = [
+    pytest.mark.testnet,
+    pytest.mark.skipif(
+        os.getenv("CT_TESTNET") != "1" or os.getenv("CT_LOAD") != "1",
+        reason="signed load requires CT_TESTNET=1 and CT_LOAD=1",
+    ),
+]
+
+
+def _require_signed_load() -> None:
+    if os.getenv("CT_TESTNET") != "1" or os.getenv("CT_LOAD") != "1":
+        raise RuntimeError("signed load requires CT_TESTNET=1 and CT_LOAD=1")
+
 
 def _settings_for(tmp_path: Path) -> Settings:
+    _require_signed_load()
     settings = Settings(
         db_path=tmp_path / "hybrid-load.sqlite3",
         log_path=tmp_path / "hybrid-load.log",
         shadow_accounts_enabled=True,
         shadow_auto_trigger_conditionals=False,
     )
-    if "testnet" not in settings.rest_base_url.lower():
-        pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
+    settings.network_profile.require_testnet()
     if settings.dry_run:
         pytest.fail("load gate refuses to run in dry_run: orders would be fake")
     # Production-equivalent snapshot profile: the UNMODIFIED configured
@@ -254,11 +267,15 @@ async def _ready_flag(app: App) -> bool:
 
 async def _boot(settings: Settings) -> App:
     app = App(settings)
-    await app.start()
-    assert app._ready and app._stream_connect_count >= 1
-    assert await _ready_flag(app)
-    await _seed_shadow_leverage(app)
-    return app
+    try:
+        await app.start()
+        assert app._ready and app._stream_connect_count >= 1
+        assert await _ready_flag(app)
+        await _seed_shadow_leverage(app)
+        return app
+    except BaseException:
+        await app.stop()
+        raise
 
 
 async def _seed_shadow_leverage(app: App) -> None:
@@ -342,54 +359,59 @@ async def _submit_master_order(
     request: PlaceOrderRequest,
     retry_stats: dict[str, int],
 ) -> str:
-    """Master submit with outcome-unknown recovery (no duplicate economics)."""
-    current = request
-    before_abs = await _master_position_abs(client, request.position_side)
-    requested_abs = abs(request.quantity or D(0))
-    target_abs = (
-        before_abs + requested_abs
-        if request.side == Side.BUY
-        else max(before_abs - requested_abs, D(0))
+    """Use the production three-state resolver; partial progress cannot authorize a retry."""
+    from copytradeaster.trading.executor import (
+        MarketRecoveryContext,
+        ResolutionOutcome,
+        _resolve_exchange_outcome,
     )
+
+    payload = {
+        "symbol": request.symbol,
+        "side": request.side.value,
+        "type": request.type,
+        "quantity": format(request.quantity or D(0), "f"),
+        "positionSide": request.position_side.value,
+    }
+    kind = ActionKind.MARKET_OPEN if request.type == "MARKET" else ActionKind.PLACE_STOP
+    before = sum(
+        (
+            p.position_amt
+            for p in await client.position_risk("main", request.symbol)
+            if p.position_side == request.position_side
+        ),
+        D(0),
+    )
+    delta = (request.quantity or D(0)) * (1 if request.side == Side.BUY else -1)
+    context = MarketRecoveryContext(request.symbol, request.position_side, before, delta)
+    current = request
     for attempt in range(3):
         try:
             order = await client.place_order("main", current)
             return order.client_order_id or current.new_client_order_id
-        except Exception as exc:  # noqa: BLE001 - classify only unknown outcomes below
+        except Exception as exc:
             if not _unknown_order_error(exc):
                 raise
             retry_stats["unknown_outcomes"] += 1
-            for probe in range(3):
-                await asyncio.sleep(0.4 * (probe + 1))
-                found = await client.query_order(
-                    "main", current.symbol, orig_client_order_id=current.new_client_order_id
-                )
-                if found is not None:
-                    return found.client_order_id
-                if current.type != "MARKET":
-                    continue
-                actual_abs = await _master_position_abs(client, current.position_side)
-                if current.side == Side.BUY and actual_abs >= target_abs:
-                    retry_stats["resolved_by_position"] += 1
-                    return current.new_client_order_id
-                if current.side == Side.SELL and actual_abs <= target_abs:
-                    retry_stats["resolved_by_position"] += 1
-                    return current.new_client_order_id
-                if current.side == Side.BUY and before_abs < actual_abs < target_abs:
-                    current = replace(current, quantity=target_abs - actual_abs)
-                    retry_stats["partial_residuals"] += 1
-                    break
-                if current.side == Side.SELL and target_abs < actual_abs < before_abs:
-                    current = replace(current, quantity=actual_abs - target_abs)
-                    retry_stats["partial_residuals"] += 1
-                    break
-            if attempt == 2:
-                raise
-            retry_stats["retries"] += 1
-            current = replace(
-                current,
-                new_client_order_id=f"{request.new_client_order_id}-r{attempt + 2}"[:36],
+            resolution = await _resolve_exchange_outcome(
+                client,
+                "main",
+                kind,
+                payload,
+                current.new_client_order_id,
+                context,
             )
+            if resolution.outcome == ResolutionOutcome.FOUND:
+                retry_stats[
+                    "resolved_by_position"
+                    if resolution.observed_delta is not None
+                    else "resolved_by_query"
+                ] += 1
+                return current.new_client_order_id
+            if resolution.outcome != ResolutionOutcome.PROVEN_NOT_EXECUTED or attempt == 2:
+                raise RuntimeError(f"master outcome unresolved: {resolution.reason}") from exc
+            retry_stats["retries"] += 1
+            current = replace(request, new_client_order_id=f"hl-r{attempt + 2}-{time.time_ns()}")
     raise RuntimeError("master order retry loop exhausted")
 
 
@@ -651,6 +673,7 @@ async def _run_cycle(
 
 async def _run_app_process_worker(db_path_str: str) -> None:
     """Boot the load App from the shared run DB, then idle until signalled."""
+    _require_signed_load()
     settings = Settings(
         db_path=Path(db_path_str),
         log_path=Path(db_path_str).with_suffix(".worker.log"),
@@ -670,6 +693,7 @@ async def _run_app_process_worker(db_path_str: str) -> None:
 
 async def _run_kill_worker(db_path_str: str, coid: str) -> None:
     """Place one real MARKET via the run journal, then hang inside UNKNOWN."""
+    _require_signed_load()
     from copytradeaster.credentials.service import SqliteCredentials
     from copytradeaster.trading.executor import Executor
 
@@ -774,12 +798,12 @@ async def _flatten_account(client: AsterClient, account_id: str, tag: str) -> No
 async def _assert_flat_signed(client: AsterClient, account_ids: list[str]) -> None:
     """Independent signed audit: every REAL account flat, zero open orders."""
     for account_id in account_ids:
-        positions = await client.position_risk(account_id, SYMBOL)
-        nonzero = [p for p in positions if p.symbol == SYMBOL and p.position_amt != 0]
+        positions = await client.position_risk(account_id)
+        nonzero = [p for p in positions if p.position_amt != 0]
         assert not nonzero, (
             f"{account_id} not flat: {[(str(p.position_side), p.position_amt) for p in nonzero]}"
         )
-        orders = await client.open_orders(account_id, SYMBOL)
+        orders = await client.open_orders(account_id)
         assert not orders, (
             f"{account_id} has leftover orders: {[(o.client_order_id, o.type) for o in orders]}"
         )
@@ -835,15 +859,12 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
     _cycles = max(_sigkill_at + 1, round(CYCLES * _scale))
     db_path_str = str(settings.db_path)  # shared by restart/kill workers in any phase subset
 
-    app = await _boot(settings)
-    real_ids = [fr.account_id for fr in app.followers if fr.execution_mode == "REAL"]
-    shadow_ids = [fr.account_id for fr in app.followers if fr.execution_mode == "SHADOW"]
-    assert len(app.followers) == len(real_ids) + len(shadow_ids) == len(followers) + N_SHADOW, (
-        f"follower topology mismatch: {len(app.followers)} loaded, "
-        f"{len(real_ids)} REAL, {len(shadow_ids)} SHADOW"
-    )
-    audit_http: httpx.AsyncClient | None = None
+    await _initial_flat_proof(settings)
+    app: App | None = None
     try:
+        app = await _boot(settings)
+        real_ids = [fr.account_id for fr in app.followers if fr.execution_mode == "REAL"]
+        assert len(app.followers) == len(followers) + N_SHADOW
         # P0: preflight — every REAL account flat/order-free; measured balance gate.
         for account_id in ["main", *real_ids]:
             positions = await app.master_client.position_risk(account_id, SYMBOL)
@@ -1226,33 +1247,54 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
             )
             phase_metrics.append(f"final: {_fmt_metrics(snapshot)}")
 
-        # P8c: final flat/order-free signed audit on ALL real accounts, then stop.
-        if _want("audit"):
-            audit_http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
-
-            audit = AsterClient(
-                audit_http,
-                app.cfg.rest_base_url,
-                app.limiter,
-                app.credentials,
-                app.credentials,
-                app.nonces,
-                dry_run=False,
-            )
-            with contextlib.suppress(Exception):
-                for account_id in ["main", *real_ids]:
-                    await _flatten_account(app.master_client, account_id, "hl-clean")
-                for account_id in shadow_ids:
-                    fr = next(fr for fr in app.followers if fr.account_id == account_id)
-                    with contextlib.suppress(Exception):
-                        await _flatten_account(fr.client, account_id, "hs-clean")
-            await _assert_flat_signed(audit, ["main", *real_ids])
     finally:
-        with contextlib.suppress(Exception):
-            await app.stop()
-        if audit_http is not None:
-            with contextlib.suppress(Exception):
-                await audit_http.aclose()
+        # This path also runs for boot/assertion/cancellation failures and phase subsets.
+        try:
+            if app is not None:
+                await app.stop()
+        finally:
+            await _cleanup_signed(settings)
+
+
+async def _initial_flat_proof(settings: Settings) -> None:
+    _require_signed_load()
+    settings.network_profile.require_testnet()
+    reader = App(settings)
+    try:
+        await reader.db.connect()
+        await reader.credentials.load()
+        rows = await reader.db.fetchall(
+            "SELECT id FROM accounts WHERE enabled=1 AND execution_mode='REAL'"
+        )
+        await _assert_flat_signed(reader.master_client, [str(row["id"]) for row in rows])
+    finally:
+        await reader.stop()
+
+
+async def _cleanup_signed(settings: Settings) -> None:
+    """Independent signed client after all engine writers have stopped."""
+    _require_signed_load()
+    settings.network_profile.require_testnet()
+    cleanup = App(settings)
+    try:
+        await cleanup.db.connect()
+        await cleanup.credentials.load()
+        rows = await cleanup.db.fetchall(
+            "SELECT id FROM accounts WHERE enabled=1 AND execution_mode='REAL'"
+        )
+        ids = [str(row["id"]) for row in rows]
+        errors = []
+        for account_id in ids:
+            try:
+                await _flatten_account(cleanup.master_client, account_id, "hl-finally")
+            except Exception:
+                errors.append(account_id)
+        # Failure is visible, never suppressed or called a passing cleanup.
+        await _assert_flat_signed(cleanup.master_client, ids)
+        if errors:
+            raise AssertionError(f"cleanup mutations failed for {','.join(errors)}")
+    finally:
+        await cleanup.stop()
 
 
 if __name__ == "__main__":

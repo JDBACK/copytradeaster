@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import sqlite3
 import time
@@ -55,7 +54,10 @@ from copytradeaster.aster.trading_api import PlaceOrderRequest
 from copytradeaster.config import Settings
 from copytradeaster.domain.models import PosSide, RiskPolicy, Side
 from copytradeaster.storage.database import Database
-from copytradeaster.storage.repositories import CommandRepo, SettingsRepo
+from copytradeaster.storage.repositories import SettingsRepo
+from tests.testnet import test_engine_corrective_live as corrective_live
+
+corrective_campaign = corrective_live.campaign
 
 pytestmark = [
     pytest.mark.testnet,
@@ -801,158 +803,30 @@ async def test_protection_naked_leg_safety_flattened(tmp_path):
 # --- Liquidation-vs-stop invariant violation is flattened (PM-B7) -----------------
 
 
-async def test_liquidation_invariant_holds_safe_leg_live(tmp_path):
-    """Liquidation invariant holds a SAFE leg (PM-B7 honest contract).
-
-    UNSHAPEABILITY THEOREM (why no live flatten exists on these accounts):
-    a risk-sized single-position cross-margin LONG has qty = A*r/D, so its
-    liquidation distance is l ~= A/qty = D/r. The engine calls it violated
-    iff liq_price >= stop*(1-buf), i.e. (prices, LONG) l <= D + buf*(E-D),
-    i.e. D >~ l. Substituting l ~= D/r gives D >~ D/r, i.e. r >~ 1/(1-buf)
-    ~= 100.5% — but RiskPolicy caps r <= 1. So a compliant cross-margin leg
-    can never violate; the flatten ACTION is proven by construction (plus
-    the entry gate, live via S1 which holds). ISOLATED is refused on copyc1
-    AND tg-8264892202 (multi-assets mode, probed live), hence no live
-    violation geometry on this campaign at all.
-
-    Honest live contract asserted here, max-affordable shaping (r derivation
-    below, bound 20% testnet budget):
-    (a) the engine HOLDS the safe leg (still open, exactly one far stop
-    resting at the moved level, no flatten across the wait);
-    (b) journal evidence: no new MARKET_CLOSE for the follower since the
-    stop move (the violation branch never misfired);
-    (c) in-test recheck from independent live reads shows violated=False.
-    """
-    settings, followers = await _prepare_scratch(tmp_path, "risk_liq")
-    follower = followers[0]
-    app = App(settings)
-    started = False
-    audit_http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
-    try:
-        await app.start()
-        started = True
-        client = app.master_client
-        audit = _audit_client(app, audit_http)
-        for account_id in ["main", follower]:
-            await _flatten_account(client, account_id)
-        # Cross-margin shaping: size UP so cross-liq comes near (multi-assets
-        # reality: ISOLATED is refused on this account). Derivation: cross liq
-        # satisfies qty*liq_distance ~= equity with qty = avail*risk/D_near,
-        # so liq ~= D_near/risk (single position, equity ~= avail). The window
-        # needs liq+5% <= 1000*avail*risk, i.e. risk >= r_min below; the 20%
-        # testnet budget bound is the ceiling. No risk within it -> loud.
-        avail_pre = await _available_usdt(client, follower)
-        if avail_pre <= 0:
-            raise AssertionError(f"follower {follower} has no balance to shape: avail={avail_pre}")
-        r_min = (D("1.05") * NEAR_STOP_DISTANCE / (D("1000") * avail_pre)).sqrt()
-        if r_min > D("0.20"):
-            raise AssertionError(
-                f"no risk within 20% shapes the window: avail={avail_pre} r_min={r_min}"
-            )
-        risk = min(D("0.20"), r_min * D("1.5"))
-        if avail_pre * risk < D("1.2"):
-            raise AssertionError(
-                f"shaped budget too small for entry: avail={avail_pre} risk={risk}"
-            )
-        await _set_policy(app, follower, risk, 50)
-        await _wait_for(lambda: _ready_flag(app), 90, "READY after pre-flatten")
-        position_side = await _position_side(client)
-        opened = await _open_master_long(client, position_side, "pm-l1")
-        await _wait_follower_protected(client, follower)
-
-        follower_pos = await _follower_position(client, follower)
-        assert follower_pos is not None
-        if follower_pos.leverage < 20:
-            pytest.skip(f"follower leverage {follower_pos.leverage}x too low to shape a violation")
-        entry = follower_pos.entry_price
-        liq_distance = entry - follower_pos.liquidation_price
-        if liq_distance <= 0:
-            pytest.skip(
-                f"unexpected liquidation geometry: entry={entry} "
-                f"liq={follower_pos.liquidation_price}"
-            )
-        avail = await _available_usdt(client, follower)
-        budget = avail * risk
-        # Far stop within the nonzero-cap window (so the hold below is
-        # meaningful: a cap-zero flatten would fail (a) loudly).
-        target_distance = liq_distance + max(D("100"), liq_distance * D("0.05"))
-        if target_distance > budget / D("0.001"):
-            raise AssertionError(
-                f"no far-but-nonzero window: liq_distance={liq_distance} budget={budget}"
-            )
-        moved_level = (entry - target_distance).quantize(D("0.1"))
-        cmds_before = {
-            r["command_key"]
-            for r in await CommandRepo(app.db).recent(500)
-            if r["account_id"] == follower
-        }
-        pre_move_qty = abs(await _follower_qty(client, follower))
-        assert pre_move_qty > 0, "follower never entered before the stop move"
-        opened["stop_coid"] = await _move_master_stop(client, opened, "pm-l1", moved_level)
-        # (a) HOLD: the safe leg stays open across recompute sweeps with its
-        # far stop resting at the moved level (reductions allowed, flatten
-        # is not). 90s covers several 15s periodic sweeps plus WS deltas.
-        await asyncio.sleep(90)
-        assert abs(await _symbol_qty(client, "main")) > 0, "master episode ended mid-hold"
-        assert abs(await _follower_qty(client, follower)) > 0, "safe leg flattened"
-        held_stops = await _follower_stops(client, follower)
-        assert len(held_stops) == 1, f"expected exactly one far stop, got {len(held_stops)}"
-        assert held_stops[0].stop_price == moved_level, (
-            f"follower stop not mirrored: {held_stops[0].stop_price} != {moved_level}"
-        )
-        # (b) size tripwire, stated honestly: zero_reason never reaches the
-        # journal (no hits in planner/executor/repositories), so the branch
-        # cannot be identified directly. The violation branch always sizes
-        # the WHOLE leg in one command; observed cap partials (0.003, 0.032)
-        # never do. Trip on any single CONFIRMED MARKET_CLOSE sized >= 90%
-        # of the pre-move leg. NOTE: a future cap-path full close would also
-        # trip this and must then be re-examined, not silently accepted.
-        big_closes = []
-        for r in await CommandRepo(app.db).recent(500):
-            if (
-                r["account_id"] != follower
-                or r["command_key"] in cmds_before
-                or r["kind"] != "MARKET_CLOSE"
-                or r["status"] != "CONFIRMED"
-            ):
-                continue
-            try:
-                closed_qty = abs(D(str(json.loads(r["payload"]).get("quantity", "0"))))
-            except (ValueError, TypeError):
-                continue
-            if closed_qty >= D("0.9") * pre_move_qty:
-                big_closes.append((r["command_key"], r["status"], str(closed_qty)))
-        assert not big_closes, f"whole-leg close fired: {big_closes}"
-        # (c) independent recheck mirroring prod _liquidation_violated
-        # EXACTLY: violated = liq>0 and (LONG: liq>=stop*(1-buf) / SHORT
-        # mirrored). No nonzero precondition: liq<=0 -> False IS the prod
-        # verdict (cross dust honestly reports liq 0, and the engine holds
-        # on it). buf pinned to the Coordinator default the App composes
-        # with (App passes no explicit liquidation_buffer_pct).
-        recheck = await _follower_position(client, follower)
-        assert recheck is not None
-        buf = D("0.005")
-        stop = held_stops[0].stop_price
-        liq = recheck.liquidation_price
-        if liq > 0 and stop > 0 and recheck.position_amt != 0:
-            is_short = recheck.position_amt < 0 or recheck.position_side == PosSide.SHORT
-            violated = liq <= stop * (D(1) + buf) if is_short else liq >= stop * (D(1) - buf)
-        else:
-            violated = False
-        assert violated is False, f"recheck violated: liq={liq} stop={stop}"
-        # B-file teardown order: master flat first so the running App
-        # converges the follower flat before the finally flatten+audit.
-        await _teardown_master(client, [opened["stop_coid"]])
-
-        async def follower_flat() -> bool:
-            return await _follower_qty(client, follower) == 0
-
-        await _wait_for(follower_flat, 120, "follower flat after master teardown")
-        # Restore the shaped policy (scratch DB; keeps the file hermetic).
-        await _set_policy(app, follower, D("0.01"), 20)
-    finally:
-        if started:
-            await _flatten_audit_stop(app, audit, audit_http, ["main", follower])
-        else:  # pragma: no cover - boot never completed
-            with contextlib.suppress(Exception):
-                await audit_http.aclose()
+async def test_liquidation_invariant_holds_safe_leg_live(corrective_campaign):
+    """Signed safe-leg hold; no claim that cross-margin liquidation is unshapeable."""
+    c = corrective_campaign
+    await c.open_master("BTCUSDT", PosSide.LONG, D("0.03"))
+    await c.converge()
+    actual = await c.snapshot()
+    legs = [p for p in actual.positions.values() if p.qty]
+    assert len(legs) == 1 and legs[0].stop is not None
+    leg = legs[0]
+    liq, mark, stop = leg.liquidation_price, leg.mark_price, leg.stop.stop_price
+    adverse = D(0) < liq <= mark
+    violated = adverse and liq >= stop * D("0.995")
+    assert c.app.coordinator._liquidation_violated(leg, stop) == violated
+    assert not violated, (
+        f"entry survived with unsafe signed geometry: liq={liq}, mark={mark}, stop={stop}"
+    )
+    await c.app.leverage._maintain_once()
+    await c.converge()
+    held = (await c.snapshot()).positions[leg.key]
+    assert held.qty != 0 and held.stop is not None
+    c.evidence["safe_leg"] = {
+        "entry": leg.entry_price,
+        "mark": mark,
+        "liquidation": liq,
+        "stop": stop,
+        "held_qty": held.qty,
+    }

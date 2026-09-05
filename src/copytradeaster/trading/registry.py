@@ -18,8 +18,11 @@ if TYPE_CHECKING:
 class FollowerRegistry:
     """Small single-process registry; it never stores credential material."""
 
-    def __init__(self, runtimes: Iterable[FollowerRuntime] = ()) -> None:
+    def __init__(
+        self, runtimes: Iterable[FollowerRuntime] = (), *, max_real_followers: int | None = None
+    ) -> None:
         self._mutation_lock = asyncio.Lock()
+        self._max_real_followers = max_real_followers
         self._by_id: dict[str, FollowerRuntime] = {}
         self._snapshot: tuple[FollowerRuntime, ...] = ()
         self._publish(runtimes)
@@ -46,6 +49,13 @@ class FollowerRegistry:
         async with self._mutation_lock:
             if runtime.account_id in self._by_id:
                 raise ValueError(f"follower {runtime.account_id!r} is already registered")
+            if (
+                runtime.execution_mode == "REAL"
+                and self._max_real_followers is not None
+                and sum(fr.execution_mode == "REAL" for fr in self._snapshot)
+                >= self._max_real_followers
+            ):
+                raise ValueError(f"REAL follower cap reached ({self._max_real_followers})")
             updated = dict(self._by_id)
             updated[runtime.account_id] = runtime
             self._publish(updated.values())
@@ -68,6 +78,14 @@ class FollowerRegistry:
                 raise KeyError(f"follower {runtime.account_id!r} is not registered")
             if current is not expected:
                 raise RuntimeError(f"follower {runtime.account_id!r} changed during lifecycle")
+            if (
+                runtime.execution_mode == "REAL"
+                and current.execution_mode != "REAL"
+                and self._max_real_followers is not None
+                and sum(fr.execution_mode == "REAL" for fr in self._snapshot)
+                >= self._max_real_followers
+            ):
+                raise ValueError(f"REAL follower cap reached ({self._max_real_followers})")
             updated = dict(self._by_id)
             updated[runtime.account_id] = runtime
             self._publish(updated.values())

@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import replace
 from decimal import Decimal as D
 
 import pytest
@@ -91,8 +92,7 @@ async def journal(tmp_path):
 async def clients(settings, creds, journal):
     import httpx
 
-    if "testnet" not in settings.rest_base_url.lower():
-        pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
+    settings.network_profile.require_testnet()
     from copytradeaster.aster.rate_limits import RateLimits
 
     http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -100,7 +100,10 @@ async def clients(settings, creds, journal):
         settings.weight_limit_per_min, settings.orders_limit_per_min, settings.orders_limit_per_10s
     )
     main = AsterClient(http, settings.rest_base_url, limiter, creds, creds, NonceStore(journal))
-    yield {"main": main}
+    try:
+        yield {"main": main}
+    finally:
+        await http.aclose()
 
 
 async def _is_hedge(client: AsterClient, aid: str = "main") -> bool:
@@ -334,6 +337,14 @@ async def test_open_all_recovery_reads_down_holds_unknown_without_retry(clients,
         assert row["status"] == "UNKNOWN"
         assert row["client_order_id"] == expected_coid == wrapped.accepted_coid
         assert "unavailable" in str(row["last_error"])
+        changed = replace(
+            action, revision=action.revision + 1, payload={**action.payload, "quantity": "0.003"}
+        )
+        changed_plan = replace(plan, actions=[changed])
+        blocked = await executor.submit(changed_plan)
+        assert blocked[0].status == "BLOCKED"
+        assert wrapped.place_calls == 1
+        assert (await CommandRepo(journal).get(row["command_key"]))["status"] == "UNKNOWN"
         # Fail-closed proof: the exchange really holds the order, yet no
         # second economic send was issued under any COID.
         assert (
@@ -342,13 +353,20 @@ async def test_open_all_recovery_reads_down_holds_unknown_without_retry(clients,
             )
             is not None
         )
+        # Heal through the same production resolver, with independent signed history.
+        recovery = await resolve_boot_unknowns(
+            lambda _: real, CommandRepo(journal), OrderLinkRepo(journal)
+        )
+        assert recovery.unresolved == 0
+        assert (await CommandRepo(journal).get(row["command_key"]))["status"] == "CONFIRMED"
+        assert wrapped.place_calls == 1
     finally:
         await _flatten_main(real)
         await _audit_flat(real)
 
 
 async def test_partial_close_response_lost_confirms_by_real_position_delta(clients, creds, journal):
-    """A3: partial MARKET_CLOSE + lost response confirms via real position delta.
+    """A3: a fully filled order reducing part of a position confirms from its full delta.
 
     Covers the position-progress FOUND branch of ``_resolve_exchange_outcome``:
     both order lookups are hidden, so the only evidence is the real
@@ -478,6 +496,9 @@ async def test_proven_not_executed_retries_exactly_once_with_new_coid(clients, c
 
 async def _run_a5_sigkill_worker(journal_path: str) -> None:
     """Send one real MARKET and die inside the UNKNOWN window (no resolution)."""
+    if os.getenv("CT_TESTNET") != "1":
+        raise RuntimeError("signed worker requires CT_TESTNET=1")
+
     from pathlib import Path
 
     import httpx
@@ -635,3 +656,68 @@ if __name__ == "__main__":
         raise SystemExit(
             "usage: test_pre_mainnet_unknown_live.py --a5-sigkill-worker <journal_path>"
         )
+
+
+async def test_partial_position_progress_with_hidden_history_stays_unknown(clients, creds, journal):
+    """A6: real open plus concurrent real reduction leaves insufficient position evidence.
+
+    This deliberately creates two full fills, NOT a fabricated partial fill.
+    With both order lookups unavailable, half the requested position delta is
+    insufficient proof that the original command is complete.
+    """
+    if "main" not in creds.account_ids():
+        pytest.skip("main credentials required")
+    real = clients["main"]
+    await _audit_flat(real)
+    hedge = await _is_hedge(real)
+
+    class HiddenOrders:
+        def __init__(self):
+            self.opens = 0
+
+        async def position_risk(self, aid, symbol=None):
+            return await real.position_risk(aid, symbol)
+
+        async def query_order(self, *args, **kwargs):
+            return None
+
+        async def query_order_history(self, *args, **kwargs):
+            raise AsterError(-1006, "injected history outage")
+
+        async def place_order(self, aid, req):
+            self.opens += 1
+            await real.place_order(aid, req)
+            await real.place_order(
+                aid,
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.SELL,
+                    type="MARKET",
+                    quantity=QTY_RED,
+                    position_side=PosSide.LONG if hedge else PosSide.BOTH,
+                    reduce_only=not hedge,
+                    new_client_order_id=f"a6-external-{time.time_ns()}"[:36],
+                    new_order_resp_type="RESULT",
+                ),
+            )
+            raise AsterError(-1000, "injected lost open response", http_status=503)
+
+    wrapper = HiddenOrders()
+    executor = _executor(wrapper, journal)
+    action = _open_action(f"a6-{time.time_ns()}", hedge)
+    plan = ExecutionPlan("main", None, [action])
+    try:
+        result = (await executor.submit(plan))[0]
+        assert await _btc_position(real) == QTY - QTY_RED
+        assert result.status == "UNKNOWN"
+        blocked = await executor.submit(replace(plan, actions=[replace(action, revision=1)]))
+        assert blocked[0].status == "BLOCKED" and wrapper.opens == 1
+        recovered = await resolve_boot_unknowns(
+            lambda _: real, CommandRepo(journal), OrderLinkRepo(journal)
+        )
+        assert recovered.unresolved == 0
+        assert (await CommandRepo(journal).get(result.command_key))["status"] == "CONFIRMED"
+        assert wrapper.opens == 1
+    finally:
+        await _flatten_main(real)
+        await _audit_flat(real)

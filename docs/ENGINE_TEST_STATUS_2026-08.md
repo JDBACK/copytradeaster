@@ -3,23 +3,20 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-05):** Stage 1–3 CLOSED; Pre-Mainnet Packages A–G
-> LIVE-COMPLETE на REAL Aster Testnet (A: UNKNOWN-matrix 5/5 + REAL-05 +
-> builder corrective; B: S1 100s / S2 44s / W1 83s / W2 68s / P1 45s + REAL-06
-> 134s; C: NetworkProfile 3/3 за 12s; D: ZeroReason/naked/liquidation 6/6 за
-> 386s; E: isolation 3/3 за 633s + LIMIT L1/L3 green с L2 honest skip;
-> F: hybrid load 3 REAL + 10 SHADOW **1 passed за 3:39:15** — 100 циклов,
-> restart/SIGTERM/SIGKILL, journal без висяков, метрики p50/p95/p99, flat
-> G: HEDGE dual-leg 7/7 (`tests/testnet/test_pre_mainnet_hedge_live.py`) — LONG+SHORT, асимметрия, стопы+replace,
-> плечо мастера не дёргает ноги, partial, close-без-влияния; по пути пофикшен
-> прод-баг #27 (мусорный liq 25.5M → wrong-side guard в `_liquidation_violated`).
-> **ВЕРДИКТ v1: GO (ONE_WAY + HEDGE)**, launch cap 10 (замер); ONE_WAY-only
-> mainnet boot refusal СНЯТ после green + FLAT-ALL. Offline unit **1068 passed**
-> (1 известный flaky: whitelist regex, тест-онли); frontend 168/17;
-> ruff check+format clean. Fake-only evidence не закрывает pre-mainnet package.
-> **ЗАМЕРЕННЫЙ LAUNCH CAP v1 = 10 FOLLOWERS; ВСЕ EXCHANGE-FACING ACCEPTANCE —
-> ТОЛЬКО REAL ASTER TESTNET.**
-> Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
+> **TL;DR (2026-09-05, независимое ревью + corrective):** production-исправления
+> движка и корректирующие live-тесты реализованы. **Mainnet: NO-GO до повторной
+> квалификации исправленного дерева.** Старый GO для `2c89286` пересмотрен:
+> ревью выявило обход UNKNOWN новой ревизией, конфликт HEDGE SET_LEVERAGE,
+> неверные readiness/health proofs и другие пробелы взаимодействия компонентов.
+> Текущий offline gate: **1144 passed, 2 skipped, 85 deselected**, 36.40s;
+> coverage **85.91%** (14052 statements, 1980 missing; вывод pytest округляет до 86%).
+> Документарная цель 87% пока не достигнута. Ruff check/format и diff-check чистые.
+> Opt-out gate изменённых live-файлов: **22 skipped**, signed запросы не выполнялись.
+> Исправленные live-тесты **не прогонялись на бирже**; code-ready не означает LIVE-CLOSED.
+> Следующий исполнитель проводит прогоны и исправляет по результатам:
+> [готовый план](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md).
+> Ниже — история предыдущих кампаний; их счётчики и GO относятся к прежним деревьям.
+
 
 ## Текущее состояние
 
@@ -758,7 +755,7 @@
 | 24 | **Сырые системные логи в Telegram-уведомлениях** | движок слал внутренние имена RPC-команд (`MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `NO_STOP`) напрямую в пользовательский чат | выделен модуль `notifications/formatter.py` (`format_confirmed_action`, `format_skip_reason`); уведомления форматируются в чистые трейдерские карточки (🟢 Открыта позиция, 🛡 Защитный стоп, 🎯 Тейк-профит, 🔴 Закрыта позиция, 🗑 Снят ордер, ⏳ Ожидание стопа), технический шум убран |
 | 25 | **FAILED `SET_LEVERAGE` не блокировал `MARKET_OPEN`** | priority в плане — только порядок, а не зависимость: исполнитель продолжал план после FAILED prerequisite и отправлял вход с неподтверждённым плечом (fail-closed для плеча фактически отсутствовал) | generic dependency-модель плана: `ExecutionAction.action_id` / `depends_on_action_id`; planner связывает SET_LEVERAGE → вход/защиту, executor блокирует (`BLOCKED`) зависимые действия при FAILED/UNKNOWN prerequisite; закрытия/отмены зависимости не получают |
 | 26 | **Движок терял известное плечо flat-symbol** | `_snapshot()` выбрасывал строки positionRisk с `positionAmt==0`, а planner трактовал «нет позиции» как «плечо неизвестно» — каждая новая сделка платила холодный `SET_LEVERAGE` (+TTL bracket GET) даже при годами стоящих на бирже 200x | `AccountState.symbol_leverages` из всех строк positionRisk (включая flat; неоднозначные per-side значения → unknown/fail-closed); planner сравнивает known vs target и эмитит SET только при расхождении; hot path сделки — ноль leverage REST-запросов |
-| 27 | **Мусорный `liquidationPrice=25.5M` ломал координатор** | биржа отдаёт нефизичные/wrong-side liquidationPrice (например 25.5M для LONG), координатор трактовал это как нарушение инварианта ликвидации | wrong-side guard в `Coordinator._liquidation_violated` (LONG: liq < mark, SHORT: liq > mark; мусорные значения игнорируются) (`test_pre_mainnet_hedge_live.py`) |
+| 27 | **Liquidation guard и HEDGE geometry** | Котировка 25.5M вызывала churn; последующий guard относительно entry пропускал допустимую liquidation между entry и mark | Corrective: adverse direction относительно текущего mark (равенство считается опасным), регрессии LONG/SHORT и signed LC4; новая live-квалификация ожидается |
 
 ## Известные ограничения (осознанные решения этапа 1)
 

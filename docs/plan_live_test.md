@@ -1,5 +1,11 @@
 # Pre-Mainnet Hardening Plan
 
+**Актуализация после ревью:** исправления движка и live-тесты готовы;
+повторные прогоны ещё не выполнены. Прежний GO ниже относится к старому дереву.
+Текущий verdict — NO-GO до квалификации. Исполнять
+[corrective-план](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md): прогоны,
+разбор failures/skips, исправления по evidence.
+
 Проект: `JDBACK/copytradeaster`
 Исходный audit baseline: `3c38db34f42d7a61c334367edbc434e6fbb97c8a`
 Рабочая ветка: `codex/live-copy-tests-hardening`; `918bf46` — исходный
@@ -11,7 +17,7 @@ WIP-checkpoint Package B, а текущий факт исполнения вес
 Единая точка счётчиков тестов:
 `/Users/jd_ebash/copytradeaster/docs/ENGINE_TEST_STATUS_2026-08.md`.
 
-Статус на 2026-09-05: **Packages A–G LIVE-COMPLETE на REAL Aster Testnet.
+Исторический статус исходного дерева на 2026-09-05: **Packages A–G LIVE-COMPLETE на REAL Aster Testnet.
 Package F hybrid load 3 REAL + 10 SHADOW закрыт (1 passed за 3:39:15, loadgate8,
 CT_LOAD_SCALE=1.0, 100 циклов, restart/SIGTERM/SIGKILL, flat audit); Package G
 HEDGE 7/7 live закрыт (test_pre_mainnet_hedge_live.py, прод-баг #27 wrong-side
@@ -939,7 +945,7 @@ ONE_WAY-only boot refusal снят из `src/copytradeaster/app.py`. Финал�
 **PRE-PRODUCTION ACCEPTANCE — ТОЛЬКО REAL ASTER TESTNET.
 FAKE/OFFLINE НЕ ЗАСЧИТЫВАЮТСЯ.**
 
-Текущее состояние:
+Историческое состояние перед corrective-ревью:
 
 **Кампания A–G полностью закрыта на REAL Aster Testnet. Isolation 3/3 закрыт за 633s,
 LIMIT 2/3 (L1/L3 green + L2 honest skip), Package F hybrid load (3 REAL + 10 SHADOW

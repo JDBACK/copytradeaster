@@ -20,6 +20,7 @@ No Aster API calls, no I/O. Transition rules are fixed by the stage-1 plan
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from typing import Final
 
@@ -361,7 +362,7 @@ def _plan_for_target(
             client_order_id=ids.next(kind, symbol),
             replaces_client_order_id=None,
             priority=place_priority,
-            depends_on_action_id=prerequisite_action_id,
+            depends_on_action_id=prerequisite_action_id if actual_abs == 0 else None,
         )
         actions.append(place_action)
         if current is not None:
@@ -405,7 +406,24 @@ def build_plan(
 ) -> ExecutionPlan:
     ids = _SeqIds(client_order_id_for)
     actions: list[ExecutionAction] = []
+    # Exchange leverage belongs to a symbol, including both HEDGE legs.
+    ceilings: dict[str, int] = {}
     for tp in target.targets:
+        if tp.qty != 0 and tp.leverage > 0:
+            ceilings[tp.key.symbol] = min(ceilings.get(tp.key.symbol, tp.leverage), tp.leverage)
+    known_by_symbol = dict(actual.symbol_leverages)
+    for symbol in ceilings:
+        if symbol not in known_by_symbol:
+            values = {
+                p.leverage
+                for p in actual.positions.values()
+                if p.key.symbol == symbol and p.leverage > 0
+            }
+            if len(values) == 1:
+                known_by_symbol[symbol] = values.pop()
+    emitted: set[str] = set()
+    for original in target.targets:
+        tp = replace(original, leverage=ceilings.get(original.key.symbol, original.leverage))
         filters = filters_by_symbol.get(tp.key.symbol)
         if filters is None:
             continue
@@ -416,25 +434,25 @@ def build_plan(
         # leg's own row. Absent everywhere means UNKNOWN - fail closed with a
         # SET even for brand-new legs (a ONE_WAY WS-created position starts
         # with projected leverage 0).
-        known_leverage = actual.symbol_leverages.get(tp.key.symbol)
-        if known_leverage is None and actual_pos is not None and actual_pos.leverage > 0:
-            known_leverage = actual_pos.leverage
+        known_leverage = known_by_symbol.get(tp.key.symbol)
         prerequisite_action_id: str | None = None
-        if tp.leverage > 0 and known_leverage != tp.leverage:
+        if tp.qty != 0 and tp.leverage > 0 and known_leverage != tp.leverage:
             # Intra-plan dependency: the entry and its protection must not run
             # when this transition FAILED. Closes/reductions never reference it.
             prerequisite_action_id = f"leverage:{tp.key.symbol}"
-            actions.append(
-                ExecutionAction(
-                    kind=ActionKind.SET_LEVERAGE,
-                    symbol=tp.key.symbol,
-                    payload={"symbol": tp.key.symbol, "leverage": str(tp.leverage)},
-                    client_order_id=None,
-                    replaces_client_order_id=None,
-                    priority=0,
-                    action_id=prerequisite_action_id,
+            if tp.key.symbol not in emitted:
+                emitted.add(tp.key.symbol)
+                actions.append(
+                    ExecutionAction(
+                        kind=ActionKind.SET_LEVERAGE,
+                        symbol=tp.key.symbol,
+                        payload={"symbol": tp.key.symbol, "leverage": str(tp.leverage)},
+                        client_order_id=None,
+                        replaces_client_order_id=None,
+                        priority=0,
+                        action_id=prerequisite_action_id,
+                    )
                 )
-            )
         actions.extend(
             _plan_for_target(
                 actual_pos,

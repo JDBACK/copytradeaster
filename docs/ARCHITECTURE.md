@@ -148,27 +148,33 @@ quantity = функция(entry, stop, fees/slippage, exchange limits)
 
 Risk engine должен возвращать целевое состояние/quantity, а не отправлять ордера.
 
-Runtime leverage follower — это control-plane, а не вычисление на hot path.
-`trading/leverage.py` (`LeverageManager`) держит в RAM два разделённых
-состояния: глобальный *кандидатный* максимум по symbol (signed
-`GET /fapi/v3/leverageBracket`, обновление stale-while-revalidate фоновым
-worker-ом, никогда из торгового пути) и account-specific *подтверждённое*
-плечо `(account_id, symbol)`. Подтверждение — `POST /fapi/v3/leverage`
-(успех = биржа приняла уровень для этого аккаунта; reject → fallback на
-account-specific bracket GET + POST меньшего максимума). Источник правды при
-рестарте — authoritative `positionRisk`: coordinator собирает leverage всех
-строк (включая flat symbol) в `AccountState.symbol_leverages` и через
-`observe()` восстанавливает RAM-модель без единой записи. SQLite для плеча не
-используется. Готовность (`is_ready`) привязана к поколению каталога: смена
-максимума инвалидирует старые подтверждения, новый вход ждёт переподготовки;
-закрытие, сокращение и защита никогда не зависят от готовности. Настройка
-происходит в естественных точках: onboarding/resume (application adapter,
-аккаунт остаётся paused при неудаче), boot recovery и bounded background
-worker (`Semaphore(2)` + pacing, приоритет trading traffic в общем limiter).
-Планировщик эмитит `SET_LEVERAGE` только при расхождении known/confirmed
-значения с таргетом и связывает его generic-зависимостью `action_id →
-depends_on_action_id` с входом и защитой: FAILED prerequisite блокирует
-риск-увеличивающие действия плана, но никогда — закрытие/отмены.
+Runtime leverage follower управляется `LeverageManager`: catalog из signed
+`leverageBracket` задаёт ceiling, authoritative `positionRisk` — текущую
+конфигурацию. Любое положительное подтверждённое плечо ниже catalog/operator
+ceilings считается готовым для текущего поколения. Worker читает конфигурацию
+до записи и не повышает stop-driven downshift обратно до максимума, в том
+числе после рестарта. Нечитаемая конфигурация блокирует подготовку. Записи при
+необходимом понижении ограничены semaphore/pacing; детерминированный отказ
+допускает account-bracket fallback в пределах ceilings.
+
+Coordinator держит account mutation lock от восстановления in-flight и снимка
+до исполнения и post-fill convergence; тот же lock использует maintenance.
+Повторный CONFIRMED SET требует текущего positionRisk-proof, исторического
+статуса недостаточно. Planner создаёт один SET на symbol, выбирая минимум
+целевых плеч обоих HEDGE legs. Дубли action_id запрещены. Оба увеличения
+зависят от общего SET; закрытия и защита уже существующей позиции независимы.
+
+`risk/account_budget.py` резервирует stop-risk и margin сразу для всех
+увеличений аккаунта. `CT_MAX_TOTAL_RISK_PCT` (по умолчанию 0.10) ограничивает
+суммарный mark-to-stop риск относительно USDT equity; для margin остаётся
+80% available. Ноги не неттируются; неподтверждённые закрытия/ужесточения
+стопов не освобождают резерв, отсутствие наблюдаемого стопа блокирует рост.
+Fee buffer в суммарном резерве считается от цены единицы. Это консервативный
+stop-loss budget, не модель гарантированного исполнения или cross-liquidation.
+
+Liquidation сравнивается с текущим mark, не с entry: adverse direction LONG —
+liq <= mark, SHORT — liq >= mark. Равенство опасно; shared HEDGE quote в другом
+направлении оценивается на соответствующей противоположной ноге.
 
 Ядро не меняет `marginType` перед входом: текущий режим аккаунта сохраняется
 без скрытой подмены; isolated включается только по результату отдельной
@@ -355,7 +361,13 @@ plan:
   replace stop
 ```
 
-Повторный `reconcile()` при уже совпадающем состоянии должен создавать **0 новых команд**.
+Повторный `reconcile()` при совпадающем состоянии возвращает **0 оценённых
+действий**. Recompute возвращает фактический размер оценённого плана вместе
+с safety-действиями; retry/blocked не превращается в ноль из-за reuse строки
+или размера `recent()`. Неоценённая generation даёт -1. Snapshot scope локален
+вызову через ContextVar. Только полный authoritative отчёт для всех followers
+с нулевыми действиями, чистым master, пустым in-flight и готовым leverage
+может снять degraded. Master READY и scoped sweep такого права не дают.
 
 Инвариант конвергенции защиты (правило 9 planner):
 после reconciliation на одной follower-leg остаётся **ровно один** bot-owned
@@ -434,8 +446,8 @@ PENDING → SENDING → SUBMITTED → CONFIRMED
 до mutation и ожидаемый signed delta. Runtime, повторный submit и boot используют один
 resolver с тремя исходами:
 
-- `FOUND` — исходный COID найден либо authoritative `positionRisk` показывает
-  согласованное продвижение в ожидаемом направлении не больше requested delta;
+- `FOUND` — исходный COID имеет подтверждённый результат (для MARKET — terminal),
+  либо authoritative `positionRisk` показывает полный ожидаемый signed delta;
 - `PROVEN_NOT_EXECUTED` — исходный COID отсутствует в трёх полных чтениях
   `allOrders`, а соответствующая position leg во всех чтениях не изменилась;
 - `UNRESOLVED` — history/position недоступны, history page насыщена 1000 строками,
@@ -443,9 +455,11 @@ resolver с тремя исходами:
 
 Только `PROVEN_NOT_EXECUTED` разрешает новый COID. `UNRESOLVED` остаётся
 non-terminal, ставит degraded и блокирует новую economic mutation. Current-order query
-служит быстрым positive lookup, но его `None` не является negative proof. Partial
-progress подтверждает выполненную часть; residual создаёт следующий authoritative
-reconciliation, поэтому полный исходный quantity повторно не отправляется.
+служит быстрым positive lookup, но его `None` не является negative proof.
+Partial progress без terminal history остаётся UNKNOWN. Новая qty/revision
+не обходит незавершённую экспозицию аккаунта; reductions/protection остаются
+доступны. Перед следующей generation resolver выполняется до нового снимка,
+чтобы residual рассчитывался по актуальной позиции.
 
 Собственный `command_key` является долговременной идемпотентностью сервиса; `newClientOrderId` используется как внешний correlation id, но не заменяет внутренний журнал. `BLOCKED` — ephemeral-результат исполнителя для действий с упавшим prerequisite (в журнале не персистится; шесть статусов выше — весь CHECK).
 

@@ -82,7 +82,7 @@ def make_manager(clients: dict[str, FakeLevClient], *, concurrency: int = 2, **k
     )
 
 
-async def test_prepare_uses_candidate_post_without_bracket_get():
+async def test_prepare_reuses_authoritative_configuration_without_write():
     clients = {"main": FakeLevClient(), "copyc1": FakeLevClient()}
     manager = make_manager(clients)
     await manager.refresh_catalog()
@@ -90,7 +90,7 @@ async def test_prepare_uses_candidate_post_without_bracket_get():
     leverage = await manager.prepare_symbol("copyc1", "BTCUSDT")
 
     assert leverage == 200
-    assert clients["copyc1"].set_calls == [("copyc1", "BTCUSDT", 200)]
+    assert clients["copyc1"].set_calls == []
     # POST-as-validation succeeded: no follower-specific bracket read at all
     assert clients["copyc1"].bracket_calls == []
     assert manager.is_ready("copyc1", "BTCUSDT")
@@ -101,7 +101,7 @@ async def test_rejected_post_falls_back_to_account_bracket_and_lower_post():
     clients = {
         "main": FakeLevClient(account_max=200),
         # exchange capped this follower to 100
-        "charlie": FakeLevClient(account_max=100, reject_first_post=True),
+        "charlie": FakeLevClient(account_max=100, reject_first_post=True, risk_leverages=[250]),
     }
     charlie = clients["charlie"]
     manager = make_manager(clients, symbols=["BTCUSDT"])
@@ -117,7 +117,7 @@ async def test_rejected_post_falls_back_to_account_bracket_and_lower_post():
 
 async def test_concurrent_prepare_same_key_sends_single_network_sequence():
     clients = {"main": FakeLevClient(), "copyc1": FakeLevClient()}
-    manager = make_manager(clients, symbols=["BTCUSDT"])
+    manager = make_manager(clients, symbols=["BTCUSDT"], operator_max_leverage=100)
     await manager.refresh_catalog()
     original = clients["copyc1"].set_leverage
     gate = asyncio.Event()
@@ -140,8 +140,8 @@ async def test_concurrent_prepare_same_key_sends_single_network_sequence():
     gate.set()
     results = await asyncio.wait_for(task, timeout=5)
 
-    assert results == [200] * 5
-    assert clients["copyc1"].set_calls == [("copyc1", "BTCUSDT", 200)]
+    assert results == [100] * 5
+    assert clients["copyc1"].set_calls == [("copyc1", "BTCUSDT", 100)]
 
 
 async def test_catalog_downshift_invalidates_readiness_until_reprepared():
@@ -163,7 +163,6 @@ async def test_catalog_downshift_invalidates_readiness_until_reprepared():
     leverage = await manager.prepare_symbol("copyc1", "BTCUSDT")
     assert leverage == 100
     assert clients["copyc1"].set_calls == [
-        ("copyc1", "BTCUSDT", 200),
         ("copyc1", "BTCUSDT", 100),
     ]
     assert manager.is_ready("copyc1", "BTCUSDT")
@@ -176,7 +175,7 @@ async def test_failed_prepare_invalidates_and_reports_safe_category():
         raise AsterError(-2019, "margin insufficient")
 
     clients["copyc1"].set_leverage = always_fail  # type: ignore[method-assign]
-    manager = make_manager(clients, symbols=["BTCUSDT"])
+    manager = make_manager(clients, symbols=["BTCUSDT"], operator_max_leverage=100)
     await manager.refresh_catalog()
 
     report = await manager.prepare_account("copyc1", ["BTCUSDT"])
@@ -337,7 +336,7 @@ async def test_unknown_outcome_not_applied_falls_back_after_read():
         "copyc1": FakeLevClient(
             account_max=100,
             timeout_first_post=True,
-            risk_leverages=[100],  # pre-existing state on the exchange
+            risk_leverages=[250],  # pre-existing state on the exchange
         ),
     }
     manager = make_manager(clients)
@@ -355,7 +354,7 @@ async def test_unknown_outcome_with_unreadable_state_fails_closed():
     }
     manager = make_manager(clients)
     await manager.refresh_catalog(["BTCUSDT"])
-    with pytest.raises(LeverageError, match="outcome-unknown read failed"):
+    with pytest.raises(LeverageError, match="configuration unreadable"):
         await manager.prepare_symbol("copyc1", "BTCUSDT")
     assert clients["copyc1"].set_calls == []  # never a blind second write
     assert clients["copyc1"].bracket_calls == []
