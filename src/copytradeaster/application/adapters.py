@@ -739,6 +739,30 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         self._snapshot_cache[account_id] = (snapshot, captured_at)
         return (snapshot, captured_at)
 
+    async def symbol_assets(self, account_id: str, symbols: list[str]) -> dict[str, str | None]:
+        """Base-asset units from cached exchange metadata.
+
+        Display-only evidence: an unreadable instrument stays None instead
+        of failing the whole list. The client caches its own exchange info
+        with a TTL; per-call cost is one dict scan.
+        """
+        unique = list(dict.fromkeys(symbols))
+        if not unique:
+            return {}
+        runtime = self.app.follower_registry.get(account_id)
+        if runtime is None:
+            return dict.fromkeys(unique)
+        try:
+            info = await runtime.client.exchange_info()
+        except Exception:  # noqa: BLE001 - units degrade to null, never 503
+            return dict.fromkeys(unique)
+        assets = {
+            item.symbol: item.baseAsset
+            for item in info.symbols
+            if item.status == "TRADING" and item.contractType == "PERPETUAL"
+        }
+        return {symbol: assets.get(symbol) for symbol in unique}
+
     async def read_activity(
         self,
         account_id: str,

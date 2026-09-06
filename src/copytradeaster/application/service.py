@@ -35,7 +35,9 @@ from copytradeaster.application.models import (
     AccountBuilderReason,
     AccountBuilderRemediation,
     AccountBuilderState,
+    AccountOverview,
     ActivityCategory,
+    ActivityFeedPage,
     ActivityFilter,
     ActivityItem,
     ActivityPage,
@@ -65,26 +67,45 @@ from copytradeaster.application.models import (
     NotificationSettingsDTO,
     OnboardingApplicationError,
     OnboardingResult,
+    PendingOperation,
     PermissionsState,
     PermissionSummary,
     PositionPageDTO,
     PositionProtectionState,
     PositionSide,
     PositionSummaryDTO,
+    ResumeContextDTO,
     RiskDTO,
+    RiskPreviewDTO,
     RiskUpdateInput,
     ServiceUnavailableError,
+    SnapshotFreshness,
     StaleOperationError,
     StatusDTO,
     StatusReason,
     StatusRemediation,
     StatusState,
     SystemState,
+    TradeDetailDTO,
+    TradeEventsPage,
+    TradeListPage,
+    TradeUnavailableError,
     UserContext,
     UserRole,
     ValidationError,
 )
+from copytradeaster.application.trade_views import (
+    build_overview,
+    feed_kinds,
+    present_event,
+    present_fill,
+    present_trade,
+    present_trade_detail,
+    quantity_assets,
+    risk_budget_steps,
+)
 from copytradeaster.aster.trading_api import AsterError
+from copytradeaster.history.reader import Window
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
 from copytradeaster.onboarding.builder import validate_builder_record
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
@@ -96,10 +117,14 @@ from copytradeaster.onboarding.models import (
     mask_address,
     stable_account_id,
 )
+from copytradeaster.storage.episodes import EpisodeRepository
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
     AgentValidation,
     AgentValidationRepo,
+    CommandRepo,
     NotificationOutboxRepo,
     SettingsRepo,
     TelegramAccessRequestRepo,
@@ -114,6 +139,7 @@ PERMISSION_TTL_SECONDS = 60
 BUILDER_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60 * 1000
 TESTNET_PERMISSION_FALLBACK_TTL_SECONDS = 86_400
 ACTIVITY_PAGE_SIZE = 10
+TRADE_PAGE_SIZE = 20
 ADMIN_PAGE_SIZE = 10
 ACCESS_REQUEST_RETRY_COOLDOWN_SECONDS = 60
 # The token is embedded together with action/revision in callback_data by the
@@ -121,6 +147,24 @@ ACCESS_REQUEST_RETRY_COOLDOWN_SECONDS = 60
 # comfortably below Telegram's 64-byte callback_data ceiling.
 CONFIRMATION_TOKEN_MAX_BYTES = 16
 _MISSING = object()
+_TRADE_PERIODS = {"7d": 7, "30d": 30, "all": None}
+_PENDING_OPERATIONS = {
+    "MARKET_OPEN": "entry",
+    "MARKET_CLOSE": "exit",
+    "PLACE_STOP": "protection",
+    "PLACE_TP": "protection",
+    "CANCEL_ORDER": "cancel",
+    "SET_LEVERAGE": "leverage",
+}
+
+
+def _payload_symbol(payload: Any) -> str | None:
+    """Command symbol for the pending block; never the payload itself."""
+    parsed = _parse_activity_payload(payload)
+    symbol = _safe_activity_symbol(parsed)
+    return symbol
+
+
 _SAFE_CODE = re.compile(r"[^A-Za-z0-9_.:-]+")
 _SAFE_ERRORS = (
     AuthorizationError,
@@ -129,6 +173,7 @@ _SAFE_ERRORS = (
     ConfirmationExpiredError,
     StaleOperationError,
     ServiceUnavailableError,
+    TradeUnavailableError,
 )
 
 log = get_logger(__name__)
@@ -652,11 +697,16 @@ class UserApplicationService:
         onboarding: Any | None = None,
         builder_onboarding: Any | None = None,
         emergency_controller: EmergencyControllerPort | None = None,
+        episodes: EpisodeRepository | None = None,
+        user_events: EventRepository | None = None,
+        history: HistoryRepository | None = None,
+        commands: CommandRepo | None = None,
         testnet_check: bool | Callable[[], bool | Awaitable[bool]] | None = None,
         clock: Callable[[], datetime] | None = None,
         confirmation_ttl_seconds: float = 60.0,
         permission_ttl_seconds: int = PERMISSION_TTL_SECONDS,
         activity_page_size: int = ACTIVITY_PAGE_SIZE,
+        trade_page_size: int = TRADE_PAGE_SIZE,
     ) -> None:
         if runtime is None:
             raise ValueError("runtime adapter is required")
@@ -666,6 +716,8 @@ class UserApplicationService:
             raise ValueError("permission TTL must be positive")
         if not 1 <= activity_page_size <= 100:
             raise ValueError("activity page size must be between 1 and 100")
+        if not 1 <= trade_page_size <= 50:
+            raise ValueError("trade page size must be between 1 and 50")
 
         self._runtime = runtime
         db = getattr(runtime, "db", None)
@@ -686,6 +738,10 @@ class UserApplicationService:
             if emergency_controller is not None
             else getattr(runtime, "emergency_controller", None)
         )
+        self._episodes = episodes
+        self._user_events = user_events
+        self._history = history
+        self._commands = commands
         if db is not None:
             self._users = self._users if self._users is not None else TelegramUserRepo(db)
             self._accounts = self._accounts if self._accounts is not None else AccountRepo(db)
@@ -699,16 +755,21 @@ class UserApplicationService:
                 if self._access_requests is not None
                 else TelegramAccessRequestRepo(db)
             )
-
+            self._episodes = episodes if episodes is not None else EpisodeRepository(db)
+            self._user_events = user_events if user_events is not None else EventRepository(db)
+            self._history = history if history is not None else HistoryRepository(db)
+            self._commands = commands if commands is not None else CommandRepo(db)
         self._admin_ids = frozenset(self._parse_admin_ids(admin_ids, runtime))
         self._testnet_check = testnet_check
         self._clock = clock or (lambda: datetime.now(UTC))
         self._confirmation_ttl = float(confirmation_ttl_seconds)
         self._permission_ttl = int(permission_ttl_seconds)
         self._activity_page_size = int(activity_page_size)
+        self._trade_page_size = int(trade_page_size)
         self._confirmations: dict[str, _ConfirmationRecord] = {}
         self._confirmation_lock = asyncio.Lock()
         self._mutation_locks: dict[str, asyncio.Lock] = {}
+        self._refresh_tasks: dict[str, asyncio.Task] = {}
         self._global_mutation_lock = asyncio.Lock()
 
     @staticmethod
@@ -1205,15 +1266,36 @@ class UserApplicationService:
         return value
 
     async def _snapshot(self, account_id: str, *, refresh: bool) -> tuple[Any, datetime | None]:
-        method = "refresh_snapshot" if refresh else "cached_snapshot"
-        result = await self._call_optional(self._runtime, method, account_id)
-        if result is _MISSING and refresh:
+        if not refresh:
+            result = await self._call_optional(self._runtime, "cached_snapshot", account_id)
+            if result is _MISSING or result is None:
+                return None, None
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], datetime):
+                return result[0], result[1]
+            return result, None
+        task = self._refresh_tasks.get(account_id)
+        if task is None or task.done():
+            task = asyncio.ensure_future(
+                self._call_optional(self._runtime, "refresh_snapshot", account_id)
+            )
+            self._refresh_tasks[account_id] = task
+            task.add_done_callback(
+                lambda done, key=account_id, expected=task: (
+                    self._refresh_tasks.pop(key, None)
+                    if self._refresh_tasks.get(key) is expected
+                    else None
+                )
+            )
+        # Shielded join: one exchange read serves every concurrent caller,
+        # and one cancelled waiter never aborts the others.
+        result = await asyncio.shield(task)
+        if result is _MISSING:
             raise ServiceUnavailableError("account snapshot is unavailable")
-        if result is _MISSING or result is None:
+        if result is None:
             return None, None
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], datetime):
             return result[0], result[1]
-        return result, self._now() if refresh else None
+        return result, self._now()
 
     def _snapshot_ttl_seconds(self) -> float:
         """Bounded freshness window for cached snapshots.
@@ -1389,6 +1471,9 @@ class UserApplicationService:
             notification_enabled=enabled,
             is_admin=context.role is UserRole.ADMIN,
             builder_verified=await self._builder_verified(account_id),
+            overview=await self._overview_for(
+                account_id, snapshot, snapshot_captured_at, system_state
+            ),
         )
 
     async def _identity(self, account_id: str) -> str | None:
@@ -1579,7 +1664,6 @@ class UserApplicationService:
                     snapshot, captured_at = await self._snapshot(account_id, refresh=False)
             else:
                 snapshot, captured_at = await self._snapshot(account_id, refresh=False)
-
             # Bounded freshness TTL: a cached snapshot is only considered
             # fresh while its capture time is within max(2 x reconcile
             # interval, 30s).  Without this bound a live heartbeat would
@@ -1606,16 +1690,7 @@ class UserApplicationService:
             cfg = getattr(self._runtime, "cfg", None)
             fee_buffer_pct = Decimal(str(getattr(cfg, "fee_buffer_pct", "0.001")))
 
-            positions_map = _row_value(snapshot, "positions", _MISSING)
-            raw_positions = (
-                (
-                    positions_map.values()
-                    if isinstance(positions_map, Mapping)
-                    else (positions_map or ())
-                )
-                if positions_map is not _MISSING and positions_map is not None
-                else ()
-            )
+            raw_positions = self._raw_positions(snapshot)
 
             parsed_list: list[PositionSummaryDTO] = []
             for p in raw_positions:
@@ -2694,6 +2769,285 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("activity is unavailable") from None
 
+    # --- S1.4 history contracts (plan §10.8 B7, §11) --------------------------
+
+    async def _history_environment(self) -> str:
+        """History scope environment derived like the testnet boundary."""
+        check = self._testnet_check
+        if check is not None:
+            result = check() if callable(check) else check
+            return "testnet" if _is_true(await _maybe_await(result)) else "mainnet"
+        cfg = getattr(self._runtime, "cfg", None)
+        if cfg is not None:
+            rest = str(getattr(cfg, "rest_base_url", "")).rstrip("/")
+            return "testnet" if rest == TESTNET_REST_URL else "mainnet"
+        marker = getattr(self._runtime, "testnet", _MISSING)
+        return "testnet" if marker is not _MISSING and _is_true(marker) else "mainnet"
+
+    def _require_history(
+        self,
+    ) -> tuple[EpisodeRepository, EventRepository, HistoryRepository]:
+        if self._episodes is None or self._user_events is None or self._history is None:
+            raise ServiceUnavailableError("trade history is unavailable")
+        return self._episodes, self._user_events, self._history
+
+    async def _quantity_assets(
+        self, account_id: str, symbols: Sequence[str]
+    ) -> dict[str, str | None]:
+        """Per-symbol quantity units; unknown stays None, never guessed."""
+        unique = list(dict.fromkeys(symbols))
+        if not unique:
+            return {}
+        result = await self._call_optional(self._runtime, "symbol_assets", account_id, unique)
+        if result is _MISSING or not isinstance(result, Mapping):
+            return dict.fromkeys(unique)
+        assets = quantity_assets(unique, result)
+        return {
+            symbol: asset if isinstance(asset, str) and asset else None
+            for symbol, asset in assets.items()
+        }
+
+    async def trades(
+        self,
+        user_id: int,
+        *,
+        period: str = "7d",
+        cursor: str | None = None,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> TradeListPage:
+        """Owned closed episodes, newest first, over a stable cursor."""
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            episodes, _, history = self._require_history()
+            page_limit = self._trade_page_size if limit is None else limit
+            if isinstance(page_limit, bool) or not isinstance(page_limit, int):
+                raise ValidationError("trade page limit is invalid")
+            if not 1 <= page_limit <= 50:
+                raise ValidationError("trade page limit is invalid")
+            if period not in _TRADE_PERIODS:
+                raise ValidationError("trade period is invalid")
+            if cursor is not None and not isinstance(cursor, str):
+                raise ValidationError("trade cursor is invalid")
+            if symbol is not None and (not isinstance(symbol, str) or not symbol):
+                raise ValidationError("trade symbol filter is invalid")
+            days = _TRADE_PERIODS[period]
+            since_ms = None
+            if days is not None:
+                since_ms = int(self._now().timestamp() * 1000) - days * 86_400_000
+            scope = HistoryScope(account_id, await self._history_environment())
+            try:
+                stored, next_cursor = await episodes.list_closed(
+                    scope, symbol=symbol, since_ms=since_ms, cursor=cursor, limit=page_limit
+                )
+            except ValueError as exc:
+                raise ValidationError("trade cursor is invalid") from exc
+            assets = await self._quantity_assets(
+                account_id, [item.episode.symbol for item in stored]
+            )
+            coverage = await history.coverage_from(scope)
+            return TradeListPage(
+                items=tuple(
+                    present_trade(item.episode, quantity_asset=assets.get(item.episode.symbol))
+                    for item in stored
+                ),
+                next_cursor=next_cursor,
+                as_of=self._now(),
+                coverage_from=datetime.fromtimestamp(coverage / 1000, tz=UTC)
+                if coverage is not None
+                else None,
+                coverage_complete=False,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("trades are unavailable") from None
+
+    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO:
+        """One owned episode by opaque ref; foreign and missing read alike."""
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            episodes, _, _ = self._require_history()
+            if not isinstance(trade_ref, str) or not trade_ref:
+                raise ValidationError("trade reference is invalid")
+            scope = HistoryScope(account_id, await self._history_environment())
+            stored = await episodes.get(scope, trade_ref)
+            if stored is None:
+                raise TradeUnavailableError("trade is unavailable")
+            assets = await self._quantity_assets(account_id, [stored.episode.symbol])
+            return present_trade_detail(stored, quantity_asset=assets.get(stored.episode.symbol))
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("trade is unavailable") from None
+
+    async def trade_events(
+        self,
+        user_id: int,
+        trade_ref: str,
+        *,
+        cursor: int = 0,
+        limit: int | None = None,
+    ) -> TradeEventsPage:
+        """Fills and user events of one owned episode; fills are episode-bound."""
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            episodes, events, history = self._require_history()
+            if not isinstance(trade_ref, str) or not trade_ref:
+                raise ValidationError("trade reference is invalid")
+            page_limit = self._trade_page_size if limit is None else limit
+            if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+                raise ValidationError("trade events cursor is invalid")
+            if isinstance(page_limit, bool) or not isinstance(page_limit, int):
+                raise ValidationError("trade events page limit is invalid")
+            if not 1 <= page_limit <= 50:
+                raise ValidationError("trade events page limit is invalid")
+            scope = HistoryScope(account_id, await self._history_environment())
+            stored = await episodes.get(scope, trade_ref)
+            if stored is None:
+                raise TradeUnavailableError("trade is unavailable")
+            episode = stored.episode
+            start_ms = episode.opened_at if episode.opened_at is not None else 0
+            end_ms = (
+                episode.closed_at
+                if episode.closed_at is not None
+                else int(self._now().timestamp() * 1000)
+            )
+            fills = await history.fills(scope, episode.symbol, Window(start_ms, end_ms))
+            rows = await events.list_by_trade(
+                scope, trade_ref, after_seq=cursor, limit=page_limit + 1
+            )
+            shown = rows[:page_limit]
+            return TradeEventsPage(
+                fills=tuple(present_fill(fill) for fill in fills),
+                events=tuple(present_event(row) for row in shown),
+                next_cursor=str(shown[-1].seq) if len(rows) > page_limit else None,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("trade events are unavailable") from None
+
+    async def activity_feed(
+        self,
+        user_id: int,
+        *,
+        filter: ActivityFilter | str = ActivityFilter.ALL,
+        cursor: int = 0,
+        limit: int | None = None,
+    ) -> ActivityFeedPage:
+        """Structured user-event feed over a stable seq cursor plus pending ops."""
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            _, events, _ = self._require_history()
+            activity_filter = _coerce_activity_filter(filter)
+            page_limit = self._trade_page_size if limit is None else limit
+            if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+                raise ValidationError("feed cursor is invalid")
+            if isinstance(page_limit, bool) or not isinstance(page_limit, int):
+                raise ValidationError("feed page limit is invalid")
+            if not 1 <= page_limit <= 50:
+                raise ValidationError("feed page limit is invalid")
+            scope = HistoryScope(account_id, await self._history_environment())
+            rows = await events.list_owned(
+                scope, kinds=feed_kinds(activity_filter), after_seq=cursor, limit=page_limit + 1
+            )
+            shown = rows[:page_limit]
+            return ActivityFeedPage(
+                items=tuple(present_event(row) for row in shown),
+                next_cursor=str(shown[-1].seq) if len(rows) > page_limit else None,
+                high_water=await events.max_seq(scope),
+                pending=await self._pending_operations(account_id),
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("activity feed is unavailable") from None
+
+    async def _pending_operations(self, account_id: str) -> tuple[PendingOperation, ...]:
+        """Unsettled journal commands as safe pending facts, never payloads."""
+        if self._commands is None:
+            return ()
+        rows = await self._commands.in_flight_for(account_id)
+        now = self._now()
+        pending: list[PendingOperation] = []
+        for row in rows:
+            symbol = _payload_symbol(_row_value(row, "payload"))
+            status = str(_row_value(row, "status", ""))
+            moment = _as_datetime(_row_value(row, "updated_at", _row_value(row, "created_at")))
+            pending.append(
+                PendingOperation(
+                    symbol=symbol,
+                    operation=_PENDING_OPERATIONS.get(
+                        str(_row_value(row, "kind", "")), "operation"
+                    ),
+                    state="unknown" if status == "UNKNOWN" else "pending",
+                    age_seconds=max(int((now - moment).total_seconds()), 0)
+                    if moment is not None
+                    else 0,
+                )
+            )
+        return tuple(pending)
+
+    async def _overview_for(
+        self,
+        account_id: str,
+        snapshot: Any,
+        snapshot_captured_at: datetime | None,
+        system_state: SystemState,
+    ) -> AccountOverview | None:
+        """Dashboard aggregate over one consistent snapshot, or None."""
+        if snapshot is None:
+            return None
+        snapshot_ttl_s = self._snapshot_ttl_seconds()
+        cache_expired = snapshot_captured_at is not None and (
+            (self._now() - snapshot_captured_at).total_seconds() > snapshot_ttl_s
+        )
+        fresh = (
+            snapshot_captured_at is not None
+            and not cache_expired
+            and system_state is SystemState.READY
+        )
+        cfg = getattr(self._runtime, "cfg", None)
+        fee_buffer_pct = Decimal(str(getattr(cfg, "fee_buffer_pct", "0.001")))
+        parsed: list[PositionSummaryDTO] = []
+        for position in self._raw_positions(snapshot):
+            summary = self._parse_position_summary(
+                position, is_fresh=fresh, fee_buffer_pct=fee_buffer_pct
+            )
+            if summary is not None:
+                parsed.append(summary)
+        return build_overview(
+            parsed,
+            available_usdt=self._available_usdt(snapshot),
+            as_of=snapshot_captured_at,
+            freshness=SnapshotFreshness.FRESH if fresh else SnapshotFreshness.STALE,
+        )
+
+    @staticmethod
+    def _raw_positions(snapshot: Any) -> list[Any]:
+        positions_map = _row_value(snapshot, "positions", _MISSING)
+        if positions_map is _MISSING or positions_map is None:
+            return []
+        if isinstance(positions_map, Mapping):
+            return list(positions_map.values())
+        return list(positions_map)
+
+    @staticmethod
+    def _available_usdt(snapshot: Any) -> Decimal | None:
+        raw = _row_value(snapshot, "available_usdt", None)
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return value if value.is_finite() and value >= 0 else None
+
     async def notification_settings(self, user_id: int) -> NotificationSettingsDTO:
         try:
             context = await self._context(user_id)
@@ -3603,15 +3957,53 @@ class UserApplicationService:
             if (value - RISK_MIN) % RISK_STEP != 0:
                 raise ValidationError("risk values are invalid")
             changes: dict[str, Any] = {"risk_percent": value}
-            async with self._account_lock(str(context.account_id)):
+            account_id = str(context.account_id)
+            previous = await self._previous_risk_percent(account_id)
+            async with self._account_lock(account_id):
                 policy = await self._call_required(
-                    self._settings, "patch_policy", str(context.account_id), **changes
+                    self._settings, "patch_policy", account_id, **changes
                 )
+            facts: dict[str, str] = {"risk_percent": format(value, "f")}
+            if previous is not None:
+                facts["previous_percent"] = format(previous, "f")
+            await self._record_system_event(account_id, kind="RISK_CHANGED", facts=facts)
             return self._risk_dto(policy)
         except _SAFE_ERRORS:
             raise
         except Exception:
             raise ServiceUnavailableError("risk update is unavailable") from None
+
+    async def risk_preview(self, user_id: int) -> RiskPreviewDTO:
+        """Money examples for every allowed risk step over the cached snapshot.
+
+        Cached-only on purpose: the ruler screen loads this once and switches
+        ready rows locally. No exchange read, no side effects; a missing
+        balance yields empty steps instead of a zero example.
+        """
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            snapshot, captured_at = await self._snapshot(account_id, refresh=False)
+            available = self._available_usdt(snapshot)
+            if snapshot is None or captured_at is None:
+                freshness = SnapshotFreshness.UNAVAILABLE
+            elif (self._now() - captured_at).total_seconds() > self._snapshot_ttl_seconds():
+                freshness = SnapshotFreshness.STALE
+            else:
+                freshness = SnapshotFreshness.FRESH
+            if available is None:
+                return RiskPreviewDTO(None, (), captured_at, freshness)
+            steps = risk_budget_steps(
+                available,
+                min_percent=RISK_MIN,
+                max_percent=RISK_MAX,
+                step=RISK_STEP,
+            )
+            return RiskPreviewDTO(available, steps, captured_at, freshness)
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("risk preview is unavailable") from None
 
     @_control_audit_boundary("pause")
     async def pause(self, user_id: int) -> DashboardDTO:
@@ -3630,6 +4022,11 @@ class UserApplicationService:
                     allow_new_entries=False,
                 )
                 await self._call_required(self._runtime, "pause_account", account_id)
+            # S1.5: the pause itself is a feed fact; a record failure is
+            # logged and never turns the committed pause into an error.
+            await self._record_system_event(
+                account_id, kind="COPY_PAUSED", facts={"allow_new_entries": False}
+            )
             return await self.dashboard(context.user_id)
         except _SAFE_ERRORS:
             raise
@@ -3645,6 +4042,83 @@ class UserApplicationService:
         else:
             result = getter
         return bool(result)
+
+    async def _record_system_event(
+        self, account_id: str, *, kind: str, facts: dict[str, str]
+    ) -> None:
+        """Best-effort feed record for a committed application action.
+
+        The state change already happened; a storage failure is logged and
+        never turns it into an operation error. Push delivery stays a
+        separate concern (S3 activation); the feed shows the fact now.
+        """
+        try:
+            events = self._user_events
+            if events is None:
+                return
+            scope = HistoryScope(account_id, await self._history_environment())
+            now_ms = int(self._now().timestamp() * 1000)
+            await events.record(
+                scope,
+                kind=kind,
+                occurred_at=now_ms,
+                recorded_at=now_ms,
+                facts=facts,
+                dedup_key=(f"evt:sys:{kind}:{account_id}:{now_ms}:{secrets.token_hex(4)}"),
+                trade_ref=None,
+                notify_eligible=True,
+            )
+        except Exception:  # noqa: BLE001 - feed record must not fail the op
+            log.exception("system event record failed (kind=%s)", kind)
+
+    async def _previous_risk_percent(self, account_id: str) -> Decimal | None:
+        """Last saved risk percent for feed facts; None when unreadable."""
+        try:
+            policy = await self._call_required(self._settings, "get_policy", account_id)
+            return self._decimal_input(_row_value(policy, "risk_percent"), "risk_percent")
+        except Exception:  # noqa: BLE001 - advisory fact only
+            return None
+
+    async def _resume_context(self, account_id: str) -> ResumeContextDTO:
+        """Cached-only resume facts for the confirmation copy.
+
+        Advisory by design: every read degrades to None (unknown) instead of
+        failing begin_confirmation. The enforcing fresh checks still run
+        inside the resume workflow itself.
+        """
+        try:
+            master_in_position: bool | None = await self._master_requires_confirmation()
+        except Exception:
+            master_in_position = None
+        snapshot, captured_at = await self._snapshot(account_id, refresh=False)
+        if snapshot is None or captured_at is None:
+            snapshot_freshness = SnapshotFreshness.UNAVAILABLE
+        elif (self._now() - captured_at).total_seconds() > self._snapshot_ttl_seconds():
+            snapshot_freshness = SnapshotFreshness.STALE
+        else:
+            snapshot_freshness = SnapshotFreshness.FRESH
+        permission_ok = await self._cached_permission_ok(account_id)
+        return ResumeContextDTO(master_in_position, snapshot_freshness, permission_ok)
+
+    async def _cached_permission_ok(self, account_id: str) -> bool | None:
+        """Verified-only cached proof; None when no proof exists either way."""
+        row = await self._validation_row(account_id)
+        if row is None:
+            return None
+        permission, _ = await self._permission(account_id)
+        triple_ok = (
+            permission.can_read is True
+            and permission.can_perp_trade is True
+            and permission.can_withdraw is False
+            and permission.whitelist_ok is True
+        )
+        try:
+            expiry_ms = int(_row_value(row, "expired_ms", 0))
+        except (TypeError, ValueError):
+            return None
+        now_ms = int(self._now().timestamp() * 1000)
+        warning_ok = permission.warning is None
+        return bool(triple_ok and expiry_ms > now_ms and warning_ok)
 
     async def _resume_account(
         self,
@@ -3810,11 +4284,16 @@ class UserApplicationService:
                 context.user_id, confirmation, expected=ConfirmationAction.RESUME
             )
             expected_version = record.account_version
-            return await self._resume_account(
+            account_id = str(context.account_id)
+            dashboard = await self._resume_account(
                 context.user_id,
-                str(context.account_id),
+                account_id,
                 expected_account_version=expected_version,
             )
+            await self._record_system_event(
+                account_id, kind="COPY_RESUMED", facts={"allow_new_entries": True}
+            )
+            return dashboard
         except _SAFE_ERRORS:
             raise
         except Exception:
@@ -3852,6 +4331,11 @@ class UserApplicationService:
             account_version = (
                 None if bound_account is None else await self._account_version(bound_account)
             )
+            # S1.4: RESUME carries proven facts so the confirmation copy
+            # explains the real outcome instead of asserting a master position.
+            resume_context = None
+            if normalized_action is ConfirmationAction.RESUME and bound_account is not None:
+                resume_context = await self._resume_context(bound_account)
             expires = self._now() + timedelta(seconds=self._confirmation_ttl)
             token = _new_confirmation_token()
             record = _ConfirmationRecord(
@@ -3868,6 +4352,7 @@ class UserApplicationService:
                 action=normalized_action,
                 account_id=bound_account,
                 expires_at=expires,
+                resume_context=resume_context,
             )
         except _SAFE_ERRORS:
             raise

@@ -13,6 +13,11 @@ class NotificationSeverity(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+# Closed set of typed keyboard actions. Only an episode deep-link exists
+# today; arbitrary callback payloads are never stored or rendered.
+NOTIFICATION_ACTIONS: frozenset[str] = frozenset({"open_trade"})
+
+
 def _created_at(value: datetime | str | None) -> datetime:
     if value is None:
         return datetime.now(UTC)
@@ -27,7 +32,13 @@ def _created_at(value: datetime | str | None) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class NotificationEvent:
-    """Immutable safe event emitted independently of Telegram delivery."""
+    """Immutable safe event emitted independently of Telegram delivery.
+
+    ``trade_ref`` is a proven follower episode ref and ``action`` a member
+    of ``NOTIFICATION_ACTIONS``; both stay None for legacy engine rows.
+    The keyboard button is assembled on the transport boundary only when
+    both are present — never guessed from command payloads.
+    """
 
     event_key: str
     kind: str
@@ -35,6 +46,8 @@ class NotificationEvent:
     text: str
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     account_id: str | None = None
+    trade_ref: str | None = None
+    action: str | None = None
 
     def __post_init__(self) -> None:
         if not self.event_key:
@@ -49,6 +62,12 @@ class NotificationEvent:
             raise ValueError(f"unsupported notification severity: {self.severity!r}") from exc
         object.__setattr__(self, "severity", severity)
         object.__setattr__(self, "created_at", _created_at(self.created_at))
+        if self.trade_ref is not None and not self.trade_ref:
+            raise ValueError("notification trade_ref must be a non-empty ref or None")
+        if self.action is not None and self.action not in NOTIFICATION_ACTIONS:
+            raise ValueError(f"unsupported notification action: {self.action!r}")
+        if self.action is not None and self.trade_ref is None:
+            raise ValueError("notification action requires a proven trade_ref")
 
 
 MAX_NOTIFICATION_TEXT = 4096

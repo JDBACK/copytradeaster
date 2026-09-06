@@ -37,7 +37,14 @@ from copytradeaster.notifications.protocol import Notifier
 from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.notifications.worker import TelegramOutboxWorker
 from copytradeaster.storage.database import Database
-from copytradeaster.storage.repositories import CommandRepo, SettingsRepo, TelegramUserRepo
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryScope
+from copytradeaster.storage.repositories import (
+    AccountRepo,
+    CommandRepo,
+    SettingsRepo,
+    TelegramUserRepo,
+)
 from copytradeaster.telegram.runtime import TelegramRuntime
 
 NOTIFICATION_RECOVERY_FLOOR_KEY = "stage2_notification_recovery_floor"
@@ -105,6 +112,7 @@ def _build_worker(bot: Any, db: Database, settings: Settings) -> TelegramOutboxW
         db=db,
         concurrency=concurrency,
         poll_interval=float(settings.telegram_outbox_poll_interval_s),
+        webapp_base_url=settings.miniapp_public_url or None,
     )
 
 
@@ -204,8 +212,33 @@ async def recover_notification_outbox(
     floor = _parse_floor(current)
     if notifier is not None:
         await notifier.recover_confirmed_commands(CommandRepo(db), since=floor)
+        await _recover_user_events(db, notifier, floor)
     next_floor = max(floor, current_now)
     await settings.set_flag(NOTIFICATION_RECOVERY_FLOOR_KEY, next_floor.isoformat())
+
+
+async def _recover_user_events(db: Database, notifier: NotificationRouter, floor: datetime) -> int:
+    """Emit eligible user events recorded after the recovery floor.
+
+    Crash-window trades notify from saved facts with their proven trade
+    ref instead of re-guessing text from the command journal; backfill
+    rows stay silent via notify_eligible. Only REAL follower accounts are
+    scanned; SHADOW rows have no recipients and notify nobody.
+    """
+    # Mainnet is fail-closed (CT_ALLOW_MAINNET=false), so every history
+    # scope is testnet today; revisit if mainnet is ever enabled.
+    environment = "testnet"
+    rows = await AccountRepo(db).get_all("follower")
+    scopes = [
+        HistoryScope(str(row["id"]), environment)
+        for row in rows
+        if str(row["execution_mode"] or "REAL") == "REAL"
+    ]
+    return await notifier.recover_user_events(
+        EventRepository(db),
+        scopes,
+        since_ms=int(floor.timestamp() * 1000),
+    )
 
 
 class Stage2Process:

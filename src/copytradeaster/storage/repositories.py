@@ -584,6 +584,30 @@ class CommandRepo:
             "SELECT * FROM execution_commands WHERE command_key=?", (command_key,)
         )
 
+    async def by_client_order_id(self, account_id: str, client_order_id: str) -> Row | None:
+        """Newest command that owns one exchange client order id, if any."""
+        if not account_id or not client_order_id:
+            raise ValueError("command lookup requires an account and order id")
+        return await self.db.fetchone(
+            "SELECT * FROM execution_commands WHERE account_id=? AND client_order_id=? "
+            "ORDER BY created_at DESC, command_key LIMIT 1",
+            (account_id, client_order_id),
+        )
+
+    async def in_flight_for(self, account_id: str, *, limit: int = 20) -> list[Row]:
+        """Unsettled commands of one account for the pending-operations block."""
+        if not account_id:
+            raise ValueError("pending operations require an account")
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("pending operations page must be bounded")
+        return await self.db.fetchall(
+            "SELECT command_key, kind, status, payload, created_at, updated_at"
+            " FROM execution_commands WHERE account_id=?"
+            " AND status IN ('PENDING','SENDING','SUBMITTED','UNKNOWN')"
+            " ORDER BY created_at, command_key LIMIT ?",
+            (account_id, limit),
+        )
+
     async def in_flight(self) -> list[Row]:
         """Commands whose exchange outcome is not settled: UNKNOWN/SENDING/SUBMITTED."""
         return await self.db.fetchall(
@@ -1257,6 +1281,8 @@ class NotificationOutboxRepo:
             _as_iso(event.get("created_at")),
             _as_iso(event.get("updated_at")),
             None if event.get("sent_at") is None else _as_iso(event["sent_at"]),
+            None if event.get("trade_ref") is None else str(event["trade_ref"]),
+            None if event.get("action") is None else str(event["action"]),
         )
 
     async def enqueue(
@@ -1269,6 +1295,8 @@ class NotificationOutboxRepo:
         text: str,
         account_id: str | None = None,
         available_at: datetime | str | None = None,
+        trade_ref: str | None = None,
+        action: str | None = None,
     ) -> int:
         event = {
             "event_key": event_key,
@@ -1279,6 +1307,8 @@ class NotificationOutboxRepo:
             "severity": severity,
             "text": text,
             "available_at": available_at,
+            "trade_ref": trade_ref,
+            "action": action,
         }
         values = self._event_values(event)
         async with self.db.transaction() as conn:
@@ -1286,8 +1316,8 @@ class NotificationOutboxRepo:
                 conn,
                 "INSERT INTO notification_outbox(event_key, telegram_user_id, chat_id, account_id, "
                 "kind, severity, text, status, attempts, available_at, lease_until, claimed_by, "
-                "last_error, created_at, updated_at, sent_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "last_error, created_at, updated_at, sent_at, trade_ref, action) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(event_key, telegram_user_id) DO NOTHING",
                 values,
             )
@@ -1314,8 +1344,8 @@ class NotificationOutboxRepo:
                     "account_id, "
                     "kind, severity, text, status, attempts, available_at, lease_until, "
                     "claimed_by, "
-                    "last_error, created_at, updated_at, sent_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "last_error, created_at, updated_at, sent_at, trade_ref, action) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(event_key, telegram_user_id) DO NOTHING",
                     values,
                 )
@@ -1379,6 +1409,39 @@ class NotificationOutboxRepo:
                 "claimed_by=NULL, available_at=?, updated_at=? "
                 "WHERE status='SENDING' AND lease_until IS NOT NULL AND lease_until<=?",
                 (now_iso, now_iso, now_iso),
+            )
+            return rowcount
+
+    async def prune_terminal(
+        self,
+        *,
+        before: datetime | str,
+        statuses: tuple[str, ...] = ("SENT", "FAILED"),
+        limit: int = 1000,
+    ) -> int:
+        """Delete terminal outbox rows older than ``before``, bounded.
+
+        Retention rule (S1.6 decision): terminal delivery rows are
+        operational ballast, not user history — the facts live in
+        ``user_activity_events`` forever, the outbox only proves delivery.
+        PENDING/SENDING rows are never pruned here. ``before`` is required
+        so no call can silently wipe recent deliveries.
+        """
+        clean = tuple(s for s in statuses if s in ("SENT", "FAILED"))
+        if not clean:
+            raise ValueError("prune statuses must be SENT and/or FAILED")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("prune limit must be a positive integer")
+        before_iso = _as_iso(before)
+        placeholders = ",".join("?" * len(clean))
+        async with self.db.transaction() as conn:
+            rowcount, _ = await _conn_execute(
+                conn,
+                "DELETE FROM notification_outbox WHERE id IN ("
+                "SELECT id FROM notification_outbox "
+                f"WHERE status IN ({placeholders}) AND updated_at<? "
+                "ORDER BY id LIMIT ?) ",
+                (*clean, before_iso, limit),
             )
             return rowcount
 

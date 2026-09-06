@@ -18,6 +18,12 @@ from copytradeaster.notifications.models import (
     clip_plain_text,
 )
 from copytradeaster.notifications.protocol import Notifier, as_notifier
+from copytradeaster.notifications.trade_cards import (
+    event_notification_action,
+    format_user_event,
+)
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryScope
 from copytradeaster.storage.repositories import (
     CommandRepo,
     NotificationOutboxRepo,
@@ -26,6 +32,14 @@ from copytradeaster.storage.repositories import (
 
 log = get_logger(__name__)
 _SAFE_FRAGMENT = re.compile(r"[^A-Za-z0-9_.:-]+")
+_RECOVERY_WARN_KINDS = frozenset({"PROTECTION_UNCONFIRMED", "CONNECTIVITY_LOST"})
+
+
+def _recovery_severity(kind: str) -> NotificationSeverity:
+    """Lost protection and lost connectivity warn; trade facts inform."""
+    if kind in _RECOVERY_WARN_KINDS:
+        return NotificationSeverity.WARN
+    return NotificationSeverity.INFO
 
 
 def _safe_fragment(value: Any, fallback: str = "unknown") -> str:
@@ -116,6 +130,8 @@ class NotificationRouter:
                 "text": clip_plain_text(event.text),
                 "created_at": event.created_at,
                 "updated_at": event.created_at,
+                "trade_ref": event.trade_ref,
+                "action": event.action,
             }
             for row in recipients
         )
@@ -187,4 +203,65 @@ class NotificationRouter:
                 )
             )
             recovered += 1
+        return recovered
+
+    async def recover_user_events(
+        self,
+        events: EventRepository,
+        scopes: Iterable[Any],
+        *,
+        since_ms: int,
+        limit: int = 1000,
+    ) -> int:
+        """Emit eligible user events recorded after a durable floor.
+
+        Backfill-silent rows never notify; unknown kinds are logged and
+        skipped so one bad row cannot break the recovery sweep. The legacy
+        command recovery stays untouched for pre-history rows; both use
+        distinct event_key namespaces, so a crash-window trade can notify
+        twice at most, never silently drop.
+        """
+        if type(since_ms) is not int or since_ms < 0:
+            raise ValueError("user event recovery floor must be a nonnegative integer")
+        if limit <= 0:
+            return 0
+        recovered = 0
+        page = min(limit, 200)
+        for scope in scopes:
+            if not isinstance(scope, HistoryScope):
+                continue
+            after_seq = 0
+            while True:
+                rows = await events.list_owned(scope, after_seq=after_seq, limit=page)
+                if not rows or rows[-1].seq <= after_seq:
+                    break
+                after_seq = rows[-1].seq
+                for stored in rows:
+                    record = stored.event
+                    if record.recorded_at < since_ms or not record.notify_eligible:
+                        continue
+                    try:
+                        text = format_user_event(record)
+                    except ValueError:
+                        log.warning(
+                            "skipping unrenderable user event (kind=%s account_id=%s)",
+                            record.kind,
+                            scope.account_id,
+                        )
+                        continue
+                    await self.emit(
+                        NotificationEvent(
+                            event_key=f"user-event:{record.event_ref}",
+                            account_id=scope.account_id,
+                            kind=f"user.{record.kind}",
+                            severity=_recovery_severity(record.kind),
+                            text=text,
+                            created_at=datetime.fromtimestamp(record.occurred_at / 1000, tz=UTC),
+                            trade_ref=record.trade_ref,
+                            action=event_notification_action(record.kind),
+                        )
+                    )
+                    recovered += 1
+                    if recovered >= limit:
+                        return recovered
         return recovered

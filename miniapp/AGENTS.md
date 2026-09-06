@@ -1,7 +1,7 @@
 # Miniapp Guidelines
 
 Map of `miniapp/`: Vite 8 + React 19 + TypeScript follower SPA served by the bot
-process at `/miniapp/`. Talks to the backend only via 21 POST `/miniapp/api/*`
+process at `/miniapp/`. Talks to the backend only via 26 POST `/miniapp/api/*`
 (routes in `src/copytradeaster/miniapp/server.py`); all business logic lives in
 `UserApplicationService`, never here.
 
@@ -23,7 +23,7 @@ cd miniapp && pnpm lint && pnpm test && pnpm build   # oxlint + vitest + tsc -b 
 main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
   -> sessionDestination(session.ts) maps MiniAppSessionDTO -> destination
   -> home mounts AppShell (navigation.ts RouteState tab + nested[] stack)
-  -> screens fetch via api.ts -> 21 POST /miniapp/api/* -> UserApplicationService
+  -> screens fetch via api.ts -> 26 POST /miniapp/api/* -> UserApplicationService
 ```
 
 - Gate/Wizard/Recovery/Success render standalone (no bottom nav); only `home`

@@ -2763,3 +2763,31 @@ async def test_risk_p24_policy_round_trip_and_audit(environment, caplog):
     ]
     assert len(success) == 1
     assert "changed_fields=risk_percent" in success[0]
+
+
+async def test_pause_records_system_event_in_feed(environment):
+    _, _, _, _, service = environment
+    await service.pause(7)
+    feed = await service.activity_feed(7)
+    assert "COPY_PAUSED" in [item.kind for item in feed.items]
+
+
+async def test_resume_records_system_event_in_feed(environment):
+    _, _, _, _, service = environment
+    await service.pause(7)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+    await service.resume(7, confirmation=confirmation)
+    kinds = [item.kind for item in (await service.activity_feed(7)).items]
+    assert "COPY_PAUSED" in kinds and "COPY_RESUMED" in kinds
+
+
+async def test_update_risk_records_percent_change_in_feed(environment):
+    from copytradeaster.application.models import RiskUpdateInput
+
+    _, _, _, _, service = environment
+    await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02")))
+    (item,) = [
+        item for item in (await service.activity_feed(7)).items if item.kind == "RISK_CHANGED"
+    ]
+    assert item.facts["risk_percent"] == "0.02"
+    assert item.facts["previous_percent"] == "0.01"

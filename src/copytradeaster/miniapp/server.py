@@ -223,6 +223,112 @@ def create_miniapp_app(
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
+    def _cursor_str(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        return raw if isinstance(raw, str) and raw else None
+
+    def _cursor_int(raw: Any) -> int | None:
+        if raw is None:
+            return None
+        if isinstance(raw, str) and raw.isdigit():
+            return int(raw)
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return None
+        return raw
+
+    def _page_limit(raw: Any) -> int | None:
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return None
+        return raw
+
+    async def trades(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request) or {}
+        period = body.get("period", "7d")
+        if period not in {"7d", "30d", "all"}:
+            return _json_error(400, "invalid_input", "Некорректный период истории.")
+        cursor = _cursor_str(body.get("cursor"))
+        if body.get("cursor") is not None and cursor is None:
+            return _json_error(400, "invalid_input", "Некорректный курсор истории.")
+        limit = _page_limit(body.get("limit"))
+        if body.get("limit") is not None and limit is None:
+            return _json_error(400, "invalid_input", "Некорректный размер страницы.")
+        symbol = body.get("symbol")
+        if symbol is not None and (not isinstance(symbol, str) or not symbol):
+            return _json_error(400, "invalid_input", "Некорректный инструмент.")
+        try:
+            return _json_dto(
+                await application.trades(
+                    user_id, period=period, cursor=cursor, limit=limit, symbol=symbol
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def trade(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request) or {}
+        trade_ref = body.get("trade_ref")
+        if not isinstance(trade_ref, str) or not trade_ref:
+            return _json_error(400, "invalid_input", "Некорректная ссылка на сделку.")
+        try:
+            return _json_dto(await application.trade(user_id, trade_ref))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def trade_events(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request) or {}
+        trade_ref = body.get("trade_ref")
+        if not isinstance(trade_ref, str) or not trade_ref:
+            return _json_error(400, "invalid_input", "Некорректная ссылка на сделку.")
+        cursor = _cursor_int(body.get("cursor", 0))
+        if cursor is None:
+            return _json_error(400, "invalid_input", "Некорректный курсор истории.")
+        limit = _page_limit(body.get("limit"))
+        if body.get("limit") is not None and limit is None:
+            return _json_error(400, "invalid_input", "Некорректный размер страницы.")
+        try:
+            return _json_dto(
+                await application.trade_events(user_id, trade_ref, cursor=cursor, limit=limit)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def activity_feed(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        body = await _body(request) or {}
+        filter_raw = body.get("filter", "all")
+        if not isinstance(filter_raw, str) or filter_raw not in {
+            value.value for value in ActivityFilter
+        }:
+            return _json_error(400, "invalid_input", "Некорректный фильтр журнала.")
+        cursor = _cursor_int(body.get("cursor", 0))
+        if cursor is None:
+            return _json_error(400, "invalid_input", "Некорректный курсор истории.")
+        limit = _page_limit(body.get("limit"))
+        if body.get("limit") is not None and limit is None:
+            return _json_error(400, "invalid_input", "Некорректный размер страницы.")
+        try:
+            return _json_dto(
+                await application.activity_feed(
+                    user_id, filter=filter_raw, cursor=cursor, limit=limit
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
     async def notifications(request: web.Request) -> web.Response:
         user_id = await _identity(request)
         if user_id is None:
@@ -252,6 +358,15 @@ def create_miniapp_app(
             return _unauthorized()
         try:
             return _json_dto(await application.risk(user_id))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(exc, MSG_UNAVAILABLE)
+
+    async def risk_preview(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        try:
+            return _json_dto(await application.risk_preview(user_id))
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)
 
@@ -555,9 +670,14 @@ def create_miniapp_app(
     app.router.add_post("/miniapp/api/dashboard", dashboard)
     app.router.add_post("/miniapp/api/positions", positions)
     app.router.add_post("/miniapp/api/activity", activity)
+    app.router.add_post("/miniapp/api/activity/feed", activity_feed)
+    app.router.add_post("/miniapp/api/trades", trades)
+    app.router.add_post("/miniapp/api/trade", trade)
+    app.router.add_post("/miniapp/api/trade/events", trade_events)
     app.router.add_post("/miniapp/api/notifications", notifications)
     app.router.add_post("/miniapp/api/notifications/enabled", notifications_set)
     app.router.add_post("/miniapp/api/risk", risk)
+    app.router.add_post("/miniapp/api/risk/preview", risk_preview)
     app.router.add_post("/miniapp/api/risk/percent", risk_set)
     app.router.add_post("/miniapp/api/status", status)
     app.router.add_post("/miniapp/api/pause", pause)
