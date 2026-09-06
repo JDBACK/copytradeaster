@@ -75,11 +75,13 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `HomeScreen.tsx` (+`home.ts`) | MUTATES pause/resume (+ confirm Sheet); trust strip, metrics, first position | `dashboard`, `pause`, `resume`, `confirmation/begin`, `confirmation/confirm` |
 | `PositionsScreen.tsx` | READ-ONLY list + exported `PositionCard` (entry/now/stop/TP/risk-to-stop/leverage); refresh-only | `positions` |
 | `ActivityScreen.tsx` (+`activityView.ts`) | READ-ONLY journal timeline, filter tabs, append-pagination | `activity` |
-| `RiskScreen.tsx` (+`riskView.ts`) | MUTATES risk-on-Stop: snap-strip ruler + save, exact 1e-5 integer math | `risk`, `risk/percent` |
+| `RiskScreen.tsx` (+`riskView.ts`) | MUTATES risk-on-Stop: draft/confirmed/save integration, exact 1e-5 integer math; ruler control lives in `components/RiskRuler.tsx` | `risk`, `risk/percent` |
 | `SettingsScreen.tsx` (+`settingsView.ts`) | READ-ONLY capability list; navigation only | — (routes to nested) |
 | `NotificationsScreen.tsx` (+`notificationsView.ts`) | MUTATES single toggle (`role=switch`), server-confirmed flip + double-tap gate | `notifications`, `notifications/enabled` |
 | `SystemStatusScreen.tsx` (+`systemStatus.ts`) | READ-ONLY status slice, seq-guarded refresh, transport-stale honesty | `status` |
 | `components/ui.tsx` | Shared `Brand/TrustRail/Sheet/Row/ErrorBox` (+ inline SVG icons) | — |
+| `components/RiskRuler.tsx` | Snap-strip control: native touch/trackpad inertia, mouse drag w/ pointer capture, gated wheel, interruptible settle animator, scrollend+fallback settle, rate-limited selection haptics, save freeze | — |
+| `riskRuler.ts` | Pure ruler decisions: wheel deltaMode normalization + `wheelIntent` gating, ease-out/duration, clamp, haptic rate limit | — |
 | `protectionWarning.ts` | Protection-state → Russian warning copy map | — |
 | `format.ts` | USDT/fee/date/pnl formatting | — |
 
@@ -90,7 +92,7 @@ cd miniapp
 pnpm install          # deps (@walletconnect lazy chunk needs VITE_WC_PROJECT_ID at runtime)
 pnpm dev              # HMR; needs backend on :8080 (VITE_API_TARGET override) — or real bot via dev-up.sh
 pnpm lint             # oxlint (no ESLint)
-pnpm test             # vitest run, 18 files
+pnpm test             # vitest run, 21 files
 pnpm build            # tsc -b && vite build -> dist/ (git-ignored, served by bot at /miniapp/)
 pnpm preview          # vite preview
 ```
@@ -131,8 +133,8 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 ## Testing & QA
 
-18 test files, three styles:
+21 test files, three styles:
 
-- **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format` tests — import helpers directly.
+- **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format/riskRuler` tests — import helpers directly.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/systemStatus/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
-- **Behavior** (jsdom + testing-library, mocked `api.*`): `riskBehavior` (tap→dirty→save, one-POST gate, ruler freeze), `systemStatusBehavior` (races, stale honesty, retry), `accountBuilderBehavior` (load/refresh/reauth/disconnect/seq-guard), `appShellKeepAlive` (mount-all warmup budget, TTL revalidation, scroll slots, seq-guards, partial-ready).
+- **Behavior** (jsdom + testing-library, mocked `api.*`): `riskBehavior` (tap→dirty→save, one-POST gate, ruler freeze), `riskRulerBehavior` (wheel gating/normalization/boundary, drag capture/cancel/suppression scope, animator interruption, settle fallback), `systemStatusBehavior` (races, stale honesty, retry), `accountBuilderBehavior` (load/refresh/reauth/disconnect/seq-guard), `appShellKeepAlive` (mount-all warmup budget, TTL revalidation, scroll slots, seq-guards, partial-ready).

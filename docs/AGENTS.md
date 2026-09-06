@@ -81,6 +81,7 @@
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 | [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md) | План по текущему коду и acceptance-p27. **§14: S1 Backend → G1 → S2 Скорость → G2 → S3 Интерфейс/функциональность → G3.** Backend B1–B10, §19 — скорость F0–F6 и сравнение keep-alive с альтернативами, §20 — итог повторного review. H-номера — mapping прежней редакции. PLAN READY, реализация не начата (2026-09-05) |
+| `MINIAPP_RISK_RULER_2026-09.md` | Шкала риска — первый vertical slice UX-плана (S2.5 lifecycle + S3.4 motion по §21): baseline, изменения, jsdom/node evidence, handoff-чеклист. Браузерная приёмка 15/15 PASS + независимая перепроверка (вердикт: принять) — браузерная часть CLOSED; устройство-часть (Telegram haptics/BackButton/WebKit, snap-stop A/B) отложена на потом → S3.5/G3 (2026-09-06) |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 
@@ -94,6 +95,7 @@
 | `review_stage1_final.md` | Третий проход: dust zero-target edge case | закрыт (миграция #12) |
 | `review_stage1_acceptance.md` | Финальное принятие: flip-регрессия + честное dust-evidence | **Stage 1 принят**, 0 blockers, две P2-заметки |
 | `review_leverage_control_plane.md` | Три прохода ревью leverage control-plane: 4 находки → остаточный P1 (ambiguous ≠ FAILED) → финальный acceptance `69fa148` (2026-08-25) |
+| `review_miniapp_risk_ruler_2026-09.md` | Независимая перепроверка браузерной приёмки шкалы риска: перемер подмножества живым CDP/DOM, все числа сошлись; одна формулировочная находка («в тот же тик» → «в ближайшие кадры») | verdict: приёмка реальная, slice принять; правка применена, разрешение — в `MINIAPP_RISK_RULER_2026-09.md` |
 Это исторический verdict того прохода. Актуальный corrective acceptance после
 нового независимого аудита описан в
 `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md`.

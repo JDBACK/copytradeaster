@@ -1293,6 +1293,23 @@ UI H3–H6; в H1 добавлены retention/capacity для 100 аккаун�
 H6 включает готовый flat resume copy, локальные календарные tests и новые Home
 acceptance-снимки без TrustRail. Реализация остаётся не начатой.
 
+2026-09-06, исполнение: шкала риска реализована как первый vertical slice
+(§21: S2.5 input lifecycle + S3.4 motion) — control выделен в
+`components/RiskRuler.tsx`, pure-решения в `riskRuler.ts`, wheel/drag/settle/
+save-race исправлены, добавлены прерываемое доведение, постоянная геометрия
+highlight, edge fade и selection haptics. Журнал и evidence:
+`docs/reports/MINIAPP_RISK_RULER_2026-09.md`. Физическая приёмка жестов,
+snap-stop A/B и ресурсный cache остаются открытыми; gates G1–G3 этот slice
+не закрывает.
+
+2026-09-06, приёмка slice: браузерная приёмка по handoff-чеклисту — 15/15
+PASS (Headless Chromium/CDP против preview engine), затем независимая
+перепроверка второй сессией — вердикт «приёмка реальная, slice принимать»
+(`docs/reviews/review_miniapp_risk_ruler_2026-09.md`); единственная находка
+формулировочная, применена. Браузерная часть шкалы CLOSED; Telegram
+haptics/BackButton/WebKit и snap-stop A/B **отложены на потом** (устройства
+недоступны) — возврат в S3.5/G3 при их появлении.
+
 Дополнение по скорости: проверены текущий shell, загрузчики экранов, transport,
 revalidation, navigation, lifecycle, bundle и static-cache path. Существующие
 frontend tests и build прошли. Добавлен §19 с performance-пакетами F0–F6.

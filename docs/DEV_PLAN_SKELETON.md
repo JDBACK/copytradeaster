@@ -376,9 +376,17 @@ Activity/бот, local-calendar tests, flat resume, новые снимки и �
 приёмкой touch/мыши/trackpad. Геометрия Aster-шкалы и risk policy сохраняются.
 Подробности, зависимости, файлы и критерии:
 [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
-Реализация не начата; прежние acceptance-статусы не переоткрываются.
+Кампания в целом не начата (S1 backend не стартовал); прежние
+acceptance-статусы не переоткрываются. Изолированный первый slice —
+шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
+2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
+[MINIAPP_RISK_RULER_2026-09.md](reports/MINIAPP_RISK_RULER_2026-09.md));
+устройство-зависимая часть (Telegram haptics, BackButton, WebKit,
+snap-stop A/B) **отложена на потом — устройства недоступны**, возврат
+в S3.5/G3 при их появлении.
 
 - [x] Аудит текущих экранов/снимков и data paths; подробный UX/архитектурный план.
+- [x] Slice «шкала риска» (§21: S2.5 lifecycle + S3.4 motion) — браузерная часть (2026-09-06); не закрывает G1/G2; устройства отложены → S3.5/G3.
 - [ ] S1: Backend — источники, хранение, episodes/PnL, API/settings, outbox; шаги S1.1–S1.6.
 - [ ] G1: Backend принят по §10.9 и контрактам S1; разрешён старт S2.
 - [ ] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings; S2.1–S2.6.

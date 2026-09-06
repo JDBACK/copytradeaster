@@ -1183,6 +1183,19 @@ button.settings-row {
   scrollbar-width: none;
   -ms-overflow-style: none;
   cursor: grab;
+  /* Soft edge fade in the canvas colour: the strip feels continuous beyond
+   * the visible window.  Purely decorative — engines without mask support
+   * keep plain edges, and the focused (always centered) tick's focus ring
+   * is never clipped. */
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 20px, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 20px, #000 calc(100% - 20px), transparent);
+}
+
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  .risk-ruler {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
 }
 
 .risk-ruler::-webkit-scrollbar {
@@ -1191,6 +1204,15 @@ button.settings-row {
 
 .risk-ruler.dragging {
   cursor: grabbing;
+}
+
+/* Snap off while the strip is driven directly (mouse drag) or by the
+ * settle animator: mandatory snap would fight the pointer mid-drag and
+ * stalls programmatic multi-step travel in WebKit.  Snap returns the
+ * moment the gesture/animation ends. */
+.risk-ruler.dragging,
+.risk-ruler.animating {
+  scroll-snap-type: none;
 }
 
 .risk-tick-btn {
@@ -1214,22 +1236,25 @@ button.settings-row {
 
 .risk-tick-mark {
   width: 3px;
-  height: 16px;
+  /* Constant geometry: every mark occupies the full height box and the
+   * fish-eye scales it with transform — selection never relayouts the
+   * strip (the old height 16→26 transition did). */
+  height: 26px;
   border-radius: 2px;
   background: var(--border);
-  /* Fish-eye driven per-frame via --off (0 center → 1 edge); transform only,
-   * no transition — transitions would trail behind the finger. */
-  transform: scaleY(calc(1 - var(--off, 0) * 0.6));
-  transition:
-    height 0.18s ease-out,
-    background-color 0.18s ease-out;
+  transform-origin: center;
+  /* Fish-eye driven per-frame via --off (0 center → 1 edge); transform and
+   * opacity only, no transition — transitions would trail behind the finger. */
+  transform: scaleY(calc(1 - var(--off, 0) * 0.5));
+  opacity: calc(1 - var(--off, 0) * 0.35);
+  transition: background-color 0.12s ease-out;
 }
 
 .risk-tick-label {
   font-size: 12px;
   font-weight: 600;
   opacity: calc(1 - var(--off, 0) * 0.65);
-  transition: color 0.18s ease-out;
+  transition: color 0.12s ease-out;
 }
 
 .risk-tick-btn.active {
@@ -1237,12 +1262,11 @@ button.settings-row {
 }
 
 .risk-tick-btn.active .risk-tick-mark {
-  height: 26px;
   background: var(--champagne);
 }
 
 .risk-tick-btn.active .risk-tick-label {
-  font-weight: 700;
+  opacity: 1;
 }
 
 @media (hover: hover) {
@@ -1253,10 +1277,15 @@ button.settings-row {
 
 @media (prefers-reduced-motion: reduce) {
   .risk-tick-mark {
+    /* Flat static ruler: a single constant height, colour carries state. */
+    height: 18px;
     transform: none;
+    opacity: 1;
+    transition: none;
   }
   .risk-tick-label {
     opacity: 1;
+    transition: none;
   }
 }
 

@@ -4,11 +4,28 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-04):** Stage 1–3 CLOSED в `main`, открытых gates нет.
-> Offline 1089/2/42 (~87%), frontend 168/17, full testnet 42/1, ruff/oxlint clean.
+> Offline 1089/2/42 (~87%), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
 
+- **UX-кампания Mini App (план 2026-09), slice «шкала риска» — браузерная
+  часть CLOSED (2026-09-06):** первый vertical slice по
+  `MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md` §14/§21 (S2.5 input lifecycle +
+  S3.4 motion): control выделен в `components/RiskRuler.tsx` + pure
+  `riskRuler.ts`; wheel gating/deltaMode/границы, pointer-capture drag со
+  scoped suppression, прерываемое доведение 140–220 ms, scrollend+fallback
+  settle, save из ref-draft (надпись ≡ payload), constant-geometry
+  highlight, edge fade, reduced-motion, `hapticSelectionChanged`.
+  Gates: frontend Vitest **224 passed / 21 файл** (новые
+  `riskRuler.test.ts`, `riskRulerBehavior.test.tsx`), oxlint +
+  `tsc -b && vite build` clean; браузерная приёмка **15/15 PASS** +
+  независимая перепроверка (вердикт «принимать») —
+  `docs/reports/MINIAPP_RISK_RULER_2026-09.md`. Backend/торговля не
+  затронуты, offline/testnet counters без изменений. Устройство-зависимая
+  часть (Telegram haptics, BackButton, WebKit-инерция, snap-stop A/B)
+  **отложена на потом — доступа к устройствам нет**; возврат в S3.5/G3.
+  G1–G3 кампании не закрывает.
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /
   CLOSED (2026-09-03, ветка `codex/stage-3-mini-app-part2`):** nested control screen поверх
   `UserApplicationService.account_builder()` — persistent `identity_source`

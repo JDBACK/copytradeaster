@@ -23,6 +23,7 @@ interface TelegramWebApp {
   HapticFeedback?: {
     impactOccurred(style: 'light' | 'medium' | 'heavy'): void
     notificationOccurred(type: 'error' | 'success' | 'warning'): void
+    selectionChanged(): void
   }
 }
 
@@ -62,6 +63,16 @@ export function setupTelegram(): void {
 export function hapticImpact(style: 'light' | 'medium' | 'heavy' = 'light'): void {
   try {
     webApp()?.HapticFeedback?.impactOccurred(style)
+  } catch {
+    /* haptics are best-effort */
+  }
+}
+
+/** Soft step-crossing feedback for continuous pickers (risk ruler).
+ *  Selection correctness never depends on haptics: Telegram may skip them. */
+export function hapticSelectionChanged(): void {
+  try {
+    webApp()?.HapticFeedback?.selectionChanged()
   } catch {
     /* haptics are best-effort */
   }
