@@ -77,6 +77,7 @@ class TelegramOutboxWorker:
         retry_jitter: float = 0.25,
         drain_timeout: float = 5.0,
         webapp_base_url: str | None = None,
+        trade_links_enabled: bool = False,
     ) -> None:
         if bot is None and sender is None:
             raise ValueError("bot or sender is required")
@@ -96,6 +97,10 @@ class TelegramOutboxWorker:
         self._bot = bot
         self._sender = sender
         self._webapp_base_url = (webapp_base_url or "").rstrip("/") or None
+        # S3 capability, not URL presence: the episode deep-link button needs
+        # an accepted owned route. Payload keeps its structured action/ref
+        # while delivery stays text-only until then.
+        self._trade_links_enabled = bool(trade_links_enabled)
         self._outbox = outbox
         self._users = users
         self._worker_id = worker_id or f"telegram-{uuid.uuid4().hex}"
@@ -251,7 +256,11 @@ class TelegramOutboxWorker:
         keys = set(row.keys()) if hasattr(row, "keys") else set()
         trade_ref = row["trade_ref"] if "trade_ref" in keys else None
         action = row["action"] if "action" in keys else None
-        markup = trade_keyboard(trade_ref, action, self._webapp_base_url)
+        markup = (
+            trade_keyboard(trade_ref, action, self._webapp_base_url)
+            if self._trade_links_enabled
+            else None
+        )
         async with self._chat_lock(chat_id):
             await self._pace(chat_id)
             try:

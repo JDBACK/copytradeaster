@@ -33,6 +33,10 @@ from copytradeaster.history.composition import build_history_worker
 from copytradeaster.history.worker import HistoryWorker
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.notifications.console import ConsoleNotifier
+from copytradeaster.notifications.delivery import (
+    ensure_user_event_rollout_floor,
+    recover_user_events_durable,
+)
 from copytradeaster.notifications.protocol import Notifier
 from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.notifications.worker import TelegramOutboxWorker
@@ -192,6 +196,7 @@ async def recover_notification_outbox(
     notifier: NotificationRouter | None,
     *,
     now: datetime,
+    enable_user_event_delivery: bool = False,
 ) -> None:
     """Recover confirmed commands after a durable, non-retroactive floor.
 
@@ -200,6 +205,11 @@ async def recover_notification_outbox(
     the floor advances; a failed recovery therefore retries on the next boot.
     Console-only mode still advances the floor but never creates an outbox or
     worker.
+
+    With ``enable_user_event_delivery`` (S1 default off) the user-event leg
+    uses the durable per-scope cursor instead of the legacy timestamp sweep
+    and records a separate rollout floor on first enable, so accumulated
+    backfill never blasts. Legacy command recovery is identical either way.
     """
 
     settings = SettingsRepo(db)
@@ -207,12 +217,21 @@ async def recover_notification_outbox(
     current_now = _as_utc(now)
     if current is None:
         await settings.set_flag(NOTIFICATION_RECOVERY_FLOOR_KEY, current_now.isoformat())
+        if enable_user_event_delivery:
+            await ensure_user_event_rollout_floor(db, now=current_now)
         return
 
     floor = _parse_floor(current)
     if notifier is not None:
         await notifier.recover_confirmed_commands(CommandRepo(db), since=floor)
-        await _recover_user_events(db, notifier, floor)
+        if enable_user_event_delivery:
+            await _recover_user_events_durable(db, notifier, now=current_now)
+        else:
+            await _recover_user_events(db, notifier, floor)
+    elif enable_user_event_delivery:
+        # Console-only mode advances durable cursors without enqueueing, so
+        # a later enable never retroactively sends the muted backlog.
+        await _recover_user_events_durable(db, None, now=current_now)
     next_floor = max(floor, current_now)
     await settings.set_flag(NOTIFICATION_RECOVERY_FLOOR_KEY, next_floor.isoformat())
 
@@ -241,6 +260,39 @@ async def _recover_user_events(db: Database, notifier: NotificationRouter, floor
     )
 
 
+async def _recover_user_events_durable(
+    db: Database, notifier: NotificationRouter | None, *, now: datetime
+) -> int:
+    """Sweep eligible user events behind the durable per-scope cursor.
+
+    The rollout floor is recorded on first enable; history collection is
+    unaffected because this only reads the already-published event log.
+    """
+    # Mainnet is fail-closed (CT_ALLOW_MAINNET=false), so every history
+    # scope is testnet today; revisit if mainnet is ever enabled.
+    environment = "testnet"
+    rows = await AccountRepo(db).get_all("follower")
+    scopes = [
+        HistoryScope(str(row["id"]), environment)
+        for row in rows
+        if str(row["execution_mode"] or "REAL") == "REAL"
+    ]
+    rollout_floor_ms = await ensure_user_event_rollout_floor(db, now=now)
+    report = await recover_user_events_durable(
+        db, notifier, EventRepository(db), scopes, rollout_floor_ms=rollout_floor_ms
+    )
+    logger.info(
+        "user event delivery sweep recovered=%s skipped_ineligible=%s "
+        "skipped_no_recipient=%s blocked=%s budget_exhausted=%s",
+        report.recovered,
+        report.skipped_ineligible,
+        report.skipped_no_recipient,
+        report.blocked_unrenderable,
+        report.budget_exhausted,
+    )
+    return report.recovered
+
+
 class Stage2Process:
     """Own the complete Stage 2 process lifecycle.
 
@@ -263,6 +315,7 @@ class Stage2Process:
         worker_factory: WorkerFactory = _build_worker,
         clock: Clock = _utc_now,
         history_factory: Callable[[App], HistoryWorker] = build_history_worker,
+        enable_user_event_delivery: bool = False,
     ) -> None:
         self.settings = settings
         self.db = db if db is not None else db_factory(settings.db_path)
@@ -271,6 +324,9 @@ class Stage2Process:
         self._telegram_factory = telegram_factory
         self._worker_factory = worker_factory
         self._history_factory = history_factory
+        # S1 default off: the durable user-event consumer has no boot hook or
+        # recurring drain until S3; history collection never depends on it.
+        self._enable_user_event_delivery = bool(enable_user_event_delivery)
         self.history_worker: HistoryWorker | None = None
         self._clock = clock
         self.app: App | None = None
@@ -316,12 +372,18 @@ class Stage2Process:
                     self.db,
                     notifier,
                     now=self._clock(),
+                    enable_user_event_delivery=self._enable_user_event_delivery,
                 )
             else:
                 # Explicit console-only mode: no durable router and no worker.
                 notifier = ConsoleNotifier()
                 self.notifier = notifier
-                await recover_notification_outbox(self.db, None, now=self._clock())
+                await recover_notification_outbox(
+                    self.db,
+                    None,
+                    now=self._clock(),
+                    enable_user_event_delivery=self._enable_user_event_delivery,
+                )
 
             self.app = self._app_factory(self.settings, self.db, notifier)
             self.application = self._application_factory(self.app)
@@ -471,6 +533,7 @@ def build_stage2_process(
     telegram_factory: TelegramFactory = _build_telegram,
     worker_factory: WorkerFactory = _build_worker,
     clock: Clock = _utc_now,
+    enable_user_event_delivery: bool = False,
 ) -> Stage2Process:
     """Build the production Stage 2 process with explicit test seams."""
     return Stage2Process(
@@ -482,6 +545,7 @@ def build_stage2_process(
         telegram_factory=telegram_factory,
         worker_factory=worker_factory,
         clock=clock,
+        enable_user_event_delivery=enable_user_event_delivery,
     )
 
 

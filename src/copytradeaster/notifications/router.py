@@ -22,7 +22,7 @@ from copytradeaster.notifications.trade_cards import (
     event_notification_action,
     format_user_event,
 )
-from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.events import EventRepository, StoredEvent
 from copytradeaster.storage.history import HistoryScope
 from copytradeaster.storage.repositories import (
     CommandRepo,
@@ -108,18 +108,16 @@ class NotificationRouter:
             recipients[int(admin["telegram_user_id"])] = admin
         return list(recipients.values())
 
-    async def emit(self, event: NotificationEvent) -> None:
-        # Console is deliberately best-effort: a broken local sink must not
-        # prevent durable outbox enqueue.
-        try:
-            await self._console.emit(event)
-        except Exception:  # noqa: BLE001 - local sink must not affect trading
-            log.exception("console notification sink failed")
+    @staticmethod
+    def plan_outbox_rows(
+        event: NotificationEvent, recipients: Iterable[Any]
+    ) -> list[dict[str, Any]]:
+        """Build one durable outbox row per recipient without touching the DB.
 
-        recipients = await self._recipients(event)
-        if not recipients:
-            return
-        await self._outbox.enqueue_many(
+        Shared by the live ``emit`` path and the durable delivery sweep so
+        both persist the identical row shape.
+        """
+        return [
             {
                 "event_key": event.event_key,
                 "account_id": event.account_id,
@@ -134,7 +132,48 @@ class NotificationRouter:
                 "action": event.action,
             }
             for row in recipients
+        ]
+
+    async def prepare_user_event_notification(
+        self, stored: StoredEvent
+    ) -> tuple[NotificationEvent, list[Any]] | None:
+        """Format one stored event and resolve recipients before any commit.
+
+        Returns ``None`` for an explicit deliberate skip: no deliverable
+        recipient exists, so enabling notifications later must never
+        retroactively send it. Raises ``ValueError`` for an unrenderable
+        eligible row (unknown kind, action/ref mismatch); the durable sweep
+        keeps such rows blocking instead of advancing past them silently.
+        """
+        record = stored.event
+        text = format_user_event(record)
+        event = NotificationEvent(
+            event_key=f"user-event:{record.event_ref}",
+            account_id=stored.scope.account_id,
+            kind=f"user.{record.kind}",
+            severity=_recovery_severity(record.kind),
+            text=text,
+            created_at=datetime.fromtimestamp(record.occurred_at / 1000, tz=UTC),
+            trade_ref=record.trade_ref,
+            action=event_notification_action(record.kind),
         )
+        recipients = await self._recipients(event)
+        if not recipients:
+            return None
+        return (event, recipients)
+
+    async def emit(self, event: NotificationEvent) -> None:
+        # Console is deliberately best-effort: a broken local sink must not
+        # prevent durable outbox enqueue.
+        try:
+            await self._console.emit(event)
+        except Exception:  # noqa: BLE001 - local sink must not affect trading
+            log.exception("console notification sink failed")
+
+        recipients = await self._recipients(event)
+        if not recipients:
+            return
+        await self._outbox.enqueue_many(self.plan_outbox_rows(event, recipients))
 
     async def __call__(self, event: NotificationEvent) -> None:
         await self.emit(event)

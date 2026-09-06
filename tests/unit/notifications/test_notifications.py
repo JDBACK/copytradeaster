@@ -681,7 +681,11 @@ async def test_worker_attaches_button_only_for_structured_rows(db):
     from copytradeaster.notifications.worker import TelegramOutboxWorker
 
     worker = TelegramOutboxWorker(
-        bot=MarkupBot(), db=db, per_chat_interval=0, webapp_base_url="https://example.com"
+        bot=MarkupBot(),
+        db=db,
+        per_chat_interval=0,
+        webapp_base_url="https://example.com",
+        trade_links_enabled=True,
     )
     assert await worker.process_once()
     assert await worker.process_once()
