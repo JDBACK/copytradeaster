@@ -16,7 +16,7 @@ class MigrationConflictError(RuntimeError):
     """Fail closed with an actionable diagnostic for unsafe legacy data."""
 
 
-MIGRATIONS: list[str] = [
+MIGRATIONS: list[str | tuple[str, ...]] = [
     """
     CREATE TABLE IF NOT EXISTS schema_migrations(
       version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))
@@ -332,6 +332,111 @@ MIGRATIONS: list[str] = [
     # S1.6 repair companion of entry 34 (see comment there).
     "CREATE INDEX IF NOT EXISTS idx_follower_fills_time ON follower_fills"
     "(account_id, environment, symbol, executed_at)",
+    # C1 stable projection: facts revision per import scope, durable replay
+    # boundaries (origin + latest proven frontier with seed JSON), and typed
+    # episode identity resolutions. Boundaries are saved only after a
+    # successful reconciliation; resolutions share the publication commit.
+    """
+    CREATE TABLE IF NOT EXISTS history_scope_state(
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      facts_revision INTEGER NOT NULL CHECK(facts_revision >= 0),
+      updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+      PRIMARY KEY(account_id, environment, symbol))
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS history_projection_boundaries(
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('origin','latest')),
+      cutoff_ms INTEGER NOT NULL CHECK(cutoff_ms >= 0),
+      mode TEXT NOT NULL CHECK(mode IN ('settled','partial')),
+      seeds_json TEXT NOT NULL,
+      coverage_revision INTEGER NOT NULL CHECK(coverage_revision >= 0),
+      version INTEGER NOT NULL CHECK(version >= 1),
+      updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+      PRIMARY KEY(account_id, environment, symbol, kind))
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS follower_episode_resolutions(
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('canonical','alias','split','merge')),
+      targets_json TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK(revision >= 0),
+      updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+      PRIMARY KEY(account_id, environment, ref))
+    """,
+    # C2 fill ownership (plan §23.3): materialized index over the allocations
+    # already published inside episode payloads, not a second facts source.
+    # Rows are replaced only together with their episode revision inside the
+    # same publish transaction; rebuilds refill from stored payloads. Unique
+    # over scope, episode ref, fill and role; money stays TEXT. One statement
+    # per migration entry: the leading PRIMARY KEY columns already index the
+    # (account, environment, trade_ref) read prefix.
+    """
+    CREATE TABLE IF NOT EXISTS follower_episode_allocations(
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      position_side TEXT NOT NULL,
+      trade_ref TEXT NOT NULL REFERENCES follower_episode_refs(public_ref),
+      exchange_trade_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('entry','exit','unknown')),
+      allocated_qty TEXT NOT NULL,
+      allocated_realized_gross TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+      PRIMARY KEY(account_id, environment, trade_ref, exchange_trade_id, role))
+    """,
+    # C3 deterministic transition events (plan §23.4): widen the event kind
+    # CHECK with HISTORY_CORRECTED, the silent link for superseded pre-C3
+    # evt:* lineage. SQLite cannot ALTER a CHECK, so this entry rebuilds the
+    # table inside the single migration transaction (plan §23 C8): stage to
+    # a fresh table, copy every row verbatim, prove no row was lost or
+    # gained with a parity guard that fails the migration on mismatch,
+    # then swap and recreate the same indexes. Crash-resume safe: an
+    # uncommitted attempt rolls back (the version is recorded only on
+    # commit) and the staging table is dropped first on retry.
+    (
+        "DROP TABLE IF EXISTS user_activity_events_new",
+        """
+        CREATE TABLE user_activity_events_new(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_ref TEXT NOT NULL UNIQUE,
+          account_id TEXT NOT NULL REFERENCES accounts(id),
+          environment TEXT NOT NULL,
+          trade_ref TEXT,
+          kind TEXT NOT NULL CHECK(kind IN ('POSITION_OPENED','POSITION_INCREASED',
+            'POSITION_REDUCED','POSITION_CLOSED','HISTORY_CORRECTED','PROTECTION_SET',
+            'PROTECTION_CHANGED','PROTECTION_UNCONFIRMED','RISK_CHANGED','COPY_PAUSED',
+            'COPY_RESUMED','CONNECTIVITY_LOST','CONNECTIVITY_RESTORED','ENTRY_SKIPPED')),
+          occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+          recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+          facts TEXT NOT NULL,
+          dedup_key TEXT NOT NULL,
+          notify_eligible INTEGER NOT NULL CHECK(notify_eligible IN (0,1)),
+          UNIQUE(account_id, environment, dedup_key))
+        """,
+        "INSERT INTO user_activity_events_new(seq, event_ref, account_id, environment,"
+        " trade_ref, kind, occurred_at, recorded_at, facts, dedup_key, notify_eligible)"
+        " SELECT seq, event_ref, account_id, environment,"
+        " trade_ref, kind, occurred_at, recorded_at, facts, dedup_key, notify_eligible"
+        " FROM user_activity_events",
+        "CREATE TEMP TABLE _c3_event_parity(ok INTEGER CHECK(ok))",
+        "INSERT INTO _c3_event_parity(ok) SELECT (SELECT COUNT(*) FROM user_activity_events_new)"
+        " = (SELECT COUNT(*) FROM user_activity_events)",
+        "DROP TABLE user_activity_events",
+        "ALTER TABLE user_activity_events_new RENAME TO user_activity_events",
+        "CREATE INDEX idx_user_events_feed ON user_activity_events(account_id, environment, seq)",
+        "CREATE INDEX idx_user_events_trade ON user_activity_events"
+        "(account_id, environment, trade_ref)",
+        "DROP TABLE _c3_event_parity",
+    ),
 ]
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version
@@ -363,7 +468,12 @@ class Database:
         await self.conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
 
     async def migrate(self) -> int:
-        """Applies unapplied MIGRATIONS in order; returns number applied."""
+        """Applies unapplied MIGRATIONS in order; returns number applied.
+
+        A tuple entry runs its statements inside the same per-version
+        transaction, so multi-statement rebuilds stay atomic; the version
+        is recorded only on commit.
+        """
         if self.conn is None:
             raise RuntimeError("Database.connect() must be called before migrate()")
         # bootstrap the migration bookkeeping table itself
@@ -380,7 +490,10 @@ class Database:
             try:
                 if version == CASEFOLD_ADDRESS_INDEX_VERSION:
                     await self._assert_casefold_addresses_unique()
-                await self.conn.execute(MIGRATIONS[version])
+                entry = MIGRATIONS[version]
+                steps = entry if isinstance(entry, tuple) else (entry,)
+                for step in steps:
+                    await self.conn.execute(step)
                 await self.conn.execute(
                     "INSERT INTO schema_migrations(version) VALUES (?)", (version,)
                 )
