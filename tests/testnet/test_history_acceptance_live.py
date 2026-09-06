@@ -493,7 +493,13 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
             notify_eligible=True,
         )
         assert [s.episode.public_ref for s in restated] == [ref]
-        assert (await episodes2.load_boundary(scope, SYMBOL)) == boundary_before
+        # The frontier may have grown over an empty range between the runs;
+        # identity is the proven end state, not the exact cutoff number.
+        boundary_after = await episodes2.load_boundary(scope, SYMBOL)
+        assert boundary_after is not None
+        assert boundary_after.seeds == boundary_before.seeds
+        assert boundary_after.mode == boundary_before.mode
+        assert boundary_after.cutoff_ms >= boundary_before.cutoff_ms
         assert (
             len(
                 await history_db2.fetchall(

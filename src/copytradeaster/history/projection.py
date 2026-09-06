@@ -314,7 +314,7 @@ class HistoryProjection:
             version=(1 if boundary_version is None else boundary_version + 1),
         )
         stamp = recorded_at if recorded_at is not None else now_ms
-        return await self._episodes.publish(
+        saved = await self._episodes.publish(
             scope,
             symbol,
             resolved,
@@ -325,6 +325,14 @@ class HistoryProjection:
             origin_seeds=tuple(origin[1].items()) if origin is not None else None,
             origin_start_ms=origin[0] if origin is not None else None,
             now_ms=cutoff_ms if stamp is None else stamp,
+        )
+        if saved or boundary_version is None:
+            return saved
+        # The replay grew the proven frontier but projected nothing new
+        # (no fills in the added range): report what the replayed range
+        # already shows instead of an empty publication.
+        return tuple(
+            await self._episodes.list_range(scope, symbol, replay_start_ms, cutoff_ms)
         )
 
     async def _existing_events(
