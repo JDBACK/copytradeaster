@@ -247,6 +247,11 @@ class HistoryCapture:
         if cutoff < window.start:
             raise HistoryReconciliationError("capture window has no provable coverage")
         replay = await self._projection.plan_replay(scope, symbol, delta, window.start)
+        if replay.start_ms > cutoff:
+            # The proven frontier already covers the requested window and did
+            # not grow: nothing to publish, report the window overlap.
+            stored = tuple(await self._episodes.list_range(scope, symbol, window.start, cutoff))
+            return stored, Span(cutoff, cutoff)
         published = Span(replay.start_ms, cutoff)
         fresh = published.end >= after.response_received - LIVE_ELIGIBLE_MS
         stored = await self.publish_reconciled(
@@ -261,6 +266,13 @@ class HistoryCapture:
             notify_eligible=notify_eligible and fresh,
             delta=delta,
         )
+        if not stored:
+            # The replay slice grew the proven frontier but projected nothing
+            # new. Report what the requested window already shows: the slice
+            # alone cannot overlap episodes that closed before it.
+            stored = tuple(
+                await self._episodes.list_range(scope, symbol, window.start, published.end)
+            )
         return stored, published
 
     async def _read_boundary(

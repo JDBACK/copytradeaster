@@ -339,3 +339,53 @@ async def test_ambiguous_duplicate_records_split_and_keeps_row(storage):
     resolution = await repo.get_resolution(scope, stray_ref)
     assert resolution.kind == "split" and resolution.targets == ()
     assert resolution.reason
+
+
+async def test_recapture_after_frontier_growth_returns_stored_episode(storage):
+    """Restart with a stale hint window: the grown frontier projects nothing
+    new, but the call reports the requested window overlap, not emptiness."""
+    from unittest.mock import AsyncMock
+
+    from copytradeaster.history.capture import HistoryCapture
+    from copytradeaster.history.reader import WindowRead
+    from copytradeaster.history.sync import HistorySynchronizer
+    from tests.unit.history.test_capture import StaticSnapshots
+
+    db, history, scope = storage
+    window = Window(0, 100)
+    await commit(
+        history,
+        scope,
+        [fill(10, "BUY", "2"), fill(60, "SELL", "2", "110", "20")],
+        window,
+    )
+    flat = position(positionAmt="0")
+    capture = HistoryCapture(history, EpisodeRepository(db))
+    (first,) = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        window,
+        before=boundary(flat),
+        after=after_boundary(flat),
+        cutoff=100,
+        recorded_at=5000,
+    )
+    # Fresh objects over the same file, coverage grown over an empty range.
+    await commit(history, scope, [], Window(100, 200))
+    reader = AsyncMock()
+
+    def _read(account_id, symbol, requested, request_budget=8):
+        return WindowRead((), (requested,), (), (), 1)
+
+    reader.fills.side_effect = _read
+    clocks = [0, 100, 2200, 2300]
+    stored, published = await capture.capture_and_publish(
+        scope,
+        "BTCUSDT",
+        window,
+        snapshots=StaticSnapshots([flat]),
+        synchronizer=HistorySynchronizer(reader, history),
+        clock_ms=lambda: clocks.pop(0) if clocks else 2300,
+    )
+    assert published.end == 200
+    assert [s.episode.public_ref for s in stored] == [first.episode.public_ref]
