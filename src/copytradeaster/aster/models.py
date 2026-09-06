@@ -147,6 +147,7 @@ class LeverageBracketResponse(_Camel):
 
 
 class PositionDTO(BaseModel):
+    update_time: StrictInt | None = Field(default=None, alias="updateTime", ge=0)
     symbol: str
     position_amt: Decimal = Field(alias="positionAmt")
     entry_price: Decimal = Field(alias="entryPrice")

@@ -46,6 +46,16 @@ async def test_existing_follower_history_contract(tmp_path):
             assert symbol.baseAsset == "BTC"
             assert symbol.quoteAsset == "USDT"
             assert symbol.marginAsset == "USDT"
+            positions = await client.position_risk("probe", "BTCUSDT")
+            assert positions
+            print(
+                {
+                    "position_update_time_present": all(
+                        p.update_time is not None for p in positions
+                    ),
+                    "position_updates_nonzero": sum(bool(p.update_time) for p in positions),
+                }
+            )
             end = int(time.time() * 1000)
             start = end - 7 * 86400000
             fills = await client.user_trades("probe", "BTCUSDT", start_time=start, end_time=end)

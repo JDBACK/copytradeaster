@@ -208,3 +208,22 @@ Runtime acquisition согласованных boundary snapshots, сериал�
 нужны перед подключением этого seam к worker. Пока runtime не публикует episodes;
 G1 не закрыт. Не считать совпадение ending quantity доказательством полноты
 income/net или достоверности произвольно выбранного seed.
+
+## Шаг 11 — позиционная boundary evidence
+
+PositionDTO сохраняет nullable updateTime без permissive default. Read-only
+signed testnet подтвердил поле у обеих HEDGE-сторон, обе timestamps ненулевые.
+`history/snapshot.py` нормализует signed BOTH и HEDGE magnitude, требует полный
+mode набор без дубликатов и сравнивает qty/entry/updateTime двух снимков.
+Одинаковая qty с новым updateTime не считается неизменной позицией.
+
+Исторический cutoff должен находиться между получением первого ответа и началом
+второго запроса с clock margin 2000 ms; изменения позже cutoff отвергаются.
+Согласованная boundary + отдельная complete fill coverage позволяют восстановить
+начальный qty обратным суммированием. Ненулевой seed остаётся partial entry с
+placeholder ref; это не выдуманная историческая цена входа.
+
+Это механизм проверки, ещё не worker capture state machine. Не приняты:
+устойчивые incremental checkpoints за пределами семидневного окна, согласование
+REST indexing latency, generation barrier и capture/import/recheck wiring.
+Не обещать, что два одинаковых snapshot без полной истории сами доказывают net.
