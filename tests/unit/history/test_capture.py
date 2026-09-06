@@ -11,7 +11,7 @@ import pytest
 
 from copytradeaster.aster.models import OrderDTO, PositionDTO
 from copytradeaster.history.capture import HistoryCapture, read_boundary
-from copytradeaster.history.reader import Window, WindowRead
+from copytradeaster.history.reader import Span, Window, WindowRead
 from copytradeaster.history.reconcile import HistoryReconciliationError
 from copytradeaster.history.snapshot import PositionBoundary
 from copytradeaster.history.sync import HistorySynchronizer
@@ -247,7 +247,7 @@ async def test_capture_and_publish_wires_import_then_proven_publish(storage):
         synchronizer=HistorySynchronizer(reader, history),
         clock_ms=manual_clock([0, 100, 3000, 3100]),
     )
-    assert published == window
+    assert published == Span(0, 100)
     assert len(stored) == 1 and stored[0].episode.remaining_qty == D(1)
     assert len(await history.fills(scope, "BTCUSDT", window)) == 1
 
@@ -272,7 +272,7 @@ async def test_fast_import_waits_out_margin_then_publishes(storage):
         clock_ms=manual_clock([0, 100, 150, 160, 2150, 2160]),
         sleep=fake_sleep,
     )
-    assert published == window
+    assert published == Span(0, 100)
     assert len(stored) == 1
     assert slept == [pytest.approx(1.95)]
     assert len(await history.fills(scope, "BTCUSDT", window)) == 1
@@ -332,7 +332,7 @@ async def test_stale_window_extends_to_live_edge_and_publishes(storage):
         sleep=fake_sleep,
     )
     assert seen == [Window(0, 1_000_050)]
-    assert published == Window(0, 1_000_050)
+    assert published == Span(0, 1_000_050)
     assert len(stored) == 1 and stored[0].episode.remaining_qty == D(1)
     assert slept == [pytest.approx(1.95)]
 
@@ -405,7 +405,7 @@ async def test_prepare_defers_fresh_frontier_without_exchange_reads(storage):
     await commit_empty(history, scope, Window(0, 1000))
     capture = scheduled_capture(db, history)
     assert await capture.prepare_window(scope, "BTCUSDT", 2999) is None
-    assert await capture.prepare_window(scope, "BTCUSDT", 3000) == Window(0, 1000)
+    assert await capture.prepare_window(scope, "BTCUSDT", 3000) == Span(0, 1000)
 
 
 async def test_prepare_skips_published_frontier_and_reuses_start(storage):
@@ -415,21 +415,21 @@ async def test_prepare_skips_published_frontier_and_reuses_start(storage):
     capture = scheduled_capture(db, history)
     assert await capture.prepare_window(scope, "BTCUSDT", 20000) is None
     await history.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=500, now_ms=6000)
-    assert await capture.prepare_window(scope, "BTCUSDT", 20000) == Window(0, 1000)
+    assert await capture.prepare_window(scope, "BTCUSDT", 20000) == Span(0, 1000)
 
 
-async def test_prepare_clamps_span_deterministically(storage):
+async def test_prepare_returns_unclamped_import_hint(storage):
     db, history, scope = storage
     await commit_empty(history, scope, Window(0, 500_000_000))
     await commit_empty(history, scope, Window(500_000_000, 800_000_000))
     await history.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=None, now_ms=1)
     capture = scheduled_capture(db, history)
-    assert await capture.prepare_window(scope, "BTCUSDT", 900_000_000) == Window(
-        195_200_000, 800_000_000
-    )
+    # Seven days bound the exchange request, never the replay: the hint
+    # spans the full retained coverage and identity comes from boundaries.
+    assert await capture.prepare_window(scope, "BTCUSDT", 900_000_000) == Span(0, 800_000_000)
 
 
-async def test_settled_gate_publishes_close_of_unknown_open(storage):
+async def test_partial_start_publishes_close_of_unknown_open(storage):
     db, history, scope = storage
     flat = position(positionAmt="0")
     capture = scheduled_capture(db, history)
@@ -443,33 +443,37 @@ async def test_settled_gate_publishes_close_of_unknown_open(storage):
         after=boundary(flat, started=2400, received=2500),
         cutoff=300,
         recorded_at=5000,
-        require_settled=True,
     )
     assert stored.episode.closed_at == 260 and stored.episode.quality == "partial_history"
 
 
-async def test_settled_gate_refuses_mid_position_window(storage):
+async def test_mid_position_window_publishes_partial_once(storage):
     db, history, scope = storage
     window = Window(0, 100)
     await commit(history, scope, [fill(60, "BUY", "2")], window)
     row = position(positionAmt="5")
     capture = scheduled_capture(db, history)
-    with pytest.raises(HistoryReconciliationError, match="open position"):
-        await capture.publish_reconciled(
-            scope,
-            "BTCUSDT",
-            window,
-            before=boundary(row),
-            after=after_boundary(row),
-            cutoff=100,
-            recorded_at=5000,
-            require_settled=True,
-        )
-    assert await db.fetchall("SELECT * FROM follower_episodes") == []
-    assert await EventRepository(db).list_owned(scope) == []
+    kwargs = dict(
+        scope=scope,
+        symbol="BTCUSDT",
+        window=window,
+        before=boundary(row),
+        after=after_boundary(row),
+        cutoff=100,
+        recorded_at=5000,
+    )
+    (stored,) = await capture.publish_reconciled(**kwargs)
+    assert stored.episode.quality == "partial_history"
+    # A second publication of the same proven range is a no-op that returns
+    # the same episode instead of minting a second identity.
+    assert await capture.publish_reconciled(**kwargs) == (stored,)
+    assert len(await db.fetchall("SELECT * FROM follower_episodes")) == 1
+    assert [row.event.kind for row in await EventRepository(db).list_owned(scope)] == [
+        "POSITION_OPENED"
+    ]
 
 
-async def test_settled_gate_publishes_flat_start_and_flat_end(storage):
+async def test_flat_window_publishes_settled_close(storage):
     db, history, scope = storage
     flat = position(positionAmt="0")
     capture = scheduled_capture(db, history)
@@ -483,7 +487,6 @@ async def test_settled_gate_publishes_flat_start_and_flat_end(storage):
         after=after_boundary(flat),
         cutoff=100,
         recorded_at=5000,
-        require_settled=True,
     )
     assert stored.episode.closed_at == 70
     opened, closed = await EventRepository(db).list_owned(scope)
@@ -546,13 +549,21 @@ async def test_run_scheduled_deferral_records_error_and_raises(storage):
     await commit(history, scope, [fill(60, "BUY", "2")], window)
     reader = AsyncMock()
     reader.fills.return_value = WindowRead((), (window,), (), (), 1)
-    moved = position(positionAmt="5")
+
+    class MovingSnapshots:
+        def __init__(self):
+            self.calls = 0
+
+        async def position_risk(self, account_id, symbol):
+            self.calls += 1
+            return [position(positionAmt="2" if self.calls == 1 else "5")]
+
     capture = scheduled_capture(db, history)
-    with pytest.raises(HistoryReconciliationError, match="open position"):
+    with pytest.raises(HistoryReconciliationError, match="position changed"):
         await capture.run_scheduled(
             scope,
             "BTCUSDT",
-            snapshots=StaticSnapshots([moved]),
+            snapshots=MovingSnapshots(),
             synchronizer=HistorySynchronizer(reader, history),
             now_ms=10000,
             clock_ms=manual_clock([0, 500, 4000, 4100]),
@@ -659,4 +670,15 @@ async def test_confirmed_stop_observation_emits_protection_set(storage):
     assert kinds == ["POSITION_OPENED", "PROTECTION_SET"]
     protection = (await EventRepository(db).list_owned(scope))[1].event
     assert protection.trade_ref is None and protection.occurred_at == 60
-    assert protection.facts == {"symbol": "BTCUSDT", "slot": "stop", "new_price": "61900"}
+    command = await db.fetchone(
+        "SELECT created_at FROM execution_commands WHERE command_key='cmd-ct-stop-1'"
+    )
+    assert protection.facts == {
+        "symbol": "BTCUSDT",
+        "slot": "stop",
+        "new_price": "61900",
+        "leg": "BOTH",
+        "command_key": "cmd-ct-stop-1",
+        "command_created_at": command["created_at"],
+        "time_source": "observation",
+    }

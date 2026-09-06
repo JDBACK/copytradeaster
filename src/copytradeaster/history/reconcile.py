@@ -7,14 +7,14 @@ from decimal import Decimal
 
 from copytradeaster.domain.models import PosSide
 from copytradeaster.history.models import Episode
-from copytradeaster.history.reader import Window
+from copytradeaster.history.reader import Span, Window
 
 
 class HistoryReconciliationError(ValueError):
     """Current evidence cannot certify the projected history."""
 
 
-def require_coverage(window: Window, complete: Sequence[tuple[int, int]]) -> None:
+def require_coverage(window: Window | Span, complete: Sequence[tuple[int, int]]) -> None:
     next_time = window.start
     for start, end in sorted(complete):
         if end < next_time:

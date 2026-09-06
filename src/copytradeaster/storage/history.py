@@ -8,12 +8,14 @@ financial history. Projection and user events will share this transaction path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import aiosqlite
 
 from copytradeaster.aster.models import IncomeDTO, OrderDTO, UserTradeDTO
-from copytradeaster.history.reader import Window, WindowRead
+from copytradeaster.history.models import ImportDelta
+from copytradeaster.history.reader import Span, Window, WindowRead
 from copytradeaster.storage.database import Database
 
 
@@ -43,11 +45,19 @@ class HistoryRepository:
         result: WindowRead[UserTradeDTO],
         *,
         checked_at: int,
-    ) -> None:
+    ) -> ImportDelta:
+        """Store one import batch and report what actually changed.
+
+        The facts revision bumps inside the same transaction whenever new
+        facts land or coverage newly completes; a repeat import of identical
+        evidence returns ``inserted_count == 0`` and ``coverage_changed ==
+        False`` so replay can stand down.
+        """
         if not symbol or any(row.symbol != symbol for row in result.rows):
             raise ValueError("fill symbol mismatch")
         self._validate_result(window, result)
         async with self._db.transaction() as conn:
+            before = await _complete_intervals(conn, scope, "fills", symbol)
             batch = []
             for row in result.rows:
                 values = (
@@ -67,13 +77,46 @@ class HistoryRepository:
                     row.time,
                 )
                 batch.append(values)
-            await _insert_facts(
+            inserted = await _insert_facts(
                 conn,
                 "follower_fills",
                 ("account_id", "environment", "symbol", "exchange_trade_id"),
                 batch,
             )
             await self._commit_windows(conn, scope, "fills", symbol, window, result, checked_at)
+            after = await _complete_intervals(conn, scope, "fills", symbol)
+            changed_from = min((row.time for row in result.rows), default=None)
+            coverage_changed = before != after
+            coverage_from = _new_coverage_start(before, after)
+            revision = await _bump_scope_revision(
+                conn, scope, symbol, checked_at, changed=inserted > 0 or coverage_changed
+            )
+            states = await conn.execute(
+                "SELECT MAX(end_ms) FROM history_sync_state WHERE account_id=? "
+                "AND environment=? AND stream='fills' AND symbol=? AND state='complete'",
+                (scope.account_id, scope.environment, symbol),
+            )
+            try:
+                frontier = await states.fetchone()
+            finally:
+                await states.close()
+            return ImportDelta(
+                inserted_count=inserted,
+                changed_from_ms=changed_from if inserted > 0 else None,
+                coverage_changed=coverage_changed,
+                coverage_changed_from_ms=coverage_from,
+                verified_through_ms=frontier[0] if frontier and frontier[0] is not None else None,
+                facts_revision=revision,
+            )
+
+    async def facts_revision(self, scope: HistoryScope, symbol: str) -> int:
+        """Durable import revision for one scope/symbol; 0 means never imported."""
+        row = await self._db.fetchone(
+            "SELECT facts_revision FROM history_scope_state "
+            "WHERE account_id=? AND environment=? AND symbol=?",
+            (scope.account_id, scope.environment, symbol),
+        )
+        return int(row["facts_revision"]) if row is not None else 0
 
     async def commit_income(
         self,
@@ -208,7 +251,9 @@ class HistoryRepository:
             (scope.account_id, scope.environment, symbol, start_ms, end_ms, error, now_ms),
         )
 
-    async def fills(self, scope: HistoryScope, symbol: str, window: Window) -> list[UserTradeDTO]:
+    async def fills(
+        self, scope: HistoryScope, symbol: str, window: Window | Span
+    ) -> list[UserTradeDTO]:
         rows = await self._db.fetchall(
             "SELECT * FROM follower_fills WHERE account_id=? AND environment=? AND symbol=? "
             "AND executed_at BETWEEN ? AND ? ORDER BY executed_at, length(exchange_trade_id), "
@@ -318,15 +363,29 @@ class HistoryRepository:
     async def latest_protection_places(
         self, scope: HistoryScope, symbol: str, before_ms: int
     ) -> list[dict]:
-        """Newest stop/take-profit placement per slot strictly before a time."""
+        """Newest stop/take-profit placement per leg and slot before a time.
+
+        The partition key is ``(kind, leg)`` with the leg derived from the
+        placement *command* payload (``positionSide``, one-way orders
+        honestly read as ``BOTH``), never from the mutable observation row
+        alone: two legs of the same slot converge independently.
+        """
         if not symbol or type(before_ms) is not int or before_ms < 0:
             raise ValueError("protection baseline requires a symbol and time")
+        leg = (
+            "CASE WHEN json_valid(c.payload) THEN COALESCE(NULLIF(UPPER(TRIM("
+            "json_extract(c.payload,'$.positionSide'))),'')"
+            ",'BOTH') ELSE 'BOTH' END"
+        )
         rows = await self._db.fetchall(
-            "SELECT order_id,client_order_id,command_key,kind,status,observed_at FROM ("
-            "SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY observed_at DESC,"
-            " order_id DESC) AS rn FROM follower_order_observations "
-            "WHERE account_id=? AND environment=? AND symbol=? "
-            "AND kind IN ('PLACE_STOP','PLACE_TP') AND observed_at < ?) WHERE rn=1",
+            "SELECT order_id,client_order_id,command_key,kind,status,observed_at,leg FROM ("
+            f"SELECT o.order_id,o.client_order_id,o.command_key,o.kind,o.status,o.observed_at,"
+            f"{leg} AS leg, ROW_NUMBER() OVER (PARTITION BY o.kind,{leg} "
+            "ORDER BY o.observed_at DESC, o.order_id DESC) AS rn "
+            "FROM follower_order_observations o "
+            "LEFT JOIN execution_commands c ON c.command_key=o.command_key "
+            "WHERE o.account_id=? AND o.environment=? AND o.symbol=? "
+            "AND o.kind IN ('PLACE_STOP','PLACE_TP') AND o.observed_at < ?) WHERE rn=1",
             (scope.account_id, scope.environment, symbol, before_ms),
         )
         return [dict(row) for row in rows]
@@ -334,7 +393,14 @@ class HistoryRepository:
     async def protection_canceled_before(
         self, scope: HistoryScope, symbol: str, replaced_coid: str, before_ms: int
     ) -> bool:
-        """Whether a confirmed cancel removed one protection order earlier."""
+        """Whether a confirmed cancel removed one protection order earlier.
+
+        Exchange observations are the first proof; CONFIRMED journal cancel
+        commands are the second (an exchange-unknown ``-2011`` confirm writes
+        no observation, yet proves the order no longer rests). A proven
+        cancel with an unreadable journal time excludes the slot rather than
+        risking a stale baseline claim.
+        """
         if not symbol or not replaced_coid or type(before_ms) is not int or before_ms < 0:
             raise ValueError("cancel check requires a symbol, order id and time")
         row = await self._db.fetchone(
@@ -347,7 +413,20 @@ class HistoryRepository:
             "LIMIT 1",
             (scope.account_id, scope.environment, symbol, before_ms, replaced_coid),
         )
-        return row is not None
+        if row is not None:
+            return True
+        cmds = await self._db.fetchall(
+            "SELECT created_at FROM execution_commands "
+            "WHERE account_id=? AND kind='CANCEL_ORDER' AND status='CONFIRMED' "
+            "AND json_valid(payload) AND json_extract(payload,'$.origClientOrderId')=? "
+            "AND json_extract(payload,'$.symbol')=?",
+            (scope.account_id, replaced_coid, symbol),
+        )
+        for cmd in cmds:
+            created_ms = _iso_to_ms(cmd["created_at"])
+            if created_ms is None or created_ms < before_ms:
+                return True
+        return False
 
     async def record_order_check(
         self,
@@ -404,6 +483,19 @@ class HistoryRepository:
         )
 
 
+def _iso_to_ms(value: object) -> int | None:
+    """Journal ISO time as epoch ms; None when unreadable (never invented)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp() * 1000)
+
+
 def _decimal_text(value: Decimal) -> str:
     text = format(value, "f")
     if "." in text:
@@ -411,14 +503,73 @@ def _decimal_text(value: Decimal) -> str:
     return "0" if value == 0 else text
 
 
+async def _complete_intervals(
+    conn: aiosqlite.Connection, scope: HistoryScope, stream: str, symbol: str
+) -> tuple[tuple[int, int], ...]:
+    cursor = await conn.execute(
+        "SELECT start_ms,end_ms FROM history_sync_state WHERE account_id=? "
+        "AND environment=? AND stream=? AND symbol=? AND state='complete' ORDER BY start_ms",
+        (scope.account_id, scope.environment, stream, symbol),
+    )
+    try:
+        rows = await cursor.fetchall()
+    finally:
+        await cursor.close()
+    return tuple((int(row[0]), int(row[1])) for row in rows)
+
+
+def _new_coverage_start(
+    before: tuple[tuple[int, int], ...], after: tuple[tuple[int, int], ...]
+) -> int | None:
+    """Earliest start the ``after`` set covers that ``before`` did not."""
+    starts = [
+        start
+        for start, _ in after
+        if not any(prev_start <= start <= prev_end for prev_start, prev_end in before)
+    ]
+    return min(starts) if starts else None
+
+
+async def _bump_scope_revision(
+    conn: aiosqlite.Connection,
+    scope: HistoryScope,
+    symbol: str,
+    checked_at: int,
+    *,
+    changed: bool,
+) -> int:
+    cursor = await conn.execute(
+        "SELECT facts_revision FROM history_scope_state "
+        "WHERE account_id=? AND environment=? AND symbol=?",
+        (scope.account_id, scope.environment, symbol),
+    )
+    try:
+        row = await cursor.fetchone()
+    finally:
+        await cursor.close()
+    revision = int(row[0]) if row is not None else 0
+    if changed:
+        revision += 1
+        cursor = await conn.execute(
+            "INSERT INTO history_scope_state VALUES (?,?,?,?,?) "
+            "ON CONFLICT(account_id,environment,symbol) DO UPDATE SET "
+            "facts_revision=excluded.facts_revision,updated_at=excluded.updated_at",
+            (scope.account_id, scope.environment, symbol, revision, checked_at),
+        )
+        await cursor.close()
+    return revision
+
+
 async def _insert_facts(
     conn: aiosqlite.Connection,
     table: str,
     key_columns: tuple[str, ...],
     rows: list[tuple],
-) -> None:
+) -> int:
+    """Insert new facts only; returns the stored row count."""
     # Table/columns are internal constants, never transport input. Batch both
     # lookups and inserts to avoid one aiosqlite thread hop per individual fill.
+    inserted = 0
     for offset in range(0, len(rows), 200):
         chunk = rows[offset : offset + 200]
         keyed = {}
@@ -447,6 +598,8 @@ async def _insert_facts(
                 list(keyed.values()),
             )
             await cursor.close()
+            inserted += len(keyed)
+    return inserted
 
 
 async def _compact_coverage(

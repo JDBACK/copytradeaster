@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
 from copytradeaster.aster.models import PositionDTO, UserTradeDTO
 from copytradeaster.domain.models import PosSide, Side
 from copytradeaster.history.models import PositionSeed
-from copytradeaster.history.reader import Window
+from copytradeaster.history.reader import Span, Window
 from copytradeaster.history.reconcile import HistoryReconciliationError
 
 
@@ -79,27 +79,27 @@ class PositionBoundary:
         return {leg.side: leg.quantity for leg in self.legs}
 
 
-def infer_starting_seeds(
-    boundary: PositionBoundary,
-    window: Window,
+def derive_starting_seeds(
+    symbol: str,
+    ending: Mapping[PosSide, Decimal],
     fills: Sequence[UserTradeDTO],
     *,
     placeholder_ref: Callable[[PosSide], str],
 ) -> dict[PosSide, PositionSeed]:
-    """Only after unchanged-boundary and complete-window proofs by the caller.
+    """Walk authoritative ending quantities back over fills to the start.
 
-    A nonzero inferred starting position has an unknown entry and remains partial.
-    This does not establish cost coverage or historical ownership of any order.
+    The caller scopes ``fills`` to the replay range; every fill must belong
+    to ``symbol``. A nonzero start keeps the caller-supplied stable ref so a
+    later correction supplements the same link instead of minting a new one.
+    This does not establish cost coverage or historical order ownership.
     """
-    quantities = boundary.quantities()
+    quantities = dict(ending)
     seen = {}
     with localcontext() as context:
         context.prec = 80
         for fill in fills:
-            if fill.symbol != boundary.symbol or fill.position_side not in quantities:
+            if fill.symbol != symbol or fill.position_side not in quantities:
                 raise HistoryReconciliationError("fill outside snapshot scope")
-            if not window.start <= fill.time <= window.end:
-                raise HistoryReconciliationError("fill outside import boundary")
             if fill.trade_id in seen:
                 if seen[fill.trade_id] != fill:
                     raise HistoryReconciliationError("conflicting fill identity")
@@ -115,3 +115,23 @@ def infer_starting_seeds(
         leg: PositionSeed(qty, placeholder_ref(leg) if qty != 0 else None)
         for leg, qty in quantities.items()
     }
+
+
+def infer_starting_seeds(
+    boundary: PositionBoundary,
+    window: Window | Span,
+    fills: Sequence[UserTradeDTO],
+    *,
+    placeholder_ref: Callable[[PosSide], str],
+) -> dict[PosSide, PositionSeed]:
+    """Only after unchanged-boundary and complete-window proofs by the caller.
+
+    A nonzero inferred starting position has an unknown entry and remains partial.
+    This does not establish cost coverage or historical ownership of any order.
+    """
+    for fill in fills:
+        if not window.start <= fill.time <= window.end:
+            raise HistoryReconciliationError("fill outside import boundary")
+    return derive_starting_seeds(
+        boundary.symbol, boundary.quantities(), fills, placeholder_ref=placeholder_ref
+    )

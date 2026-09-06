@@ -5,8 +5,11 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from copytradeaster.history.reader import HistoryReader, Window
+from copytradeaster.history.models import ImportDelta
+from copytradeaster.history.reader import HistoryReader, Span, Window
 from copytradeaster.storage.history import HistoryRepository, HistoryScope
+
+MAX_REQUEST_SPAN_MS = 7 * 86400000
 
 
 class HistorySynchronizer:
@@ -54,10 +57,11 @@ class HistorySynchronizer:
         self,
         scope: HistoryScope,
         symbol: str,
-        fallback: Window,
+        fallback: Window | Span,
         *,
         request_budget: int = 8,
-    ) -> None:
+    ) -> ImportDelta:
+        """Import one bounded step and report what changed for replay planning."""
         window = await self._next_window(scope, "fills", symbol, fallback)
         result = await self._reader.fills(
             scope.account_id,
@@ -65,7 +69,7 @@ class HistorySynchronizer:
             window,
             request_budget=request_budget,
         )
-        await self._repository.commit_fills(
+        return await self._repository.commit_fills(
             scope,
             symbol,
             window,
@@ -89,7 +93,7 @@ class HistorySynchronizer:
         scope: HistoryScope,
         stream: str,
         symbol: str,
-        fallback: Window,
+        fallback: Window | Span,
     ) -> Window:
         states = await self._repository.windows(scope, stream, symbol)
         for row in states:
@@ -102,5 +106,6 @@ class HistorySynchronizer:
             # Bounded overlap recovers late exchange facts. Pending windows above
             # retain priority; no gap is silently promoted to complete coverage.
             start = min(fallback.end, max(fallback.start, max(verified_ends) - 60000))
-            return Window(start, fallback.end)
-        return fallback
+            return Window(max(start, fallback.end - MAX_REQUEST_SPAN_MS), fallback.end)
+        end = min(fallback.end, fallback.start + MAX_REQUEST_SPAN_MS)
+        return Window(fallback.start, end)

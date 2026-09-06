@@ -46,6 +46,8 @@ class HistoryReadClient(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Window:
+    """One exchange-sized request range: ordered, at most seven days."""
+
     start: int
     end: int
 
@@ -54,6 +56,25 @@ class Window:
             raise ValueError("window timestamps must be integers")
         if self.start < 0 or not 0 <= self.end - self.start <= 7 * 86400000:
             raise ValueError("window must be ordered and at most seven days")
+
+
+@dataclass(frozen=True, slots=True)
+class Span:
+    """An unbounded ordered range for import hints, replay and reads.
+
+    Seven days bound the exchange request (``Window``), never the retained
+    history: import chunks a span into windows across sweeps, and replay
+    reads the full span from durable storage.
+    """
+
+    start: int
+    end: int
+
+    def __post_init__(self) -> None:
+        if type(self.start) is not int or type(self.end) is not int:
+            raise ValueError("span timestamps must be integers")
+        if self.start < 0 or self.end < self.start:
+            raise ValueError("span must be ordered")
 
 
 @dataclass(frozen=True, slots=True)
