@@ -7,6 +7,7 @@ financial history. Projection and user events will share this transaction path.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -481,6 +482,144 @@ class HistoryRepository:
                 observed_at,
             ),
         )
+
+    async def fills_by_trade_ids(
+        self, scope: HistoryScope, keys: Sequence[tuple[str, str]]
+    ) -> list[UserTradeDTO]:
+        """Owned fills for exact ``(symbol, exchange_trade_id)`` keys.
+
+        C5 money read (plan §23.6): no time-range or side-only selection, so
+        overlapping HEDGE legs never leak and two fills sharing a numeric id
+        on different symbols stay distinct. Empty keys return no rows.
+        """
+        wanted = tuple(keys)
+        if not wanted:
+            return []
+        if any(
+            not isinstance(symbol, str) or not symbol or not isinstance(trade, str) or not trade
+            for symbol, trade in wanted
+        ):
+            raise ValueError("fill keys must be nonempty symbol and trade id strings")
+        if len(set(wanted)) != len(wanted):
+            raise ValueError("fill keys must be unique")
+        pairs = ",".join("(?,?)" for _ in wanted)
+        params: tuple[object, ...] = (scope.account_id, scope.environment)
+        params += tuple(value for key in wanted for value in key)
+        rows = await self._db.fetchall(
+            "SELECT * FROM follower_fills WHERE account_id=? AND environment=? "
+            f"AND (symbol,exchange_trade_id) IN ({pairs}) "
+            "ORDER BY executed_at, length(exchange_trade_id), exchange_trade_id",
+            params,
+        )
+        return [
+            UserTradeDTO(
+                id=int(row["exchange_trade_id"]),
+                orderId=int(row["order_id"]),
+                symbol=row["symbol"],
+                side=row["side"],
+                positionSide=row["position_side"],
+                qty=row["qty"],
+                price=row["price"],
+                quoteQty=row["quote_qty"],
+                realizedPnl=row["realized_pnl"],
+                commission=row["commission"],
+                commissionAsset=row["commission_asset"],
+                time=row["executed_at"],
+            )
+            for row in rows
+        ]
+
+    async def cashflows_for_symbols(
+        self, scope: HistoryScope, symbols: Sequence[str]
+    ) -> list[IncomeDTO]:
+        """Owned cashflows for the requested symbols, oldest first.
+
+        C5 money read (plan §23.6): the canonical signed source for
+        commissions, funding and builder flows. Symbol-empty global rows are
+        included so no proven flow is silently dropped; callers attribute
+        them explicitly and never treat a non-empty response as complete.
+        """
+        wanted = tuple(symbols)
+        if not wanted:
+            return []
+        if any(not isinstance(symbol, str) or not symbol for symbol in wanted):
+            raise ValueError("cashflow symbols must be nonempty strings")
+        if len(set(wanted)) != len(wanted):
+            raise ValueError("cashflow symbols must be unique")
+        marks = ",".join("?" for _ in wanted)
+        rows = await self._db.fetchall(
+            "SELECT * FROM follower_cash_flows WHERE account_id=? AND environment=? "
+            f"AND (symbol IN ({marks}) OR symbol='') "
+            "ORDER BY occurred_at, income_type, tran_id",
+            (scope.account_id, scope.environment, *wanted),
+        )
+        return [
+            IncomeDTO(
+                symbol=row["symbol"],
+                incomeType=row["income_type"],
+                income=row["amount"],
+                asset=row["asset"],
+                time=row["occurred_at"],
+                tranId=row["tran_id"],
+                tradeId=row["exchange_trade_id"],
+            )
+            for row in rows
+        ]
+
+    async def sibling_refs(
+        self, scope: HistoryScope, keys: Sequence[tuple[str, str]]
+    ) -> tuple[str, ...]:
+        """Every episode ref sharing one of the given allocation keys.
+
+        C5 money read (plan §23.6): a shared flip fill loads ALL sibling
+        allocations even when the sibling episode sits outside the current
+        page, so the signed COMMISSION total splits exactly once.
+        """
+        wanted = tuple(keys)
+        if not wanted:
+            return ()
+        if any(
+            not isinstance(symbol, str) or not symbol or not isinstance(trade, str) or not trade
+            for symbol, trade in wanted
+        ):
+            raise ValueError("allocation keys must be nonempty symbol and trade id strings")
+        if len(set(wanted)) != len(wanted):
+            raise ValueError("allocation keys must be unique")
+        pairs = ",".join("(?,?)" for _ in wanted)
+        params: tuple[object, ...] = (scope.account_id, scope.environment)
+        params += tuple(value for key in wanted for value in key)
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT trade_ref FROM follower_episode_allocations "
+            "WHERE account_id=? AND environment=? "
+            f"AND (symbol,exchange_trade_id) IN ({pairs}) ORDER BY trade_ref",
+            params,
+        )
+        return tuple(str(row["trade_ref"]) for row in rows)
+
+    async def builder_policy(self, scope: HistoryScope) -> str:
+        """Durable fee policy for money proof; the cap never becomes an expense.
+
+        C5 money read (plan §23.6): ``direct`` accounts prove
+        ``included_in_commission`` (no separate builder flow expected);
+        ``builder`` accounts and unknown rows stay ``unknown`` so their net
+        keeps a concrete gap instead of an invented zero. Only proven USDT
+        flows ever count as costs.
+        """
+        row = await self._db.fetchone(
+            "SELECT identity_source FROM accounts WHERE id=?",
+            (scope.account_id,),
+        )
+        if row is None:
+            return "unknown"
+        try:
+            source = str(row["identity_source"] or "direct").strip().lower()
+        except (TypeError, ValueError, AttributeError):
+            return "unknown"
+        if source == "builder":
+            return "unknown"
+        if source == "direct":
+            return "included_in_commission"
+        return "unknown"
 
 
 def _iso_to_ms(value: object) -> int | None:

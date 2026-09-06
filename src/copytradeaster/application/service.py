@@ -9,6 +9,8 @@ importing Telegram types here.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import inspect
 import json
@@ -108,6 +110,7 @@ from copytradeaster.application.trade_views import (
     risk_budget_steps,
 )
 from copytradeaster.aster.trading_api import AsterError
+from copytradeaster.history.accounting import EpisodeMoney, load_episode_money
 from copytradeaster.history.models import TradeResolutionDTO
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
 from copytradeaster.onboarding.builder import validate_builder_record
@@ -543,6 +546,65 @@ def _coerce_activity_filter(value: Any) -> ActivityFilter:
         except ValueError:
             pass
     raise ValidationError("activity filter is invalid")
+
+
+_FEED_CURSOR_PREFIX = "v1:"
+_FEED_CURSOR_FILTERS = ("all", "trade", "system")
+
+
+def _encode_feed_cursor(
+    *,
+    scope: HistoryScope,
+    filter_value: str,
+    high_water: int,
+    last_occurred_at: int,
+    last_seq: int,
+) -> str:
+    """Opaque v1 feed cursor: scope token, filter, high water, last tuple."""
+    payload = {
+        "filter": filter_value,
+        "high_water": high_water,
+        "last_occurred_at": last_occurred_at,
+        "last_seq": last_seq,
+        "scope": f"{scope.account_id}:{scope.environment}",
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _FEED_CURSOR_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_feed_cursor(cursor: str) -> tuple[str, str, int, int, int]:
+    """Split a v1 feed cursor; any malformed input is a plain ValueError."""
+    if not isinstance(cursor, str) or not cursor.startswith(_FEED_CURSOR_PREFIX):
+        raise ValueError("feed cursor version is invalid")
+    encoded = cursor[len(_FEED_CURSOR_PREFIX) :]
+    if not encoded:
+        raise ValueError("feed cursor is invalid")
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise ValueError("feed cursor is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("feed cursor is invalid")
+    scope_token = payload.get("scope")
+    filter_value = payload.get("filter")
+    high_water = payload.get("high_water")
+    last_occurred_at = payload.get("last_occurred_at")
+    last_seq = payload.get("last_seq")
+    if not isinstance(scope_token, str) or not scope_token or ":" not in scope_token:
+        raise ValueError("feed cursor scope is invalid")
+    if not isinstance(filter_value, str):
+        raise ValueError("feed cursor filter is invalid")
+    if filter_value not in _FEED_CURSOR_FILTERS:
+        raise ValueError("feed cursor filter is invalid")
+    if type(high_water) is not int or high_water < 0:
+        raise ValueError("feed cursor high-water is invalid")
+    if type(last_occurred_at) is not int or last_occurred_at < 0:
+        raise ValueError("feed cursor position is invalid")
+    if type(last_seq) is not int or last_seq < 1:
+        raise ValueError("feed cursor position is invalid")
+    if last_seq > high_water:
+        raise ValueError("feed cursor position is beyond the pinned snapshot")
+    return scope_token, filter_value, high_water, last_occurred_at, last_seq
 
 
 def _is_true(value: Any) -> bool:
@@ -2843,6 +2905,18 @@ class UserApplicationService:
             for symbol, asset in assets.items()
         }
 
+    async def _trade_money(
+        self, scope: HistoryScope, refs: Sequence[str]
+    ) -> dict[str, EpisodeMoney]:
+        """Proof-driven money for owned refs; empty in, empty out."""
+        if not refs:
+            return {}
+        episodes, _, history = self._require_history()
+        batch = await load_episode_money(
+            scope, tuple(refs), history_repo=history, episodes_repo=episodes
+        )
+        return dict(batch.money)
+
     async def trades(
         self,
         user_id: int,
@@ -2883,13 +2957,21 @@ class UserApplicationService:
                 account_id, [item.episode.symbol for item in stored]
             )
             coverage = await history.coverage_from(scope)
+            now = self._now()
+            money = await self._trade_money(scope, [item.episode.public_ref for item in stored])
             return TradeListPage(
                 items=tuple(
-                    present_trade(item.episode, quantity_asset=assets.get(item.episode.symbol))
+                    present_trade(
+                        item.episode,
+                        quantity_asset=assets.get(item.episode.symbol),
+                        money=money.get(item.episode.public_ref),
+                        revision=item.revision,
+                        as_of=now,
+                    )
                     for item in stored
                 ),
                 next_cursor=next_cursor,
-                as_of=self._now(),
+                as_of=now,
                 coverage_from=datetime.fromtimestamp(coverage / 1000, tz=UTC)
                 if coverage is not None
                 else None,
@@ -2919,7 +3001,14 @@ class UserApplicationService:
                 raise TradeSplitError("trade split into several episodes")
             stored = owned.stored
             assets = await self._quantity_assets(account_id, [stored.episode.symbol])
-            return present_trade_detail(stored, quantity_asset=assets.get(stored.episode.symbol))
+            now = self._now()
+            money = await self._trade_money(scope, [owned.canonical_ref])
+            return present_trade_detail(
+                stored,
+                quantity_asset=assets.get(stored.episode.symbol),
+                money=money.get(owned.canonical_ref),
+                as_of=now,
+            )
         except _SAFE_ERRORS:
             raise
         except Exception:
@@ -3033,33 +3122,128 @@ class UserApplicationService:
         user_id: int,
         *,
         filter: ActivityFilter | str = ActivityFilter.ALL,
-        cursor: int = 0,
+        cursor: int | str | None = 0,
         limit: int | None = None,
     ) -> ActivityFeedPage:
-        """Structured user-event feed over a stable seq cursor plus pending ops."""
+        """Structured user-event feed over a pinned snapshot plus pending ops.
+
+        The first page (``cursor`` omitted, ``None``, or a legacy bare int)
+        pins ``high_water`` to the current max seq and reads ``seq <=
+        high_water`` newest first (``occurred_at DESC, seq DESC``). A
+        continuation passes the opaque ``v1:`` cursor holding the scope
+        token, the pinned filter, the pinned high water, and the last
+        ``(occurred_at, seq)`` tuple; rows above the water never interleave.
+        ``latest_seq`` is the live max at response time so the UI can banner
+        new events. The cursor is never authorization: ownership is
+        re-checked on every request and a foreign scope token fails closed.
+
+        Feed rows are immutable events; a correction arrives as a new
+        ``HISTORY_CORRECTED`` row above a fresh high water, so the page
+        carries no episode/coverage revision. Facts revisions live
+        per-symbol (and coverage per stream/symbol); no single cheap
+        account-level revision exists, and inventing a ``MAX()`` aggregate
+        would signal change when the feed did not move. A
+        correction-model ``history_page_changed`` signal is therefore
+        C1-resolution-driven future work, not part of this snapshot.
+        """
         try:
             context, _, _ = await self._owned_account(user_id, allow_disabled=True)
             account_id = str(context.account_id)
             _, events, _ = self._require_history()
             activity_filter = _coerce_activity_filter(filter)
             page_limit = self._trade_page_size if limit is None else limit
-            if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
-                raise ValidationError("feed cursor is invalid")
             if isinstance(page_limit, bool) or not isinstance(page_limit, int):
                 raise ValidationError("feed page limit is invalid")
             if not 1 <= page_limit <= 50:
                 raise ValidationError("feed page limit is invalid")
             scope = HistoryScope(account_id, await self._history_environment())
-            rows = await events.list_owned(
-                scope, kinds=feed_kinds(activity_filter), after_seq=cursor, limit=page_limit + 1
-            )
-            shown = rows[:page_limit]
-            return ActivityFeedPage(
-                items=tuple(present_event(row) for row in shown),
-                next_cursor=str(shown[-1].seq) if len(rows) > page_limit else None,
-                high_water=await events.max_seq(scope),
-                pending=await self._pending_operations(account_id),
-            )
+            kinds = feed_kinds(activity_filter)
+            if (
+                cursor is None
+                or isinstance(cursor, int)
+                or (isinstance(cursor, str) and cursor.isdigit())
+            ):
+                # Legacy seq-only callers: any bare int (or digit string, or
+                # omitted cursor) is a first-page request that pins now. The
+                # numeric value is not a position; continuation needs v1.
+                if isinstance(cursor, bool):
+                    raise ValidationError("feed cursor is invalid")
+                if isinstance(cursor, int) and cursor < 0:
+                    raise ValidationError("feed cursor is invalid")
+                try:
+                    rows, pinned = await events.list_feed_page(
+                        scope,
+                        kinds=kinds,
+                        high_water=None,
+                        last_occurred_at=None,
+                        last_seq=None,
+                        limit=page_limit + 1,
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                latest = await events.max_seq(scope)
+                shown = rows[:page_limit]
+                if len(rows) > page_limit:
+                    last = shown[-1]
+                    next_cursor: str | None = _encode_feed_cursor(
+                        scope=scope,
+                        filter_value=activity_filter.value,
+                        high_water=pinned,
+                        last_occurred_at=last.event.occurred_at,
+                        last_seq=last.seq,
+                    )
+                else:
+                    next_cursor = None
+                return ActivityFeedPage(
+                    items=tuple(present_event(row) for row in shown),
+                    next_cursor=next_cursor,
+                    high_water=pinned,
+                    latest_seq=latest,
+                    pending=await self._pending_operations(account_id),
+                )
+            if isinstance(cursor, str) and cursor.startswith(_FEED_CURSOR_PREFIX):
+                try:
+                    scope_token, cursor_filter, pinned, last_occurred_at, last_seq = (
+                        _decode_feed_cursor(cursor)
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                if scope_token != f"{scope.account_id}:{scope.environment}":
+                    raise ValidationError("feed cursor scope mismatch")
+                if cursor_filter != activity_filter.value:
+                    raise ValidationError("feed cursor filter mismatch")
+                try:
+                    rows, _ = await events.list_feed_page(
+                        scope,
+                        kinds=kinds,
+                        high_water=pinned,
+                        last_occurred_at=last_occurred_at,
+                        last_seq=last_seq,
+                        limit=page_limit + 1,
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                latest = await events.max_seq(scope)
+                shown = rows[:page_limit]
+                if len(rows) > page_limit:
+                    last = shown[-1]
+                    next_cursor = _encode_feed_cursor(
+                        scope=scope,
+                        filter_value=activity_filter.value,
+                        high_water=pinned,
+                        last_occurred_at=last.event.occurred_at,
+                        last_seq=last.seq,
+                    )
+                else:
+                    next_cursor = None
+                return ActivityFeedPage(
+                    items=tuple(present_event(row) for row in shown),
+                    next_cursor=next_cursor,
+                    high_water=pinned,
+                    latest_seq=latest,
+                    pending=await self._pending_operations(account_id),
+                )
+            raise ValidationError("feed cursor is invalid")
         except _SAFE_ERRORS:
             raise
         except Exception:

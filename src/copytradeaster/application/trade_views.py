@@ -17,9 +17,12 @@ from decimal import Decimal
 from copytradeaster.application.models import (
     AccountOverview,
     ActivityFilter,
+    EpisodeMoneyView,
     EpisodeSource,
     FillFacts,
     HistoryQuality,
+    MoneyComponent,
+    MoneyState,
     PositionSide,
     PositionSummaryDTO,
     RiskCoverage,
@@ -30,10 +33,40 @@ from copytradeaster.application.models import (
     TradeListItem,
     TradeState,
 )
+from copytradeaster.history.accounting import EpisodeMoney
 from copytradeaster.history.models import Episode, TradeResolutionDTO
 from copytradeaster.storage.episodes import AllocatedFill, EpisodeRepository, StoredEpisode
 from copytradeaster.storage.events import EVENT_KINDS, StoredEvent
 from copytradeaster.storage.history import HistoryScope
+
+_COMMISSION_ISSUES = frozenset(
+    {
+        "partial_history",
+        "income_incomplete",
+        "fill_missing",
+        "shared_fill_commission",
+        "commission_missing",
+        "commission_mismatch",
+        "non_usdt_cost",
+    }
+)
+_FUNDING_ISSUES = frozenset(
+    {
+        "partial_history",
+        "income_incomplete",
+        "funding_unattributed",
+        "non_usdt_cost",
+    }
+)
+_BUILDER_ISSUES = frozenset(
+    {
+        "partial_history",
+        "builder_unknown",
+        "builder_unattributed",
+        "builder_policy_conflict",
+        "non_usdt_cost",
+    }
+)
 
 _TRADE_FEED_KINDS = frozenset(
     {
@@ -66,10 +99,18 @@ def episode_side(direction: str) -> PositionSide | None:
     return None
 
 
-def present_trade(episode: Episode, *, quantity_asset: str | None) -> TradeListItem:
-    """One episode as a list card; money is canonical, net is absent."""
+def present_trade(
+    episode: Episode,
+    *,
+    quantity_asset: str | None,
+    money: EpisodeMoney | None = None,
+    revision: int = 0,
+    as_of: datetime | None = None,
+) -> TradeListItem:
+    """One episode as a list card; money is canonical, net needs proof."""
     closed = episode.closed_at is not None
     executed = episode.exit_qty if closed else episode.remaining_qty
+    view = _money_view(money, revision=revision, as_of=as_of) if money is not None else None
     return TradeListItem(
         trade_ref=episode.public_ref,
         symbol=episode.symbol,
@@ -81,19 +122,34 @@ def present_trade(episode: Episode, *, quantity_asset: str | None) -> TradeListI
         closed_at=_as_datetime(episode.closed_at),
         executed_qty=_money(executed) if executed is not None else None,
         realized_pnl_gross_usdt=_money(episode.realized_pnl_gross),
-        net_pnl_usdt=None,
+        net_pnl_usdt=view.net if view is not None else None,
         quality=HistoryQuality(episode.quality),
+        result_state=view.result_state if view is not None else "gross_only",
+        money=view,
     )
 
 
-def present_trade_detail(stored: StoredEpisode, *, quantity_asset: str | None) -> TradeDetailDTO:
+def present_trade_detail(
+    stored: StoredEpisode,
+    *,
+    quantity_asset: str | None,
+    money: EpisodeMoney | None = None,
+    as_of: datetime | None = None,
+) -> TradeDetailDTO:
     """Episode card plus its proven money breakdown and provenance."""
     episode = stored.episode
     duration = None
     if episode.opened_at is not None and episode.closed_at is not None:
         duration = episode.closed_at - episode.opened_at
+    view = _money_view(money, revision=stored.revision, as_of=as_of) if money is not None else None
     return TradeDetailDTO(
-        trade=present_trade(episode, quantity_asset=quantity_asset),
+        trade=present_trade(
+            episode,
+            quantity_asset=quantity_asset,
+            money=money,
+            revision=stored.revision,
+            as_of=as_of,
+        ),
         entry_qty=_money(episode.entry_qty),
         exit_qty=_money(episode.exit_qty),
         remaining_qty=_money(episode.remaining_qty) if episode.remaining_qty is not None else None,
@@ -102,6 +158,39 @@ def present_trade_detail(stored: StoredEpisode, *, quantity_asset: str | None) -
         duration_ms=duration,
         revision=stored.revision,
         position_side=episode.position_side.value,
+        result_state=view.result_state if view is not None else "gross_only",
+        money=view,
+    )
+
+
+def _money_component(
+    known: Decimal, relevant: frozenset[str], flat: frozenset[str]
+) -> MoneyComponent:
+    """One component's proven amount plus its own complete/partial/unavailable state."""
+    own = tuple(sorted(flat & relevant))
+    if not own:
+        state = MoneyState.COMPLETE
+    elif known != 0:
+        state = MoneyState.PARTIAL
+    else:
+        state = MoneyState.UNAVAILABLE
+    return MoneyComponent(known_amount=_money(known), state=state, issues=own)
+
+
+def _money_view(money: EpisodeMoney, *, revision: int, as_of: datetime | None) -> EpisodeMoneyView:
+    """Proof-driven view: net only with sufficient proof, else null plus gaps."""
+    flat = frozenset(money.issues)
+    result_state = "net_complete" if money.net is not None else "gross_only"
+    return EpisodeMoneyView(
+        gross=_money(money.gross),
+        net=_money(money.net) if money.net is not None else None,
+        commission=_money_component(money.commission, _COMMISSION_ISSUES, flat),
+        funding=_money_component(money.funding, _FUNDING_ISSUES, flat),
+        builder=_money_component(money.builder, _BUILDER_ISSUES, flat),
+        result_state=result_state,
+        issues=money.issues,
+        as_of=as_of,
+        revision=revision,
     )
 
 

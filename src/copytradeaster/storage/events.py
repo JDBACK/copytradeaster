@@ -224,6 +224,66 @@ class EventRepository:
         )
         return [_decode(scope, row) for row in rows]
 
+    async def list_feed_page(
+        self,
+        scope: HistoryScope,
+        *,
+        kinds: Sequence[str] | None = None,
+        high_water: int | None = None,
+        last_occurred_at: int | None = None,
+        last_seq: int | None = None,
+        limit: int = 50,
+    ) -> tuple[list[StoredEvent], int]:
+        """Stable UI page over a pinned snapshot, newest first (C7, plan §23.8).
+
+        The delivery scan keeps using :meth:`list_owned` / ``scan_after_seq``
+        (C6, ``seq ASC`` past a seq cursor); this is the UI read path: the
+        first page passes ``high_water=None`` to pin the current max seq,
+        later pages pass the pinned high water plus the last
+        ``(occurred_at, seq)`` tuple. Rows satisfy ``seq <= high_water`` and,
+        past the first page, ``(occurred_at, seq) < (last_occurred_at,
+        last_seq)``, ordered ``occurred_at DESC, seq DESC`` so events
+        recorded above the pinned water never interleave into open pages.
+        Returns the rows plus the pinned high water.
+        """
+        if kinds is not None:
+            kinds = tuple(kinds)
+            if not kinds or any(kind not in EVENT_KINDS for kind in kinds):
+                raise ValueError("unknown event kind filter")
+        if high_water is not None and (type(high_water) is not int or high_water < 0):
+            raise ValueError("feed high-water must be a nonnegative integer")
+        if (last_occurred_at is None) != (last_seq is None):
+            raise ValueError("feed page position is invalid")
+        if last_occurred_at is not None and last_seq is not None:
+            if type(last_occurred_at) is not int or last_occurred_at < 0:
+                raise ValueError("feed page position is invalid")
+            if type(last_seq) is not int or last_seq < 1:
+                raise ValueError("feed page position is invalid")
+        _check_limit(limit)
+        if high_water is None:
+            if last_occurred_at is not None:
+                raise ValueError("feed page position requires a pinned high-water")
+            pinned = await self.max_seq(scope)
+        else:
+            pinned = high_water
+            if last_seq is not None and last_seq > pinned:
+                raise ValueError("feed page position is beyond the pinned snapshot")
+        params: list[object] = [scope.account_id, scope.environment, pinned]
+        where = "account_id=? AND environment=? AND seq<=?"
+        if kinds is not None:
+            where += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        if last_occurred_at is not None and last_seq is not None:
+            where += " AND (occurred_at < ? OR (occurred_at = ? AND seq < ?))"
+            params.extend([last_occurred_at, last_occurred_at, last_seq])
+        rows = await self._db.fetchall(
+            "SELECT seq,event_ref,trade_ref,kind,occurred_at,recorded_at,"
+            f"facts,dedup_key,notify_eligible FROM user_activity_events WHERE {where}"
+            f" ORDER BY occurred_at DESC, seq DESC LIMIT {limit}",
+            tuple(params),
+        )
+        return [_decode(scope, row) for row in rows], pinned
+
     async def max_seq(self, scope: HistoryScope) -> int:
         """Newest feed position; zero when the account has no events yet."""
         row = await self._db.fetchone(

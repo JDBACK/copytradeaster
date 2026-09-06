@@ -331,20 +331,24 @@ async def test_activity_feed_filters_and_reports_high_water(history_env):
         )
     page = await service.activity_feed(USER_ID)
     assert [item.kind for item in page.items] == [
-        "POSITION_OPENED",
-        "PROTECTION_SET",
-        "RISK_CHANGED",
         "COPY_PAUSED",
+        "RISK_CHANGED",
+        "PROTECTION_SET",
+        "POSITION_OPENED",
     ]
-    assert page.high_water == 4 and page.next_cursor is None and page.pending == ()
+    assert page.high_water == 4 and page.latest_seq == 4
+    assert page.next_cursor is None and page.pending == ()
     trade_only = await service.activity_feed(USER_ID, filter="trade")
-    assert [item.kind for item in trade_only.items] == ["POSITION_OPENED", "PROTECTION_SET"]
+    assert [item.kind for item in trade_only.items] == ["PROTECTION_SET", "POSITION_OPENED"]
     system_only = await service.activity_feed(USER_ID, filter=ActivityFilter.SYSTEM)
-    assert [item.kind for item in system_only.items] == ["RISK_CHANGED", "COPY_PAUSED"]
+    assert [item.kind for item in system_only.items] == ["COPY_PAUSED", "RISK_CHANGED"]
     first = await service.activity_feed(USER_ID, limit=2)
-    assert first.next_cursor == "2" and len(first.items) == 2
-    second = await service.activity_feed(USER_ID, cursor=int(first.next_cursor), limit=2)
-    assert [item.kind for item in second.items] == ["RISK_CHANGED", "COPY_PAUSED"]
+    assert first.next_cursor is not None and first.next_cursor.startswith("v1:")
+    assert [item.kind for item in first.items] == ["COPY_PAUSED", "RISK_CHANGED"]
+    assert first.high_water == 4 and first.latest_seq == 4
+    second = await service.activity_feed(USER_ID, cursor=first.next_cursor, limit=2)
+    assert [item.kind for item in second.items] == ["PROTECTION_SET", "POSITION_OPENED"]
+    assert second.high_water == 4 and second.next_cursor is None
     with pytest.raises(ValidationError):
         await service.activity_feed(USER_ID, filter="bogus")
 

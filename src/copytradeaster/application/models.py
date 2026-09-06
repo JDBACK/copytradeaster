@@ -517,6 +517,51 @@ class RiskCoverage(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class MoneyState(StrEnum):
+    """Per-component money completeness as proven by the C5 accountant.
+
+    ``complete`` means the known amount is exact; ``partial`` means a proven
+    amount is known but gaps remain; ``unavailable`` means nothing is proven
+    for the component. Absent facts never read as zero: callers check the
+    state, never the amount alone.
+    """
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class MoneyComponent:
+    """One proven cost component: canonical amount plus its own proof state."""
+
+    known_amount: str
+    state: MoneyState
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeMoneyView:
+    """Proof-driven money for one episode (C5, plan §23.6).
+
+    ``gross`` is always the proven realized gross; ``net`` is set only with
+    sufficient proof, else None with a concrete gap in ``issues``.
+    ``result_state`` keeps the legacy ``gross_only`` value for insufficient
+    proof and uses ``net_complete`` once the net is proven. ``as_of`` is the
+    read time, ``revision`` the episode revision read.
+    """
+
+    gross: str
+    net: str | None
+    commission: MoneyComponent
+    funding: MoneyComponent
+    builder: MoneyComponent
+    result_state: str = "gross_only"
+    issues: tuple[str, ...] = ()
+    as_of: datetime | None = None
+    revision: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class TradeListItem:
     """One follower episode for the closed/open lists.
@@ -542,6 +587,8 @@ class TradeListItem:
     realized_pnl_gross_usdt: str
     net_pnl_usdt: str | None
     quality: HistoryQuality
+    result_state: str = "gross_only"
+    money: EpisodeMoneyView | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -622,6 +669,7 @@ class ActivityFeedPage:
     items: tuple[TradeEventItem, ...] = ()
     next_cursor: str | None = None
     high_water: int = 0
+    latest_seq: int = 0
     pending: tuple[PendingOperation, ...] = ()
 
 
@@ -643,6 +691,7 @@ class TradeDetailDTO:
     revision: int
     position_side: str
     result_state: str = "gross_only"
+    money: EpisodeMoneyView | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -980,13 +1029,12 @@ class ApplicationProtocol(Protocol):
         fills_limit: int | None = None,
         events_limit: int | None = None,
     ) -> TradeEventsPage: ...
-
     async def activity_feed(
         self,
         user_id: int,
         *,
         filter: ActivityFilter = ActivityFilter.ALL,
-        cursor: int = 0,
+        cursor: int | str | None = 0,
         limit: int | None = None,
     ) -> ActivityFeedPage: ...
 

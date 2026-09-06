@@ -337,9 +337,19 @@ def create_miniapp_app(
             value.value for value in ActivityFilter
         }:
             return _json_error(400, "invalid_input", "Некорректный фильтр журнала.")
-        cursor = _cursor_int(body.get("cursor", 0))
-        if cursor is None:
-            return _json_error(400, "invalid_input", "Некорректный курсор истории.")
+        # Stable-snapshot feed (C7, plan §23.8): the cursor is either a legacy
+        # bare int (first-page request) or an opaque v1: snapshot cursor that
+        # round-trips through this route untouched. Shape is checked here;
+        # content (scope/filter/water/position) is validated by the service,
+        # whose ValidationError maps to 400 via _failure, never 500.
+        raw_cursor = body.get("cursor", 0)
+        cursor: int | str | None
+        if isinstance(raw_cursor, str) and raw_cursor.startswith("v1:"):
+            cursor = raw_cursor
+        else:
+            cursor = _cursor_int(raw_cursor)
+            if raw_cursor is not None and cursor is None:
+                return _json_error(400, "invalid_input", "Некорректный курсор истории.")
         limit = _page_limit(body.get("limit"))
         if body.get("limit") is not None and limit is None:
             return _json_error(400, "invalid_input", "Некорректный размер страницы.")
