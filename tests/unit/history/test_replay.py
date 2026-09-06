@@ -291,3 +291,51 @@ async def test_rebuild_requires_accepted_origin(storage):
         await projection.rebuild_scope(
             scope, "BTCUSDT", ending={PosSide.BOTH: D(0)}, recorded_at=6000
         )
+
+
+async def test_ambiguous_duplicate_records_split_and_keeps_row(storage):
+    """No surviving episode continues the ref: verdict without deletion."""
+    from dataclasses import replace as dc_replace
+
+    from copytradeaster.domain.models import PosSide
+    from copytradeaster.history.projection import HistoryProjection
+
+    db, history, scope = storage
+    window = Window(0, 100)
+    await commit(
+        history,
+        scope,
+        [fill(10, "BUY", "2"), fill(60, "SELL", "2", "110", "20")],
+        window,
+    )
+    flat = position(positionAmt="0")
+    capture = HistoryCapture(history, EpisodeRepository(db))
+    (first,) = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        window,
+        before=boundary(flat),
+        after=after_boundary(flat),
+        cutoff=100,
+        recorded_at=5000,
+    )
+    # A stale row whose entry fill exists nowhere in the replay: neither an
+    # update nor an alias, so the row survives with a split verdict.
+    repo = EpisodeRepository(db)
+    stray_ref = await repo.reserve_ref(scope, "BTCUSDT", PosSide.BOTH, "legacy:stray")
+    unknown_entry = dc_replace(first.episode.allocations[0], trade_id=9999)
+    stray = dc_replace(
+        first.episode,
+        public_ref=stray_ref,
+        allocations=(unknown_entry,) + first.episode.allocations[1:],
+    )
+    await repo.save(scope, stray, expected_revision=0)
+    projection = HistoryProjection(history, repo)
+    fresh = await projection.rebuild_scope(
+        scope, "BTCUSDT", ending={PosSide.BOTH: D(0)}, recorded_at=6000
+    )
+    assert [s.episode.public_ref for s in fresh] == [first.episode.public_ref]
+    assert len(await db.fetchall("SELECT * FROM follower_episodes")) == 2
+    resolution = await repo.get_resolution(scope, stray_ref)
+    assert resolution.kind == "split" and resolution.targets == ()
+    assert resolution.reason
