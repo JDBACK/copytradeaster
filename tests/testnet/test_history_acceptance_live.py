@@ -150,6 +150,13 @@ async def _wait_qty(client: AsterClient, expected: D, timeout_s: float = POLL_TI
         await asyncio.sleep(2.0)
 
 
+def _close_mode_extras(*, hedge: bool, leg: str | None = None) -> dict:
+    """Mirror planner close-mode: hedge -> positionSide, no reduceOnly."""
+    if hedge:
+        return {"positionSide": leg} if leg else {}
+    return {"reduceOnly": "true"}
+
+
 def _signed_init_data(token: str, user_id: int) -> str:
     pairs = {
         "auth_date": str(int(time.time())),
@@ -336,8 +343,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
                             "type": "STOP_MARKET",
                             "quantity": format(QTY * 2, "f"),
                             "stopPrice": "1000",
-                            "reduceOnly": "true",
-                            **({"positionSide": pside.value} if pside != PosSide.BOTH else {}),
+                            **_close_mode_extras(hedge=hedge, leg=pside.value),
                             "workingType": "MARK_PRICE",
                             "newOrderRespType": "ACK",
                         },
@@ -380,7 +386,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
         await submit(ActionKind.MARKET_CLOSE, Side.SELL, QTY, f"{tag}-close")
         await _wait_flat(client)
     finally:
-        # Fail-safe flatten, one leg at a time with reduceOnly closes.
+        # Fail-safe flatten, one leg at a time (hedge close-mode).
         for leg, qty in _leg_qtys(await client.position_risk(ACCOUNT, SYMBOL)).items():
             if qty == 0:
                 continue
@@ -399,8 +405,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
                                 "side": side.value,
                                 "type": "MARKET",
                                 "quantity": format(abs(qty), "f"),
-                                "positionSide": leg,
-                                "reduceOnly": "true",
+                                **_close_mode_extras(hedge=hedge, leg=leg),
                                 "newOrderRespType": "RESULT",
                             },
                             client_order_id=f"{tag}-failsafe-{leg}",
