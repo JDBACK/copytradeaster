@@ -36,7 +36,7 @@ Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` �
    - Uncommitted credentials in memory isolated via `EphemeralIdentityProvider` / `EphemeralKeyProvider`.
 4. **Concurrency & Storage**:
    - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, MiniApp.
-   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **33 migrations (indices 0..32)**.
+   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **40 migrations (indices 0..39)**.
    - Per-account `asyncio.Lock` serializes order/nonce/leverage pipelines; `FollowerRegistry` is copy-on-write (lock-free reads, CAS publish under mutation lock).
 
 ---
@@ -53,7 +53,7 @@ copytradeaster/
 │   ├── master/                # MasterProjector: WS -> normalized state deltas & copy_trades
 │   ├── risk/                  # RiskEngine: pure sizing math, 80% margin cap (MARGIN_SAFETY=0.8)
 │   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution
-│   ├── storage/               # SQLite Database, MIGRATIONS (0..32), async repositories
+│   ├── storage/               # SQLite Database, MIGRATIONS (0..39), async repositories
 │   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
 │   ├── notifications/         # NotificationRouter, SQLite outbox, TelegramOutboxWorker
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services

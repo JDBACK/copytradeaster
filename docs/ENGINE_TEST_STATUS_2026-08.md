@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1115/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1123/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1248,3 +1248,15 @@ Runtime после restart:
 income, 9 положительных commissions. fromId inclusive подтверждён; BTC/USDT/USDT
 из metadata подтверждены. Funding/Builder/full-history completeness не приняты.
 Полный testnet suite не перезапускался. Ruff changed files и doc links clean.
+
+
+## 2026-09-06 — S1.2 history storage и import step
+
+Append-only миграции history facts/observations/coverage; repository и bounded
+sync step. Новый `tests/unit/history/test_storage.py`: 8 сценариев idempotency,
+exact Decimal, scope isolation, conflict rollback, reconnect/pending resume,
+income identity, invalid coverage, observations и read failure.
+Full offline: **1123 passed / 2 skipped / 44 deselected**, 15.21 s.
+После замены per-row SQL на batch lookup/insert: targeted history **14 passed**.
+Ruff для изменённых файлов clean. S1.2 ещё открыт: worker lifecycle/hooks,
+retention/capacity и episodes/events не приняты.

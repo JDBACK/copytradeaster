@@ -59,3 +59,22 @@ Builder fee пока не доказаны. Следующая учётная п
 пробрасывается владельцу транзакции, checkpoint не продвигается. Worker/repository
 ещё не подключены. Продолжение S1.2: атомарное хранение фактов и этих checkpoints,
 observations, worker и retention measurement.
+
+## Шаг 3 — durable facts и возобновление импорта
+
+Добавлены append-only migration 33–39: fills, cash flows, order observations,
+coverage windows и индексы. `storage/history.py` атомарно записывает факты и
+complete/pending/saturated окна. Scope — account + environment; income identity
+включает income_type. Decimal канонизируется без округляющего normalize.
+Конфликт старого exchange identity с новыми фактами прерывает всю транзакцию.
+Наблюдения ордера обновляются на месте и не становятся fills.
+
+`history/sync.py` выполняет один ограниченный шаг, сначала подбирает durable
+pending window; HTTP вне write lock. Сетевой сбой сохраняет прежний checkpoint.
+Пока это building block: lifecycle worker, account-symbol discovery и executor
+hooks ещё не подключены. Episodes/events добавляются следующим слоем перед UI.
+
+Промежуточный замер первоначальной per-row реализации: 1000 fills занимали
+134.6 ms транзакции на локальном tmp SQLite. Заменено на batch SQL по 200 строк,
+с прежней атомарностью/проверкой конфликтов; итоговый capacity/latency benchmark
+ещё предстоит. Canonical facts не очищаются TTL; retention budget пока не принят.

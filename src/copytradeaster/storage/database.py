@@ -199,6 +199,47 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE accounts ADD COLUMN builder_max_fee_rate TEXT",
     "ALTER TABLE accounts ADD COLUMN builder_agent_expires_at_ms INTEGER",
     "ALTER TABLE accounts ADD COLUMN builder_verified_at TEXT",
+    # Follower history is an independent read model. Exact amounts remain TEXT.
+    """
+    CREATE TABLE follower_fills(
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      symbol TEXT NOT NULL, exchange_trade_id TEXT NOT NULL, order_id TEXT NOT NULL,
+      side TEXT NOT NULL, position_side TEXT NOT NULL, qty TEXT NOT NULL,
+      price TEXT NOT NULL, quote_qty TEXT NOT NULL, realized_pnl TEXT NOT NULL,
+      commission TEXT NOT NULL, commission_asset TEXT NOT NULL, executed_at INTEGER NOT NULL,
+      PRIMARY KEY(account_id, environment, symbol, exchange_trade_id))
+    """,
+    "CREATE INDEX idx_follower_fills_time ON follower_fills"
+    "(account_id, environment, symbol, executed_at)",
+    "CREATE INDEX idx_follower_fills_order ON follower_fills"
+    "(account_id, environment, symbol, order_id)",
+    """
+    CREATE TABLE follower_cash_flows(
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      income_type TEXT NOT NULL, tran_id TEXT NOT NULL, symbol TEXT NOT NULL,
+      asset TEXT NOT NULL, amount TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+      exchange_trade_id TEXT NOT NULL,
+      PRIMARY KEY(account_id, environment, income_type, tran_id))
+    """,
+    "CREATE INDEX idx_follower_cash_time ON follower_cash_flows"
+    "(account_id, environment, occurred_at)",
+    """
+    CREATE TABLE history_sync_state(
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      stream TEXT NOT NULL CHECK(stream IN ('fills','income')), symbol TEXT NOT NULL,
+      start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL CHECK(end_ms >= start_ms),
+      state TEXT NOT NULL CHECK(state IN ('pending','complete','saturated')),
+      checked_at INTEGER,
+      PRIMARY KEY(account_id, environment, stream, symbol, start_ms, end_ms))
+    """,
+    """
+    CREATE TABLE follower_order_observations(
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      symbol TEXT NOT NULL, order_id TEXT NOT NULL, client_order_id TEXT NOT NULL,
+      command_key TEXT, kind TEXT NOT NULL, status TEXT NOT NULL,
+      executed_qty TEXT NOT NULL, avg_price TEXT NOT NULL, observed_at INTEGER NOT NULL,
+      PRIMARY KEY(account_id, environment, symbol, order_id))
+    """,
 ]
 
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
