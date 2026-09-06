@@ -617,3 +617,78 @@ async def test_boot_unreadable_leverage_stays_fail_closed(env):
     assert report.unresolved_query_error == 1
     assert len(await commands.in_flight()) == 1
     assert client.leverage_calls == []
+
+
+async def test_history_observer_receives_order_and_durable_identity(env):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, _, _ = env
+    observer = AsyncMock()
+    executor._order_observer = observer
+    result = (await executor.submit(plan_of(open_action())))[0]
+    args = observer.await_args.args
+    assert args[:3] == ("copyc1", result.command_key, "MARKET_OPEN")
+    assert args[3].status == "FILLED"
+    assert (await commands.get(result.command_key))["status"] == "CONFIRMED"
+
+
+async def test_history_observer_failure_cannot_resend_trade(env):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, _, _ = env
+    executor._order_observer = AsyncMock(side_effect=RuntimeError("storage unavailable"))
+    plan = plan_of(open_action())
+    assert (await executor.submit(plan))[0].status == "CONFIRMED"
+    assert (await executor.submit(plan))[0].status == "CONFIRMED"
+    assert len(client.placed) == 1
+
+
+async def test_boot_history_observer_receives_recovered_order(env):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, links, _ = env
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    coid = "ct" + key
+    await commands.insert(
+        key, "copyc1", None, action.kind.value, json.dumps(action.payload), 1, coid
+    )
+    await commands.set_status(key, "UNKNOWN")
+    order = SimpleOrder(coid, "FILLED")
+    client.query_results[coid] = order
+    observer = AsyncMock()
+    report = await resolve_boot_unknowns(lambda _: client, commands, links, order_observer=observer)
+    assert report.confirmed == 1
+    observer.assert_awaited_once_with("copyc1", key, "MARKET_OPEN", order)
+
+
+@pytest.mark.parametrize("status", ["SUBMITTED", "UNKNOWN"])
+async def test_history_observer_on_query_recovery(env, status):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, links, _ = env
+    observer = AsyncMock()
+    executor._order_observer = observer
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    coid = "ct" + key
+    order = SimpleOrder(coid, "FILLED")
+    client.query_results[coid] = order
+    if status == "SUBMITTED":
+        await commands.insert(
+            key, "copyc1", None, action.kind.value, json.dumps(action.payload), 1, coid
+        )
+        await commands.set_status(key, "SUBMITTED")
+        result = (await executor.submit(plan))[0]
+    else:
+
+        async def lost_response(account_id, req):
+            raise AsterError(-1000, "unknown outcome", http_status=503)
+
+        client.place_order = lost_response
+        result = (await executor.submit(plan))[0]
+    assert result.status == "CONFIRMED"
+    observer.assert_awaited_once_with("copyc1", key, "MARKET_OPEN", order)
+    assert len(client.placed) == 0

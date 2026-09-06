@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from copytradeaster.aster.models import OrderDTO
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
 from copytradeaster.domain.models import (
     ActionKind,
@@ -53,6 +54,24 @@ RISK_REDUCTION_KINDS = frozenset(
 )
 
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+
+OrderObserver = Callable[[str, str, str, OrderDTO], Awaitable[None]]
+
+
+async def _observe_order(
+    observer: OrderObserver | None,
+    account_id: str,
+    key: str,
+    kind: str,
+    order: OrderDTO,
+) -> None:
+    if observer is None:
+        return
+    try:
+        await observer(account_id, key, kind, order)
+    except Exception:
+        # Read-model failure must not turn a confirmed trade into a retry.
+        log.warning("history observation failed account_id=%s command_key=%s", account_id, key)
 
 
 def _safe_error_category(exc: BaseException) -> str:
@@ -155,6 +174,7 @@ class Executor:
         on_confirmed: Callable[..., Awaitable[None]] | None = None,
         attribution_provider: Any | None = None,
         builder_invalidator: Callable[[str], Awaitable[None]] | None = None,
+        order_observer: OrderObserver | None = None,
     ) -> None:
         self._clients = clients
         self._commands = commands
@@ -164,6 +184,7 @@ class Executor:
         self._on_confirmed = on_confirmed
         self._attribution_provider = attribution_provider
         self._builder_invalidator = builder_invalidator
+        self._order_observer = order_observer
         self._mutation_owners: dict[str, asyncio.Task] = {}
         self._confirmed_callback_accepts_key = self._callback_accepts_command_key(on_confirmed)
 
@@ -514,7 +535,7 @@ class Executor:
         symbol = action.payload["symbol"]
         coid = action.payload["origClientOrderId"]
         try:
-            await self._client_for(plan, client).cancel_order(
+            order = await self._client_for(plan, client).cancel_order(
                 plan.account_id, symbol, orig_client_order_id=coid
             )
         except AsterError as exc:
@@ -524,6 +545,7 @@ class Executor:
                 await self._notify_confirmed(plan.account_id, action, key)
                 return CommandResult(key, "CONFIRMED", safe_error)
             return await self._fail(plan, key, exc)
+        await _observe_order(self._order_observer, plan.account_id, key, action.kind.value, order)
         await self._commands.set_status(key, "CONFIRMED")
         await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
@@ -703,6 +725,7 @@ class Executor:
         if order is None:
             await self._commands.set_status(key, "FAILED", last_error="submitted:not-found")
             return None
+        await _observe_order(self._order_observer, plan.account_id, key, action.kind.value, order)
         await self._commands.set_status(
             key,
             "CONFIRMED",
@@ -724,6 +747,7 @@ class Executor:
         *,
         client: AsterClient | None = None,
     ) -> CommandResult:
+        await _observe_order(self._order_observer, plan.account_id, key, action.kind.value, order)
         conditional = action.kind in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP)
         if not conditional:
             # MARKET RESULT response carries final fill data
@@ -764,6 +788,9 @@ class Executor:
             log.warning("unknown-resolution query failed: %s", exc)
             return None
         if order is not None:
+            await _observe_order(
+                self._order_observer, plan.account_id, key, action.kind.value, order
+            )
             await self._commands.set_status(
                 key,
                 "CONFIRMED",
@@ -806,6 +833,8 @@ async def resolve_boot_unknowns(
     clients: Callable[[str], AsterClient],
     commands: CommandRepo,
     links: OrderLinkRepo | None = None,
+    *,
+    order_observer: OrderObserver | None = None,
 ) -> BootResolutionReport:
     """Boot-time resolution of every in-flight command: UNKNOWN / SENDING / SUBMITTED.
 
@@ -869,6 +898,7 @@ async def resolve_boot_unknowns(
             )
             continue
         if order is not None:
+            await _observe_order(order_observer, account_id, key, str(row["kind"]), order)
             await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:{order.status}")
             if links is not None:
                 trade_id = row["trade_id"]

@@ -78,3 +78,18 @@ hooks ещё не подключены. Episodes/events добавляются �
 134.6 ms транзакции на локальном tmp SQLite. Заменено на batch SQL по 200 строк,
 с прежней атомарностью/проверкой конфликтов; итоговый capacity/latency benchmark
 ещё предстоит. Canonical facts не очищаются TTL; retention budget пока не принят.
+
+## Шаг 4 — наблюдение ордеров в production executor
+
+`Executor.order_observer` получает account, durable command key, kind и OrderDTO:
+обычный ответ, successful cancel, SUBMITTED/UNKNOWN query recovery. Отдельный
+optional observer в `resolve_boot_unknowns` охватывает восстановление после crash.
+`App` связывает observer с HistoryRepository, изолирует REAL/testnet/mainnet/SHADOW
+и пропускает dry-run/master. observed_at здесь — биржевой updateTime, чтобы
+запоздавший ответ не затирал более новое наблюдение.
+
+Ошибка observer логируется безопасной категорией, не преобразует торговый
+результат в FAILED/UNKNOWN и не инициирует resend. Cancellation не подавляется.
+Сбой записи может оставить недостающее observation: восстановление по durable
+journal/order links должно быть реализовано periodic history worker; этот шаг
+сам по себе не закрывает crash completeness. Worker lifecycle ещё не подключён.

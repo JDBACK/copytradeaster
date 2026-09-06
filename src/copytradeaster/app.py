@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from copytradeaster.aster.models import OrderDTO
 from copytradeaster.aster.rate_limits import RateLimits
 from copytradeaster.aster.shadow import ShadowExchange
 from copytradeaster.aster.trading_api import AsterClient, AsterError
@@ -24,6 +25,7 @@ from copytradeaster.notifications.formatter import format_confirmed_action
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
 from copytradeaster.notifications.protocol import NotificationCallback, Notifier, as_notifier
 from copytradeaster.storage.database import Database
+from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
     AgentValidationRepo,
@@ -187,6 +189,7 @@ class App:
         self.trades = CopyTradeRepo(self.db)
         self.links = OrderLinkRepo(self.db)
         self.commands = CommandRepo(self.db)
+        self.history = HistoryRepository(self.db)
         self.nonces = NonceStore(self.db)
         self.basis = SyncBasisRepo(self.db)
         self.follower_registry = FollowerRegistry()
@@ -213,6 +216,7 @@ class App:
             on_confirmed=self._on_confirmed,
             attribution_provider=self.builder_attribution,
             builder_invalidator=self.accounts.clear_builder_snapshot,
+            order_observer=self._observe_history_order,
         )
         self.master_client = self._make_client()
         self.projector = MasterProjector(
@@ -297,6 +301,33 @@ class App:
     def _filters(self) -> dict:
         return self._filters_cache
 
+    async def _observe_history_order(
+        self,
+        account_id: str,
+        command_key: str,
+        kind: str,
+        order: OrderDTO,
+    ) -> None:
+        if self.cfg.dry_run or account_id == "main":
+            return
+        follower = self.follower_registry.get(account_id)
+        if follower is None:
+            return
+        environment = (
+            "shadow"
+            if follower.execution_mode == "SHADOW"
+            else "testnet"
+            if "testnet" in self.cfg.rest_base_url
+            else "mainnet"
+        )
+        await self.history.observe_order(
+            HistoryScope(account_id, environment),
+            order,
+            kind=kind,
+            command_key=command_key,
+            observed_at=order.update_time,
+        )
+
     async def _emit_notification(
         self,
         *,
@@ -374,7 +405,12 @@ class App:
         log.info("clock drift ok (%dms)", drift)
 
         # 4. resolve UNKNOWN commands from previous run
-        resolved = await resolve_boot_unknowns(self._client_for, self.commands, self.links)
+        resolved = await resolve_boot_unknowns(
+            self._client_for,
+            self.commands,
+            self.links,
+            order_observer=self._observe_history_order,
+        )
         in_flight = await self.commands.in_flight()
         log.info(
             "boot resolution: confirmed=%d not_found=%d unresolved=%d",
