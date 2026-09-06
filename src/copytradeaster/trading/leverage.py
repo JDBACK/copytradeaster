@@ -187,17 +187,23 @@ class LeverageManager:
         """Fold authoritative positionRisk leverages into the confirmed map.
 
         The candidate and operator setting are ceilings, not desired upshifts.
-        Any observed value in ``[2, ceilings]`` validates this catalog
+        Any observed value within ``[1, ceilings]`` validates this catalog
         generation. In particular, a stop-driven downshift survives maintenance
-        and restart. Values above the ceiling remain unready for increases.
+        and restart, and values above the ceiling remain unready for
+        increases (preparation pulls them down to policy).
 
-        1x is the exchange unset marker, never a ready candidate: it is
-        stored unready (like an above-ceiling value) even when it sits
-        below the ceilings, and it actively disagrees with any live
-        confirmation. Otherwise a freshly observed 1x would silently bless
-        entries sized for provisioned leverage (F3 live incident:
-        copyc1 opened at 1x economics with zero SET_LEVERAGE rows while
-        every SET was denied).
+        Effective-is-truth (review 636dfff): the exchange-reported
+        configuration is authoritative for what the account runs TODAY,
+        including 1x. 1x is a legitimate effective state — a stop-driven
+        downshift the execution DAG provisioned, an operator cap of 1, or a
+        deliberate operator setting — not an unset marker. Entries size from
+        the EFFECTIVE leverage, so opening at an observed 1x with 1x sizing
+        is safe; and whenever the entry target differs from actual, the
+        planner still emits SET_LEVERAGE, so no entry can silently run
+        economics its sizing did not assume. The control plane therefore
+        never upshifts an observed value toward the ceiling: that "optimize"
+        re-provisioned 20x over a live stop-driven 1x every maintenance
+        pass (SET-tennis plus a readiness flap blocking every other entry).
         """
         for symbol, raw in symbol_leverages.items():
             try:
@@ -215,11 +221,11 @@ class LeverageManager:
                 and current.catalog_revision == (candidate.revision if candidate else -1)
             ):
                 continue
+            ceiling = candidate.leverage if candidate is not None else None
+            if ceiling is not None and self._operator_max_leverage:
+                ceiling = min(ceiling, self._operator_max_leverage)
             agrees_with_candidate = (
-                leverage >= 2
-                and candidate is not None
-                and leverage <= candidate.leverage
-                and (self._operator_max_leverage is None or leverage <= self._operator_max_leverage)
+                candidate is not None and ceiling is not None and leverage <= ceiling
             )
             self._confirmed[key] = ConfirmedLeverage(
                 leverage=leverage,
@@ -314,9 +320,11 @@ class LeverageManager:
         if len(values) != 1:
             return None
         leverage = values.pop()
-        if leverage < 2:
-            # 1x is the exchange unset marker (see observe()): a unanimous
-            # unprovisioned fleet must not become a 1x global candidate.
+        if leverage < 2 and self._operator_max_leverage != 1:
+            # A unanimous 1x fleet is ambiguous: exchange unset default or a
+            # deliberate fleet-wide setting. Refuse to bless it as the global
+            # candidate — unless the operator policy explicitly wants 1x,
+            # in which case there is no ambiguity to resolve.
             return None
         revision = self._next_revision()
         candidate = CandidateLeverage(
@@ -376,14 +384,16 @@ class LeverageManager:
             self.invalidate(account_id, symbol)
             raise LeverageError(f"{symbol}: configuration unreadable")
         ceiling = min(candidate.leverage, self._operator_max_leverage or candidate.leverage)
-        # Exchange unset marker (see observe()): never an already-configured
-        # state. Provision the ceiling candidate below (or fail on fault)
-        # instead of short-circuiting a 1x confirmation.
-        desired = ceiling if observed < 2 else min(ceiling, observed)
-        if observed == desired:
+        if observed <= ceiling:
+            # Effective configuration already within policy: confirm it and
+            # send nothing. In particular a legitimate 1x (stop-driven
+            # downshift, operator cap 1, deliberate setting) is returned as
+            # ready instead of being "optimized" back up to the ceiling.
             self.observe(account_id, {symbol: observed})
             return observed
-        candidate = CandidateLeverage(desired, candidate.observed_at, candidate.revision)
+        # Over policy: pull down to the ceiling. This is the ONLY provision
+        # direction; upshifts never happen here (see observe()).
+        candidate = CandidateLeverage(ceiling, candidate.observed_at, candidate.revision)
         try:
             await self._paced_set_leverage(client, account_id, symbol, candidate.leverage)
         except Exception as exc:  # noqa: BLE001 - classified below

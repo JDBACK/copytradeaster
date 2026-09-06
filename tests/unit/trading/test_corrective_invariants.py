@@ -22,6 +22,7 @@ from copytradeaster.trading.coordinator import FollowerRuntime
 from copytradeaster.trading.executor import command_key_of
 from copytradeaster.trading.planner import build_plan
 from copytradeaster.trading.registry import FollowerRegistry
+from tests.unit.trading import test_coordinator_routing as routing_tests
 from tests.unit.trading import test_executor_journal as journal_tests
 from tests.unit.trading import test_reconciler_idempotent as recon_tests
 from tests.unit.trading.test_coordinator_routing import filters_provider
@@ -35,6 +36,7 @@ from tests.unit.trading.test_executor_journal import (
 
 journal_env = journal_tests.env
 recon_env = recon_tests.env
+coordinator_env = routing_tests.env
 
 
 def position(key, qty="1", *, entry="100", mark="100", liq="0"):
@@ -324,3 +326,79 @@ async def test_load_harness_does_not_retry_from_partial_position_progress(journa
     with pytest.raises(RuntimeError, match="master outcome unresolved"):
         await _submit_master_order(client, request, stats)
     assert client.place_calls == 1 and stats["retries"] == 0
+
+
+async def test_fresh_authoritative_reconcile_supersedes_old_postfill_state(coordinator_env):
+    """Review 636dfff P1: a fresh REST reconcile must refresh the saved
+    master cache. A post-fill task spawned on an older flat capture must
+    converge on the newer open state, not close the live leg."""
+    import time as _time
+
+    from copytradeaster.domain.models import ExecutionAction
+    from tests.unit.trading.test_coordinator_routing import delta_of, master_state
+
+    coordinator, followers, _, _ = coordinator_env
+    old_flat = master_state(qty=D(0), stop=None)
+    await coordinator.on_master_delta(delta_of(old_flat))
+    fr = followers[0]
+    fr.client.positions[PositionKey("BTCUSDT")] = {
+        "qty": D("0.01"),
+        "stop": D("64500"),
+        "leverage": 20,
+    }
+    fresh_open = master_state()
+    await coordinator.recompute_follower(fr, delta_of(fresh_open))
+    assert not [p for p in fr.client.placed if p["type"] == "MARKET" and p["side"] == "SELL"]
+    fr.client.placed.clear()
+    assert _time.monotonic() - coordinator._last_master_state_at < 10
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT"},
+        client_order_id="probe",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    await coordinator.on_command_confirmed(fr.account_id, action)
+    await coordinator.drain_postfill_tasks(timeout_s=5)
+    closes = [p for p in fr.client.placed if p["type"] == "MARKET" and p["side"] == "SELL"]
+    assert not closes, f"fresh REST state was superseded by old flat postfill: {closes}"
+
+
+async def test_postfill_uses_newer_delta_arriving_during_lock_wait(coordinator_env):
+    """Review 636dfff P1: state captured before the executor-lock wait must
+    be re-validated after it. A newer WS delta landing mid-wait wins over
+    the stale flat capture."""
+    from copytradeaster.domain.models import ExecutionAction
+    from tests.unit.trading.test_coordinator_routing import delta_of, master_state
+
+    coordinator, followers, _, _ = coordinator_env
+    fr = followers[0]
+    await coordinator.on_master_delta(delta_of(master_state(qty=D(0), stop=None)))
+    fr.client.positions[PositionKey("BTCUSDT")] = {
+        "qty": D("0.01"),
+        "stop": D("64500"),
+        "leverage": 20,
+    }
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT"},
+        client_order_id="probe-race",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    async with coordinator._executor.mutation_context(fr.account_id):
+        await coordinator.on_command_confirmed(fr.account_id, action)
+        assert len(coordinator._postfill_tasks) == 1
+        # A newer authoritative refresh lands while the post-fill task waits
+        # on the executor lock. It runs for another follower (no fan-out
+        # inside the held guard — gather would wrap coroutines in child
+        # tasks and break guard re-entrancy), but the master cache is
+        # global, so the waiting task must still converge on the newer
+        # open state instead of its stale flat capture.
+        await coordinator.recompute_follower(followers[1], delta_of(master_state()))
+        fr.client.placed.clear()
+    await coordinator.drain_postfill_tasks(timeout_s=5)
+    closes = [p for p in fr.client.placed if p["type"] == "MARKET" and p["side"] == "SELL"]
+    assert not closes, f"stale capture won over newer delta: {closes}"

@@ -732,3 +732,57 @@ exit-кода (перезапуск ради строчки `1 passed` откл�
 
 **Вердикт: corrective qualification COMPLETE (owner scope). Mainnet этим сообщением
 НЕ разрешается.**
+
+## 2026-09-07 — Review-исправления P1/P1/P2 + STOP: фронт-стенд торгует теми же аккаунтами
+
+Три пункта ревью приняты и исправлены (дерево некоммичено на момент записи):
+1. Post-fill generation-freshness (`trading/coordinator.py`): публичный
+   `recompute_follower` теперь обновляет `_last_master_state` (авторитетный
+   refresh вытесняет WS-кэш), а `_postfill_recompute` после `wait_until_idle`
+   перечитывает кэш — пришедшее новее состояние побеждает stale-capture
+   (identity+generation+timestamp), плюс повторный TTL-гейт. Регрессии:
+   supersede-тест + детерминированный race-тест (refresh другого фолловера
+   под held-guard; fan-out внутри гарда невозможен — gather ломает
+   re-entrancy, это учтено в тесте).
+2. Effective-is-truth (`trading/leverage.py`): `observe()` подтверждает любое
+   биржевое значение в `[1, ceiling]`; `prepare` provisionит ТОЛЬКО вниз
+   (observed > ceiling), апшифта к ceiling больше нет; unanimous-1x сидирует
+   кандидата только при operator cap 1. Старый F3-юнит заменён, добавлены
+   repro-тесты ревьюера как штатные.
+3. Строгий P8a-хелпер (`test_pre_mainnet_load_live.py`): allowlist
+   (`aster:-N`, `proven-not-executed:*`, `boot-resolved:*`) + точный
+   intent-match (side/positionSide/leverage) + moot только для MARKET_CLOSE
+   на flat REAL с классифицированной ошибкой. Синтетика ревьюера
+   (http:500/502, runtimeerror, пусто, чужое плечо) отвергается; на load7
+   даёт те же 26 healed + 1 moot; офлайн-юниты в
+   `tests/unit/trading/test_journal_audit.py`.
+Офлайн: **1157 passed, 2 skipped**, ruff check/format чистые. Три repro
+ревьюера зелены. A5 rerun live green 8.13s (артефакт `data/review-a5-junit.xml`;
+в окне A5 фронт молчал — результат ЧИСТ).
+
+STOP live-кампании — внешняя контаминация (расследование 2026-09-07):
+F3 дважды упал одинаково (denial механика идеальна: 1 FAILED SET + BLOCKED,
+ноль sends), а позиция 0.003+stop пришла извне журнала. Форензика по
+allOrders/history/140 журналам нашла отправителя: **движок фронт-стенда
+(`copytradeaster-front/data/miniapp-preview.sqlite3`) торгует ТЕМИ ЖЕ
+main/copyc1-3/tg-8264892202 теми же ключами** — 2301 команда с 2026-09-02,
+все ghost-coid найдены у него как CONFIRMED. Пересечения по его журналу:
+- A5 (00:27:02–00:27:10 MSK): 0 строк фронта — ЧИСТ.
+- L1 (00:27:12–00:28:45): фронт пашет copyc1-3/tg — даблы 0.003/0.004 с
+  разницей 50–200мс доказаны fills. L1-green КОНТАМИНИРОВАН (ассёрты слепы
+  к удвоению) — нужен чистый rerun.
+- F3/F3b: фронт OPEN+STOP на copyc1 в окне (ghost) — движок F3 полностью
+  оправдан, тест требует чистого rerun.
+- Load5/6/7 (UTC 01:54–05:06): фронт 1900+ команд на тех же аккаунтах —
+  КОНТАМИНИРОВАНЫ. Все 27 FAILED load7 — только REAL-аккаунты, ноль shadow.
+  Гипотеза: шторм -4226 — это интерференция двух движков, а не тестнет
+  (была «недокументированный транзиент»; теперь корреляция с dual-engine
+  окнами установлена, дискриминация требует тихого окна).
+- Чистыми остаются: Step-2 (UNKNOWN/network/LC), compat, fix-reruns
+  (f3fix2/l1fix/lc2fix), A5-rerun, весь офлайн.
+Фронт в 21:49 UTC показывает и свои FAILED — движки взаимно портят друг
+другу результаты. Дальнейшие live-прогоны на shared-аккаунтах
+бессмысленны до решения owner'а (остановить стенд / развести ключи).
+Watch 4 мин после остановки работ: тихо. Exchange FLAT везде.
+Вердикт: код-фиксы qualify (офлайн + repro + A5-clean); live-матрица
+ТРЕБУЕТ чистой переквалификации затронутого (F3, L1, load) — mainnet NO-GO.

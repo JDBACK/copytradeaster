@@ -170,3 +170,16 @@ command_key/COID/status/attempts, relevant signed history/positionRisk/openOrder
 зависят, хвосты ловят только грозы биржи. Полный load 1.0 остаётся открытым
 пунктом (не проваленным — отложенным). P8a-B и moot-by-flat — тоже решения
 owner'а (см. TL;DR и PROGRESS-журнал). Вердикт: COMPLETE (owner scope).
+
+## Контаминация live-окон фронтом (2026-09-07, STOP)
+Фронт-стенд (`copytradeaster-front/data/miniapp-preview.sqlite3`, 2301
+команда с 2026-09-02) торгует теми же main/copyc1-3/tg-8264892202. Все
+ghost-fills найдены у него как CONFIRMED. Чистые: Step-2, compat,
+fix-reruns, A5-rerun (0 строк фронта в окне), весь офлайн.
+Контаминированы: load5/6/7 (1900+ команд фронта в окнах; -4226-шторм —
+кандидат в интерференцию двух движков: все 27 FAILED только на REAL,
+ноль на shadow), L1-rerun (даблы 50–200мс доказаны fills), F3/F3b
+(ghost-open при идеальном denial: 1 FAILED SET + BLOCKED + 0 sends).
+Движок F3 полностью оправдан; L1-green отозван как слепой к удвоению.
+Дальнейшие live-прогоны — только после решения owner'а (стоп стенда /
+развод ключей): чистые rerun F3, L1, load. Mainnet NO-GO.

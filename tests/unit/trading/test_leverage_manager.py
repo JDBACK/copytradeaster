@@ -361,29 +361,57 @@ async def test_unknown_outcome_with_unreadable_state_fails_closed():
     assert not manager.is_ready("copyc1", "BTCUSDT")
 
 
-async def test_observe_rejects_1x_unset_marker_and_disagrees_with_live_confirmation():
-    """F3 live incident: a freshly observed 1x must never validate readiness.
+async def test_observe_confirms_effective_leverage_including_1x():
+    """Review 636dfff (effective-is-truth): the exchange-reported
+    configuration is authoritative for what the account runs today.
 
-    1x is the exchange unset marker. Accepting it (below-ceiling shortcut)
-    blessed entries sized for provisioned leverage with zero SET_LEVERAGE
-    rows. A stop-driven downshift (>= 2) still validates the generation.
+    Readiness follows the effective value — including 1x, which is a
+    legitimate state (stop-driven downshift, operator cap 1, deliberate
+    setting), not an unset marker. Entries size from the effective
+    leverage, and the planner still emits SET_LEVERAGE whenever the entry
+    target differs from actual, so no entry runs economics its sizing did
+    not assume. A later read simply re-confirms the new effective value.
     """
     clients = {"main": FakeLevClient(), "copyc1": FakeLevClient()}
     manager = make_manager(clients, symbols=["BTCUSDT"])
     await manager.refresh_catalog(["BTCUSDT"])
     assert manager.is_ready("copyc1", "BTCUSDT") is False
     manager.observe("copyc1", {"BTCUSDT": 1})
-    assert manager.is_ready("copyc1", "BTCUSDT") is False
+    assert manager.is_ready("copyc1", "BTCUSDT") is True
     assert manager.confirmed("copyc1", "BTCUSDT") == 1
-    # A live 20x confirmation is actively disagreed with by a later 1x read.
     manager.observe("copyc1", {"BTCUSDT": 20})
     assert manager.is_ready("copyc1", "BTCUSDT") is True
-    manager.observe("copyc1", {"BTCUSDT": 1})
-    assert manager.is_ready("copyc1", "BTCUSDT") is False
-    # Genuine downshifts keep validating.
+    assert manager.confirmed("copyc1", "BTCUSDT") == 20
     manager.observe("copyc1", {"BTCUSDT": 13})
     assert manager.is_ready("copyc1", "BTCUSDT") is True
     assert manager.confirmed("copyc1", "BTCUSDT") == 13
+
+
+async def test_prepare_never_upshifts_observed_leverage_toward_ceiling():
+    """Review 636dfff P1: maintenance must not re-provision the ceiling
+    over a legitimate below-ceiling configuration (stop-driven 1x)."""
+    clients = {
+        "main": FakeLevClient(account_max=20),
+        "copyc1": FakeLevClient(account_max=20, risk_leverages=[1]),
+    }
+    manager = make_manager(clients, symbols=["BTCUSDT"])
+    await manager.refresh_catalog(["BTCUSDT"])
+    assert await manager.prepare_symbol("copyc1", "BTCUSDT") == 1
+    assert clients["copyc1"].set_calls == []
+    assert manager.is_ready("copyc1", "BTCUSDT") is True
+
+
+async def test_operator_cap_1_prepares_and_stays_ready():
+    """Review 636dfff P1: an allowed operator cap of 1 is provisionable
+    and stays ready instead of failing closed forever."""
+    clients = {
+        "main": FakeLevClient(account_max=20),
+        "copyc1": FakeLevClient(account_max=20, risk_leverages=[1]),
+    }
+    manager = make_manager(clients, symbols=["BTCUSDT"], operator_max_leverage=1)
+    await manager.refresh_catalog(["BTCUSDT"])
+    assert await manager.prepare_symbol("copyc1", "BTCUSDT") == 1
+    assert manager.is_ready("copyc1", "BTCUSDT") is True
 
 
 async def test_unanimous_1x_observed_fleet_never_seeds_1x_candidate():
@@ -395,3 +423,18 @@ async def test_unanimous_1x_observed_fleet_never_seeds_1x_candidate():
     assert manager._seed_candidate_from_observed_accounts("BTCUSDT") is None  # noqa: SLF001
     assert not manager.is_ready("copyc1", "BTCUSDT")
     assert not manager.is_ready("copyc2", "BTCUSDT")
+
+
+async def test_unanimous_1x_seeds_candidate_when_operator_cap_is_1():
+    """Review 636dfff P1: with an explicit operator cap of 1 there is no
+    unset ambiguity — a unanimous 1x fleet IS the policy."""
+    clients = {"copyc1": FakeLevClient(), "copyc2": FakeLevClient()}
+    manager = make_manager(
+        clients,
+        symbols=["BTCUSDT"],
+        accounts=lambda: ["copyc1", "copyc2"],
+        operator_max_leverage=1,
+    )
+    manager.observe("copyc1", {"BTCUSDT": 1})
+    manager.observe("copyc2", {"BTCUSDT": 1})
+    assert manager._seed_candidate_from_observed_accounts("BTCUSDT") is not None  # noqa: SLF001

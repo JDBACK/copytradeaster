@@ -21,14 +21,15 @@ Row coverage (failure-isolation qualification rows) -> test node:
   raise a bad-key ``AsterError`` (-2015, that follower only) -> ``copyc1``/
   ``copyc2`` converge, ``copyc3`` untouched (verified via the independent
   audit client); then heal, full convergence, flat audit.
-- F3 ``test_isolation_insufficient_margin``: copyc1's SET_LEVERAGE +
-  leverage_bracket methods raise on its own runtime client while its
-  exchange leverage really sits at 1x (non-candidate marker, not margin
-  shaping) -> every re-prepare fails, so copyc2/copyc3 converge each
-  master cycle while copyc1 stays flat with zero sends and either
-  LEVERAGE_NOT_READY skips (control-plane denial) or FAILED SET_LEVERAGE
-  rows plus degraded evidence (executor denial); then wrapper restored,
-  fresh-cycle full convergence, leverage restored, flat audit.
+- F3 ``test_isolation_insufficient_margin``: copyc1's exchange leverage is
+  really set to its bracket maximum while its SET_LEVERAGE raises a
+  deterministic AsterError (wrapper on its own runtime client only), so the
+  entry target (stop-capped far below the maximum) forces a NEEDED provision
+  that fails -> copyc1 stays flat with FAILED SET rows + degraded evidence
+  (executor denial) while copyc2/copyc3 converge; heal proves fresh-cycle
+  convergence, then a steady-state 1x phase proves maintenance never
+  upshifts a legitimate 1x back to the ceiling (review 636dfff P1);
+  leverage restored, flat audit.
 
 HEDGE-aware: main is HEDGE, so LONG/SHORT legs exist alongside zero legs;
 quantity reads sum legs and only nonzero legs count toward convergence.
@@ -765,30 +766,23 @@ def _account_records_dump(events: list, account_id: str) -> str:
 
 
 async def test_isolation_insufficient_margin(tmp_path):
-    """F3: copyc1 leverage-denied; control plane withholds the copy pre-send.
+    """F3: copyc1 leverage-denied; a NEEDED provision fails, copy withheld pre-send.
 
-    The 1x-margin premise is dead and documented here: the leverage control
-    plane provisions leverage itself (a SET_LEVERAGE prerequisite precedes
-    the MARKET_OPEN via dependency gating whenever the known exchange value
-    differs from the confirmed target), so it overwrites a bare 1x before
-    any margin math runs — 1x-margin refusal is UNREACHABLE while the engine
-    manages leverage.
-
-    Honest geometry instead: copyc1's exchange leverage is really set to 1x
-    (kept only as the non-candidate marker the observe() path disagrees
-    with — NOT for margin math), and its runtime client's SET_LEVERAGE +
-    leverage_bracket methods raise a deterministic AsterError (wrapper
-    matching on copyc1's own FollowerRuntime.client only). Every re-prepare
-    then fails, so the copy is withheld pre-send while copyc2/copyc3
-    converge each master cycle. Refusal takes one of two code-honest forms,
-    and the gate accepts either with full dumps: (A) control-plane denial —
-    LEVERAGE_NOT_READY skip records with zero command rows for copyc1;
-    (B) executor denial — FAILED SET_LEVERAGE rows plus degraded evidence
-    with zero MARKET-kind sends (dependents stay BLOCKED in memory and send
-    nothing). Common conjuncts: copyc2/copyc3 converge, copyc1 flat, app
-    READY. Heal restores the wrapper (the control plane re-prepares on the
-    next sweep / prerequisite) and proves full convergence on a fresh
-    master cycle; teardown restores baseline leverage and audits flat.
+    Effective-is-truth (review 636dfff P1): the control plane confirms the
+    exchange-reported configuration instead of disagreeing with 1x, so the
+    old "1x marker" denial premise is dead. Honest denial now needs a
+    provision the entry genuinely requires: copyc1's exchange leverage is
+    really set to its bracket maximum while its runtime client's
+    SET_LEVERAGE raises a deterministic AsterError (wrapper matching on
+    copyc1's own FollowerRuntime.client only). The entry target is
+    stop-capped far below the maximum, so the planner emits SET_LEVERAGE,
+    the POST fails deterministically, dependents stay BLOCKED, and copyc1
+    stays flat with FAILED SET rows + degraded evidence (executor denial)
+    while copyc2/copyc3 converge each master cycle. App stays READY.
+    Heal restores the wrapper and proves full convergence on a fresh master
+    cycle; a steady-state 1x phase then proves maintenance never upshifts a
+    legitimate 1x back to the ceiling (zero set_leverage POSTs while copyc1
+    converges at 1x). Teardown restores baseline leverage and audits flat.
     """
     settings, followers = await _prepare_scratch(tmp_path, "iso_d3")
     assert followers == ["copyc1", "copyc2", "copyc3"]
@@ -827,35 +821,33 @@ async def test_isolation_insufficient_margin(tmp_path):
             if row.symbol == SYMBOL and row.leverage:
                 baseline_leverage = int(row.leverage)
                 break
-        await client.set_leverage("copyc1", SYMBOL, 1)
-        # The 1x write is a REAL exchange write kept only as the non-candidate
-        # marker the observe() path disagrees with — NOT for margin math (the
-        # control plane would overwrite it before any margin check runs).
-        # Seam: the control plane resolves per-account clients through
-        # App._client_for -> FollowerRuntime.client (trading/coordinator.py,
-        # app.py; one AsterClient per runtime via App._make_client), and the
-        # executor routes SET_LEVERAGE the same way. Fault both control-plane
-        # writes on copyc1's own client: set_leverage (POST provision) and
-        # leverage_bracket (account-specific fallback read). The global
-        # catalog read uses main's client and stays healthy.
+        from copytradeaster.trading.leverage import _max_initial_leverage
+
+        bracket_max = _max_initial_leverage(await client.leverage_bracket("copyc1", SYMBOL))
+        if bracket_max <= 30:
+            pytest.skip(f"bracket max {bracket_max} cannot force a leverage transition")
+        await client.set_leverage("copyc1", SYMBOL, bracket_max)
+        # REAL exchange write to the bracket maximum: the entry target is
+        # stop-capped far below it (2% stop -> cap ~28 on BTC), so the
+        # planner must emit a NEEDED SET_LEVERAGE transition. Faulting that
+        # POST denies the copy at the executor while the control plane
+        # stays honest (effective-is-truth: the maximum IS confirmed).
+        # Seam: the executor routes SET_LEVERAGE through
+        # App._client_for -> FollowerRuntime.client (one AsterClient per
+        # runtime via App._make_client). Fault only the POST on copyc1's
+        # own client; reads and the global catalog (main's client) stay
+        # healthy.
         runtime_c1 = app.follower_registry.get("copyc1")
         assert runtime_c1 is not None, "copyc1 runtime missing from follower_registry"
         target_c1 = runtime_c1.client
         original_setlev = target_c1.set_leverage
-        original_bracket = target_c1.leverage_bracket
 
         async def _deny_setlev(account_id: str, symbol: str, leverage: int):
             if account_id == "copyc1":
                 raise AsterError(-1003, "injected-levdeny(copyc1)", 429)
             return await original_setlev(account_id, symbol, leverage)
 
-        async def _deny_bracket(account_id: str, symbol: str):
-            if account_id == "copyc1":
-                raise AsterError(-1003, "injected-levdeny(copyc1)", 429)
-            return await original_bracket(account_id, symbol)
-
         target_c1.set_leverage = _deny_setlev  # type: ignore[method-assign]
-        target_c1.leverage_bracket = _deny_bracket  # type: ignore[method-assign]
         try:
             opened_d3a = await _open_master_long(client, position_side, "pm-d3a")
             await _wait_followers_protected(app, ["copyc2", "copyc3"])
@@ -869,11 +861,11 @@ async def test_isolation_insufficient_margin(tmp_path):
                         failures.append(f"{account_id} stops != 1 under leverage fault")
                 if await _symbol_qty(audit, "copyc1") != 0:
                     failures.append("copyc1 opened despite leverage denial")
-                # Refusal takes one of two code-honest forms (HEDGE leg unanimity
-                # decides): (A) control-plane denial — LEVERAGE_NOT_READY skips
-                # with zero command rows; (B) executor denial — FAILED
-                # SET_LEVERAGE rows plus degraded evidence with zero MARKET-kind
-                # sends (dependents stay BLOCKED in memory and send nothing).
+                # Refusal takes exactly one code-honest form (effective-is-truth:
+                # the bracket maximum IS confirmed, so no LEVERAGE_NOT_READY
+                # skip can occur): executor denial — FAILED SET_LEVERAGE rows
+                # plus degraded evidence with zero MARKET-kind sends
+                # (dependents stay BLOCKED in memory and send nothing).
                 window = notified[window_start:]
                 skips = _copy_skip_records(window, "copyc1")
                 attempts = recompute_attempts.get("copyc1", 0)
@@ -895,15 +887,13 @@ async def test_isolation_insufficient_margin(tmp_path):
                     if getattr(e, "kind", None) == "execution.degraded"
                     and getattr(e, "account_id", None) == "copyc1"
                 ]
-                form_a = len(skips) >= 1 and not rows
-                form_b = (
+                if not (
                     len(failed_setlev) >= 1
                     and ("copyc1" in degraded_reason or exec_deg)
                     and not market_rows
-                )
-                if not (form_a or form_b):
+                ):
                     failures.append(
-                        "copyc1 shows neither denial form "
+                        "copyc1 shows no executor denial "
                         f"(skips={len(skips)} rows={kinds} degraded={degraded_reason!r} "
                         f"recompute_attempts={attempts}; "
                         f"copyc1 records: {_account_records_dump(window, 'copyc1')})"
@@ -911,7 +901,7 @@ async def test_isolation_insufficient_margin(tmp_path):
                 if not await _ready_flag(app):
                     failures.append("app not READY/healthy during fault window")
                 detail = (
-                    f"form={'A' if form_a else 'B'} skips={len(skips)} "
+                    f"executor-denial skips={len(skips)} "
                     f"setlev_fail={len(failed_setlev)} market_rows={len(market_rows)} "
                     f"recompute_attempts={attempts} "
                     f"reasons={[k.split(':')[4] for k in skips if len(k.split(':')) > 4]}"
@@ -934,13 +924,12 @@ async def test_isolation_insufficient_margin(tmp_path):
             await _wait_stable(_f3_close_isolated, what="F3 close-cycle isolation")
         finally:
             target_c1.set_leverage = original_setlev  # type: ignore[method-assign]
-            target_c1.leverage_bracket = original_bracket  # type: ignore[method-assign]
 
-        # Heal: wrapper restored, so the control plane re-prepares on the next
-        # sweep / prerequisite (overwriting the 1x marker itself). Prove full
-        # 3-follower convergence on a FRESH master cycle: re-entry into a
-        # drifted leg would be correctly refused by the ENTRY_DEVIATION gate,
-        # so flat copyc1 must never be expected to chase a stale move.
+        # Heal: wrapper restored, so the failed provision succeeds on the next
+        # sweep / prerequisite. Prove full 3-follower convergence on a FRESH
+        # master cycle: re-entry into a drifted leg would be correctly refused
+        # by the ENTRY_DEVIATION gate, so flat copyc1 must never be expected
+        # to chase a stale move.
         await app.reconcile_follower("copyc1", reason="pm-d3-heal")
         await _close_master_long(client, position_side, "pm-d3a", opened_d3a["stop_coid"])
         opened_d3b = await _open_master_long(client, position_side, "pm-d3b")
@@ -958,6 +947,43 @@ async def test_isolation_insufficient_margin(tmp_path):
         await _wait_stable(_f3_healed, what="F3 fresh-cycle convergence after heal")
 
         await _close_master_long(client, position_side, "pm-d3b", opened_d3b["stop_coid"])
+
+        # Steady-state 1x (review 636dfff P1 live pin): park copyc1 at a
+        # legitimate 1x and prove it converges there with ZERO set_leverage
+        # POSTs — maintenance must confirm the effective value, never
+        # upshift it back toward the ceiling (the old clobber sent 20x over
+        # a live stop-driven 1x every pass).
+        copy_balances = await client.balance("copyc1")
+        copy_usdt = next((b for b in copy_balances if b.asset == "USDT"), None)
+        if copy_usdt is not None and copy_usdt.available_balance >= D("500"):
+            await client.set_leverage("copyc1", SYMBOL, 1)
+            setlev_posts: list[int] = []
+            counting_setlev = target_c1.set_leverage
+
+            async def _counting_setlev(account_id: str, symbol: str, leverage: int):
+                if account_id == "copyc1":
+                    setlev_posts.append(leverage)
+                return await counting_setlev(account_id, symbol, leverage)
+
+            target_c1.set_leverage = _counting_setlev  # type: ignore[method-assign]
+            try:
+                opened_d3c = await _open_master_long(client, position_side, "pm-d3c")
+                await _wait_followers_protected(app, followers)
+
+                async def _f3_steady() -> tuple[bool, str]:
+                    failures = []
+                    if await _symbol_qty(audit, "copyc1") == 0:
+                        failures.append("copyc1 flat at steady 1x")
+                    if setlev_posts:
+                        failures.append(f"maintenance upshifted 1x: {setlev_posts}")
+                    return (not failures, "; ".join(failures))
+
+                await _wait_stable(_f3_steady, what="F3 steady-state 1x convergence")
+                await _close_master_long(client, position_side, "pm-d3c", opened_d3c["stop_coid"])
+            finally:
+                target_c1.set_leverage = original_setlev  # type: ignore[method-assign]
+        else:
+            pytest.skip("copyc1 equity too small for steady-state 1x sizing")
     finally:
         with contextlib.suppress(Exception):
             app.coordinator._recompute_follower = original_recompute  # type: ignore[method-assign]

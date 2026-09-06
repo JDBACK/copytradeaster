@@ -372,9 +372,10 @@ class Coordinator:
         self._last_postfill_recompute[account_id] = now
         fr = self._registry.get(account_id)
         state = self._last_master_state
+        captured_at = self._last_master_state_at
         if fr is None or state is None:
             return
-        if time.monotonic() - self._last_master_state_at > POSTFILL_STATE_MAX_AGE_S:
+        if time.monotonic() - captured_at > POSTFILL_STATE_MAX_AGE_S:
             # L1 live incident: the cached delta predates a REST-side fill
             # the lagging WS never delivered. Recomputing closes against it
             # flattens live legs on a phantom MASTER_CLOSED (open/close
@@ -388,17 +389,44 @@ class Coordinator:
         async with self._postfill_admission_lock:
             if not self._postfill_admission_open:
                 return
-            task = asyncio.create_task(self._postfill_recompute(fr, state))
+            task = asyncio.create_task(self._postfill_recompute(fr, state, captured_at))
             self._postfill_tasks.add(task)
             task.add_done_callback(self._postfill_tasks.discard)
 
-    async def _postfill_recompute(self, fr: FollowerRuntime, state: MasterState) -> None:
+    async def _postfill_recompute(
+        self, fr: FollowerRuntime, state: MasterState, captured_at: float
+    ) -> None:
         try:
             # on_confirmed is called while Executor holds the account mutation
             # lock. Wait for the whole originating plan (including its new
             # protection) before taking the snapshot; otherwise a post-fill
             # task can observe the brief pre-STOP window and place a duplicate.
             await self._executor.wait_until_idle(fr.account_id)
+            # Review 636dfff P1: the capture above predates the lock wait. A
+            # newer authoritative refresh (REST sweep/boundary via
+            # recompute_follower, or a newer WS delta) may have superseded it
+            # while we waited — a TTL alone cannot see that, and recomputing
+            # against the stale capture closes live legs on a phantom
+            # MASTER_CLOSED. Re-read the cache after the wait and converge
+            # on whatever is current (the cache only moves forward: the
+            # projector discards out-of-order frames before they reach it).
+            latest = self._last_master_state
+            if latest is None:
+                return
+            if (
+                latest is not state
+                or latest.generation != state.generation
+                or self._last_master_state_at != captured_at
+            ):
+                state = latest
+            elif time.monotonic() - captured_at > POSTFILL_STATE_MAX_AGE_S:
+                # Nothing newer arrived and the capture aged out while we
+                # waited: same stale-cache hazard as at admission.
+                log.info(
+                    "post-fill recompute skipped for %s: cached master state aged out",
+                    _safe_fragment(fr.account_id),
+                )
+                return
             await self._recompute_follower(fr, MasterDelta(frozenset({"*"}), state))
         except Exception as exc:  # noqa: BLE001 - notification path must not raise
             log.warning("post-fill recompute failed for %s: %s", fr.account_id, exc)
@@ -1786,6 +1814,11 @@ class Coordinator:
     ) -> int:
         if not await self._enter_generation():
             return -1
+        # Authoritative refresh (REST sweep/boundary): supersede the WS delta
+        # cache so a post-fill task spawned earlier converges on this newer
+        # state instead of a stale flat capture (review 636dfff P1).
+        self._last_master_state = delta.state
+        self._last_master_state_at = time.monotonic()
         token = self._snapshot_scope.set(snapshot_scope)
         try:
             return await self._recompute_follower(fr, delta)

@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -827,6 +828,9 @@ _AMBIGUOUS_FAILURE_MARKERS = (
     "unknown",
     "timeout",
     "unresolved",
+    "malformed",
+    "runtimeerror",
+    "traceback",
     "-1000",
     "-1006",
     "-1007",
@@ -834,55 +838,109 @@ _AMBIGUOUS_FAILURE_MARKERS = (
     "504",
 )
 
+_HTTP_5XX_RE = re.compile(r"http\D*5\d\d")
+
+# Deterministic non-application proofs: an exchange business reject carrying
+# its code, or a durable journal lifecycle verdict proving the write never
+# landed (later re-issue + CONFIRMED = converged). Anything else — transport
+# text, tracebacks, empty errors — proves neither classification nor
+# convergence and stays fatal even with a successor row.
+_CLASSIFIED_REJECT_RE = re.compile(r"aster:-\d+")
+_DETERMINISTIC_VERDICT_PREFIXES = (
+    "proven-not-executed:",
+    "boot-proven-not-executed:",
+    "boot-resolved:",
+)
+
+
+def _classified_deterministic(error: str) -> bool:
+    text = (error or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if _HTTP_5XX_RE.search(lowered):
+        return False
+    if any(marker in lowered for marker in _AMBIGUOUS_FAILURE_MARKERS):
+        return False
+    if lowered.startswith(_DETERMINISTIC_VERDICT_PREFIXES):
+        return True
+    return bool(_CLASSIFIED_REJECT_RE.search(lowered))
+
 
 def _failed_rows_healed(
     failed_rows, confirmed_rows, *, flat_moot_accounts: frozenset[str] = frozenset()
 ) -> tuple[bool, str]:
-    """Every FAILED row must be a classified deterministic exchange reject
-    with a later CONFIRMED row for the same account+symbol+kind, or moot:
-    its account verified flat/order-free at audit time (close intent
-    satisfied by teardown, open intent died with its episode).
+    """Every FAILED row must be a classified deterministic reject with a
+    later CONFIRMED row carrying the SAME economic intent
+    (account+symbol+kind+side/positionSide/leverage), or moot: a
+    MARKET_CLOSE on an account verified flat/order-free at audit time
+    (close intent satisfied by teardown).
 
-    Transport/ambiguity markers (timeouts, -1000/-1006/-1007, 5xx,
-    unresolved) stay fatal even when moot: they prove neither correct
-    classification nor convergence. Moot applies to REAL accounts only;
-    shadow rows always need successors.
+    Unclassified errors (transport/ambiguity markers, http 5xx, tracebacks,
+    empty) stay fatal even with a successor and even when moot: they prove
+    neither correct classification nor convergence. A CONFIRMED row for the
+    opposite HEDGE leg never heals: intent must match exactly. Moot applies
+    to MARKET_CLOSE on REAL accounts only (flat IS the proof); an
+    unconfirmed MARKET_OPEN can never be moot, and shadow rows always need
+    successors.
     """
     import json as _json
 
-    def _sym(row) -> str:
+    def _payload(row) -> dict:
         try:
-            return str(_json.loads(str(row["payload"])).get("symbol", ""))
+            parsed = _json.loads(str(row["payload"]))
+            return parsed if isinstance(parsed, dict) else {}
         except (TypeError, ValueError):
-            return ""
+            return {}
+
+    def _sym(row) -> str:
+        return str(_payload(row).get("symbol", ""))
+
+    def _intent(row) -> tuple[str, str, str]:
+        payload = _payload(row)
+        return (
+            str(payload.get("side", "")),
+            str(payload.get("positionSide", "")),
+            str(payload.get("leverage", "")),
+        )
 
     confirmed_keys = {
-        (str(r["account_id"]), _sym(r), str(r["kind"]), str(r["created_at"]))
+        (
+            str(r["account_id"]),
+            _sym(r),
+            str(r["kind"]),
+            _intent(r),
+            str(r["created_at"]),
+        )
         for r in confirmed_rows
     }
     problems: list[str] = []
     moot = 0
     for row in failed_rows:
         err = str(row["last_error"] or "")
-        lowered = err.lower()
-        if any(marker in lowered for marker in _AMBIGUOUS_FAILURE_MARKERS):
-            problems.append(
-                f"{row['account_id']}/{row['kind']}: ambiguous failure kept ({err[:80]})"
-            )
-            continue
         key = (str(row["account_id"]), _sym(row), str(row["kind"]))
-        healed = any(
-            c[0] == key[0] and c[1] == key[1] and c[2] == key[2] and c[3] >= str(row["created_at"])
+        intent = _intent(row)
+        healed = _classified_deterministic(err) and any(
+            c[0] == key[0]
+            and c[1] == key[1]
+            and c[2] == key[2]
+            and c[3] == intent
+            and c[4] >= str(row["created_at"])
             for c in confirmed_keys
         )
         if healed:
             continue
-        if key[0] in flat_moot_accounts:
+        if (
+            key[2] == "MARKET_CLOSE"
+            and key[0] in flat_moot_accounts
+            and _classified_deterministic(err)
+        ):
             moot += 1
             continue
         problems.append(
-            f"{row['account_id']}/{row['kind']}/{key[1]}: no CONFIRMED successor "
-            f"after {row['created_at']} ({err[:80]})"
+            f"{row['account_id']}/{row['kind']}/{key[1]}: unhealed "
+            f"(classified={_classified_deterministic(err)}, intent={intent}, "
+            f"after {row['created_at']}, err={err[:80]})"
         )
     if problems:
         return False, f"unhealed FAILED rows ({len(problems)}): {problems[:5]}"
