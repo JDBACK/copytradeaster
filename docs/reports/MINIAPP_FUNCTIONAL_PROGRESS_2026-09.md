@@ -139,3 +139,20 @@ observation. Сценарий 10 эпизодов/account/day × 2 orders × 2 f
 бюджета после episodes/events; H1 capacity пока не принят. Перед G1 нужны
 финальная схема, профиль protection updates, параллельный trading-writer latency,
 полный disk/headroom budget и эксплуатационные пороги/диагностика.
+
+## Шаг 7 — чистая модель эпизода фолловера
+
+`history/models.py` и `history/projector.py`: authoritative PositionSeed,
+Episode/FillAllocation, ordered deduped fills, увеличение/частичное закрытие,
+zero→position→zero, BOTH flip и независимые HEDGE legs. Flip распределяет qty
+между старым и новым эпизодом, realizedPnl учитывается один раз на закрытии.
+Source задаётся подтверждённым order mapping; неизвестная связь не становится
+external автоматически. Для неизвестного seed qty=null/opened_at=null/partial;
+нулевой остаток не выводится из взаимного погашения наблюдавшихся fills.
+Известный ненулевой seed сохраняет placeholder ref и partial до flat.
+
+`complete` в этой чистой функции означает известное начало эпизода при переданном
+доказанном seed; это НЕ доказательство net, coverage или snapshot reconciliation.
+Persistence/snapshot seeding/rebuild/aliases и financial accounting ещё не
+подключены. Экраны по этой функции пока не включаются. Следующий шаг S1.3:
+сохранение episodes/allocations и устойчивые refs, затем денежные потоки/events.

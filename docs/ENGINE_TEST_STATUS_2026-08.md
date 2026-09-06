@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1135/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1146/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1294,3 +1294,12 @@ Synthetic benchmark: 100 accounts, 100k fills + 100k cashflows + 50k observation
 DB/backup 65,880,064 bytes, WAL до checkpoint 4,358,992 bytes; 1000-fill commit
 p50 5.49 ms, max 7.67 ms. Это текущая схема без будущих episodes/events и без
 параллельного trading workload; не окончательный G1 capacity/latency gate.
+
+
+## 2026-09-06 — S1.3 чистая follower episode projection
+
+Новый `tests/unit/history/test_projector.py`: 11 cases (increase/partial/close,
+flip attribution, HEDGE, unknown/known seed, dedup, contradictory facts, source).
+Targeted history **31 passed**; full offline **1146 passed / 2 skipped /
+44 deselected**, 15.97 s. Ruff changed files/doc links clean. Это математическое
+ядро; storage/snapshot proof/aliases/net/events ещё не подключены и G1 не закрыт.
