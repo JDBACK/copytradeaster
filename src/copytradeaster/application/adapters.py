@@ -1015,6 +1015,19 @@ def build_stage2_composition(
         builder_onboarding=builder_onboarding,
         emergency_controller=emergency,
     )
+
+    async def _feed_entry_skip(
+        account_id: str, symbol: str, reason: str, attempt_id: str, pos_side: str
+    ) -> None:
+        await application._record_entry_skipped(
+            account_id,
+            symbol=symbol,
+            reason=reason,
+            attempt_id=attempt_id,
+            pos_side=pos_side,
+        )
+
+    app.coordinator.set_entry_skipped_hook(_feed_entry_skip)
     return Stage2Composition(
         runtime, onboarding, builder_onboarding, emergency_state, emergency, application
     )

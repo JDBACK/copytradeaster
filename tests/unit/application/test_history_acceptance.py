@@ -79,9 +79,12 @@ async def accepted_trade(tmp_path: Path):
         fill(3, "SELL", "1", price="140", pnl="40", leg="BOTH"),
         fill(4, "SELL", "1", price="140", pnl="40", leg="BOTH"),
     )
-    window = Window(0, 4)
+    live = tuple(
+        item.model_copy(update={"time": FLOOR_MS - 4000 + item.time * 1000}) for item in fills
+    )
+    window = Window(FLOOR_MS - 5000, FLOOR_MS)
     await history.commit_fills(
-        scope, "BTCUSDT", window, WindowRead(fills, (window,), (), (), 1), checked_at=3
+        scope, "BTCUSDT", window, WindowRead(live, (window,), (), (), 1), checked_at=3
     )
     projection = HistoryProjection(history, EpisodeRepository(db), EventRepository(db))
     both = PosSide.BOTH
@@ -118,7 +121,7 @@ async def test_all_surfaces_share_one_ref_and_facts(accepted_trade):
     )
     row = await db.fetchone("SELECT * FROM notification_outbox WHERE kind='user.POSITION_CLOSED'")
 
-    assert recovered == 2
+    assert recovered == 4
 
     assert (
         item.trade_ref == detail.trade.trade_ref == feed_item.trade_ref == row["trade_ref"] == ref
@@ -128,17 +131,19 @@ async def test_all_surfaces_share_one_ref_and_facts(accepted_trade):
     assert item.realized_pnl_gross_usdt == detail.trade.realized_pnl_gross_usdt == "80"
     assert feed_item.facts["realized_gross"] == "80"
     assert feed_item.facts["entry_price"] == "100" and feed_item.facts["exit_price"] == "140"
-    # Single-shot publication batches one round into OPENED+CLOSED: the
-    # increase/partial fills above still settle the same episode (qty, entry,
-    # exit, gross all prove it), while per-leg INCREASED/REDUCED rows belong
-    # to multi-publish continuation, covered at unit level in
-    # test_event_builder.py. Locking the batching rule here keeps the
-    # silence explicit instead of accidental.
+    # One event per semantic allocation, identical for a single batch and
+    # for sequential publications (R3): the increase/partial fills settle
+    # the same episode and each carries its own qty/gross.
     stored_kinds = {
         row.event.kind
         for row in await EventRepository(db).list_owned(HistoryScope("h1", "testnet"))
     }
-    assert stored_kinds == {"POSITION_OPENED", "POSITION_CLOSED"}
+    assert stored_kinds == {
+        "POSITION_OPENED",
+        "POSITION_INCREASED",
+        "POSITION_REDUCED",
+        "POSITION_CLOSED",
+    }
 
 
 async def test_foreign_user_sees_nothing_on_any_surface(accepted_trade):

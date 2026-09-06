@@ -59,6 +59,10 @@ class _Coordinator:
         self.events: list[str] = []
         self.fail_reconcile = False
         self.admission_open = True
+        self.entry_skipped_hook = None
+
+    def set_entry_skipped_hook(self, hook) -> None:
+        self.entry_skipped_hook = hook
 
     async def close_generation_admission(self) -> None:
         self.events.append("close")
