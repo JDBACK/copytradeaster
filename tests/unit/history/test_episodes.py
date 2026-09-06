@@ -72,3 +72,46 @@ async def test_cross_account_alias_fails_without_erasing_source(storage):
     with pytest.raises(ValueError, match="scope"):
         await repo.merge_ref(scope, a.episode.public_ref, b.episode.public_ref)
     assert await repo.get(scope, a.episode.public_ref) == a
+
+
+async def test_multi_episode_publication_rolls_back_if_last_revision_conflicts(storage):
+    db, _, scope = storage
+    repo = EpisodeRepository(db)
+    a, b = [await create(repo, scope, str(n)) for n in range(2)]
+    changed = replace(a.episode, source="external")
+    with pytest.raises(EpisodeRevisionConflict):
+        await repo.publish(
+            scope,
+            "BTCUSDT",
+            [changed, b.episode],
+            {a.episode.public_ref: 1, b.episode.public_ref: 0},
+        )
+    assert await repo.get(scope, a.episode.public_ref) == a
+
+
+async def test_durable_fills_project_and_republish_same_episode_ref(storage):
+    from decimal import Decimal as D
+
+    from copytradeaster.history.models import PositionSeed
+    from copytradeaster.history.projection import HistoryProjection
+    from copytradeaster.history.reader import Window, WindowRead
+    from copytradeaster.history.reconcile import HistoryReconciliationError
+
+    db, history, scope = storage
+    fills = (fill(1, "BUY", "2"), fill(2, "SELL", "1", "110", "10"))
+    window = Window(0, 2)
+    await history.commit_fills(
+        scope, "BTCUSDT", window, WindowRead(fills, (window,), (), (), 1), checked_at=3
+    )
+    repo = EpisodeRepository(db)
+    projection = HistoryProjection(history, repo)
+    kwargs = dict(seeds={PosSide.BOTH: PositionSeed(D(0))}, ending={PosSide.BOTH: D(1)})
+    first = await projection.publish_window(scope, "BTCUSDT", window, **kwargs)
+    second = await projection.publish_window(scope, "BTCUSDT", window, **kwargs)
+    assert first == second
+    assert first[0].episode.realized_pnl_gross == D(10)
+    with pytest.raises(HistoryReconciliationError):
+        await projection.publish_window(
+            scope, "BTCUSDT", window, seeds=kwargs["seeds"], ending={PosSide.BOTH: D(0)}
+        )
+    assert await repo.get(scope, first[0].episode.public_ref) == first[0]

@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1158/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1164/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1323,3 +1323,12 @@ restart/idempotency/revision CAS/ownership/alias merge. Shared history fixture
 16.38 s; после canonical reserve-ref correction targeted **5 passed**.
 History total перед последней correction **43 passed**. API/worker projection
 wiring не включены; G1 открыт. Ruff changed files и doc links clean.
+
+
+## 2026-09-06 — projection publication / reconciliation
+
+Новый test_reconcile (4 cases), atomic batch rollback и durable-window integration
+в test_episodes (+2). Targeted history **49 passed**; full offline **1164 passed /
+2 skipped / 44 deselected**, 15.76 s. Ruff changed files/doc links clean.
+Runtime boundary snapshots/worker projection activation ещё не реализованы;
+эта приёмка доказывает storage→projector→reconciliation→atomic publish seam.

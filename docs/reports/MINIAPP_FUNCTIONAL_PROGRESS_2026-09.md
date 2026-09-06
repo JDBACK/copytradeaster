@@ -189,3 +189,22 @@ Alias merge разрешён только явным вызовом после �
 policy и атомарное batch publication с events ещё впереди; сохранение отдельных
 эпизодов само по себе не закрывает этот gate. Дальше: snapshot seed/coverage
 proof, публикация проекции из sync и стабильный list/detail service.
+
+## Шаг 10 — атомарная публикация и reconciliation seam
+
+EpisodeRepository.publish публикует набор эпизодов одной транзакцией; конфликт
+последней revision откатывает и предыдущие изменения. `history/reconcile.py`
+проверяет непрерывную включительную coverage и signed BOTH/независимые HEDGE
+остатки. Unknown remainder не сертифицируется даже нулевым ending snapshot.
+
+`HistoryProjection.publish_window`: durable fills + complete windows → pure
+projector → проверка ending quantity → stable reservations → atomic publication.
+Есть integration test реального tmp SQLite, повторной публикации и отказа при
+snapshot mismatch без повреждения прошлой версии. Seed и ending quantity пока
+передаются явными аргументами доверенного caller, не угадываются по fills.
+
+Runtime acquisition согласованных boundary snapshots, сериализация import/project
+одного account-symbol, incremental checkpoints и backfill split/merge всё ещё
+нужны перед подключением этого seam к worker. Пока runtime не публикует episodes;
+G1 не закрыт. Не считать совпадение ending quantity доказательством полноты
+income/net или достоверности произвольно выбранного seed.

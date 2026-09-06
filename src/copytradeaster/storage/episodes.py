@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal
+
+import aiosqlite
 
 from copytradeaster.domain.models import PosSide
 from copytradeaster.history.models import Episode, FillAllocation
@@ -60,57 +63,86 @@ class EpisodeRepository:
         *,
         expected_revision: int,
     ) -> StoredEpisode:
+        async with self._db.transaction() as conn:
+            return await self._save(conn, scope, episode, expected_revision)
+
+    async def publish(
+        self,
+        scope: HistoryScope,
+        symbol: str,
+        episodes: Sequence[Episode],
+        expected_revisions: Mapping[str, int],
+    ) -> tuple[StoredEpisode, ...]:
+        refs = [episode.public_ref for episode in episodes]
+        if len(set(refs)) != len(refs) or set(refs) != set(expected_revisions):
+            raise ValueError("publication requires exact unique revision set")
+        if any(episode.symbol != symbol for episode in episodes):
+            raise ValueError("publication symbol mismatch")
+        async with self._db.transaction() as conn:
+            saved = []
+            for episode in episodes:
+                saved.append(
+                    await self._save(conn, scope, episode, expected_revisions[episode.public_ref])
+                )
+            return tuple(saved)
+
+    async def _save(
+        self,
+        conn: aiosqlite.Connection,
+        scope: HistoryScope,
+        episode: Episode,
+        expected_revision: int,
+    ) -> StoredEpisode:
         payload = json.dumps(
             asdict(episode), default=_encode, sort_keys=True, separators=(",", ":")
         )
-        async with self._db.transaction() as conn:
-            ref = await self._db.fetchone(
-                "SELECT * FROM follower_episode_refs WHERE public_ref=? AND account_id=? "
-                "AND environment=? AND symbol=? AND position_side=?",
-                (
-                    episode.public_ref,
-                    scope.account_id,
-                    scope.environment,
-                    episode.symbol,
-                    episode.position_side.value,
-                ),
-            )
-            if ref is None:
-                raise ValueError("episode reference outside scope")
-            alias = await self._db.fetchone(
-                "SELECT 1 FROM follower_episode_aliases WHERE alias_ref=?",
-                (episode.public_ref,),
-            )
-            if alias is not None:
-                raise ValueError("cannot update superseded episode")
-            old = await self._db.fetchone(
-                "SELECT revision,payload FROM follower_episodes WHERE public_ref=?",
-                (episode.public_ref,),
-            )
-            revision = int(old["revision"]) if old else 0
-            if revision != expected_revision:
-                raise EpisodeRevisionConflict("episode revision changed")
-            if old and old["payload"] == payload:
-                return StoredEpisode(episode, revision)
-            revision += 1
-            cursor = await conn.execute(
-                "INSERT INTO follower_episodes VALUES (?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(public_ref) DO UPDATE SET opened_at=excluded.opened_at, "
-                "closed_at=excluded.closed_at,revision=excluded.revision,payload=excluded.payload",
-                (
-                    episode.public_ref,
-                    scope.account_id,
-                    scope.environment,
-                    episode.symbol,
-                    episode.position_side.value,
-                    episode.opened_at,
-                    episode.closed_at,
-                    revision,
-                    payload,
-                ),
-            )
-            await cursor.close()
+        ref = await self._db.fetchone(
+            "SELECT * FROM follower_episode_refs WHERE public_ref=? AND account_id=? "
+            "AND environment=? AND symbol=? AND position_side=?",
+            (
+                episode.public_ref,
+                scope.account_id,
+                scope.environment,
+                episode.symbol,
+                episode.position_side.value,
+            ),
+        )
+        if ref is None:
+            raise ValueError("episode reference outside scope")
+        alias = await self._db.fetchone(
+            "SELECT 1 FROM follower_episode_aliases WHERE alias_ref=?",
+            (episode.public_ref,),
+        )
+        if alias is not None:
+            raise ValueError("cannot update superseded episode")
+        old = await self._db.fetchone(
+            "SELECT revision,payload FROM follower_episodes WHERE public_ref=?",
+            (episode.public_ref,),
+        )
+        revision = int(old["revision"]) if old else 0
+        if revision != expected_revision:
+            raise EpisodeRevisionConflict("episode revision changed")
+        if old and old["payload"] == payload:
             return StoredEpisode(episode, revision)
+        revision += 1
+        cursor = await conn.execute(
+            "INSERT INTO follower_episodes VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(public_ref) DO UPDATE SET opened_at=excluded.opened_at, "
+            "closed_at=excluded.closed_at,revision=excluded.revision,payload=excluded.payload",
+            (
+                episode.public_ref,
+                scope.account_id,
+                scope.environment,
+                episode.symbol,
+                episode.position_side.value,
+                episode.opened_at,
+                episode.closed_at,
+                revision,
+                payload,
+            ),
+        )
+        await cursor.close()
+        return StoredEpisode(episode, revision)
 
     async def get(self, scope: HistoryScope, ref: str) -> StoredEpisode | None:
         # Resolve a single canonical hop. merge_ref flattens existing chains.
