@@ -437,6 +437,17 @@ MIGRATIONS: list[str | tuple[str, ...]] = [
         "(account_id, environment, trade_ref)",
         "DROP TABLE _c3_event_parity",
     ),
+    # C6 durable delivery cursor (plan §23.7): per-scope scan high-water for
+    # the user-event outbox sweep. Rollout-floor eligibility lives separately
+    # in app_state; this table only records committed scan progress.
+    """
+    CREATE TABLE IF NOT EXISTS user_event_delivery_state(
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      scanned_seq INTEGER NOT NULL CHECK(scanned_seq >= 0),
+      updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+      PRIMARY KEY(account_id, environment))
+    """,
 ]
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version
