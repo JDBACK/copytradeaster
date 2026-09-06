@@ -152,7 +152,7 @@ class HistoryProjection:
                 raise HistoryReconciliationError("stored projection disagrees with ending snapshot")
             return tuple(await self._episodes.list_range(scope, symbol, window.start, window.end))
         seeds_for_replay = dict(correction[1]) if correction is not None else latest.seed_map()
-        return await self.publish_projection(
+        saved = await self.publish_projection(
             scope,
             symbol,
             replay_start_ms=replay_start,
@@ -166,6 +166,12 @@ class HistoryProjection:
             recorded_at=recorded_at,
             notify_eligible=notify_eligible,
         )
+        if saved:
+            return saved
+        # The replay grew the proven frontier but projected nothing new (no
+        # fills in the added range): report what the requested window
+        # already shows instead of an empty publication.
+        return tuple(await self._episodes.list_range(scope, symbol, window.start, window.end))
 
     async def publish_projection(
         self,
@@ -331,9 +337,7 @@ class HistoryProjection:
         # The replay grew the proven frontier but projected nothing new
         # (no fills in the added range): report what the replayed range
         # already shows instead of an empty publication.
-        return tuple(
-            await self._episodes.list_range(scope, symbol, replay_start_ms, cutoff_ms)
-        )
+        return tuple(await self._episodes.list_range(scope, symbol, replay_start_ms, cutoff_ms))
 
     async def _existing_events(
         self, scope: HistoryScope, trade_refs: Sequence[str]
