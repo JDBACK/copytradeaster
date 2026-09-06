@@ -590,3 +590,96 @@ Full offline: **1322 passed / 2 skipped / 45 deselected**. Ruff + format
 - S2/S3 не запускались. G1/G2/G3 не закрыты.
 
 Следующий шаг — ревью настоящего diff, затем запуск live §10.9 и вердикт G1.
+
+## Шаг 23 — независимое ревью реализации S1 (2026-09-06)
+
+Проверены четыре коммита `4f1a86a..f77a3fd`, повторены offline suite и ruff;
+локальные probes на временной SQLite подтвердили ошибки, не покрытые suite.
+Полный отчёт: [MINIAPP_S1_REVIEW_2026-09.md](MINIAPP_S1_REVIEW_2026-09.md).
+Результаты проверок — в ENGINE_TEST_STATUS, без изменения самой suite.
+
+**Актуальный verdict: REQUEST CHANGES; S1/G1 не принят.** Формулировки
+предыдущего milestone «аудит CONFORM / всё исправлено / дальше только live»
+описывают прежний внутренний проход и не являются текущим acceptance verdict.
+
+Обязательный остаток: отбор fills по allocations/alias, стабильные refs при
+rolling window и open-start/backfill, корректные события при batch capture,
+HEDGE protection, подключённые known costs/issues, recovery без потери хвоста,
+реально dormant trade keyboard, snapshot-bound feed. Live harness содержит
+ошибку распаковки list_closed, неверное требование положительного PnL и неполный
+cleanup; он пишет nonce в configured DB и не проверяет настоящий restart/journal.
+Утверждения «prod-БД не трогает» и «live-файл готов» отзываются этим уточнением.
+
+Дальше: исправления R1–R9 с компактными regression tests, численный итоговый
+capacity/retention budget и проверка worker lag, затем исправленный production
+testnet сценарий §10.9. Live в этом review не запускался. Основной код не менялся;
+обновлены только документация и статусы roadmap. S2/S3 и device smoke шкалы
+остаются в прежнем объёме.
+
+## Шаг 24 — архитектурный план исправлений review (2026-09-06)
+
+По запросу владельца в [основной план](MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md)
+добавлен §23: C1–C9 с точными границами модулей, предлагаемыми методами/DTO,
+storage changes, transactional boundaries и порядком PR. Описаны стабильные
+replay boundaries/lineage, allocation index и pagination, transitions вместо
+diff конечного состояния, HEDGE protection, финансовый read path, отдельный
+delivery cursor, выключенные до rollout capabilities, feed high-water,
+worker/retention и исправленный live harness.
+
+Это **документирование предстоящих изменений**, код не реализован. R1–R9,
+capacity/retention и G1 остаются открытыми. Обычная архитектура single-process /
+SQLite и три stages сохранены. Новые tests/миграции появятся при исполнении
+соответствующих C-пакетов; в этой правке проверяются документационные ссылки.
+
+## Шаг 25 — исполнение C1–C9, live-прогон и его разбор (2026-09-07)
+
+C1 (коммит `b2fbf73` + миграции `0c1c392`): ImportDelta + facts_revision в
+import-транзакции, ProjectionBoundary origin/latest, choose_replay_range,
+Span для импорта/реплея (Window остался биржевым ≤7d), partial вместо
+require_settled, end-state seeds в границе, alias/split-коррекции атомарно,
+тихий rebuild_scope. Батарея `test_replay.py` (R2: rolling, 7d-passage,
+late-fill откат с перевыводом seeds, alias/split, silent rebuild).
+
+C2 (`7efe69a`, сабагент): allocation index (миграция 55), fills строго по
+аллокациям, resolve_owned_ref, раздельные fills/events курсоры,
+history_page_changed. C3 (`fb6acac`, сабагент): transitions при применении
+аллокаций, событие на смысловую аллокацию, dedup scope+fill+seq,
+HISTORY_CORRECTED (миграция 56 + tuple-runner), per-event age/floor.
+C4 (`d107b60` + хук): leg-keyed protection из команд журнала,
+ENTRY_SKIPPED через `Coordinator.set_entry_skipped_hook` (вшит в
+`build_stage2_composition`), CONNECTIVITY по переходам адаптера.
+
+C5 (`4432590`, сабагент): load_episode_money, (symbol,trade_id) ключи,
+proof-driven net с именованными gaps. C6 (`c67e52a`, сабагент):
+user_event_delivery_state (миграция 57), high-water sweep одной
+транзакцией, rollout floor, trade_links_enabled=False. C7 (`489d0c3`,
+сабагент): v1 feed-курсор, high_water snapshot, newest-first, banner.
+
+C8 (`09104a8`): split dirty_import/dirty_projection, fills→capture chaining,
+ImportDelta.requests + snapshot-счётчик сквозно, no-op fall-through в тике,
+stats(), часовой maintenance tick outbox, бенчмарк полной схемы:
+30 аккаунтов × 1000 fills — publish p50 538ms / p95 552ms на аккаунт,
+60 snapshot reads; прогноз при 100 акков × 20 fills/день: 30d 0.13GB,
+90d 0.39GB, 365d 1.56GB, порог места 1.0GB. Оговорки: синтетика (1ms fills,
+без сети, margin 1ms); тик 5s/1-job доминирует в проде, mitigated no-op
+пропуском.
+
+C9 (`bf1ee2a`): харнес переписан на Executor/journal (per-step
+operation_id — одинаковые payloads делят journal key!), journal-coid
+сверка с биржей, distant STOP place+cancel, post-send-timeout
+query-before-retry close, REAL рестарт файлом, HTTP по HMAC на всех
+поверхностях, per-leg reduceOnly failsafe, exclusivity guards.
+
+Live-прогон `CT_TESTNET=1` (96s): FAIL, и это две настоящие находки.
+1. copyc2 делят: чужие fills `ct+32hex` (BUY 01:04:03, SELL 01:04:21) во
+время нашего окна + 0.004-раунды за 15–35 мин до старта; наш wait(0.001)
+прошёл по чужой позиции. Exclusivity precondition из §23.10 не был
+проверен до запуска — больше без него не гонять.
+2. Баг харнеса (не ядра): open-a/open-b с одинаковым payload получили один
+journal key — open-b стал тихим no-op с чужим CONFIRMED. Исправлено
+per-step operation_id + сверка journal-coid↔биржа после каждого submit.
+Ядро (dedupe по ключу перехода) работало правильно.
+
+Счёт: offline **1428 passed / 2 skipped / 45 deselected**, ruff + format
+чистые, миграции 0..57. G1 остаётся открытым: нужен эксклюзивный прогон
+исправленного харнеса.

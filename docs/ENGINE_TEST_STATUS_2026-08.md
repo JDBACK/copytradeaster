@@ -3,8 +3,9 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1322/2/45 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> **TL;DR (2026-09-07):** Ревью S1 принято в работу: C1–C9 исполнены и запушены (`b2fbf73..bf1ee2a`), live-прогон нашёл делимый copyc2 + баг харнеса (починен офлайн). G1/G2/G3 открыты.
+> Ревью S1: **REQUEST CHANGES** остаются до эксклюзивного live-прогона; условия — `reports/MINIAPP_S1_REVIEW_2026-09.md` §23.
+> Offline 1428/2/45 (2026-09-07; coverage не перемерялось), миграции 0..57, ruff clean. Live §10.9: 1 FAIL (контест) — повтор только в эксклюзивном окне.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1515,3 +1516,40 @@ single-count комиссий, foreign spot-check, notify_eligible=True).
 fold верит CONFIRMED-команде, а не статусу наблюдения. Full offline
 **1322 passed / 2 skipped / 45 deselected**. Ruff + format clean. Live
 §10.9 (журнал, рестарт, SL/UNKNOWN, прогон) — только с ревью; G1 не закрыт.
+
+## 2026-09-06 — Шаг 23: независимое ревью S1, REQUEST CHANGES
+
+Scope `4f1a86a..f77a3fd`. Повторная проверка именно текущего checkout:
+`PYTHONPATH=src:. .venv/bin/pytest -q -m 'not testnet'` — **1322 passed /
+2 skipped / 45 deselected**, 18.76 s. `.venv/bin/ruff check .` и
+`.venv/bin/ruff format --check .` — clean. Coverage не перемерялось;
+frontend не менялся и повторно не запускался. Новых постоянных тестов нет.
+
+Дополнительные hermetic probes (реальные repositories/service/capture,
+временная SQLite; только notification emitter заменён recorder) подтвердили:
+лишний fill чужого эпизода в trade_events; повторный closed episode с тем же
+gross после сдвига start; потерю increase/partial и неверные промежуточные
+числа при batch events; смешение HEDGE protection; потерю 1001-го eligible
+event после продвижения recovery floor. Отдельно подтверждены отсутствующие
+costs/issues в DTO, активный markup при обычном URL и tuple-контракт list_closed,
+который нарушает live harness.
+
+**S1/G1 — REQUEST CHANGES.** Открыты R1–R9 и остаток capacity/retention /
+publication latency. Отчёт с файлами, воспроизведениями и критериями исправления:
+[MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
+Ранее записанные CONFORM и «дальше только live» — результаты прежнего прохода,
+не текущий verdict. Live не запускался; harness нужно исправить до signed
+прогона. Рабочая БД и биржа этим review не затрагивались. G2/G3 также открыты.
+
+## 2026-09-07 — C1–C9 исполнены; live нашёл делимый аккаунт + баг харнеса
+
+C1–C4 (границы/аллокации/transitions/protection+хук), C5–C7 (деньги/delivery/
+feed), C8 (worker budget, maintenance tick, бенчмарк 30 акков: publish p95
+552ms, прогноз 365d 1.56GB), C9 (харнес на Executor/journal, HTTP, рестарт).
+Offline **1428/2/45**, ruff/format clean, миграции 0..57.
+Live `CT_TESTNET=1` FAIL за 96s: (1) copyc2 торгует чужой бот (fills
+`ct+32hex` в нашем окне) — эксклюзивность из §23.10 не проверена, повтор
+только в эксклюзивном окне; (2) одинаковые payloads open-a/open-b делили
+journal key — open-b был тихим no-op (ядро право, харнес починен:
+per-step operation_id + journal-coid↔биржа после каждого submit).
+Аккаунт оставлен flat. G1 открыт.
