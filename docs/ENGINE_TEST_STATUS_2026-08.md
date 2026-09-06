@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1170/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1322/2/45 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1343,3 +1343,175 @@ cutoff, missing time, seed inference и dedup. Targeted history **55 passed**;
 full offline **1170 passed / 2 skipped / 44 deselected**, 15.94 s.
 Ruff/doc links clean. Полный signed suite не повторялся; runtime capture machine
 и long-lived incremental checkpoint ещё не реализованы.
+
+
+## 2026-09-06 — serial boundary capture seam
+
+Новый `history/capture.py`: `read_boundary` (один авторитетный `positionRisk`
+snapshot с clock-интервалом), `HistoryCapture` с per-key `asyncio.Lock`,
+`prove_unchanged` (margin 2000 ms), seeds обратным суммированием из доказанной
+ending-границы, стабильные placeholder refs (`seed:{window.start}:{leg}`),
+публикация через `HistoryProjection`; `capture_and_publish` выполняет сначала
+bounded import, затем доказывает live edge. Отложенная публикация —
+`HistoryReconciliationError` без потери durable fills, не повод для backoff.
+`App.episodes` и `build_history_capture` подключены. Новый
+`tests/unit/history/test_capture.py`: 12 checks. Targeted history
+**67 passed**; full offline **1182 passed / 2 skipped / 44 deselected**,
+17.56 s. Ruff changed files clean. Периодическая worker-активация, durable
+capture checkpoints, user events и shared-fill allocation остаются открытыми;
+G1 не закрыт.
+
+
+## 2026-09-06 — хранилище пользовательских событий S1.3
+
+Append-only миграции 45–47: `user_activity_events` (seq, UNIQUE event_ref,
+account/environment ownership, nullable trade_ref, 13 kinds из §7.1,
+occurred/recorded_at, canonical JSON facts, per-account dedup key, notify
+eligibility) + индексы feed/trade. Новый `storage/events.py`:
+idempotent `record` (повтор по dedup key возвращает первую запись, события
+неизменяемы), owned `get`/`list_owned`/`list_by_trade`, стабильный seq-курсор
+(поздний backfill не сдвигает страницы), facts только str/int/bool/null,
+bounded limit. Новый `tests/unit/history/test_events.py`: 10 checks. Targeted
+history **77 passed**; full offline **1192 passed / 2 skipped / 44 deselected**,
+17.98 s. Ruff changed files clean. Вывод событий из фактов, worker-активация
+capture и shared-fill allocation остаются открытыми; G1 не закрыт.
+
+
+## 2026-09-06 — вывод событий из переходов эпизодов S1.3
+
+Новый pure `history/event_builder.py`: `episode_events` сравнивает ранее
+опубликованные эпизоды со свежей проекцией — OPENED/INCREASED/REDUCED/CLOSED
+только за новые подтверждённые факты (цены строго из fills, недостающий fill
+абрагирует пачку; связь `unknown` не приписывается; placeholder молчит до
+первой entry-аллокации). Повторная проекция даёт ноль черновиков; dedup key
+стабилен под first-wins семантику репозитория; `notify_eligible` — политика
+caller. Новый `tests/unit/history/test_event_builder.py`: 11 checks. Targeted
+history **88 passed**; full offline **1203 passed / 2 skipped / 44 deselected**,
+19.10 s. Ruff changed files clean. Проводка в транзакцию публикации,
+protection/system-события, worker-активация и shared-fill allocation остаются
+открытыми; G1 не закрыт.
+
+
+## 2026-09-06 — атомарные события публикации S1.3
+
+Требование §10.6 «проекция и события — одной транзакцией»: `EventDraft`
+переехал в `storage/events.py` + `insert_many` на чужом соединении;
+`episodes.publish(..., events=)` пишет эпизоды и события атомарно (конфликт
+revision и невалидный черновик откатывают всё). `HistoryProjection`
+выводит черновики из diff со старой публикацией и требует `recorded_at`;
+`HistoryCapture`/`App.user_events`/`build_history_capture` проводят политику
+сквозно, `capture_and_publish` штампует временем after-снапшота. Без репо
+поведение прежнее. Новые `test_episode_events.py` (6) + 2 capture-теста +
+`recorded_at` в builder-тестах (12). Targeted history **97 passed**; full
+offline **1212 passed / 2 skipped / 44 deselected**, 17.45 s. Ruff clean.
+Остаются worker-активация, protection/system-события, shared-fill allocation;
+G1 не закрыт.
+
+## 2026-09-06 — worker-активация capture S1.3
+
+Периодическая публикация истории: миграция 48 `history_capture_state`
+(cap_start/cap_end per account/environment/symbol, secret-safe last_error);
+`HistoryRepository.capture_state/record_capture` — dumb put, политика выше.
+`prepare_window` строит стабильное окно из durable состояния без биржевых
+чтений (пропуски: нет покрытия / фронтир опубликован / фронтир свежий;
+старт пинится к checkpoint, спан > 7 дней клампится). `require_settled=True`
+отказывает окна поверх открытой позиции — steady-state только settled.
+`run_scheduled`: prepare → capture_and_publish → checkpoint; пропуск — False
+без чтений, deferral пишет ошибку-категорию и пробрасывается в worker-backoff;
+края моложе 5 мин eligible, backfill silent. `HistoryWorker`: capture-jobs в
+ротации отдельно от fills, `mark_dirty` приоритизирует symbol (best-effort),
+`App._observe_history_order` дергает hint через `history_mark_dirty`,
+`build_history_worker` отдаёт fills+capture jobs. Тесты: storage +1, capture
++10 (prepare/settled/run_scheduled), worker +5, App hook +2. Targeted history
+**113 passed**; full offline **1230 passed / 2 skipped / 44 deselected**,
+17.17 s. Ruff changed files clean. Остаются protection/system-события,
+shared-fill allocation; G1 не закрыт.
+
+## 2026-09-06 — order-link источники и protection-события S1.3
+
+`HistoryRepository.proven_order_sources`: order id — `copy` только при согласии
+observation + CONFIRMED entry/exit-команды + link с master trade id; проекция
+резолвит сама, частичная связь остаётся `unknown`. Новый `history/protection.py`:
+baseline и факты окна только из CONFIRMED-команд, цены из journal payload,
+чистая свёртка SET/CHANGED/UNCONFIRMED в транзакции публикации; замена — одно
+событие, непривязываемый cancel молчит, trade_ref пуст. `CommandRepo.
+by_client_order_id` для связи cancel→заменённый ордер. `account_episodes`:
+batch pro-rata split shared-fill комиссий с точным сохранением суммы;
+single-view без сиблингов keeps `shared_fill_commission`. System-события
+(риск/пауза/связность/пропуск) из журнала не выводятся — источник
+application-слой, S1.5. Тесты: accounting +3, storage +4, protection +9,
+capture +3. Targeted history **132 passed**; full offline **1249 passed /
+2 skipped / 44 deselected**, 19.52 s. Ruff всего репо clean. Остаются S1.4–S1.6;
+G1 не закрыт.
+
+## 2026-09-06 — S1.4 контракты истории (list/detail/feed)
+
+`EpisodeRepository.list_closed/list_open` (курсор `closed_at:ref`), `max_seq`,
+`in_flight_for`, `coverage_from`. DTO (`TradeListItem/Page`, `TradeDetailDTO`
+с `gross_only`, `ActivityFeedPage`, `AccountOverview` без суммарного
+risk_to_stop, `TradeUnavailableError`) и методы в `ApplicationProtocol`.
+Новый `application/trade_views.py`: чистые презентеры поверх доказанных
+фактов. Service: репозитории из `runtime.db`, `trades`/`trade`/`trade_events`/
+`activity_feed` с ownership, pending-блок без payload, аддитивный `overview`
+в DashboardDTO, refresh-snapshot singleflight. Адаптер `symbol_assets`
+(baseAsset, soft-null). HTTP: `trades`/`trade`/`trade/events`/`activity/feed`
+(стало 25 POST). Тесты: trade_views +9, service +12, HTTP +9. Full offline
+**1279 passed / 2 skipped / 44 deselected**, 18.33 s. Ruff всего репо clean.
+Остаются остаток S1.4 (risk preview, resume-контекст), S1.5–S1.6; G1 не закрыт.
+
+## 2026-09-06 — S1.4 остаток: risk preview и resume-контекст
+
+`RiskPreviewStep/DTO` + чистый `risk_budget_steps` (10 шагов 0,5–5%, точный
+`available × percent`); `service.risk_preview` поверх cached snapshot без
+side effects, пустые steps вместо нулевого примера при недоступном балансе;
+route `risk/preview` (стало 26 POST). `ResumeContextDTO` + аддитивное
+`Confirmation.resume_context` только для RESUME, факты cached-only, unknown
+вместо отказа begin. Замена hardcoded копии resume в UI — S3; TS-зеркала —
+с экранами. Тесты: service +8, презентер +5, HTTP +1. Full offline
+**1293 passed / 2 skipped / 44 deselected**, 19.96 s. Ruff + format clean.
+S1.4 закрыт по backend-объёму; остаются S1.5–S1.6; G1 не закрыт.
+
+## 2026-09-06 — S1.5 presenter, structured outbox, recovery из событий
+
+`notifications/trade_cards.py`: общий pure-презентер всех 13 видов событий
+по примерам §7 (нейтральное закрытие, итог «до комиссий», unknown опускается,
+unknown kind — ValueError). Миграции 49–50: outbox `trade_ref`/`action` без
+backfill; `NotificationEvent` closed-set action; router passthrough; worker
+`trade_keyboard` dormant без base URL + `webapp_base_url` из настроек.
+`recover_user_events` (eligible после floor, backfill молчит) поверх legacy
+на старте. Service пишет RISK_CHANGED/COPY_PAUSED/COPY_RESUMED поверх ленты
+best-effort. Push-активация и menu — S3. Тесты: презентер +7, recovery +3,
+keyboard +2, writers +3. Full offline **1308 passed / 2 skipped /
+44 deselected**, 19.18 s. Ruff + format clean. Остаются S1.6 и G1.
+
+## 2026-09-06 — S1.6 offline-приёмка, ремонт миграций, retention
+
+Cross-surface acceptance (§10.9.5/6) offline: один trade_ref и одинаковые
+факты на списке/деталях/ленте/recovery; рестарт-идемпотентность; изоляция
+§10.9.7 покрыта. Найден и отремонтирован блокер рестарта: mid-list вставка
+схемы (36c55d3) ломала апгрейд pre-S1 БД (ghost-v33 пропускал CREATE TABLE
+fills) — entry 34 стал table-ensure, индекс переехал в 51, S1-DDL закалена
+IF NOT EXISTS; копия prod-БД мигрируется, fresh/upgraded конвергируют;
+регрессия `test_database_upgrade.py`. Retention: facts без TTL, outbox
+`prune_terminal` (SENT 7d / FAILED 30d, bounded, на старте worker).
+Тесты: acceptance +2, upgrade +2, prune +2. Full offline **1314 passed /
+2 skipped / 45 deselected**, ~19 s. Ruff + format clean. Live §10.9-цикл
+написан (`test_history_acceptance_live.py`), не запущен — ждёт ревью; G1
+не закрыт.
+
+## 2026-09-06 — Шаг 22: пред-ревью аудит S1, 10 must-fix влиты
+
+Шесть ревьюеров: шаги 12–15 CONFORM; P0 — live-edge capture (stale cutoff
+делал bracket невыполнимым всегда; фикс: импорт до живого края,
+cutoff=min(frontier, after−margin), одно ожидание margin, checkpoint и
+eligibility по эффективному концу; инвариант плана не тронут); S1.4 —
+курсор round-trip, preview отключённым, whitelist в advisory,
+executed_qty None≠"0"; S1.5 — recovery листает всю ленту (гард курсора,
+регрессия 204+1; найден висяк на стабе без after_seq); protection —
+cancel-гейт требует CONFIRMED; acceptance — полный цикл + batching-правило;
+FAILED-retention 10d/40d; live-файл hardened offline (order_id-фильтр,
+single-count комиссий, foreign spot-check, notify_eligible=True).
+Отклонено с обоснованием: seq-сортировка ленты (§11.2 — правится план),
+fold верит CONFIRMED-команде, а не статусу наблюдения. Full offline
+**1322 passed / 2 skipped / 45 deselected**. Ruff + format clean. Live
+§10.9 (журнал, рестарт, SL/UNKNOWN, прогон) — только с ревью; G1 не закрыт.
