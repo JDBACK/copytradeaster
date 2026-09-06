@@ -190,12 +190,27 @@ async def test_trade_events_validates_cursor_and_limit(client, fake_app):
         "/miniapp/api/trade/events", json={"trade_ref": "ref-1"}, headers=_auth()
     )
     assert resp.status == 200
-    assert fake_app.calls[0][3] == {"cursor": 0, "limit": None}
+    assert fake_app.calls[0][3] == {
+        "cursor": 0,
+        "limit": None,
+        "fills_cursor": None,
+        "events_cursor": None,
+        "fills_limit": None,
+        "events_limit": None,
+    }
     resp = await client.post(
         "/miniapp/api/trade/events", json={"trade_ref": "ref-1", "cursor": "7"}, headers=_auth()
     )
     assert resp.status == 200
-    assert fake_app.calls[-1][3] == {"cursor": 7, "limit": None}
+    assert fake_app.calls[-1][3]["cursor"] == 7
+    resp = await client.post(
+        "/miniapp/api/trade/events",
+        json={"trade_ref": "ref-1", "fills_cursor": "abc", "events_cursor": "9"},
+        headers=_auth(),
+    )
+    assert resp.status == 200
+    assert fake_app.calls[-1][3]["fills_cursor"] == "abc"
+    assert fake_app.calls[-1][3]["events_cursor"] == 9
     resp = await client.post(
         "/miniapp/api/trade/events", json={"trade_ref": "ref-1", "cursor": "7x"}, headers=_auth()
     )

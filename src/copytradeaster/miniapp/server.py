@@ -291,15 +291,38 @@ def create_miniapp_app(
         trade_ref = body.get("trade_ref")
         if not isinstance(trade_ref, str) or not trade_ref:
             return _json_error(400, "invalid_input", "Некорректная ссылка на сделку.")
+        # Split pagination (C2, plan §23.3): fills and events page
+        # independently. The legacy bare cursor pages events only.
+        fills_cursor = _cursor_str(body.get("fills_cursor"))
+        if body.get("fills_cursor") is not None and fills_cursor is None:
+            return _json_error(400, "invalid_input", "Некорректный курсор исполнений.")
+        events_cursor = _cursor_int(body.get("events_cursor"))
+        if body.get("events_cursor") is not None and events_cursor is None:
+            return _json_error(400, "invalid_input", "Некорректный курсор истории.")
         cursor = _cursor_int(body.get("cursor", 0))
         if cursor is None:
             return _json_error(400, "invalid_input", "Некорректный курсор истории.")
         limit = _page_limit(body.get("limit"))
         if body.get("limit") is not None and limit is None:
             return _json_error(400, "invalid_input", "Некорректный размер страницы.")
+        fills_limit = _page_limit(body.get("fills_limit"))
+        if body.get("fills_limit") is not None and fills_limit is None:
+            return _json_error(400, "invalid_input", "Некорректный размер страницы.")
+        events_limit = _page_limit(body.get("events_limit"))
+        if body.get("events_limit") is not None and events_limit is None:
+            return _json_error(400, "invalid_input", "Некорректный размер страницы.")
         try:
             return _json_dto(
-                await application.trade_events(user_id, trade_ref, cursor=cursor, limit=limit)
+                await application.trade_events(
+                    user_id,
+                    trade_ref,
+                    cursor=cursor,
+                    limit=limit,
+                    fills_cursor=fills_cursor,
+                    events_cursor=events_cursor,
+                    fills_limit=fills_limit,
+                    events_limit=events_limit,
+                )
             )
         except Exception as exc:  # noqa: BLE001
             return _failure(exc, MSG_UNAVAILABLE)

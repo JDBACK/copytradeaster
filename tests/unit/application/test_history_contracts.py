@@ -141,6 +141,9 @@ async def seed_episodes(db: Database, account_id: str = "h1"):
                 expected_revision=0,
             )
         )
+    # C2: fills are episode-bound through the allocation index; seeding via
+    # save() bypasses publication, so the test rebuilds the index explicitly.
+    await repo.rebuild_allocations(history_scope, "BTCUSDT")
     return stored
 
 

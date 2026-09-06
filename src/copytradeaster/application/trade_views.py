@@ -7,7 +7,10 @@ no exchange calls, no guessing: unknown directions stay null, net stays
 absent until full attribution, and money travels as canonical strings.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -27,10 +30,10 @@ from copytradeaster.application.models import (
     TradeListItem,
     TradeState,
 )
-from copytradeaster.aster.models import UserTradeDTO
-from copytradeaster.history.models import Episode
-from copytradeaster.storage.episodes import StoredEpisode
+from copytradeaster.history.models import Episode, TradeResolutionDTO
+from copytradeaster.storage.episodes import AllocatedFill, EpisodeRepository, StoredEpisode
 from copytradeaster.storage.events import EVENT_KINDS, StoredEvent
+from copytradeaster.storage.history import HistoryScope
 
 _TRADE_FEED_KINDS = frozenset(
     {
@@ -102,16 +105,24 @@ def present_trade_detail(stored: StoredEpisode, *, quantity_asset: str | None) -
     )
 
 
-def present_fill(fill: UserTradeDTO) -> FillFacts:
-    """One exchange execution with string ids and canonical money."""
+def present_allocated_fill(row: AllocatedFill) -> FillFacts:
+    """One episode share of one exchange execution (C2, plan §23.3).
+
+    Exchange qty/price travel untouched next to the episode share; money is
+    canonical strings, ids stay strings.
+    """
     return FillFacts(
-        trade_id=str(fill.trade_id),
-        order_id=str(fill.order_id),
-        side=fill.side.value,
-        quantity=_money(fill.qty),
-        price=_money(fill.price),
-        realized_pnl=_money(fill.realized_pnl),
-        executed_at=_as_datetime(fill.time),
+        trade_id=str(row.exchange_trade_id),
+        order_id=str(row.order_id),
+        side=row.side,
+        quantity=_money(row.quantity),
+        price=_money(row.price),
+        realized_pnl=_money(row.exchange_realized_pnl),
+        executed_at=_as_datetime(row.occurred_at),
+        allocated_quantity=_money(row.allocated_qty),
+        role=row.role,
+        allocated_realized_pnl=_money(row.allocated_realized_gross),
+        position_side=row.position_side,
     )
 
 
@@ -124,6 +135,50 @@ def present_event(stored: StoredEvent) -> TradeEventItem:
         trade_ref=event.trade_ref,
         occurred_at=_as_datetime(event.occurred_at),
         facts=dict(event.facts),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedTradeRef:
+    """One owned ref resolved for a details/fills/events request.
+
+    ``canonical_ref`` is the surviving episode; ``family_refs`` adds every
+    proven alias/merge ref so event selection covers the whole proven
+    family. ``resolution`` carries the recorded verdict when one exists.
+    """
+
+    canonical_ref: str
+    family_refs: tuple[str, ...]
+    stored: StoredEpisode
+    resolution: TradeResolutionDTO | None
+
+
+async def resolve_owned_ref(
+    episodes: EpisodeRepository, scope: HistoryScope, ref: str
+) -> OwnedTradeRef | TradeResolutionDTO | None:
+    """Resolve once per request: direct → canonical, merge/alias → canonical.
+
+    Lives here (not in the service) so every transport shares one meaning;
+    the service maps the outcome to the response and never re-resolves.
+    Returns the split :class:`TradeResolutionDTO` itself so the caller maps
+    it to an explicit response instead of silently picking a child; None
+    covers missing and foreign refs alike so existence never leaks.
+    """
+    if not isinstance(ref, str) or not ref:
+        raise ValueError("trade reference is invalid")
+    resolution = await episodes.get_resolution(scope, ref)
+    if resolution is not None and resolution.kind == "split":
+        return resolution
+    stored = await episodes.get(scope, ref)
+    if stored is None:
+        return None
+    canonical = stored.episode.public_ref
+    family = await episodes.alias_family(scope, canonical)
+    return OwnedTradeRef(
+        canonical_ref=canonical,
+        family_refs=family,
+        stored=stored,
+        resolution=resolution,
     )
 
 

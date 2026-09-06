@@ -72,6 +72,26 @@ class TradeUnavailableError(ApplicationError):
     public_code = "trade_unavailable"
 
 
+class HistoryPageChangedError(ApplicationError):
+    """The episode revision moved under an open fills page (C2, plan §23.3).
+
+    The client must restart paging from the first page instead of continuing
+    the stale cursor; retrying the same cursor can never succeed.
+    """
+
+    public_code = "history_page_changed"
+
+
+class TradeSplitError(ApplicationError):
+    """The requested ref split into several episodes (C2, plan §23.3).
+
+    No single child is picked silently; the client must ask the user which
+    surviving episode to open.
+    """
+
+    public_code = "trade_split"
+
+
 class ServiceUnavailableError(ApplicationError):
     public_code = "service_unavailable"
 
@@ -535,7 +555,14 @@ class TradeListPage:
 
 @dataclass(frozen=True, slots=True)
 class FillFacts:
-    """One exchange execution; ids stay strings, never JS numbers."""
+    """One episode share of one exchange execution (C2, plan §23.3).
+
+    Ids stay strings, never JS numbers. ``quantity``/``price``/``realized_pnl``
+    are the source exchange facts; ``allocated_quantity``/``role``/
+    ``allocated_realized_pnl``/``position_side`` are this episode's proven
+    share. A shared flip fill appears once per episode with only its share;
+    shares of one fill sum to the source fill.
+    """
 
     trade_id: str
     order_id: str
@@ -544,6 +571,10 @@ class FillFacts:
     price: str
     realized_pnl: str
     executed_at: datetime
+    allocated_quantity: str
+    role: str
+    allocated_realized_pnl: str
+    position_side: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,9 +590,21 @@ class TradeEventItem:
 
 @dataclass(frozen=True, slots=True)
 class TradeEventsPage:
+    """One episode's fills plus its user events, paged independently.
+
+    ``fills_cursor``/``events_cursor`` are the positions for the next
+    request (None when that array is exhausted); ``next_fills_cursor``/
+    ``next_events_cursor`` repeat the same values under explicit names and
+    legacy ``next_cursor`` repeats the events position.
+    """
+
     fills: tuple[FillFacts, ...] = ()
     events: tuple[TradeEventItem, ...] = ()
     next_cursor: str | None = None
+    fills_cursor: str | None = None
+    events_cursor: str | None = None
+    next_fills_cursor: str | None = None
+    next_events_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -926,7 +969,16 @@ class ApplicationProtocol(Protocol):
     async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO: ...
 
     async def trade_events(
-        self, user_id: int, trade_ref: str, *, cursor: int = 0, limit: int | None = None
+        self,
+        user_id: int,
+        trade_ref: str,
+        *,
+        cursor: int = 0,
+        limit: int | None = None,
+        fills_cursor: str | None = None,
+        events_cursor: int | str | None = None,
+        fills_limit: int | None = None,
+        events_limit: int | None = None,
     ) -> TradeEventsPage: ...
 
     async def activity_feed(

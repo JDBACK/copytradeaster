@@ -18,8 +18,8 @@ from copytradeaster.application.trade_views import (
     build_overview,
     episode_side,
     feed_kinds,
+    present_allocated_fill,
     present_event,
-    present_fill,
     present_trade,
     present_trade_detail,
     quantity_assets,
@@ -100,10 +100,28 @@ def test_unproven_remainder_stays_none_not_zero():
 
 
 def test_fill_and_event_presenters_keep_ids_and_kinds():
-    (row,) = [fill(1, "BUY", "2")]
-    facts = present_fill(row)
+    from copytradeaster.storage.episodes import AllocatedFill
+
+    facts = present_allocated_fill(
+        AllocatedFill(
+            trade_ref="ref-1",
+            exchange_trade_id="1",
+            order_id="1",
+            side="BUY",
+            position_side="BOTH",
+            quantity=D("2"),
+            price=D("100"),
+            exchange_realized_pnl=D("0"),
+            occurred_at=1,
+            role="entry",
+            allocated_qty=D("2"),
+            allocated_realized_gross=D("0"),
+        )
+    )
     assert (facts.trade_id, facts.order_id) == ("1", "1")
     assert facts.side == "BUY" and facts.quantity == "2"
+    assert facts.allocated_quantity == "2" and facts.role == "entry"
+    assert facts.allocated_realized_pnl == "0" and facts.position_side == "BOTH"
     stored = StoredEvent(
         HistoryScope("a", "testnet"),
         UserEvent(
@@ -163,6 +181,7 @@ def test_feed_kinds_split_trade_and_system():
         "PROTECTION_UNCONFIRMED",
     }
     assert set(feed_kinds(ActivityFilter.SYSTEM) or ()) == {
+        "HISTORY_CORRECTED",
         "RISK_CHANGED",
         "COPY_PAUSED",
         "COPY_RESUMED",

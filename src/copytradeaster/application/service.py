@@ -61,6 +61,7 @@ from copytradeaster.application.models import (
     DirectCredentialsInput,
     GlobalEmergencyActiveError,
     GlobalPauseActiveError,
+    HistoryPageChangedError,
     MiniAppAccessState,
     MiniAppConnectionState,
     MiniAppSessionDTO,
@@ -89,6 +90,7 @@ from copytradeaster.application.models import (
     TradeDetailDTO,
     TradeEventsPage,
     TradeListPage,
+    TradeSplitError,
     TradeUnavailableError,
     UserContext,
     UserRole,
@@ -97,15 +99,16 @@ from copytradeaster.application.models import (
 from copytradeaster.application.trade_views import (
     build_overview,
     feed_kinds,
+    present_allocated_fill,
     present_event,
-    present_fill,
     present_trade,
     present_trade_detail,
     quantity_assets,
+    resolve_owned_ref,
     risk_budget_steps,
 )
 from copytradeaster.aster.trading_api import AsterError
-from copytradeaster.history.reader import Window
+from copytradeaster.history.models import TradeResolutionDTO
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
 from copytradeaster.onboarding.builder import validate_builder_record
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
@@ -117,7 +120,7 @@ from copytradeaster.onboarding.models import (
     mask_address,
     stable_account_id,
 )
-from copytradeaster.storage.episodes import EpisodeRepository
+from copytradeaster.storage.episodes import EpisodeRepository, EpisodeRevisionConflict
 from copytradeaster.storage.events import EventRepository
 from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import (
@@ -174,7 +177,33 @@ _SAFE_ERRORS = (
     StaleOperationError,
     ServiceUnavailableError,
     TradeUnavailableError,
+    HistoryPageChangedError,
+    TradeSplitError,
 )
+
+
+_CONNECTIVITY_ASTER_CODES = frozenset({-1000, -1006, -1007})
+
+
+def _is_connectivity_error(exc: BaseException) -> bool:
+    """Transport-classified failures only; app bugs never read as outages.
+
+    Mirrors the executor outcome-unknown taxonomy (timeout/gateway codes and
+    5xx) plus stdlib transport errors. A 4xx (auth, validation) or a local
+    bug is not a lost exchange connection and records no event.
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    if not isinstance(exc, AsterError):
+        return False
+    if exc.code in _CONNECTIVITY_ASTER_CODES:
+        return True
+    status = exc.http_status
+    if isinstance(status, int) and not isinstance(status, bool) and status >= 500:
+        return True
+    message = exc.msg.lower() if isinstance(exc.msg, str) else ""
+    return exc.code == 0 and ("timeout" in message or "timed out" in message)
+
 
 log = get_logger(__name__)
 
@@ -770,6 +799,7 @@ class UserApplicationService:
         self._confirmation_lock = asyncio.Lock()
         self._mutation_locks: dict[str, asyncio.Lock] = {}
         self._refresh_tasks: dict[str, asyncio.Task] = {}
+        self._connectivity: dict[str, bool] = {}
         self._global_mutation_lock = asyncio.Lock()
 
     @staticmethod
@@ -1288,9 +1318,15 @@ class UserApplicationService:
             )
         # Shielded join: one exchange read serves every concurrent caller,
         # and one cancelled waiter never aborts the others.
-        result = await asyncio.shield(task)
+        try:
+            result = await asyncio.shield(task)
+        except Exception as exc:
+            if _is_connectivity_error(exc):
+                await self._record_connectivity(account_id, reachable=False)
+            raise
         if result is _MISSING:
             raise ServiceUnavailableError("account snapshot is unavailable")
+        await self._record_connectivity(account_id, reachable=True)
         if result is None:
             return None, None
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], datetime):
@@ -2873,9 +2909,15 @@ class UserApplicationService:
             if not isinstance(trade_ref, str) or not trade_ref:
                 raise ValidationError("trade reference is invalid")
             scope = HistoryScope(account_id, await self._history_environment())
-            stored = await episodes.get(scope, trade_ref)
-            if stored is None:
+            try:
+                owned = await resolve_owned_ref(episodes, scope, trade_ref)
+            except ValueError as exc:
+                raise ValidationError("trade reference is invalid") from exc
+            if owned is None:
                 raise TradeUnavailableError("trade is unavailable")
+            if isinstance(owned, TradeResolutionDTO):
+                raise TradeSplitError("trade split into several episodes")
+            stored = owned.stored
             assets = await self._quantity_assets(account_id, [stored.episode.symbol])
             return present_trade_detail(stored, quantity_asset=assets.get(stored.episode.symbol))
         except _SAFE_ERRORS:
@@ -2890,46 +2932,101 @@ class UserApplicationService:
         *,
         cursor: int = 0,
         limit: int | None = None,
+        fills_cursor: str | None = None,
+        events_cursor: int | str | None = None,
+        fills_limit: int | None = None,
+        events_limit: int | None = None,
     ) -> TradeEventsPage:
-        """Fills and user events of one owned episode; fills are episode-bound."""
+        """Fills and user events of one owned episode family (C2, plan §23.3).
+
+        Fills come from the allocation index, never a time range: overlapping
+        HEDGE legs stay separate and a shared flip fill shows only the
+        episode share. Fills and events page independently (default 20, max
+        50 each); the legacy bare ``cursor`` pages events only.
+        """
         try:
             context, _, _ = await self._owned_account(user_id, allow_disabled=True)
             account_id = str(context.account_id)
-            episodes, events, history = self._require_history()
+            episodes, events, _ = self._require_history()
             if not isinstance(trade_ref, str) or not trade_ref:
                 raise ValidationError("trade reference is invalid")
-            page_limit = self._trade_page_size if limit is None else limit
-            if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            if fills_cursor is not None and (not isinstance(fills_cursor, str) or not fills_cursor):
+                raise ValidationError("trade events fills cursor is invalid")
+            after_seq = events_cursor if events_cursor is not None else cursor
+            if isinstance(after_seq, str):
+                if not after_seq.isdigit():
+                    raise ValidationError("trade events cursor is invalid")
+                after_seq = int(after_seq)
+            if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
                 raise ValidationError("trade events cursor is invalid")
-            if isinstance(page_limit, bool) or not isinstance(page_limit, int):
-                raise ValidationError("trade events page limit is invalid")
-            if not 1 <= page_limit <= 50:
-                raise ValidationError("trade events page limit is invalid")
+            fills_page = self._trade_page_size if fills_limit is None else fills_limit
+            if limit is not None and fills_limit is None:
+                fills_page = limit
+            events_page = self._trade_page_size if events_limit is None else events_limit
+            if limit is not None and events_limit is None:
+                events_page = limit
+            for page in (fills_page, events_page):
+                if isinstance(page, bool) or not isinstance(page, int):
+                    raise ValidationError("trade events page limit is invalid")
+                if not 1 <= page <= 50:
+                    raise ValidationError("trade events page limit is invalid")
             scope = HistoryScope(account_id, await self._history_environment())
-            stored = await episodes.get(scope, trade_ref)
-            if stored is None:
+            try:
+                owned = await resolve_owned_ref(episodes, scope, trade_ref)
+            except ValueError as exc:
+                raise ValidationError("trade reference is invalid") from exc
+            if owned is None:
                 raise TradeUnavailableError("trade is unavailable")
-            episode = stored.episode
-            start_ms = episode.opened_at if episode.opened_at is not None else 0
-            end_ms = (
-                episode.closed_at
-                if episode.closed_at is not None
-                else int(self._now().timestamp() * 1000)
-            )
-            fills = await history.fills(scope, episode.symbol, Window(start_ms, end_ms))
-            rows = await events.list_by_trade(
-                scope, trade_ref, after_seq=cursor, limit=page_limit + 1
-            )
-            shown = rows[:page_limit]
+            if isinstance(owned, TradeResolutionDTO):
+                raise TradeSplitError("trade split into several episodes")
+            try:
+                allocated, next_fills = await episodes.list_allocated_fills(
+                    scope, owned.family_refs, fills_cursor, fills_page
+                )
+            except EpisodeRevisionConflict as exc:
+                raise HistoryPageChangedError("trade history changed under this page") from exc
+            except ValueError as exc:
+                raise ValidationError("trade events fills cursor is invalid") from exc
+            rows = await self._family_events(events, scope, owned.family_refs, after_seq)
+            shown = rows[:events_page]
+            next_seq = str(shown[-1].seq) if len(rows) > events_page else None
             return TradeEventsPage(
-                fills=tuple(present_fill(fill) for fill in fills),
+                fills=tuple(present_allocated_fill(row) for row in allocated),
                 events=tuple(present_event(row) for row in shown),
-                next_cursor=str(shown[-1].seq) if len(rows) > page_limit else None,
+                next_cursor=next_seq,
+                fills_cursor=next_fills,
+                events_cursor=next_seq,
+                next_fills_cursor=next_fills,
+                next_events_cursor=next_seq,
             )
         except _SAFE_ERRORS:
             raise
         except Exception:
             raise ServiceUnavailableError("trade events are unavailable") from None
+
+    @staticmethod
+    async def _family_events(
+        events: EventRepository,
+        scope: HistoryScope,
+        family_refs: tuple[str, ...],
+        after_seq: int,
+    ) -> list:
+        """User events for the whole proven ref family, oldest first.
+
+        One bounded read per family member (families are tiny: a canonical
+        ref plus its proven aliases), merged by immutable seq past the
+        events cursor. Aliases share the canonical history instead of each
+        showing a partial slice.
+        """
+        merged: list = []
+        for family_ref in family_refs:
+            try:
+                rows = await events.list_by_trade(scope, family_ref, after_seq=0, limit=200)
+            except ValueError as exc:
+                raise ValidationError("trade reference is invalid") from exc
+            merged.extend(row for row in rows if row.seq > after_seq)
+        merged.sort(key=lambda row: row.seq)
+        return merged
 
     async def activity_feed(
         self,
@@ -3958,8 +4055,8 @@ class UserApplicationService:
                 raise ValidationError("risk values are invalid")
             changes: dict[str, Any] = {"risk_percent": value}
             account_id = str(context.account_id)
-            previous = await self._previous_risk_percent(account_id)
             async with self._account_lock(account_id):
+                previous = await self._previous_risk_percent(account_id)
                 policy = await self._call_required(
                     self._settings, "patch_policy", account_id, **changes
                 )
@@ -4070,6 +4167,114 @@ class UserApplicationService:
             )
         except Exception:  # noqa: BLE001 - feed record must not fail the op
             log.exception("system event record failed (kind=%s)", kind)
+
+    async def _record_entry_skipped(
+        self,
+        account_id: str,
+        *,
+        symbol: str,
+        reason: str,
+        attempt_id: str,
+        pos_side: str | None = None,
+        occurred_at_ms: int | None = None,
+    ) -> None:
+        """Best-effort ENTRY_SKIPPED fact for one risk/planner skip decision.
+
+        Production hook: the trading coordinator skip loop
+        (``_recompute_follower_locked`` over ``_targets_for`` skips), passing
+        the ``SkipRecord`` fields with the stable attempt identity
+        (``_skip_episode_token``: ``trade-{id}`` or the hashed leg-state
+        digest). The dedup key carries that identity, so one decision is one
+        event no matter how many sweeps re-observe it. A storage failure is
+        logged and never fails the trading loop.
+        """
+        if not account_id or not isinstance(account_id, str):
+            raise ValueError("entry skip account required")
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("entry skip symbol required")
+        if not reason or not isinstance(reason, str):
+            raise ValueError("entry skip reason required")
+        if not attempt_id or not isinstance(attempt_id, str):
+            raise ValueError("entry skip attempt identity required")
+        if pos_side is not None and (not isinstance(pos_side, str) or not pos_side):
+            raise ValueError("entry skip position side must be text or absent")
+        if occurred_at_ms is not None and (type(occurred_at_ms) is not int or occurred_at_ms < 0):
+            raise ValueError("entry skip time must be a nonnegative integer")
+        try:
+            events = self._user_events
+            if events is None:
+                return
+            scope = HistoryScope(account_id, await self._history_environment())
+            now_ms = int(self._now().timestamp() * 1000)
+            facts: dict[str, str] = {
+                "symbol": symbol,
+                "reason": reason,
+                "attempt_id": attempt_id,
+            }
+            if pos_side is not None:
+                facts["pos_side"] = pos_side
+            leg = pos_side if pos_side else "unknown"
+            await events.record(
+                scope,
+                kind="ENTRY_SKIPPED",
+                occurred_at=occurred_at_ms if occurred_at_ms is not None else now_ms,
+                recorded_at=now_ms,
+                facts=facts,
+                dedup_key=(
+                    f"evt:sys:ENTRY_SKIPPED:{account_id}:{symbol}:{leg}:{reason}:{attempt_id}"
+                ),
+                trade_ref=None,
+                notify_eligible=True,
+            )
+        except Exception:  # noqa: BLE001 - feed record must not fail the loop
+            log.exception("entry skipped record failed (account_id=%s)", account_id)
+
+    async def _record_connectivity(self, account_id: str, *, reachable: bool) -> str | None:
+        """Idempotent account connectivity transition; None when unchanged.
+
+        Production hook: the exchange-read seam in ``_snapshot(refresh=True)``
+        (the concrete account-adapter read), called with ``reachable=True``
+        on a response and ``reachable=False`` on a transport-classified
+        failure — never per sweep unconditionally. The last-recorded state
+        guards emission: an identical sweep records nothing, and a restart
+        re-observes from unknown (first success stays silent, first failure
+        reports the outage it just proved). Storage failures are logged;
+        the last state only advances on a durable write so the next sweep
+        retries the report.
+        """
+        if not account_id or not isinstance(account_id, str):
+            raise ValueError("connectivity account required")
+        if not isinstance(reachable, bool):
+            raise ValueError("connectivity reachability must be a boolean")
+        last = self._connectivity.get(account_id)
+        if reachable and last is False:
+            kind = "CONNECTIVITY_RESTORED"
+        elif not reachable and last is not False:
+            kind = "CONNECTIVITY_LOST"
+        else:
+            self._connectivity.setdefault(account_id, reachable)
+            return None
+        try:
+            events = self._user_events
+            if events is None:
+                return None
+            scope = HistoryScope(account_id, await self._history_environment())
+            now_ms = int(self._now().timestamp() * 1000)
+            await events.record(
+                scope,
+                kind=kind,
+                occurred_at=now_ms,
+                recorded_at=now_ms,
+                facts={"reachable": reachable},
+                dedup_key=f"evt:sys:{kind}:{account_id}:{now_ms}",
+                trade_ref=None,
+                notify_eligible=True,
+            )
+        except Exception:  # noqa: BLE001 - feed record must not fail the read
+            log.exception("connectivity record failed (account_id=%s)", account_id)
+            return None
+        self._connectivity[account_id] = reachable
+        return kind
 
     async def _previous_risk_percent(self, account_id: str) -> Decimal | None:
         """Last saved risk percent for feed facts; None when unreadable."""
