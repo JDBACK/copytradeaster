@@ -70,4 +70,10 @@ class HistorySynchronizer:
                 return Window(row["start_ms"], row["end_ms"])
         # Saturated timestamps remain an explicit gap for separate reconciliation;
         # repeatedly selecting them would starve all subsequent history.
+        verified_ends = [row["end_ms"] for row in states if row["state"] == "complete"]
+        if verified_ends:
+            # Bounded overlap recovers late exchange facts. Pending windows above
+            # retain priority; no gap is silently promoted to complete coverage.
+            start = min(fallback.end, max(fallback.start, max(verified_ends) - 60000))
+            return Window(start, fallback.end)
         return fallback

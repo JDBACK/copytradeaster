@@ -29,6 +29,8 @@ from typing import Any, Protocol
 from copytradeaster.app import App
 from copytradeaster.application.models import ApplicationProtocol
 from copytradeaster.config import Settings
+from copytradeaster.history.composition import build_history_worker
+from copytradeaster.history.worker import HistoryWorker
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.notifications.console import ConsoleNotifier
 from copytradeaster.notifications.protocol import Notifier
@@ -227,6 +229,7 @@ class Stage2Process:
         telegram_factory: TelegramFactory = _build_telegram,
         worker_factory: WorkerFactory = _build_worker,
         clock: Clock = _utc_now,
+        history_factory: Callable[[App], HistoryWorker] = build_history_worker,
     ) -> None:
         self.settings = settings
         self.db = db if db is not None else db_factory(settings.db_path)
@@ -234,6 +237,8 @@ class Stage2Process:
         self._application_factory = application_factory
         self._telegram_factory = telegram_factory
         self._worker_factory = worker_factory
+        self._history_factory = history_factory
+        self.history_worker: HistoryWorker | None = None
         self._clock = clock
         self.app: App | None = None
         self.application: ApplicationProtocol | None = None
@@ -301,6 +306,8 @@ class Stage2Process:
             # App owns the shared DB close after all workers have drained.  It
             # must be READY/started before Telegram can begin polling.
             await self.app.start()
+            self.history_worker = self._history_factory(self.app)
+            await self.history_worker.start()
 
             if self.settings.miniapp_enabled:
                 from copytradeaster.miniapp.server import MiniAppServer
@@ -378,6 +385,14 @@ class Stage2Process:
                     errors.append(exc)
                 finally:
                     self.miniapp = None
+
+            if self.history_worker is not None:
+                try:
+                    await self.history_worker.stop()
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    self.history_worker = None
 
             app = self.app
             if app is not None and not self._app_stopped:

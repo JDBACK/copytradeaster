@@ -93,3 +93,18 @@ optional observer в `resolve_boot_unknowns` охватывает восстан
 Сбой записи может оставить недостающее observation: восстановление по durable
 journal/order links должно быть реализовано periodic history worker; этот шаг
 сам по себе не закрывает crash completeness. Worker lifecycle ещё не подключён.
+
+## Шаг 5 — фоновый worker в Stage2Process
+
+HistoryWorker запускается после App.start и останавливается до App.stop/DB close.
+Один последовательный запрос за шаг, rotation по streams/account, ограниченный
+backoff ошибки, отмена in-flight чтения на shutdown. Отсутствующий account удаляет
+его retry state. Источники symbol: whitelist, observations, cashflows и journal.
+SHADOW/dry-run не вызывают account history endpoints. Общий Aster limiter сохранён.
+
+После завершения начального окна fallback читает от последней verified границы
+с минутным overlap. Pending windows всегда приоритетны; saturated остаются gap.
+Это ещё не performance acceptance на 100 accounts: измерение задержки полного
+оборота и tuning отдельного history weight budget обязательны перед G1.
+Не завершены periodic order-observation repair, расширение discovery по snapshot,
+retention/coverage compaction и измерение роста. S1.2 остаётся открытым.

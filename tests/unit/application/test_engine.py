@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -162,6 +163,7 @@ def build_process(
     }
     if clock is not None:
         kwargs["clock"] = lambda: clock
+    kwargs["history_factory"] = lambda app: AsyncMock()
     return Stage2Process(settings, **kwargs), built
 
 
@@ -477,3 +479,25 @@ def test_engine_factory_boundaries_and_utc_floor_parsing(tmp_path: Path, monkeyp
     process = build_stage2_process(settings, db=db)
     assert isinstance(process, Stage2Process)
     asyncio.run(db.close())
+
+
+async def test_history_worker_stops_before_app_closes_database(tmp_path: Path) -> None:
+    trace = []
+    process, _ = build_process(make_settings(tmp_path / "history.sqlite3"), trace)
+    history = AsyncMock()
+
+    async def start():
+        trace.append("history.start")
+
+    async def stop():
+        assert process.db.conn is not None
+        trace.append("history.stop")
+
+    history.start.side_effect = start
+    history.stop.side_effect = stop
+    process._history_factory = lambda app: history
+    await process.start()
+    await process.shutdown()
+    assert trace.index("app.start") < trace.index("history.start")
+    assert trace.index("history.stop") < trace.index("app.stop")
+    history.stop.assert_awaited_once()

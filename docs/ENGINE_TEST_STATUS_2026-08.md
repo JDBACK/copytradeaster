@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1128/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1131/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1271,3 +1271,13 @@ boot, SUBMITTED и UNKNOWN. Full offline: **1128 passed / 2 skipped /
 44 deselected**, 16.61 s (`PYTHONPATH=src:.`). Ruff changed files/doc links clean.
 Worker recovery пропущенных observations и runtime history sync ещё впереди;
 этот gate не доказывает полноту истории после сбоя записи.
+
+
+## 2026-09-06 — history background lifecycle
+
+Full offline после worker wiring: **1131 passed / 2 skipped / 44 deselected**,
+15.40 s. Затем добавлена lifecycle-проверка history.stop до закрытия БД;
+targeted application/history **31 passed**. Full total после этого добавления
+не пересчитывался. Worker tests: rotation/request bound, failure isolation/backoff,
+in-flight cancellation/idempotent start/stop. Ruff changed paths clean.
+G1 ещё открыт: latency/retention/repair и финансовая проекция не приняты.
