@@ -22,37 +22,37 @@ MIGRATIONS: list[str] = [
       version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))
     """,
     """
-    CREATE TABLE accounts(
+    CREATE TABLE IF NOT EXISTS accounts(
       id TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('master','follower')),
       label TEXT NOT NULL UNIQUE, user_address TEXT NOT NULL UNIQUE,
       enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')))
     """,
     """
-    CREATE TABLE credentials(
+    CREATE TABLE IF NOT EXISTS credentials(
       account_id TEXT PRIMARY KEY REFERENCES accounts(id),
       encrypted BLOB NOT NULL, algo TEXT NOT NULL DEFAULT 'AESGCM-v1', updated_at TEXT NOT NULL)
     """,
     """
-    CREATE TABLE copy_settings(
+    CREATE TABLE IF NOT EXISTS copy_settings(
       account_id TEXT PRIMARY KEY REFERENCES accounts(id),
       risk_percent TEXT NOT NULL, max_leverage INTEGER NOT NULL,
       max_entry_deviation_pct TEXT NOT NULL, risk_base TEXT NOT NULL DEFAULT 'available_balance',
       enabled INTEGER NOT NULL DEFAULT 1, allow_new_entries INTEGER NOT NULL DEFAULT 1)
     """,
     """
-    CREATE TABLE master_events(
+    CREATE TABLE IF NOT EXISTS master_events(
       id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, event_time INTEGER NOT NULL,
       received_at TEXT NOT NULL, raw TEXT NOT NULL, dedup_key TEXT NOT NULL UNIQUE,
       processed_at TEXT)
     """,
     """
-    CREATE TABLE copy_trades(
+    CREATE TABLE IF NOT EXISTS copy_trades(
       trade_id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, pos_side TEXT NOT NULL,
       opened_at TEXT NOT NULL, closed_at TEXT, master_event_id INTEGER,
       status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN','CLOSED','SKIPPED')))
     """,
     """
-    CREATE TABLE order_links(
+    CREATE TABLE IF NOT EXISTS order_links(
       id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id INTEGER REFERENCES copy_trades(trade_id),
       account_id TEXT NOT NULL, kind TEXT NOT NULL,
       master_client_order_id TEXT, follower_client_order_id TEXT NOT NULL,
@@ -60,7 +60,7 @@ MIGRATIONS: list[str] = [
       UNIQUE(account_id, follower_client_order_id))
     """,
     """
-    CREATE TABLE execution_commands(
+    CREATE TABLE IF NOT EXISTS execution_commands(
       command_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, trade_id INTEGER,
       kind TEXT NOT NULL, payload TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL
@@ -71,14 +71,14 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_commands_account_status"
     " ON execution_commands(account_id, status)",
     """
-    CREATE TABLE nonce_store(
+    CREATE TABLE IF NOT EXISTS nonce_store(
       signer_address TEXT PRIMARY KEY, last_nonce INTEGER NOT NULL, updated_at TEXT NOT NULL)
     """,
     """
-    CREATE TABLE app_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)
+    CREATE TABLE IF NOT EXISTS app_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)
     """,
     """
-    CREATE TABLE sync_basis(
+    CREATE TABLE IF NOT EXISTS sync_basis(
       account_id TEXT NOT NULL, symbol TEXT NOT NULL, pos_side TEXT NOT NULL,
       master_ref_abs TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
       issued_target TEXT, updated_at TEXT NOT NULL,
@@ -98,7 +98,7 @@ MIGRATIONS: list[str] = [
     ALTER TABLE execution_commands ADD COLUMN operation_id TEXT
     """,
     """
-    CREATE TABLE telegram_users(
+    CREATE TABLE IF NOT EXISTS telegram_users(
       telegram_user_id INTEGER PRIMARY KEY,
       chat_id INTEGER NOT NULL UNIQUE,
       account_id TEXT UNIQUE REFERENCES accounts(id),
@@ -110,7 +110,7 @@ MIGRATIONS: list[str] = [
     )
     """,
     """
-    CREATE TABLE agent_validations(
+    CREATE TABLE IF NOT EXISTS agent_validations(
       account_id TEXT PRIMARY KEY REFERENCES accounts(id),
       signer_address TEXT NOT NULL,
       can_read INTEGER NOT NULL,
@@ -124,7 +124,7 @@ MIGRATIONS: list[str] = [
     )
     """,
     """
-    CREATE TABLE notification_outbox(
+    CREATE TABLE IF NOT EXISTS notification_outbox(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       event_key TEXT NOT NULL,
       telegram_user_id INTEGER NOT NULL REFERENCES telegram_users(telegram_user_id),
@@ -151,7 +151,7 @@ MIGRATIONS: list[str] = [
     " ON accounts(lower(user_address))",
     "ALTER TABLE telegram_users ADD COLUMN access_enabled INTEGER NOT NULL DEFAULT 1",
     """
-    CREATE TABLE telegram_access_requests(
+    CREATE TABLE IF NOT EXISTS telegram_access_requests(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_user_id INTEGER NOT NULL,
       chat_id INTEGER NOT NULL,
@@ -165,9 +165,10 @@ MIGRATIONS: list[str] = [
     """,
     "CREATE UNIQUE INDEX idx_telegram_access_requests_pending_user"
     " ON telegram_access_requests(telegram_user_id) WHERE status='PENDING'",
-    "CREATE INDEX idx_telegram_access_requests_status_id ON telegram_access_requests(status, id)",
+    "CREATE INDEX IF NOT EXISTS idx_telegram_access_requests_status_id"
+    " ON telegram_access_requests(status, id)",
     """
-    CREATE TABLE builder_onboarding_attempts(
+    CREATE TABLE IF NOT EXISTS builder_onboarding_attempts(
       pending_id TEXT PRIMARY KEY,
       telegram_user_id INTEGER NOT NULL UNIQUE,
       account_id TEXT NOT NULL,
@@ -201,7 +202,7 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE accounts ADD COLUMN builder_verified_at TEXT",
     # Follower history is an independent read model. Exact amounts remain TEXT.
     """
-    CREATE TABLE follower_fills(
+    CREATE TABLE IF NOT EXISTS follower_fills(
       account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
       symbol TEXT NOT NULL, exchange_trade_id TEXT NOT NULL, order_id TEXT NOT NULL,
       side TEXT NOT NULL, position_side TEXT NOT NULL, qty TEXT NOT NULL,
@@ -209,22 +210,34 @@ MIGRATIONS: list[str] = [
       commission TEXT NOT NULL, commission_asset TEXT NOT NULL, executed_at INTEGER NOT NULL,
       PRIMARY KEY(account_id, environment, symbol, exchange_trade_id))
     """,
-    "CREATE INDEX idx_follower_fills_time ON follower_fills"
-    "(account_id, environment, symbol, executed_at)",
-    "CREATE INDEX idx_follower_fills_order ON follower_fills"
+    # S1.6 repair: 36c55d3 inserted the history schema mid-list, so DBs
+    # migrated before S1 recorded a ghost version 33 and skip the real
+    # CREATE TABLE follower_fills at index 33. This entry re-creates it
+    # idempotently before its first index; the displaced time index moves
+    # to entry 51. Fresh DBs see a no-op here.
+    """
+    CREATE TABLE IF NOT EXISTS follower_fills(
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      symbol TEXT NOT NULL, exchange_trade_id TEXT NOT NULL, order_id TEXT NOT NULL,
+      side TEXT NOT NULL, position_side TEXT NOT NULL, qty TEXT NOT NULL,
+      price TEXT NOT NULL, quote_qty TEXT NOT NULL, realized_pnl TEXT NOT NULL,
+      commission TEXT NOT NULL, commission_asset TEXT NOT NULL, executed_at INTEGER NOT NULL,
+      PRIMARY KEY(account_id, environment, symbol, exchange_trade_id))
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_follower_fills_order ON follower_fills"
     "(account_id, environment, symbol, order_id)",
     """
-    CREATE TABLE follower_cash_flows(
+    CREATE TABLE IF NOT EXISTS follower_cash_flows(
       account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
       income_type TEXT NOT NULL, tran_id TEXT NOT NULL, symbol TEXT NOT NULL,
       asset TEXT NOT NULL, amount TEXT NOT NULL, occurred_at INTEGER NOT NULL,
       exchange_trade_id TEXT NOT NULL,
       PRIMARY KEY(account_id, environment, income_type, tran_id))
     """,
-    "CREATE INDEX idx_follower_cash_time ON follower_cash_flows"
+    "CREATE INDEX IF NOT EXISTS idx_follower_cash_time ON follower_cash_flows"
     "(account_id, environment, occurred_at)",
     """
-    CREATE TABLE history_sync_state(
+    CREATE TABLE IF NOT EXISTS history_sync_state(
       account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
       stream TEXT NOT NULL CHECK(stream IN ('fills','income')), symbol TEXT NOT NULL,
       start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL CHECK(end_ms >= start_ms),
@@ -233,7 +246,7 @@ MIGRATIONS: list[str] = [
       PRIMARY KEY(account_id, environment, stream, symbol, start_ms, end_ms))
     """,
     """
-    CREATE TABLE follower_order_observations(
+    CREATE TABLE IF NOT EXISTS follower_order_observations(
       account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
       symbol TEXT NOT NULL, order_id TEXT NOT NULL, client_order_id TEXT NOT NULL,
       command_key TEXT, kind TEXT NOT NULL, status TEXT NOT NULL,
@@ -241,36 +254,85 @@ MIGRATIONS: list[str] = [
       PRIMARY KEY(account_id, environment, symbol, order_id))
     """,
     """
-    CREATE TABLE history_order_checks(
+    CREATE TABLE IF NOT EXISTS history_order_checks(
       account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
       command_key TEXT NOT NULL, checked_at INTEGER NOT NULL,
       outcome TEXT NOT NULL CHECK(outcome IN ('observed','not_found')),
       PRIMARY KEY(account_id,environment,command_key))
     """,
     """
-    CREATE TABLE follower_episode_refs(
+    CREATE TABLE IF NOT EXISTS follower_episode_refs(
       public_ref TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
       environment TEXT NOT NULL, symbol TEXT NOT NULL, position_side TEXT NOT NULL,
       anchor TEXT NOT NULL,
       UNIQUE(account_id,environment,symbol,position_side,anchor))
     """,
     """
-    CREATE TABLE follower_episodes(
+    CREATE TABLE IF NOT EXISTS follower_episodes(
       public_ref TEXT PRIMARY KEY REFERENCES follower_episode_refs(public_ref),
       account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
       symbol TEXT NOT NULL, position_side TEXT NOT NULL, opened_at INTEGER, closed_at INTEGER,
       revision INTEGER NOT NULL, payload TEXT NOT NULL)
     """,
-    "CREATE INDEX idx_episode_owned_time ON follower_episodes"
+    "CREATE INDEX IF NOT EXISTS idx_episode_owned_time ON follower_episodes"
     "(account_id,environment,closed_at,opened_at,public_ref)",
     """
-    CREATE TABLE follower_episode_aliases(
+    CREATE TABLE IF NOT EXISTS follower_episode_aliases(
       alias_ref TEXT PRIMARY KEY REFERENCES follower_episode_refs(public_ref),
       target_ref TEXT NOT NULL REFERENCES follower_episode_refs(public_ref),
       CHECK(alias_ref != target_ref))
     """,
+    # S1.3 user events (§10.3): immutable account-owned facts for the
+    # activity feed. Events are never updated; replays resolve to the same
+    # public ref through the per-account dedup key. Feed cursors use the
+    # internal monotonic seq so late backfill never shifts open pages.
+    """
+    CREATE TABLE IF NOT EXISTS user_activity_events(
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_ref TEXT NOT NULL UNIQUE,
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      trade_ref TEXT,
+      kind TEXT NOT NULL CHECK(kind IN ('POSITION_OPENED','POSITION_INCREASED',
+        'POSITION_REDUCED','POSITION_CLOSED','PROTECTION_SET','PROTECTION_CHANGED',
+        'PROTECTION_UNCONFIRMED','RISK_CHANGED','COPY_PAUSED','COPY_RESUMED',
+        'CONNECTIVITY_LOST','CONNECTIVITY_RESTORED','ENTRY_SKIPPED')),
+      occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+      recorded_at INTEGER NOT NULL CHECK(recorded_at >= 0),
+      facts TEXT NOT NULL,
+      dedup_key TEXT NOT NULL,
+      notify_eligible INTEGER NOT NULL CHECK(notify_eligible IN (0,1)),
+      UNIQUE(account_id, environment, dedup_key))
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_user_events_feed ON user_activity_events"
+    "(account_id, environment, seq)",
+    "CREATE INDEX IF NOT EXISTS idx_user_events_trade ON user_activity_events"
+    "(account_id, environment, trade_ref)",
+    # S1.3 capture activation: durable per-symbol publication frontier.
+    # cap_start_ms pins the window start so placeholder anchors stay stable
+    # across retries; cap_end_ms is the newest fully published window end.
+    # NULL end means nothing published yet.
+    """
+    CREATE TABLE IF NOT EXISTS history_capture_state(
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      cap_start_ms INTEGER CHECK(cap_start_ms IS NULL OR cap_start_ms >= 0),
+      cap_end_ms INTEGER CHECK(cap_end_ms IS NULL OR cap_end_ms >= 0),
+      last_error TEXT,
+      updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+      PRIMARY KEY(account_id, environment, symbol))
+    """,
+    # S1.5 structured delivery: proven follower episode ref and a typed
+    # action for the Telegram keyboard payload. Both stay NULL for legacy
+    # engine rows; the button is assembled on the transport boundary only
+    # when both are present. No backfill: old rows keep no invented link.
+    "ALTER TABLE notification_outbox ADD COLUMN trade_ref TEXT",
+    "ALTER TABLE notification_outbox ADD COLUMN action TEXT",
+    # S1.6 repair companion of entry 34 (see comment there).
+    "CREATE INDEX IF NOT EXISTS idx_follower_fills_time ON follower_fills"
+    "(account_id, environment, symbol, executed_at)",
 ]
-
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version
     for version, statement in enumerate(MIGRATIONS)
