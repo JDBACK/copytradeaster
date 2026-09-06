@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1153/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1158/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1313,3 +1313,13 @@ Builder mechanism (синтетический тип, не exchange evidence). H
 **38 passed**; full offline: **1153 passed / 2 skipped / 44 deselected**, 16.11 s.
 Ruff changed files/doc links clean. Exact net включается только explicit proof;
 реальный Builder policy/flip allocation/persistence ещё не приняты.
+
+
+## 2026-09-06 — episode persistence / refs
+
+Миграции 41–44: refs/episodes/owned index/aliases. `test_episodes.py` — 5 checks
+restart/idempotency/revision CAS/ownership/alias merge. Shared history fixture
+вынесена в conftest. Full offline **1158 passed / 2 skipped / 44 deselected**,
+16.38 s; после canonical reserve-ref correction targeted **5 passed**.
+History total перед последней correction **43 passed**. API/worker projection
+wiring не включены; G1 открыт. Ruff changed files и doc links clean.

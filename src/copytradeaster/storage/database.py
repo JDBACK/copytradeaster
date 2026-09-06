@@ -247,6 +247,28 @@ MIGRATIONS: list[str] = [
       outcome TEXT NOT NULL CHECK(outcome IN ('observed','not_found')),
       PRIMARY KEY(account_id,environment,command_key))
     """,
+    """
+    CREATE TABLE follower_episode_refs(
+      public_ref TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
+      environment TEXT NOT NULL, symbol TEXT NOT NULL, position_side TEXT NOT NULL,
+      anchor TEXT NOT NULL,
+      UNIQUE(account_id,environment,symbol,position_side,anchor))
+    """,
+    """
+    CREATE TABLE follower_episodes(
+      public_ref TEXT PRIMARY KEY REFERENCES follower_episode_refs(public_ref),
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      symbol TEXT NOT NULL, position_side TEXT NOT NULL, opened_at INTEGER, closed_at INTEGER,
+      revision INTEGER NOT NULL, payload TEXT NOT NULL)
+    """,
+    "CREATE INDEX idx_episode_owned_time ON follower_episodes"
+    "(account_id,environment,closed_at,opened_at,public_ref)",
+    """
+    CREATE TABLE follower_episode_aliases(
+      alias_ref TEXT PRIMARY KEY REFERENCES follower_episode_refs(public_ref),
+      target_ref TEXT NOT NULL REFERENCES follower_episode_refs(public_ref),
+      CHECK(alias_ref != target_ref))
+    """,
 ]
 
 CASEFOLD_ADDRESS_INDEX_VERSION = next(

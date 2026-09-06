@@ -172,3 +172,20 @@ AccountingProof по умолчанию не разрешает exact net. Не�
 Комиссия flip fill, общего двум эпизодам, пока shared_fill_commission (net=null):
 нужна единая batch allocation policy с сохранением суммы, до G1 этот случай не
 считать принятым. Storage/aliases и accounting wiring ещё впереди.
+
+## Шаг 9 — persistence эпизодов и стабильные refs
+
+`storage/episodes.py` выделен из растущего history repository как cohesive
+подрепозиторий проекции: UUID public refs на устойчивый внутренний anchor,
+account/environment ownership, revision CAS, idempotent save. Episode payload
+сохраняет Decimal strings и allocations; фильтруемые scope/time поля вынесены
+в индексируемые колонки. Это внутренний payload, не публичный HTTP DTO.
+
+Alias merge разрешён только явным вызовом после доказательства общей сделки,
+внутри одного account/environment/symbol/leg. Старые ссылки переходят к
+канонической, цепочки уплощаются, циклы/чужой scope/обновление alias запрещены.
+Повторная reservation старого anchor также возвращает canonical ref.
+Не делать автоматический merge только по symbol. Split/backfill reconciliation
+policy и атомарное batch publication с events ещё впереди; сохранение отдельных
+эпизодов само по себе не закрывает этот gate. Дальше: snapshot seed/coverage
+proof, публикация проекции из sync и стабильный list/detail service.

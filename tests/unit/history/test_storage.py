@@ -4,24 +4,9 @@ import pytest
 
 from copytradeaster.aster.models import IncomeDTO, OrderDTO, UserTradeDTO
 from copytradeaster.history.reader import Window, WindowRead
-from copytradeaster.storage.database import Database
-from copytradeaster.storage.history import HistoryConflictError, HistoryRepository, HistoryScope
+from copytradeaster.storage.history import HistoryConflictError
 from tests.unit.aster.test_history_api import FILL, FLOW
 from tests.unit.aster.test_trading_api import ORDER_RESPONSE
-
-
-@pytest.fixture
-async def storage(tmp_path):
-    db = Database(tmp_path / "history.sqlite3")
-    await db.connect()
-    await db.migrate()
-    for name in ("a", "b"):
-        await db.execute_write(
-            "INSERT INTO accounts(id,role,label,user_address) VALUES (?, 'follower',?,?)",
-            (name, name, name),
-        )
-    yield db, HistoryRepository(db), HistoryScope("a", "testnet")
-    await db.close()
 
 
 def read(rows):
