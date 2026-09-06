@@ -227,3 +227,23 @@ placeholder ref; это не выдуманная историческая це�
 устойчивые incremental checkpoints за пределами семидневного окна, согласование
 REST indexing latency, generation barrier и capture/import/recheck wiring.
 Не обещать, что два одинаковых snapshot без полной истории сами доказывают net.
+
+## Зафиксированный milestone перед продолжением работы
+
+Состояние на последнем коммите `d9761ab`:
+
+- S1.1 foundation выполнен: typed Aster reads, единицы из exchange metadata,
+  bounded windows и read-only testnet evidence; окончательная полнота истории и
+  учётная политика ещё не приняты.
+- S1.2 foundation выполнен: durable ledger, observations, coverage/checkpoints,
+  bounded worker, repair/compaction и синтетический capacity probe на 100 аккаунтах.
+- S1.3 core выполнен частично: projector, partial/flip/HEDGE, accounting proof,
+  owned refs/aliases, reconciliation и atomic publication seam.
+- S1.3 integration и S1.4–S1.6 остаются открытыми: runtime capture wiring,
+  user events, application/HTTP DTOs, outbox, retention decision и G1 acceptance.
+- S2/S3 не запускались как stages. Ранее принятый браузерный slice шкалы риска
+  остаётся отдельным; Telegram device smoke отложен до финала.
+
+Это промежуточная фиксация фактического кода и evidence. G1/G2/G3 не закрыты;
+следующий рабочий шаг — подключить boundary capture/recheck к синхронизации и
+только затем писать application presenters поверх принятой модели.

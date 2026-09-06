@@ -2,7 +2,9 @@
 
 Дата: 2026-09-05. База анализа: текущий код, HEAD `0db6c84`.
 
-Статус: **план подготовлен; реализация не начата; решения ниже предлагаются к принятию**.
+Статус на 2026-09-06: **S1 backend реализуется; G1 не принят; S2/S3 и G1–G3 открыты**.
+Ниже сохраняются исходные решения и критерии, а фактический ход реализации
+ведётся в `MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md`.
 Подтверждено владельцем: показываем результат аккаунта фолловера, его объёмы,
 исполнения и PnL. Визуальный стиль и четыре основные вкладки сохраняются.
 Уточнение владельца: backend входит в обязательный объём этой кампании;
@@ -11,7 +13,8 @@
 **Актуальный порядок: S1 Backend → G1 → S2 Скорость → G2 → S3 Интерфейс и
 функциональность → G3.** Подробный исполняемый план — §14. Обозначения H/B/F
 ниже — пакеты работ и ссылки прежней редакции, не отдельная последовательность
-этапов. При расхождении порядка руководствоваться §14. Все три stage пока PLANNED.
+этапов. При расхождении порядка руководствоваться §14. S1 — IN PROGRESS;
+S2/S3 — PLANNED; G1–G3 — OPEN.
 
 ## 1. Решение
 
@@ -1320,7 +1323,21 @@ frontend tests и build прошли. Добавлен §19 с performance-па�
 сопоставлены варианты root navigation (§19.8); temporary probe 50 warm cycles
 подтвердил постоянство root DOM/count и отсутствие дополнительных API reads,
 после проверки удалён. Уточнены scope cache, modal lifecycle, prefetch priority,
-scroll history и correction refs (§20). Статус всех stage — PLANNED.
+scroll history и correction refs (§20). На момент подготовки этого плана все
+stage были PLANNED; актуальный статус ниже отражён отдельной записью.
+
+2026-09-06, backend milestone: реализованы и проверены foundation slices S1.1–S1.3:
+typed Aster userTrades/income reads с bounded subdivision и live evidence;
+Decimal SQLite ledger fills/cashflows/observations, durable coverage, repair,
+worker и preliminary capacity probe; pure follower episodes с partial history,
+partial close/flip/HEDGE, signed commission/funding proof, owned stable refs,
+revision CAS, aliases, snapshot boundary checks и atomic reconciled publication.
+Это зафиксировано последовательностью commits `89ea530`, `36c55d3`, `12325be`,
+`e4f78d4`, `a538445`, `44d6e92`, `cab3a9b`, `e16d038`, `6c00533`, `d9761ab`.
+Offline evidence на последнем milestone: 1170 passed / 2 skipped / 44 deselected;
+read-only signed testnet history probe прошёл. Это implementation evidence,
+не acceptance G1: ещё нет user events/HTTP presenters, snapshot capture wiring,
+final retention budget, shared-fill allocation policy и Telegram/UI flows.
 
 ## 19. Скорость, плавность и архитектура frontend
 

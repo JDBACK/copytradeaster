@@ -376,8 +376,8 @@ Activity/бот, local-calendar tests, flat resume, новые снимки и �
 приёмкой touch/мыши/trackpad. Геометрия Aster-шкалы и risk policy сохраняются.
 Подробности, зависимости, файлы и критерии:
 [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
-Кампания в целом не начата (S1 backend не стартовал); прежние
-acceptance-статусы не переоткрываются. Изолированный первый slice —
+Кампания находится в реализации: S1 backend начат, но G1 ещё не принят;
+прежние acceptance-статусы не переоткрываются. Изолированный первый slice —
 шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
 2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
 [MINIAPP_RISK_RULER_2026-09.md](reports/MINIAPP_RISK_RULER_2026-09.md));
@@ -387,7 +387,17 @@ snap-stop A/B) **отложена на потом — устройства не�
 
 - [x] Аудит текущих экранов/снимков и data paths; подробный UX/архитектурный план.
 - [x] Slice «шкала риска» (§21: S2.5 lifecycle + S3.4 motion) — браузерная часть (2026-09-06); не закрывает G1/G2; устройства отложены → S3.5/G3.
-- [ ] S1: Backend — источники, хранение, episodes/PnL, API/settings, outbox; шаги S1.1–S1.6.
+- [x] S1.1 foundation: typed fills/income reads, signed testnet evidence, asset
+  units, bounded windows и знак комиссии; policy/fullness gate остаётся открытым.
+- [x] S1.2 foundation: append-only SQLite facts, observations, coverage/checkpoints,
+  worker, repair, overlap/compaction и preliminary 100-account benchmark.
+- [x] S1.3 core: pure episodes (partial/flip/HEDGE), signed-cost accounting,
+  stable owned refs/aliases, reconciliation и atomic publication seam.
+- [ ] S1.3 integration: snapshot capture/recheck, runtime projection wiring, user
+  events и final shared-fill allocation policy.
+- [ ] S1.4–S1.6: application/HTTP DTOs, settings/ownership, structured outbox,
+  retention decision, signed acceptance и G1.
+- [ ] S1: Backend stage — закрыть оставшиеся S1.3–S1.6 work packages и принять G1.
 - [ ] G1: Backend принят по §10.9 и контрактам S1; разрешён старт S2.
 - [ ] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings; S2.1–S2.6.
 - [ ] G2: Скорость принята на нынешних экранах; разрешён старт S3.
