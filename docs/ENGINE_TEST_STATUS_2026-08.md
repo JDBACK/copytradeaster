@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1146/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1153/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1303,3 +1303,13 @@ flip attribution, HEDGE, unknown/known seed, dedup, contradictory facts, source)
 Targeted history **31 passed**; full offline **1146 passed / 2 skipped /
 44 deselected**, 15.97 s. Ruff changed files/doc links clean. Это математическое
 ядро; storage/snapshot proof/aliases/net/events ещё не подключены и G1 не закрыт.
+
+
+## 2026-09-06 — episode cash accounting core
+
+Новый `test_accounting.py`: 7 checks на signed commissions/rebates, dedup,
+missing costs, funding attribution, foreign asset, shared flip fee и separate
+Builder mechanism (синтетический тип, не exchange evidence). History targeted:
+**38 passed**; full offline: **1153 passed / 2 skipped / 44 deselected**, 16.11 s.
+Ruff changed files/doc links clean. Exact net включается только explicit proof;
+реальный Builder policy/flip allocation/persistence ещё не приняты.

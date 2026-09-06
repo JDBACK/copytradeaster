@@ -156,3 +156,19 @@ external автоматически. Для неизвестного seed qty=nu
 Persistence/snapshot seeding/rebuild/aliases и financial accounting ещё не
 подключены. Экраны по этой функции пока не включаются. Следующий шаг S1.3:
 сохранение episodes/allocations и устойчивые refs, затем денежные потоки/events.
+
+## Шаг 8 — evidence-based денежные потоки эпизода
+
+`history/accounting.py`: gross из fills, commission из подписанного income,
+rebates сохраняют знак; повторный flow id дедуплицируется, конфликт отвергается.
+REALIZED_PNL из income не прибавляется второй раз, transfers не относятся к
+trade PnL. Funding/отдельный Builder flow входят в эпизод только при переданной
+доказанной attribution; non-USDT cost не пересчитывается текущим FX.
+
+AccountingProof по умолчанию не разрешает exact net. Неизвестная Builder policy,
+неполный income, partial history, missing/mismatched commission дают явные issues.
+Тип BUILDER_FEE используется только синтетическим тестом механизма; наличия такого
+типа на Aster тест не доказывает. Production policy остаётся unknown до evidence.
+Комиссия flip fill, общего двум эпизодам, пока shared_fill_commission (net=null):
+нужна единая batch allocation policy с сохранением суммы, до G1 этот случай не
+считать принятым. Storage/aliases и accounting wiring ещё впереди.
