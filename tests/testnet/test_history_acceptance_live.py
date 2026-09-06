@@ -337,6 +337,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
                             "quantity": format(QTY * 2, "f"),
                             "stopPrice": "1000",
                             "reduceOnly": "true",
+                            **({"positionSide": pside.value} if pside != PosSide.BOTH else {}),
                             "workingType": "MARK_PRICE",
                             "newOrderRespType": "ACK",
                         },
