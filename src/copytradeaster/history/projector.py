@@ -13,26 +13,42 @@ from decimal import Decimal, localcontext
 
 from copytradeaster.aster.models import UserTradeDTO
 from copytradeaster.domain.models import PosSide, Side
-from copytradeaster.history.models import Episode, FillAllocation, PositionSeed, TradeSource
+from copytradeaster.history.models import (
+    Episode,
+    EpisodeTransition,
+    FillAllocation,
+    PositionSeed,
+    ProjectionResult,
+    TradeSource,
+)
 
 ZERO = Decimal(0)
 
 
-def project_episodes(
+def project_with_transitions(
     fills: Sequence[UserTradeDTO],
     *,
     symbol: str,
     seeds: Mapping[PosSide, PositionSeed],
     reference: Callable[[UserTradeDTO, str], str],
     order_sources: Mapping[int, TradeSource] | None = None,
-) -> tuple[Episode, ...]:
-    """Reference factory receives the first fill and direction, including flip remainders."""
+) -> ProjectionResult:
+    """Project episodes and the semantic transitions that built them.
+
+    Reference factory receives the first fill and direction, including flip
+    remainders. Every nonzero ``entry``/``exit`` allocation appends one
+    transition carrying the state right after it was applied, so events
+    derived later describe the transition itself instead of re-reading
+    episode totals (which diverge between one batch and sequential
+    publications of the same fills).
+    """
     sources = order_sources or {}
     ordered = sorted(fills, key=lambda fill: (fill.time, fill.trade_id))
     seen: dict[int, UserTradeDTO] = {}
     active: dict[PosSide, Episode] = {}
     quantities = {leg: seed.quantity for leg, seed in seeds.items()}
     completed: list[Episode] = []
+    transitions: list[EpisodeTransition] = []
     if PosSide.BOTH in seeds and len(seeds) > 1:
         raise ValueError("mixed position modes require an explicit boundary")
     for leg, seed in seeds.items():
@@ -90,6 +106,22 @@ def project_episodes(
             if closing:
                 episode = active[leg]
                 remaining = abs(quantity) - close_qty
+                if close_qty != ZERO:
+                    transitions.append(
+                        EpisodeTransition(
+                            ref=episode.public_ref,
+                            symbol=symbol,
+                            leg=leg,
+                            trade_id=fill.trade_id,
+                            order_id=fill.order_id,
+                            role="exit",
+                            occurred_at=fill.time,
+                            qty=close_qty,
+                            remainder=remaining,
+                            price=fill.price,
+                            closed_gross=_closed_gross(fill, close_qty),
+                        )
+                    )
                 episode = replace(
                     episode,
                     remaining_qty=remaining,
@@ -118,6 +150,22 @@ def project_episodes(
                         "complete",
                     )
                 episode = active[leg]
+                remainder_after = (episode.remaining_qty or ZERO) + entry_qty
+                transitions.append(
+                    EpisodeTransition(
+                        ref=episode.public_ref,
+                        symbol=symbol,
+                        leg=leg,
+                        trade_id=fill.trade_id,
+                        order_id=fill.order_id,
+                        role="entry",
+                        occurred_at=fill.time,
+                        qty=entry_qty,
+                        remainder=remainder_after,
+                        price=fill.price,
+                        closed_gross=ZERO,
+                    )
+                )
                 active[leg] = replace(
                     episode,
                     remaining_qty=(episode.remaining_qty or ZERO) + entry_qty,
@@ -127,12 +175,44 @@ def project_episodes(
                     allocations=episode.allocations + (_allocation(fill, entry_qty, "entry"),),
                 )
             quantities[leg] = quantity + delta
-    return tuple(
+    episodes = tuple(
         sorted(
             completed + list(active.values()),
             key=lambda e: (e.opened_at if e.opened_at is not None else -1, e.public_ref),
         )
     )
+    ordered_transitions = tuple(
+        sorted(transitions, key=lambda item: (item.occurred_at, item.trade_id))
+    )
+    return ProjectionResult(episodes=episodes, transitions=ordered_transitions)
+
+
+def project_episodes(
+    fills: Sequence[UserTradeDTO],
+    *,
+    symbol: str,
+    seeds: Mapping[PosSide, PositionSeed],
+    reference: Callable[[UserTradeDTO, str], str],
+    order_sources: Mapping[int, TradeSource] | None = None,
+) -> tuple[Episode, ...]:
+    """Project episodes only; transitions are available via project_with_transitions."""
+    return project_with_transitions(
+        fills, symbol=symbol, seeds=seeds, reference=reference, order_sources=order_sources
+    ).episodes
+
+
+def _closed_gross(fill: UserTradeDTO, close_qty: Decimal) -> Decimal:
+    """Gross of exactly the closed share of one exit allocation.
+
+    A fill that closes exactly its own quantity carries its full realized
+    PnL; a flip fill that also opens the next episode attributes only the
+    closed share, pro-rata by ``close_qty`` over the fill quantity. This is
+    the fill-level share of this transition, distinct from the episode-level
+    pro-rata split of the episode total kept in the allocation index.
+    """
+    if close_qty == fill.qty:
+        return fill.realized_pnl
+    return fill.realized_pnl * close_qty / fill.qty
 
 
 def _empty(ref, symbol, leg, direction, opened_at, quantity, quality) -> Episode:
