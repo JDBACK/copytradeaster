@@ -2,7 +2,7 @@
 
 Map of `scripts/`: what each script does, how to run it, which gates apply.
 Everything except `dev-up.sh`, `preview_miniapp_engine.py` (backup-copy preview),
-and `check_doc_links.py` is testnet-only and touches a real DB/exchange:
+`benchmark_history.py`, and `check_doc_links.py` is testnet-only and touches a real DB/exchange:
 read the usage before running. `__pycache__/` is noise, ignore it.
 
 ## Launch and preview (safe, local)
@@ -38,3 +38,5 @@ read the usage before running. `__pycache__/` is noise, ignore it.
 - Every `.py` inserts `src/` into `sys.path` and goes through `Settings()` + `Database` + `SqliteCredentials` — secrets only from env/DB, never from argv.
 - Campaigns write JSON reports (`--report`) and never touch prod DB directly: clone it (hybrid/soak) or backup-API-copy it (preview).
 - New ops scripts go here with usage in the first docstring line; visual previews follow `preview_miniapp_engine.py` (backup copy + dev user + `--confirm-*` flag).
+
+`benchmark_history.py` — offline synthetic capacity/commit probe, temporary SQLite only, no Settings/credentials/network. Run `PYTHONPATH=src .venv/bin/python scripts/benchmark_history.py`; JSON stdout.

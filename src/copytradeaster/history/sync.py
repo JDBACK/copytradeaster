@@ -23,6 +23,33 @@ class HistorySynchronizer:
         self._repository = repository
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
 
+    async def repair_order(self, scope: HistoryScope) -> None:
+        now = self._clock_ms()
+        candidate = await self._repository.repair_candidate(scope, now)
+        if candidate is None:
+            return
+        order = await self._reader.order(
+            scope.account_id, candidate["symbol"], candidate["client_order_id"]
+        )
+        if order is not None:
+            if (
+                order.symbol != candidate["symbol"]
+                or order.client_order_id != candidate["client_order_id"]
+            ):
+                raise ValueError("history order identity mismatch")
+            await self._repository.observe_order(
+                scope,
+                order,
+                kind=candidate["kind"],
+                command_key=candidate["command_key"],
+                observed_at=order.update_time,
+            )
+        # Mark only after observation persisted. A crash between these writes
+        # merely repeats an idempotent read, never loses a repair.
+        await self._repository.record_order_check(
+            scope, candidate["command_key"], now, found=order is not None
+        )
+
     async def sync_fills(
         self,
         scope: HistoryScope,

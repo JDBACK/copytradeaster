@@ -4,7 +4,7 @@
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
 > **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
-> Offline 1131/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> Offline 1135/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1281,3 +1281,16 @@ targeted application/history **31 passed**. Full total после этого д�
 не пересчитывался. Worker tests: rotation/request bound, failure isolation/backoff,
 in-flight cancellation/idempotent start/stop. Ruff changed paths clean.
 G1 ещё открыт: latency/retention/repair и финансовая проекция не приняты.
+
+
+## 2026-09-06 — observation repair и coverage compaction
+
+Full offline **1135 passed / 2 skipped / 44 deselected**, 15.68 s.
+Targeted history **20 passed**. Новые проверки: восстановление observation из
+CONFIRMED journal, отсутствие ордера не меняет command status, retry cooldown,
+слияние overlapping coverage сохраняет настоящий gap. Миграция 40 хранит repair
+checkpoints; worker ремонтирует observation отдельным bounded job.
+Synthetic benchmark: 100 accounts, 100k fills + 100k cashflows + 50k observations:
+DB/backup 65,880,064 bytes, WAL до checkpoint 4,358,992 bytes; 1000-fill commit
+p50 5.49 ms, max 7.67 ms. Это текущая схема без будущих episodes/events и без
+параллельного trading workload; не окончательный G1 capacity/latency gate.

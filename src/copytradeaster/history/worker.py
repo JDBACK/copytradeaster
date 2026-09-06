@@ -20,6 +20,7 @@ log = get_logger(__name__)
 class HistoryJob:
     scope: HistoryScope
     symbol: str | None  # None is the account-wide income stream.
+    repair: bool = False
 
 
 class HistoryWorker:
@@ -70,7 +71,9 @@ class HistoryWorker:
             try:
                 sync = self._synchronizer(job.scope)
                 window = Window(max(0, now - 7 * 86400000), now)
-                if job.symbol is None:
+                if job.repair:
+                    await sync.repair_order(job.scope)
+                elif job.symbol is None:
                     await sync.sync_income(job.scope, window, request_budget=1)
                 else:
                     await sync.sync_fills(job.scope, job.symbol, window, request_budget=1)

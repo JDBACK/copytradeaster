@@ -12,10 +12,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from copytradeaster.aster.models import IncomeDTO, UserTradeDTO
+from copytradeaster.aster.models import IncomeDTO, OrderDTO, UserTradeDTO
 
 
 class HistoryReadClient(Protocol):
+    async def query_order(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        orig_client_order_id: str,
+    ) -> OrderDTO | None: ...
+
     async def user_trades(
         self,
         account_id: str,
@@ -102,6 +110,11 @@ async def read_windows[T: (UserTradeDTO, IncomeDTO)](
 class HistoryReader:
     def __init__(self, client: HistoryReadClient) -> None:
         self._client = client
+
+    async def order(self, account_id: str, symbol: str, client_order_id: str) -> OrderDTO | None:
+        return await self._client.query_order(
+            account_id, symbol, orig_client_order_id=client_order_id
+        )
 
     async def fills(
         self,

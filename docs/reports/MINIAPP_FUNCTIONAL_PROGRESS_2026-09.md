@@ -108,3 +108,34 @@ SHADOW/dry-run не вызывают account history endpoints. Общий Aster
 оборота и tuning отдельного history weight budget обязательны перед G1.
 Не завершены periodic order-observation repair, расширение discovery по snapshot,
 retention/coverage compaction и измерение роста. S1.2 остаётся открытым.
+
+## Шаг 6 — repair, compaction, предварительная ёмкость
+
+History repair обнаруживает пропущенные/незавершённые observations по journal,
+читает ордер и записывает его до repair checkpoint. Отсутствие ордера на бирже
+не меняет CONFIRMED command; следующий retry не раньше 5 минут. Crash между
+observation и checkpoint допускает безопасный повтор. У UNKNOWN/SENDING
+по-прежнему единственный владелец recovery — торговый executor.
+
+Проверенные соседние/перекрывающиеся интервалы history_sync_state объединяются
+в транзакции; настоящие gaps не заполняются. checked_at объединённого интервала
+консервативный (минимальный), не выдаёт старую историю за свежепроверенную.
+
+Предварительная нагрузочная модель (`scripts/benchmark_history.py`): 100 accounts,
+2 fills на ордер, 100k fills/100k cashflows/50k observations. Аллокация с индексами:
+fills 34,140,160 bytes; cashflows 22,196,224; observations 9,302,016.
+DB/backup 65,880,064 bytes (~62.83 MiB); WAL peak snapshot 4,358,992.
+Пачка 1000 fills: p50 5.49 ms/max 7.67 ms, локальный tmp SQLite, без trading writer.
+
+Для текущей схемы это ~659 bytes на fill вместе с одним cashflow и половиной
+observation. Сценарий 10 эпизодов/account/day × 2 orders × 2 fills × 100 accounts:
+4000 fills/day, ~79/237/962 MB за 30/90/365 дней. Высокий сценарий 100 эпизодов:
+~0.79/2.37/9.62 GB. Частые изменения защиты, episodes/events, order checks,
+остальная БД движка, snapshot WAL и backup добавляются сверху. Начальный
+семидневный backfill при этой модели ~18.5 MB или ~185 MB.
+
+Решение по retention: canonical facts без молчаливого TTL; observations обновляются
+на месте, coverage compaction включена. Числа служат входом окончательного
+бюджета после episodes/events; H1 capacity пока не принят. Перед G1 нужны
+финальная схема, профиль protection updates, параллельный trading-writer latency,
+полный disk/headroom budget и эксплуатационные пороги/диагностика.

@@ -24,6 +24,7 @@ def build_history_worker(app: App) -> HistoryWorker:
                 continue  # Shadow currently has no canonical history endpoints.
             scope = HistoryScope(follower.account_id, environment)
             jobs.append(HistoryJob(scope, None))
+            jobs.append(HistoryJob(scope, None, repair=True))
             rows = await app.db.fetchall(
                 "SELECT symbol FROM follower_order_observations "
                 "WHERE account_id=? AND environment=? "

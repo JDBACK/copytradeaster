@@ -141,3 +141,60 @@ async def test_synchronizer_error_preserves_last_good_data(storage):
     with pytest.raises(TimeoutError):
         await HistorySynchronizer(reader, repo).sync_income(scope, Window(0, 100))
     assert await repo.windows(scope, "income", "") == []
+
+
+async def test_overlap_coverage_compacts_without_filling_gap(storage):
+    db, repo, scope = storage
+    for start in (0, 5, 10, 30):
+        window = Window(start, start + 10)
+        await repo.commit_fills(
+            scope, "BTCUSDT", window, WindowRead((), (window,), (), (), 1), checked_at=100
+        )
+    rows = await repo.windows(scope, "fills", "BTCUSDT")
+    assert [(r["start_ms"], r["end_ms"]) for r in rows] == [(0, 20), (30, 40)]
+
+
+async def test_repair_missing_observation_then_skip_terminal_order(storage):
+    import json
+    from unittest.mock import AsyncMock
+
+    from copytradeaster.history.sync import HistorySynchronizer
+    from copytradeaster.storage.repositories import CommandRepo
+
+    db, repo, scope = storage
+    commands = CommandRepo(db)
+    await commands.insert(
+        "repair", "a", None, "MARKET_OPEN", json.dumps({"symbol": "BTCUSDT"}), 1, "ct-x"
+    )
+    await commands.set_status("repair", "CONFIRMED")
+    reader = AsyncMock()
+    reader.order.return_value = OrderDTO.model_validate(ORDER_RESPONSE)
+    sync = HistorySynchronizer(reader, repo, clock_ms=lambda: 1000)
+    await sync.repair_order(scope)
+    await sync.repair_order(scope)
+    reader.order.assert_awaited_once_with("a", "BTCUSDT", "ct-x")
+    assert len(await db.fetchall("SELECT * FROM follower_order_observations")) == 1
+    assert (await commands.get("repair"))["status"] == "CONFIRMED"
+
+
+async def test_order_not_found_preserves_command_and_backs_off(storage):
+    import json
+    from unittest.mock import AsyncMock
+
+    from copytradeaster.history.sync import HistorySynchronizer
+    from copytradeaster.storage.repositories import CommandRepo
+
+    db, repo, scope = storage
+    commands = CommandRepo(db)
+    await commands.insert(
+        "missing", "a", None, "MARKET_OPEN", json.dumps({"symbol": "BTCUSDT"}), 1, "ct-x"
+    )
+    await commands.set_status("missing", "CONFIRMED")
+    reader = AsyncMock()
+    reader.order.return_value = None
+    sync = HistorySynchronizer(reader, repo, clock_ms=lambda: 1000)
+    await sync.repair_order(scope)
+    await sync.repair_order(scope)
+    assert reader.order.await_count == 1
+    assert (await commands.get("missing"))["status"] == "CONFIRMED"
+    assert await repo.repair_candidate(scope, 301001) is not None

@@ -162,6 +162,8 @@ class HistoryRepository:
                 )
                 await cursor.close()
 
+        await _compact_coverage(conn, scope, stream, symbol)
+
     async def windows(self, scope: HistoryScope, stream: str, symbol: str) -> list:
         return await self._db.fetchall(
             "SELECT start_ms,end_ms,state,checked_at FROM history_sync_state "
@@ -193,6 +195,46 @@ class HistoryRepository:
             )
             for row in rows
         ]
+
+    async def repair_candidate(self, scope: HistoryScope, now: int) -> dict | None:
+        row = await self._db.fetchone(
+            "SELECT c.command_key,c.client_order_id,c.kind,"
+            "json_extract(c.payload,'$.symbol') symbol "
+            "FROM execution_commands c LEFT JOIN history_order_checks h ON "
+            "h.account_id=c.account_id AND h.environment=? AND h.command_key=c.command_key "
+            "LEFT JOIN follower_order_observations o ON o.account_id=c.account_id "
+            "AND o.environment=? AND o.client_order_id=c.client_order_id "
+            "WHERE c.account_id=? AND c.status IN ('CONFIRMED','SUBMITTED') "
+            "AND c.client_order_id IS NOT NULL AND json_valid(c.payload) "
+            "AND json_extract(c.payload,'$.symbol') IS NOT NULL "
+            "AND (o.order_id IS NULL OR "
+            "o.status NOT IN ('FILLED','CANCELED','EXPIRED','REJECTED')) "
+            "AND (h.checked_at IS NULL OR h.checked_at<?) "
+            "ORDER BY COALESCE(h.checked_at,0),c.created_at,c.command_key LIMIT 1",
+            (scope.environment, scope.environment, scope.account_id, now - 300000),
+        )
+        return dict(row) if row is not None else None
+
+    async def record_order_check(
+        self,
+        scope: HistoryScope,
+        command_key: str,
+        checked_at: int,
+        *,
+        found: bool,
+    ) -> None:
+        await self._db.execute_write(
+            "INSERT INTO history_order_checks VALUES (?,?,?,?,?) "
+            "ON CONFLICT(account_id,environment,command_key) DO UPDATE SET "
+            "checked_at=excluded.checked_at,outcome=excluded.outcome",
+            (
+                scope.account_id,
+                scope.environment,
+                command_key,
+                checked_at,
+                "observed" if found else "not_found",
+            ),
+        )
 
     async def observe_order(
         self,
@@ -271,3 +313,43 @@ async def _insert_facts(
                 list(keyed.values()),
             )
             await cursor.close()
+
+
+async def _compact_coverage(
+    conn: aiosqlite.Connection,
+    scope: HistoryScope,
+    stream: str,
+    symbol: str,
+) -> None:
+    params = (scope.account_id, scope.environment, stream, symbol)
+    cursor = await conn.execute(
+        "SELECT start_ms,end_ms,checked_at FROM history_sync_state "
+        "WHERE account_id=? AND environment=? AND stream=? AND symbol=? "
+        "AND state='complete' ORDER BY start_ms",
+        params,
+    )
+    try:
+        rows = await cursor.fetchall()
+    finally:
+        await cursor.close()
+    merged: list[list[int]] = []
+    for row in rows:
+        start, end, checked = tuple(row)
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+            merged[-1][2] = min(merged[-1][2], checked)
+        else:
+            merged.append([start, end, checked])
+    if len(merged) == len(rows):
+        return
+    cursor = await conn.execute(
+        "DELETE FROM history_sync_state WHERE account_id=? AND environment=? "
+        "AND stream=? AND symbol=? AND state='complete'",
+        params,
+    )
+    await cursor.close()
+    cursor = await conn.executemany(
+        "INSERT INTO history_sync_state VALUES (?,?,?,?,?,?,'complete',?)",
+        [(*params, start, end, checked) for start, end, checked in merged],
+    )
+    await cursor.close()

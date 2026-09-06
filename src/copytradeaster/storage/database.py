@@ -240,6 +240,13 @@ MIGRATIONS: list[str] = [
       executed_qty TEXT NOT NULL, avg_price TEXT NOT NULL, observed_at INTEGER NOT NULL,
       PRIMARY KEY(account_id, environment, symbol, order_id))
     """,
+    """
+    CREATE TABLE history_order_checks(
+      account_id TEXT NOT NULL REFERENCES accounts(id), environment TEXT NOT NULL,
+      command_key TEXT NOT NULL, checked_at INTEGER NOT NULL,
+      outcome TEXT NOT NULL CHECK(outcome IN ('observed','not_found')),
+      PRIMARY KEY(account_id,environment,command_key))
+    """,
 ]
 
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
