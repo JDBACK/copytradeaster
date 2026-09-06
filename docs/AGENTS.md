@@ -80,7 +80,7 @@
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
-| [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md) | План по текущему коду и acceptance-p27. **§14: S1 Backend → G1 → S2 Скорость → G2 → S3 Интерфейс/функциональность → G3.** Backend B1–B10, §19 — скорость F0–F6 и сравнение keep-alive с альтернативами, §20 — итог повторного review. H-номера — mapping прежней редакции. PLAN READY, реализация не начата (2026-09-05) |
+| [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md) | План по текущему коду и acceptance-p27. **§14: S1 Backend → G1 → S2 Скорость → G2 → S3 Интерфейс/функциональность → G3.** Backend B1–B10, §19 — скорость F0–F6 и сравнение keep-alive с альтернативами, §20 — итог повторного review. H-номера — mapping прежней редакции. IN PROGRESS (2026-09-06); журнал MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md |
 | `MINIAPP_RISK_RULER_2026-09.md` | Шкала риска — первый vertical slice UX-плана (S2.5 lifecycle + S3.4 motion по §21): baseline, изменения, jsdom/node evidence, handoff-чеклист. Браузерная приёмка 15/15 PASS + независимая перепроверка (вердикт: принять) — браузерная часть CLOSED; устройство-часть (Telegram haptics/BackButton/WebKit, snap-stop A/B) отложена на потом → S3.5/G3 (2026-09-06) |
 
 ## docs/reviews/ — дословные тексты внешних ревью
@@ -120,3 +120,5 @@
   в исторических файлах они остаются как снимки момента.
 - Перемещение документов согласуется с этой картой; перед коммитом проверить,
   что все `.md`-ссылки указывают на существующие файлы (`python scripts/check_doc_links.py`).
+
+Текущий журнал реализации: [MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md) — todo, шаги и открытые G1/G2/G3.

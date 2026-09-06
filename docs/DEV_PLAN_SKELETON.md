@@ -354,7 +354,7 @@ production application/aiohttp path. Fake/fixtures допустимы для ч�
 formatters, navigation, DOM/layout и security regression, но не заменяют live
 биржевое доказательство.
 
-#### Функциональное наполнение Mini App — план готов (2026-09-05)
+#### Функциональное наполнение Mini App — реализация начата (2026-09-06)
 
 Новая кампания после закрытого Part 2. Источник решений — текущий код,
 `miniapp/AGENTS.md` и acceptance-p27. Сохраняются дизайн и четыре вкладки;
@@ -568,3 +568,5 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 ---
 
 Источники: [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md) — status 20–21.08.2026; [REPORTS_FACTUAL_COMPARISON_2026-08.md](reports/REPORTS_FACTUAL_COMPARISON_2026-08.md).
+
+Ход S1–S3: [журнал реализации](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md). Начат S1.1 (Aster history reader); gates остаются открыты.

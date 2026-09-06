@@ -3,8 +3,8 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-04):** Stage 1–3 CLOSED в `main`, открытых gates нет.
-> Offline 1089/2/42 (~87%), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
+> **TL;DR (2026-09-06):** Исторические Stage 1–3 CLOSED; новая функциональная кампания S1–S3 IN PROGRESS, G1/G2/G3 открыты.
+> Offline 1115/2/44 (2026-09-06; coverage не перемерялось), frontend 224/21 (2026-09-06, slice «шкала риска»), full testnet 42/1, ruff/oxlint clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1225,3 +1225,26 @@ Runtime после restart:
 
 ---
 > Это дно append-only журнала (начало — 2026-08-22). Текущее состояние — только TL;DR сверху файла; всё ниже него — снимки момента.
+
+## 2026-09-06 — функциональная кампания, S1.1 read adapter (IN PROGRESS)
+
+Добавлен `tests/unit/aster/test_history_api.py`: 19 checks на точные значения,
+большие IDs, weights/параметры signed boundary, отказ от некорректных окон,
+целостность страниц и безопасные ошибки. `PYTHONPATH=src .venv/bin/pytest -q
+ tests/unit/aster` — **89 passed**. Это targeted gate, прежние full-suite
+счётчики не пересчитаны. S1.1 live evidence и G1 ещё открыты.
+Первый запуск без PYTHONPATH импортировал другой editable checkout и не является
+проверкой этой ветки; приведённый результат получен с явным `PYTHONPATH=src`.
+
+
+## 2026-09-06 — history reader и signed read probe
+
+`PYTHONPATH=src .venv/bin/pytest -q -m 'not testnet'`: **1115 passed,
+2 skipped, 44 deselected**, 14.98 s. Targeted aster/history: **95 passed**.
+Новый `tests/unit/history/test_reader.py`: 6 сценариев split/budget/gap/bounds/error.
+`PYTHONPATH=src CT_TESTNET=1 .venv/bin/pytest -q -s tests/testnet/test_history_reads_live.py`:
+**1 passed**, 3.07 s; read-only copyc1, tmp nonce DB, ни одного trading write.
+Окно: 9 fills, 12 income, 8 matched commissions; commission sign противоположен
+income, 9 положительных commissions. fromId inclusive подтверждён; BTC/USDT/USDT
+из metadata подтверждены. Funding/Builder/full-history completeness не приняты.
+Полный testnet suite не перезапускался. Ruff changed files и doc links clean.
