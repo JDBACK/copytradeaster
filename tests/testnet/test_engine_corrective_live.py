@@ -29,6 +29,7 @@ from copytradeaster.domain.models import (
     PosSide,
     RiskPolicy,
     Side,
+    SkipReason,
     TargetState,
 )
 from copytradeaster.master.projector import MasterDelta
@@ -71,20 +72,71 @@ class Campaign:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 setattr(self.app, name, None)
+        # Background fan-out is now dead AND muted: generations stay closed
+        # so stream/sweep reconcile() stays unevaluated (-1). Only the
+        # persisted entry flag is restored — pause_barrier leaves
+        # allow_new_entries=false, which would block every manually driven
+        # entry (PAUSED skips) and fake all convergence assertions. Manual
+        # Campaign.recompute uses the ungated _recompute_follower path.
+        # NOTE: never open_generation_admission here — that would let live
+        # stream deltas execute follower entries outside manual control and
+        # corrupt exact-send assertions (e.g. LC1 fault.attempts).
+        await self.app.settings.set_flag("allow_new_entries", "true")
         assert self.app._stream_connected
 
-    async def refresh(self):
-        await self.app.projector.rebuild_full(self.audit, "main")
-        self.app._entry_admission_ready = True
+    async def refresh(self, settle_attempts: int = 6):
+        # Await the engine's OWN quiescence proof instead of rebuilding
+        # around it. A raw rebuild_full + manual ready-poke races the live
+        # stream: any WS event (or a reconnect boundary in flight) re-dirties
+        # master between the rebuild and planning, closing admission
+        # (PAUSED skips). _establish_master_boundary is the single
+        # linearization point: serialized by the boundary lock, it rebuilds,
+        # proves quiescence across passes, and publishes ready. Its entry
+        # pass stays muted because quiesce keeps generations closed
+        # (recompute_follower -> -1, tolerated as faulted). On exhaustion
+        # return the last state so tests fail honestly instead of hanging.
+        for _ in range(max(1, settle_attempts)):
+            try:
+                published = await self.app._establish_master_boundary("corrective-settle")
+            except RuntimeError:
+                published = False
+            state = self.app.projector.state
+            if published and self.app._master_entry_admitted():
+                return state
+            await asyncio.sleep(2.0)
         return self.app.projector.state
 
     async def recompute(self, runtime=None, *, state=None) -> int:
+
         state = state if state is not None else await self.refresh()
         runtime = runtime or self.app.follower_registry.get(self.followers[0])
         assert runtime is not None
         return await self.app.coordinator._recompute_follower(
             runtime, MasterDelta(frozenset({"*"}), state), master_fresh=True
         )
+
+    async def settled_targets(self, aid, *, attempts: int = 12):
+        # Observe-plan until the engine holds admission across the whole
+        # refresh -> snapshot -> plan unit. Testnet WS reconnects re-dirty
+        # master for ~6s windows (auto-boundary healing); a single-shot plan
+        # inside such a window yields PAUSED skips that prove nothing about
+        # sizing. Only PAUSED retries: any other skip is engine evidence the
+        # caller must assert on. Returns the last observation on exhaustion.
+        last = None
+        for _ in range(max(1, attempts)):
+            master = await self.refresh()
+            actual = await self.snapshot()
+            runtime = self.app.follower_registry.get(aid)
+            policy = await self.app.settings.get_policy(aid)
+            targets, skips = await self.app.coordinator.targets_for(
+                aid, master, actual, policy, client=runtime.client
+            )
+            last = (master, actual, targets, skips)
+            if not any(s.reason == SkipReason.PAUSED for s in skips):
+                return last
+            await asyncio.sleep(2.0)
+        assert last is not None
+        return last
 
     async def snapshot(self):
         runtime = self.app.follower_registry.get(self.followers[0])
@@ -252,13 +304,8 @@ async def test_shared_hedge_leverage_rejection_retry_and_worker_restart(campaign
     c = campaign
     await c.open_master("BTCUSDT", PosSide.LONG, D("0.06"))
     await c.open_master("BTCUSDT", PosSide.SHORT, D("0.01"))
-    state = await c.refresh()
+    state, actual, targets, _ = await c.settled_targets(c.followers[0])
     runtime = c.app.follower_registry.get(c.followers[0])
-    actual = await c.snapshot()
-    policy = await c.app.settings.get_policy(runtime.account_id)
-    targets, _ = await c.app.coordinator.targets_for(
-        runtime.account_id, state, actual, policy, client=runtime.client
-    )
     live_targets = [t for t in targets if t.qty != 0]
     c.evidence["asymmetric_targets"] = [(t.key.pos_side, t.qty, t.leverage) for t in targets]
     independent_ceilings = [
@@ -340,16 +387,11 @@ async def test_account_budget_on_two_real_symbols(campaign, constraint):
     await c.app.leverage.prepare_account(aid, SYMBOLS)
     for symbol in SYMBOLS:
         await c.open_master(symbol, PosSide.LONG, distance)
-    master = await c.refresh()
-    before = await c.snapshot()
-    runtime = c.app.follower_registry.get(aid)
-    policy = await c.app.settings.get_policy(aid)
-    targets, skips = await c.app.coordinator.targets_for(
-        aid, master, before, policy, client=runtime.client
-    )
+    master, before, targets, skips = await c.settled_targets(aid)
     c.evidence["budget_targets"] = [(t.key.symbol, t.qty, t.leverage) for t in targets]
     assert not skips, skips
     assert len([t for t in targets if t.qty]) == 2, "both real symbols are required for this gate"
+    nonzero = [t for t in targets if t.qty]
     risk_sum = sum(
         (
             abs(t.qty)
@@ -357,12 +399,12 @@ async def test_account_budget_on_two_real_symbols(campaign, constraint):
                 abs(master.positions[t.key].mark_price - t.stop_price)
                 + master.positions[t.key].mark_price * c.app.cfg.fee_buffer_pct
             )
-            for t in targets
+            for t in nonzero
         ),
         D(0),
     )
     margin_sum = sum(
-        (abs(t.qty) * master.positions[t.key].mark_price / t.leverage for t in targets), D(0)
+        (abs(t.qty) * master.positions[t.key].mark_price / t.leverage for t in nonzero), D(0)
     )
     assert risk_sum <= before.equity_usdt * c.app.cfg.max_total_risk_pct
     assert margin_sum <= before.available_usdt * D("0.8")
@@ -370,7 +412,7 @@ async def test_account_budget_on_two_real_symbols(campaign, constraint):
         assert risk * 2 > c.app.cfg.max_total_risk_pct
     else:
         assert margin_sum > before.available_usdt * D("0.6"), "margin clamp was not exercised"
-    planned = {t.key: abs(t.qty) for t in targets}
+    planned = {t.key: abs(t.qty) for t in nonzero}
     await c.recompute(state=master)
     after = await c.snapshot()
     for key, quantity in planned.items():

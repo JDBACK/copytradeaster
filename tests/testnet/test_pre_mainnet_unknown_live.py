@@ -110,18 +110,18 @@ async def _is_hedge(client: AsterClient, aid: str = "main") -> bool:
     return bool(await client.get_position_mode(aid))
 
 
-async def _flatten_main(client: AsterClient, aid: str = "main") -> None:
-    """Best-effort flatten BTC position and clear protections (REAL-05 convention)."""
-    for o in await client.open_orders(aid, SYMBOL):
+async def _flatten_main(client: AsterClient, aid: str = "main", symbol: str = SYMBOL) -> None:
+    """Best-effort flatten position and clear protections (REAL-05 convention)."""
+    for o in await client.open_orders(aid, symbol):
         with contextlib.suppress(Exception):
-            await client.cancel_order(aid, SYMBOL, orig_client_order_id=o.client_order_id)
-    for p in await client.position_risk(aid, SYMBOL):
-        if p.symbol == SYMBOL and p.position_amt != 0:
+            await client.cancel_order(aid, symbol, orig_client_order_id=o.client_order_id)
+    for p in await client.position_risk(aid, symbol):
+        if p.symbol == symbol and p.position_amt != 0:
             with contextlib.suppress(Exception):
                 await client.place_order(
                     aid,
                     PlaceOrderRequest(
-                        symbol=SYMBOL,
+                        symbol=symbol,
                         side=Side.SELL if p.position_amt > 0 else Side.BUY,
                         type="MARKET",
                         quantity=abs(p.position_amt),
@@ -133,15 +133,15 @@ async def _flatten_main(client: AsterClient, aid: str = "main") -> None:
                 )
 
 
-async def _audit_flat(client: AsterClient, aid: str = "main") -> None:
+async def _audit_flat(client: AsterClient, aid: str = "main", symbol: str = SYMBOL) -> None:
     """Independent signed audit: flat position and zero open orders."""
-    positions = await client.position_risk(aid, SYMBOL)
+    positions = await client.position_risk(aid, symbol)
     assert all(p.position_amt == 0 for p in positions)
-    assert await client.open_orders(aid, SYMBOL) == []
+    assert await client.open_orders(aid, symbol) == []
 
 
-async def _btc_position(client: AsterClient, aid: str = "main") -> D:
-    for p in await client.position_risk(aid, SYMBOL):
+async def _btc_position(client: AsterClient, aid: str = "main", symbol: str = SYMBOL) -> D:
+    for p in await client.position_risk(aid, symbol):
         if p.position_side.value in ("BOTH", "LONG"):
             return p.position_amt
     return D(0)
@@ -164,19 +164,21 @@ async def _open_long_real(
     )
 
 
-def _open_action(planner_coid: str, hedge: bool, revision: int = 0) -> ExecutionAction:
+def _open_action(
+    planner_coid: str, hedge: bool, revision: int = 0, *, symbol: str = SYMBOL, qty: D = QTY
+) -> ExecutionAction:
     payload = {
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "side": "BUY",
         "type": "MARKET",
-        "quantity": format(QTY, "f"),
+        "quantity": format(qty, "f"),
         "newOrderRespType": "RESULT",
     }
     if hedge:
         payload["positionSide"] = PosSide.LONG.value
     return ExecutionAction(
         kind=ActionKind.MARKET_OPEN,
-        symbol=SYMBOL,
+        symbol=symbol,
         payload=payload,
         client_order_id=planner_coid,
         replaces_client_order_id=None,
@@ -433,15 +435,18 @@ async def test_proven_not_executed_retries_exactly_once_with_new_coid(clients, c
     current-order, history, and position reads prove absence, so the executor
     may resend once under a fresh COID and must then stop.
 
-    Runs on ``copyc3``: ``main``/``copyc1`` BTCUSDT ``allOrders`` windows are
-    saturated (1000/1000), so order-history absence is unprovable there by
-    design (fail-closed UNRESOLVED); ``copyc3`` (67 rows) admits real proof.
+    Runs on ``copyc3``/ETHUSDT: every BTCUSDT ``allOrders`` window is now
+    saturated (1000/1000 on all accounts), so order-history absence is
+    unprovable there by design (fail-closed UNRESOLVED); ETHUSDT windows are
+    near-empty and admit real negative proof. Same contract, honest shaping.
     """
     aid = "copyc3"
+    symbol = "ETHUSDT"
+    qty = D("0.02")
     if aid not in creds.account_ids():
         pytest.skip(f"{aid} credentials are required for signed UNKNOWN recovery")
     real = clients["main"]
-    await _flatten_main(real, aid)
+    await _flatten_main(real, aid, symbol)
     hedge = await _is_hedge(real, aid)
     stamp = time.time_ns()
 
@@ -470,7 +475,7 @@ async def test_proven_not_executed_retries_exactly_once_with_new_coid(clients, c
 
     wrapped = DropFirstSendClient()
     executor = _executor(wrapped, journal)
-    action = _open_action(f"a4-open-{stamp}", hedge, 4)
+    action = _open_action(f"a4-open-{stamp}", hedge, 4, symbol=symbol, qty=qty)
     plan = ExecutionPlan(account_id=aid, trade_id=None, actions=[action])
     first_coid = "ct" + command_key_of(plan, action)
     try:
@@ -485,13 +490,13 @@ async def test_proven_not_executed_retries_exactly_once_with_new_coid(clients, c
         assert final_coid == first_coid + "r2"
         # The retried COID filled on the exchange; the dropped first COID
         # provably never existed there.
-        history = await real.query_order_history(aid, SYMBOL, orig_client_order_id=final_coid)
-        assert history is not None and history.executed_qty == QTY
-        assert await real.query_order_history(aid, SYMBOL, orig_client_order_id=first_coid) is None
-        assert await _btc_position(real, aid) == QTY
+        history = await real.query_order_history(aid, symbol, orig_client_order_id=final_coid)
+        assert history is not None and history.executed_qty == qty
+        assert await real.query_order_history(aid, symbol, orig_client_order_id=first_coid) is None
+        assert await _btc_position(real, aid, symbol) == qty
     finally:
-        await _flatten_main(real, aid)
-        await _audit_flat(real, aid)
+        await _flatten_main(real, aid, symbol)
+        await _audit_flat(real, aid, symbol)
 
 
 async def _run_a5_sigkill_worker(journal_path: str) -> None:
@@ -617,7 +622,14 @@ async def test_sigkill_in_unknown_window_boot_resolves_without_second_order(
             assert row["status"] == "SENDING"
             assert row["recovery_context"]
             coid = str(row["client_order_id"])
-
+            # Deterministic worker COID: earlier A5 runs share it, and the
+            # saturated allOrders window keeps them. The worker already sent
+            # before dying, so boot must add ZERO new rows with this COID.
+            matches_before = [
+                o
+                for o in await real.all_orders("main", SYMBOL, limit=1000)
+                if o.client_order_id == coid
+            ]
             history_before = await real.query_order_history(
                 "main", SYMBOL, orig_client_order_id=coid
             )
@@ -640,7 +652,7 @@ async def test_sigkill_in_unknown_window_boot_resolves_without_second_order(
                 for o in await real.all_orders("main", SYMBOL, limit=1000)
                 if o.client_order_id == coid
             ]
-            assert len(matches) == 1
+            assert len(matches) == len(matches_before)
             assert await _btc_position(real) == QTY
         finally:
             await journal.close()

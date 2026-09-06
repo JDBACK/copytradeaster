@@ -77,6 +77,7 @@ STOP_TYPES = ("STOP_MARKET", "STOP")
 TP_TYPES = ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
 
 POSTFILL_RECOMPUTE_DEBOUNCE_S = 2.0
+POSTFILL_STATE_MAX_AGE_S = 10.0
 NOTIFICATION_KEY_CACHE_MAX = 4096
 _SAFE_FRAGMENT = re.compile(r"[^A-Za-z0-9_.:-]+")
 LIQUIDATION_MMR_CUSHION = Decimal("0.01")
@@ -237,8 +238,9 @@ class Coordinator:
         self._basis = basis
         self._snapshot_symbols = snapshot_symbols
         self._snapshot_scope: ContextVar = ContextVar("snapshot_scope", default=snapshot_symbols)
-        self._max_total_risk_pct = max_total_risk_pct
         self._last_master_state: MasterState | None = None
+        self._last_master_state_at: float = 0.0
+        self._max_total_risk_pct = max_total_risk_pct
         self._last_postfill_recompute: dict[str, float] = {}
         self._postfill_tasks: set[asyncio.Task] = set()
         self._postfill_admission_lock = asyncio.Lock()
@@ -298,6 +300,7 @@ class Coordinator:
 
     async def on_master_delta(self, delta: MasterDelta) -> None:
         self._last_master_state = delta.state
+        self._last_master_state_at = time.monotonic()
         if not await self._enter_generation():
             return
         followers = self._registry.snapshot()
@@ -370,6 +373,17 @@ class Coordinator:
         fr = self._registry.get(account_id)
         state = self._last_master_state
         if fr is None or state is None:
+            return
+        if time.monotonic() - self._last_master_state_at > POSTFILL_STATE_MAX_AGE_S:
+            # L1 live incident: the cached delta predates a REST-side fill
+            # the lagging WS never delivered. Recomputing closes against it
+            # flattens live legs on a phantom MASTER_CLOSED (open/close
+            # oscillation). The sweep/boundary converges on authoritative
+            # state seconds later; the post-fill net stays an optimization.
+            log.info(
+                "post-fill recompute skipped for %s: cached master state is stale",
+                _safe_fragment(account_id),
+            )
             return
         async with self._postfill_admission_lock:
             if not self._postfill_admission_open:

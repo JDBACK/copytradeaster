@@ -833,14 +833,21 @@ async def test_boot_conflicting_position_rows_keep_set_unresolved(env):
     assert str(row["last_error"]).startswith("boot-query-unresolved:ambiguous-leverage")
 
 
-async def test_boot_empty_position_rows_keep_set_unresolved(env):
+async def test_boot_empty_position_rows_fail_set_for_safe_reprovision(env):
+    """No leverage rows at all (row-omitting doubles skip flat legs) leave
+    nothing to confirm against. A SET is an idempotent config write, so
+    FAILED safely re-provisions; staying UNKNOWN would brick the account
+    behind the in-flight gate forever (load incident). Conflicting rows
+    stay ambiguous (see previous test)."""
     _executor, client, commands, links, _ = env
     key = await _seed_sending_set_command(commands)
     client.positions_result = []
     report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
-    assert report.unresolved_query_error == 1
-    assert len(await commands.in_flight()) == 1
-    assert (await commands.get(key))["status"] == "SENDING"
+    assert report.failed_not_found == 1
+    assert len(await commands.in_flight()) == 0
+    row = await commands.get(key)
+    assert row["status"] == "FAILED"
+    assert str(row["last_error"]).startswith("boot-resolved:no-leverage-rows-to-confirm")
 
 
 async def test_boot_unreadable_leverage_stays_fail_closed(env):

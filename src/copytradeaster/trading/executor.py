@@ -1309,10 +1309,13 @@ async def _resolve_set_leverage_boot(
         await commands.set_status(key, "UNKNOWN", last_error=f"boot: malformed payload:{exc}")
         return "unresolved"
     last_error: AsterError | None = None
+    position_rows: list = []
     for attempt in range(BOOT_QUERY_ATTEMPTS):
         try:
-            rows = await clients(account_id).position_risk(account_id, symbol)
-            values = {int(r.leverage) for r in rows if r.symbol == symbol and int(r.leverage) > 0}
+            position_rows = await clients(account_id).position_risk(account_id, symbol)
+            values = {
+                int(r.leverage) for r in position_rows if r.symbol == symbol and int(r.leverage) > 0
+            }
             observed: int | None = values.pop() if len(values) == 1 else None
             break
         except AsterError as exc:
@@ -1334,7 +1337,7 @@ async def _resolve_set_leverage_boot(
             last_error=f"boot-query-unresolved:{safe_error}",
         )
         return "unresolved"
-    if observed is None:
+    if observed is None and position_rows:
         # Empty or conflicting rows are not an authoritative answer: the
         # outcome is unknown, not disproven - keep the command in flight so
         # boot stays fail-closed instead of marking a maybe-applied write
@@ -1345,6 +1348,17 @@ async def _resolve_set_leverage_boot(
             last_error="boot-query-unresolved:ambiguous-leverage",
         )
         return "unresolved"
+    if observed is None:
+        # No position rows at all: row-omitting clients (shadow doubles skip
+        # flat legs) leave nothing to confirm against, and real Aster always
+        # returns rows. A SET is an idempotent config write, so FAILED safely
+        # re-provisions instead of bricking the account behind an
+        # unresolvable UNKNOWN (load incident: 10 shadow SETs stuck UNKNOWN
+        # blocked every shadow open via the in-flight gate).
+        await commands.set_status(
+            key, "FAILED", last_error="boot-resolved:no-leverage-rows-to-confirm"
+        )
+        return "not_applied"
     if observed == target:
         await commands.set_status(key, "CONFIRMED", last_error=f"boot-resolved:leverage={observed}")
         return "confirmed"

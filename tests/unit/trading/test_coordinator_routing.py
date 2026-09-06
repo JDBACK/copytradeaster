@@ -492,6 +492,33 @@ async def test_postfill_drain_rejects_a_late_confirmation(env):
     assert coordinator._postfill_tasks == set()
 
 
+async def test_postfill_skips_stale_cached_master_state(env):
+    """L1 live incident: a cached delta predating a REST-side fill must not
+    drive closes. Stale cache -> no task; fresh cache -> task spawned."""
+    import time as _time
+
+    coordinator, followers, db, _ = env
+    del db, followers
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT"},
+        client_order_id="fresh-open",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    coordinator._last_master_state = master_state()
+    coordinator._last_master_state_at = _time.monotonic() - 60.0
+    await coordinator.on_command_confirmed("copyc1", action)
+    assert coordinator._postfill_tasks == set()
+    coordinator._last_master_state_at = _time.monotonic()
+    coordinator._last_postfill_recompute.clear()
+    await coordinator.on_command_confirmed("copyc1", action)
+    assert len(coordinator._postfill_tasks) == 1
+    await coordinator.drain_postfill_tasks(timeout_s=10)
+    assert coordinator._postfill_tasks == set()
+
+
 def lifecycle_app(coordinator, db):
     app = App.__new__(App)
     app.follower_registry = coordinator.registry

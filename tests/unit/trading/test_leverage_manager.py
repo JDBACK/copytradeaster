@@ -359,3 +359,39 @@ async def test_unknown_outcome_with_unreadable_state_fails_closed():
     assert clients["copyc1"].set_calls == []  # never a blind second write
     assert clients["copyc1"].bracket_calls == []
     assert not manager.is_ready("copyc1", "BTCUSDT")
+
+
+async def test_observe_rejects_1x_unset_marker_and_disagrees_with_live_confirmation():
+    """F3 live incident: a freshly observed 1x must never validate readiness.
+
+    1x is the exchange unset marker. Accepting it (below-ceiling shortcut)
+    blessed entries sized for provisioned leverage with zero SET_LEVERAGE
+    rows. A stop-driven downshift (>= 2) still validates the generation.
+    """
+    clients = {"main": FakeLevClient(), "copyc1": FakeLevClient()}
+    manager = make_manager(clients, symbols=["BTCUSDT"])
+    await manager.refresh_catalog(["BTCUSDT"])
+    assert manager.is_ready("copyc1", "BTCUSDT") is False
+    manager.observe("copyc1", {"BTCUSDT": 1})
+    assert manager.is_ready("copyc1", "BTCUSDT") is False
+    assert manager.confirmed("copyc1", "BTCUSDT") == 1
+    # A live 20x confirmation is actively disagreed with by a later 1x read.
+    manager.observe("copyc1", {"BTCUSDT": 20})
+    assert manager.is_ready("copyc1", "BTCUSDT") is True
+    manager.observe("copyc1", {"BTCUSDT": 1})
+    assert manager.is_ready("copyc1", "BTCUSDT") is False
+    # Genuine downshifts keep validating.
+    manager.observe("copyc1", {"BTCUSDT": 13})
+    assert manager.is_ready("copyc1", "BTCUSDT") is True
+    assert manager.confirmed("copyc1", "BTCUSDT") == 13
+
+
+async def test_unanimous_1x_observed_fleet_never_seeds_1x_candidate():
+    """A unanimous unprovisioned fleet must not become a 1x global candidate."""
+    clients = {"copyc1": FakeLevClient(), "copyc2": FakeLevClient()}
+    manager = make_manager(clients, symbols=["BTCUSDT"], accounts=lambda: ["copyc1", "copyc2"])
+    manager.observe("copyc1", {"BTCUSDT": 1})
+    manager.observe("copyc2", {"BTCUSDT": 1})
+    assert manager._seed_candidate_from_observed_accounts("BTCUSDT") is None  # noqa: SLF001
+    assert not manager.is_ready("copyc1", "BTCUSDT")
+    assert not manager.is_ready("copyc2", "BTCUSDT")

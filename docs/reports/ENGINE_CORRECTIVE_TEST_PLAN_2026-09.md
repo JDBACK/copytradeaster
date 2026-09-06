@@ -51,8 +51,14 @@ USDT equity и общий резерв не более 80% available margin на
   [test_engine_corrective_live.py](../../tests/testnet/test_engine_corrective_live.py).
 - [x] Обновлены UNKNOWN, network, risk и load live-сценарии под новый контракт.
 - [x] Проверены lint/format, offline suite, collection и отказ live-тестов без opt-in.
-- [ ] Выполнены signed прогоны исправленного дерева. **Пока не выполнялись.**
-- [ ] Разобраны все failures/skips и обновлён итоговый verdict по доказательствам.
+- [x] Выполнены signed прогоны исправленного дерева (2026-09-06, REAL Testnet):
+  UNKNOWN 6/6 + network 3/3 + LC1–LC6 6/6 + совместимость 20/20 + load 0.3
+  (30/30 циклов, restart/SIGTERM/SIGKILL, метрики, FLAT-ALL). A4 → ETHUSDT
+  (BTC-окна saturated), A5 delta-count, load scope 100→30 решением owner'а.
+- [x] Разобраны все failures/skips, вердикт обновлён по доказательствам
+  (TL;DR в ENGINE_TEST_STATUS + запись 2026-09-06 в PROGRESS-журнале):
+  3 прод-бага пофикшены вживую, 3 honest shape-skip зафиксированы открытыми,
+  -4226 задокументирован, вердикт COMPLETE (owner scope), mainnet не разрешён.
 
 | ID | Готовый тест / проверка | Что должно быть доказано запуском |
 |---|---|---|
@@ -156,3 +162,11 @@ command_key/COID/status/attempts, relevant signed history/positionRisk/openOrder
 Обновить канонический статус, этот чеклист, roadmap и append-only журнал.
 После этого сформулировать новый GO/NO-GO с ограничениями; наличие готового
 кода тестов само по себе GO не даёт.
+
+## Отклонение от критерия (решение owner'а, 2026-09-06)
+Критерий «load не сокращён» нарушен явно: load scope 100→30
+(`CT_LOAD_SCALE=0.3`). Основание: «100» — эмоциональная цифра без инженерного
+обоснования; механика доказывается за 5–10 циклов, фолт-фазы от глубины не
+зависят, хвосты ловят только грозы биржи. Полный load 1.0 остаётся открытым
+пунктом (не проваленным — отложенным). P8a-B и moot-by-flat — тоже решения
+owner'а (см. TL;DR и PROGRESS-журнал). Вердикт: COMPLETE (owner scope).

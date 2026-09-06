@@ -234,16 +234,23 @@ async def test_worker_observes_lower_leverage_after_shared_mutation_barrier(jour
     assert client.set_calls == []
 
 
-async def test_stale_leverage_confirmation_read_failure_is_durably_unknown(journal_env):
+async def test_stale_leverage_confirmation_with_empty_reads_reprovisions(journal_env):
+    """Row-omitting reads (shadow doubles skip flat legs) leave nothing to
+    verify a historical confirmation against. The safe answer is a fresh
+    idempotent re-provision — never blind reuse, never a durable UNKNOWN
+    that bricks the account behind the in-flight gate (load incident).
+    Genuinely unreadable reads (transport errors) stay fail-closed; see
+    test_boot_unreadable_leverage_stays_fail_closed."""
     executor, client, commands, _, _ = journal_env
     plan = plan_of(leverage_action())
     first = (await executor.submit(plan))[0]
     assert first.status == "CONFIRMED"
     client.positions_result = []  # no authoritative configured value
-    assert (await executor.submit(plan))[0].status == "UNKNOWN"
-    assert (await commands.get(first.command_key))["status"] == "UNKNOWN"
-    assert (await executor.submit(plan_of(open_action())))[0].status == "BLOCKED"
-    assert client.place_calls == 0
+    assert (await executor.submit(plan))[0].status == "CONFIRMED"
+    assert len(client.leverage_calls) == 2
+    assert (await commands.get(first.command_key))["status"] == "CONFIRMED"
+    assert (await executor.submit(plan_of(open_action())))[0].status == "CONFIRMED"
+    assert client.place_calls == 1
 
 
 def test_account_margin_is_reserved_once_for_all_increments():

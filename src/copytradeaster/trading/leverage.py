@@ -187,9 +187,17 @@ class LeverageManager:
         """Fold authoritative positionRisk leverages into the confirmed map.
 
         The candidate and operator setting are ceilings, not desired upshifts.
-        Any positive observed value below both ceilings validates this catalog
+        Any observed value in ``[2, ceilings]`` validates this catalog
         generation. In particular, a stop-driven downshift survives maintenance
         and restart. Values above the ceiling remain unready for increases.
+
+        1x is the exchange unset marker, never a ready candidate: it is
+        stored unready (like an above-ceiling value) even when it sits
+        below the ceilings, and it actively disagrees with any live
+        confirmation. Otherwise a freshly observed 1x would silently bless
+        entries sized for provisioned leverage (F3 live incident:
+        copyc1 opened at 1x economics with zero SET_LEVERAGE rows while
+        every SET was denied).
         """
         for symbol, raw in symbol_leverages.items():
             try:
@@ -208,7 +216,8 @@ class LeverageManager:
             ):
                 continue
             agrees_with_candidate = (
-                candidate is not None
+                leverage >= 2
+                and candidate is not None
                 and leverage <= candidate.leverage
                 and (self._operator_max_leverage is None or leverage <= self._operator_max_leverage)
             )
@@ -305,6 +314,10 @@ class LeverageManager:
         if len(values) != 1:
             return None
         leverage = values.pop()
+        if leverage < 2:
+            # 1x is the exchange unset marker (see observe()): a unanimous
+            # unprovisioned fleet must not become a 1x global candidate.
+            return None
         revision = self._next_revision()
         candidate = CandidateLeverage(
             leverage=leverage,
@@ -363,7 +376,10 @@ class LeverageManager:
             self.invalidate(account_id, symbol)
             raise LeverageError(f"{symbol}: configuration unreadable")
         ceiling = min(candidate.leverage, self._operator_max_leverage or candidate.leverage)
-        desired = min(ceiling, observed)
+        # Exchange unset marker (see observe()): never an already-configured
+        # state. Provision the ceiling candidate below (or fail on fault)
+        # instead of short-circuiting a 1x confirmation.
+        desired = ceiling if observed < 2 else min(ceiling, observed)
         if observed == desired:
             self.observe(account_id, {symbol: observed})
             return observed

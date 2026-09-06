@@ -3,18 +3,27 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-05, независимое ревью + corrective):** production-исправления
-> движка и корректирующие live-тесты реализованы. **Mainnet: NO-GO до повторной
-> квалификации исправленного дерева.** Старый GO для `2c89286` пересмотрен:
-> ревью выявило обход UNKNOWN новой ревизией, конфликт HEDGE SET_LEVERAGE,
-> неверные readiness/health proofs и другие пробелы взаимодействия компонентов.
-> Текущий offline gate: **1144 passed, 2 skipped, 85 deselected**, 36.40s;
-> coverage **85.91%** (14052 statements, 1980 missing; вывод pytest округляет до 86%).
-> Документарная цель 87% пока не достигнута. Ruff check/format и diff-check чистые.
-> Opt-out gate изменённых live-файлов: **22 skipped**, signed запросы не выполнялись.
-> Исправленные live-тесты **не прогонялись на бирже**; code-ready не означает LIVE-CLOSED.
-> Следующий исполнитель проводит прогоны и исправляет по результатам:
-> [готовый план](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md).
+> **TL;DR (2026-09-06, corrective qualification COMPLETE, owner scope):**
+> live-матрица исправленного дерева закрыта: UNKNOWN 6/6 (A4 переведён на
+> ETHUSDT — все BTCUSDT allOrders-окна забиты 1000/1000), network 3/3, LC1–LC6
+> 6/6, совместимость 20/20 (master 5/5, risk 5/6, isolation 3/3, limit 2/4,
+> hedge 7/7), load 0.3: 30/30 циклов + restart/SIGTERM/SIGKILL + метрики,
+> финальный FLAT-ALL. Офлайн: **1147 passed, 2 skipped**, coverage **86%**
+> (документарная цель 87% открыта). Ruff check/format чистые.
+> Найдено и починено вживую 3 прод-бага: 1x unset-marker как ready
+> (`leverage.observe/prepare/seeding`, F3), протухший post-fill кэш мастера
+> (осцилляция open/close, L1), неразрешимый UNKNOWN у SET на row-omitting
+> клиентах (brick shadow-входов, load cycle 2).
+> Решения owner'а (зафиксированы, не умолчаны): load scope 100→30
+> (CT_LOAD_SCALE=0.3; «100» было эмоциональной цифрой), P8a-B (залеченные
+> детерминированные реджекты вместо стерильности журнала + moot-by-flat),
+> приёмка load7 по evidence + coded moot-анализу без зелёного exit-кода.
+> Открыто: полный load 1.0 (отложен), 3 honest shape-skip (dust2 бюджет,
+> L2 residual, limit-reduction full-fill), coverage 86→87, кодбук -4226
+> (недокументированный транзиентный реджект тестнета, нет в официальном
+> списке кодов Aster).
+> **Вердикт: corrective qualification COMPLETE (owner scope). Mainnet этим
+> сообщением НЕ разрешается — релиз только явным решением owner'а.**
 > Ниже — история предыдущих кампаний; их счётчики и GO относятся к прежним деревьям.
 
 

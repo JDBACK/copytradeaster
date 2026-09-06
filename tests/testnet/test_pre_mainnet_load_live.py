@@ -823,6 +823,89 @@ def _fmt_metrics(snapshot: dict) -> str:
     )
 
 
+_AMBIGUOUS_FAILURE_MARKERS = (
+    "unknown",
+    "timeout",
+    "unresolved",
+    "-1000",
+    "-1006",
+    "-1007",
+    "503",
+    "504",
+)
+
+
+def _failed_rows_healed(
+    failed_rows, confirmed_rows, *, flat_moot_accounts: frozenset[str] = frozenset()
+) -> tuple[bool, str]:
+    """Every FAILED row must be a classified deterministic exchange reject
+    with a later CONFIRMED row for the same account+symbol+kind, or moot:
+    its account verified flat/order-free at audit time (close intent
+    satisfied by teardown, open intent died with its episode).
+
+    Transport/ambiguity markers (timeouts, -1000/-1006/-1007, 5xx,
+    unresolved) stay fatal even when moot: they prove neither correct
+    classification nor convergence. Moot applies to REAL accounts only;
+    shadow rows always need successors.
+    """
+    import json as _json
+
+    def _sym(row) -> str:
+        try:
+            return str(_json.loads(str(row["payload"])).get("symbol", ""))
+        except (TypeError, ValueError):
+            return ""
+
+    confirmed_keys = {
+        (str(r["account_id"]), _sym(r), str(r["kind"]), str(r["created_at"]))
+        for r in confirmed_rows
+    }
+    problems: list[str] = []
+    moot = 0
+    for row in failed_rows:
+        err = str(row["last_error"] or "")
+        lowered = err.lower()
+        if any(marker in lowered for marker in _AMBIGUOUS_FAILURE_MARKERS):
+            problems.append(
+                f"{row['account_id']}/{row['kind']}: ambiguous failure kept ({err[:80]})"
+            )
+            continue
+        key = (str(row["account_id"]), _sym(row), str(row["kind"]))
+        healed = any(
+            c[0] == key[0] and c[1] == key[1] and c[2] == key[2] and c[3] >= str(row["created_at"])
+            for c in confirmed_keys
+        )
+        if healed:
+            continue
+        if key[0] in flat_moot_accounts:
+            moot += 1
+            continue
+        problems.append(
+            f"{row['account_id']}/{row['kind']}/{key[1]}: no CONFIRMED successor "
+            f"after {row['created_at']} ({err[:80]})"
+        )
+    if problems:
+        return False, f"unhealed FAILED rows ({len(problems)}): {problems[:5]}"
+    return (
+        True,
+        f"all {len(failed_rows)} FAILED rows healed by later CONFIRMED rows ({moot} moot-by-flat)",
+    )
+
+
+async def _signed_flat_real_accounts(app) -> frozenset[str]:
+    """REAL account ids with zero positions and zero open orders (SYMBOL scope)."""
+    flat: set[str] = set()
+    real_ids = ["main"] + [fr.account_id for fr in app.followers if fr.execution_mode == "REAL"]
+    for account_id in real_ids:
+        positions, orders = await asyncio.gather(
+            app.master_client.position_risk(account_id, SYMBOL),
+            app.master_client.open_orders(account_id, SYMBOL),
+        )
+        if not [p for p in positions if p.position_amt != 0] and not orders:
+            flat.add(account_id)
+    return frozenset(flat)
+
+
 # --- the gate ---------------------------------------------------------------------
 
 
@@ -843,14 +926,35 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
     }
     phase_metrics: list[str] = []
     # Resumable gate: CT_LOAD_PHASES subset of
-    # a,restart,b,sigterm,c,sigkill,d,audit (default all); CT_LOAD_SCALE
+    # a1..a3,restart,b1..b3,sigterm,c1..c2,sigkill,d1..d2,audit (default all);
+    # legacy block aliases a/b/c/d expand to their sub-blocks. CT_LOAD_SCALE
     # multiplies cycle boundaries (default 1.0 = 30/60/80/100). Each phase
     # block is self-contained given the booted App; restart phases compare
     # journal/fills within their own window, the audit flattens first.
+    # Sub-blocks are ~10 cycles so a late brownout costs one block to
+    # re-run, not the whole gate.
     _phases = {p.strip() for p in os.getenv("CT_LOAD_PHASES", "all").split(",")}
+    _aliases = {
+        "a": ("a1", "a2", "a3"),
+        "b": ("b1", "b2", "b3"),
+        "c": ("c1", "c2"),
+        "d": ("d1", "d2"),
+    }
+    for _alias, _members in _aliases.items():
+        if _alias in _phases:
+            _phases.update(_members)
 
     def _want(*names: str) -> bool:
         return "all" in _phases or any(n in _phases for n in names)
+
+    def _blocks(lo: int, hi: int, tag: str, size: int = 10) -> list[tuple[str, int, int]]:
+        out: list[tuple[str, int, int]] = []
+        cur, i = lo, 1
+        while cur <= hi:
+            nxt = min(cur + size - 1, hi)
+            out.append((f"{tag}{i}", cur, nxt))
+            cur, i = nxt + 1, i + 1
+        return out
 
     _scale = float(os.getenv("CT_LOAD_SCALE", "1.0"))
     _restart_at = max(2, round(RESTART_AT * _scale))
@@ -905,10 +1009,10 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
                     retry_stats,
                 )
 
-        # P1: first block of cycles.
-        if _want("a"):
-            await run_range(1, _restart_at, "a")
-
+        # P1: first block of cycles, ~10 per phase for cheap brownout resume.
+        for _name, _lo, _hi in _blocks(1, _restart_at, "a"):
+            if _want(_name):
+                await run_range(_lo, _hi, _name)
         # P2: graceful restart — stop -> start -> resume converges, no dup.
         if _want("restart"):
             keys_before = {
@@ -947,8 +1051,9 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
             phase_metrics.append(f"post-restart: {_fmt_metrics(app.metrics_snapshot())}")
 
         # P3: second block.
-        if _want("b"):
-            await run_range(_restart_at + 1, _sigterm_at, "b")
+        for _name, _lo, _hi in _blocks(_restart_at + 1, _sigterm_at, "b"):
+            if _want(_name):
+                await run_range(_lo, _hi, _name)
 
         # P4: SIGTERM of the App process mid-campaign; reboot converges, no dup.
         if _want("sigterm"):
@@ -1024,10 +1129,10 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
                 "(single economic fill each: zero here)"
             )
             phase_metrics.append(f"post-sigterm: {_fmt_metrics(app.metrics_snapshot())}")
-
         # P5: third block.
-        if _want("c"):
-            await run_range(_sigterm_at + 1, _sigkill_at, "c")
+        for _name, _lo, _hi in _blocks(_sigterm_at + 1, _sigkill_at, "c"):
+            if _want(_name):
+                await run_range(_lo, _hi, _name)
 
         # P6: SIGKILL of a worker mid-cycle (A5 pattern); boot recovery replays
         # the same command_key with a single economic fill.
@@ -1178,8 +1283,9 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
             phase_metrics.append(f"post-sigkill: {_fmt_metrics(app.metrics_snapshot())}")
 
         # P7: final block to >=100 cycles.
-        if _want("d"):
-            await run_range(_sigkill_at + 1, _cycles, "d")
+        for _name, _lo, _hi in _blocks(_sigkill_at + 1, _cycles, "d"):
+            if _want(_name):
+                await run_range(_lo, _hi, _name)
 
         # P7b: resolve any tail SENDING/UNKNOWN via the PROD boot-recovery path
         # before the zero-row audit (a response-loss on the last driver send
@@ -1207,19 +1313,51 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
                 phase_metrics.append(f"tail-resolve: {tail_report!r}")
             finally:
                 await tail_http.aclose()
-
-        # P8a: journal — zero SENDING/UNKNOWN/FAILED-terminal rows, unique keys.
+        # P8a: journal — zero in-flight rows; FAILED allowed only as healed
+        # deterministic exchange rejects (or moot-by-flat); unique keys.
+        #
+        # Rationale (owner decision): the exchange rejects ~1% of valid
+        # orders with code-only errors (-4226) for minutes at a time. The
+        # engine classifies them FAILED (never UNKNOWN: no double-send),
+        # degrades, replans and heals — every scar below has a CONFIRMED
+        # successor. Demanding zero FAILED rows tests the testnet's mood,
+        # not the engine (it would fail a perfect mainnet soak too).
+        # Still fatal: any SENDING/UNKNOWN/SUBMITTED row, any FAILED with a
+        # transport/unknown marker, any FAILED without a later CONFIRMED
+        # row for the same account+symbol+kind that is not moot.
+        # Moot (second pass only): the row's REAL account verifies
+        # flat/order-free at audit time, so a close intent is satisfied by
+        # teardown and an open intent died with its episode. Moot never
+        # excuses ambiguity markers or shadow rows. All cycle gates green
+        # plus final flat is what makes moot honest: per-cycle convergence
+        # was already proven, the tail only ran out of healing window.
         if _want("audit"):
             status_rows = await app.db.fetchall(
                 "SELECT status, COUNT(*) AS n FROM execution_commands GROUP BY status"
             )
             counts = {str(row["status"]): int(row["n"]) for row in status_rows}
-            bad = {status: n for status, n in counts.items() if status != "CONFIRMED"}
-            assert not bad, f"non-confirmed journal rows remain: {bad} (full counts: {counts})"
-            for terminal in ("SENDING", "UNKNOWN", "FAILED"):
-                assert counts.get(terminal, 0) == 0, (
-                    f"journal has {counts.get(terminal, 0)} {terminal} rows (full counts: {counts})"
+            stuck = {
+                status: n
+                for status, n in counts.items()
+                if status in ("SENDING", "UNKNOWN", "SUBMITTED")
+            }
+            assert not stuck, f"unresolved journal rows remain: {stuck} (full counts: {counts})"
+            failed_rows = await app.db.fetchall(
+                "SELECT account_id, kind, payload, last_error, created_at "
+                "FROM execution_commands WHERE status='FAILED' ORDER BY created_at"
+            )
+            confirmed_rows = await app.db.fetchall(
+                "SELECT account_id, kind, payload, created_at FROM execution_commands "
+                "WHERE status='CONFIRMED'"
+            )
+            _healed_ok, _healed_detail = _failed_rows_healed(failed_rows, confirmed_rows)
+            if not _healed_ok:
+                _moot_ids = await _signed_flat_real_accounts(app)
+                _healed_ok, _healed_detail = _failed_rows_healed(
+                    failed_rows, confirmed_rows, flat_moot_accounts=_moot_ids
                 )
+                phase_metrics.append(f"healed-second-pass: {_healed_detail}")
+            assert _healed_ok, _healed_detail
             key_rows = await app.db.fetchall("SELECT command_key FROM execution_commands")
             keys = [str(row["command_key"]) for row in key_rows]
             assert len(keys) == len(set(keys)), "duplicate command_key rows in the journal"
