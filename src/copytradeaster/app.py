@@ -25,6 +25,8 @@ from copytradeaster.notifications.formatter import format_confirmed_action
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
 from copytradeaster.notifications.protocol import NotificationCallback, Notifier, as_notifier
 from copytradeaster.storage.database import Database
+from copytradeaster.storage.episodes import EpisodeRepository
+from copytradeaster.storage.events import EventRepository
 from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
@@ -190,6 +192,9 @@ class App:
         self.links = OrderLinkRepo(self.db)
         self.commands = CommandRepo(self.db)
         self.history = HistoryRepository(self.db)
+        self.episodes = EpisodeRepository(self.db)
+        self.user_events = EventRepository(self.db)
+        self.history_mark_dirty = None
         self.nonces = NonceStore(self.db)
         self.basis = SyncBasisRepo(self.db)
         self.follower_registry = FollowerRegistry()
@@ -327,6 +332,12 @@ class App:
             command_key=command_key,
             observed_at=order.update_time,
         )
+        hook = self.history_mark_dirty
+        if hook is not None:
+            try:
+                hook(account_id, environment, order.symbol)
+            except Exception:  # noqa: BLE001 - a hint must never break trading
+                log.warning("history dirty hint failed account_id=%s", account_id)
 
     async def _emit_notification(
         self,

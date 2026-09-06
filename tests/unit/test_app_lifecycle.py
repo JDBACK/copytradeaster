@@ -355,3 +355,46 @@ async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):
     assert await app._wait_for_stream_startup() is False
     assert events[0].kind == "engine.stream_fallback"
     assert events[0].account_id == "main"
+
+
+def _observe_app():
+    from copytradeaster.aster.models import OrderDTO
+    from tests.unit.aster.test_trading_api import ORDER_RESPONSE
+
+    app = App.__new__(App)
+    app.cfg = SimpleNamespace(dry_run=False, rest_base_url="https://fapi.asterdex-testnet.com")
+    app.follower_registry = SimpleNamespace(
+        get=lambda account_id: SimpleNamespace(execution_mode="REAL")
+    )
+    observed = {}
+
+    async def observe_order(scope, order, *, kind, command_key, observed_at):
+        observed["scope"] = scope
+
+    app.history = SimpleNamespace(observe_order=observe_order)
+    app.history_mark_dirty = None
+    order = OrderDTO.model_validate({**ORDER_RESPONSE, "symbol": "BTCUSDT"})
+    params = {"account_id": "copy1", "command_key": "cmd-1", "kind": "MARKET_OPEN"}
+    return app, order, params, observed
+
+
+@pytest.mark.asyncio
+async def test_observe_history_order_marks_symbol_dirty():
+    app, order, params, observed = _observe_app()
+    hints = []
+    app.history_mark_dirty = lambda a, e, s: hints.append((a, e, s))
+    await app._observe_history_order(order=order, **params)
+    assert observed["scope"].account_id == "copy1"
+    assert hints == [("copy1", "testnet", "BTCUSDT")]
+
+
+@pytest.mark.asyncio
+async def test_observe_history_order_survives_broken_hint():
+    app, order, params, observed = _observe_app()
+
+    def broken(account_id, environment, symbol):
+        raise RuntimeError("hint sink down")
+
+    app.history_mark_dirty = broken
+    await app._observe_history_order(order=order, **params)
+    assert observed["scope"].account_id == "copy1"

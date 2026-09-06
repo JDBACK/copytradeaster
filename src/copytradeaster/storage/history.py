@@ -171,6 +171,43 @@ class HistoryRepository:
             (scope.account_id, scope.environment, stream, symbol),
         )
 
+    async def capture_state(self, scope: HistoryScope, symbol: str) -> dict | None:
+        """Newest fully published window end per symbol; None means never."""
+        row = await self._db.fetchone(
+            "SELECT cap_start_ms,cap_end_ms,last_error,updated_at FROM history_capture_state "
+            "WHERE account_id=? AND environment=? AND symbol=?",
+            (scope.account_id, scope.environment, symbol),
+        )
+        return dict(row) if row is not None else None
+
+    async def record_capture(
+        self,
+        scope: HistoryScope,
+        symbol: str,
+        *,
+        start_ms: int | None,
+        end_ms: int | None,
+        now_ms: int,
+        error: str | None = None,
+    ) -> None:
+        """Replace the publication frontier; dumb put, policy lives in capture."""
+        if (
+            (start_ms is not None and (type(start_ms) is not int or start_ms < 0))
+            or (end_ms is not None and (type(end_ms) is not int or end_ms < 0))
+            or (start_ms is not None and end_ms is not None and end_ms < start_ms)
+            or type(now_ms) is not int
+            or now_ms < 0
+            or (error is not None and (not isinstance(error, str) or len(error) > 128))
+        ):
+            raise ValueError("invalid capture checkpoint")
+        await self._db.execute_write(
+            "INSERT INTO history_capture_state VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(account_id,environment,symbol) DO UPDATE SET "
+            "cap_start_ms=excluded.cap_start_ms,cap_end_ms=excluded.cap_end_ms,"
+            "last_error=excluded.last_error,updated_at=excluded.updated_at",
+            (scope.account_id, scope.environment, symbol, start_ms, end_ms, error, now_ms),
+        )
+
     async def fills(self, scope: HistoryScope, symbol: str, window: Window) -> list[UserTradeDTO]:
         rows = await self._db.fetchall(
             "SELECT * FROM follower_fills WHERE account_id=? AND environment=? AND symbol=? "
@@ -214,6 +251,103 @@ class HistoryRepository:
             (scope.environment, scope.environment, scope.account_id, now - 300000),
         )
         return dict(row) if row is not None else None
+
+    async def coverage_from(self, scope: HistoryScope) -> int | None:
+        """Earliest verified fill coverage; None means nothing proven yet."""
+        row = await self._db.fetchone(
+            "SELECT MIN(start_ms) AS start_ms FROM history_sync_state"
+            " WHERE account_id=? AND environment=? AND stream='fills' AND state='complete'",
+            (scope.account_id, scope.environment),
+        )
+        return None if row is None or row["start_ms"] is None else int(row["start_ms"])
+
+    async def proven_order_sources(self, scope: HistoryScope, symbol: str) -> dict[int, str]:
+        """Exchange order ids proven to be copy-driven, from durable links.
+
+        A fill order counts as ``copy`` only when three durable rows agree:
+        an order observation, a CONFIRMED entry/exit command under the same
+        command key, and an order link with a non-null master trade id under
+        the same follower client order id. Anything else stays ``unknown``;
+        absence of a link never proves an external trade.
+        """
+        if not symbol:
+            raise ValueError("order source symbol required")
+        rows = await self._db.fetchall(
+            "SELECT o.order_id FROM follower_order_observations o "
+            "JOIN execution_commands c ON c.account_id=o.account_id "
+            "AND c.command_key=o.command_key "
+            "JOIN order_links l ON l.account_id=o.account_id "
+            "AND l.follower_client_order_id=o.client_order_id "
+            "WHERE o.account_id=? AND o.environment=? AND o.symbol=? "
+            "AND c.status='CONFIRMED' AND c.kind IN ('MARKET_OPEN','MARKET_CLOSE') "
+            "AND o.kind=c.kind AND l.kind=c.kind AND l.trade_id IS NOT NULL",
+            (scope.account_id, scope.environment, symbol),
+        )
+        sources: dict[int, str] = {}
+        for row in rows:
+            try:
+                order_id = int(row["order_id"])
+            except (TypeError, ValueError):
+                continue
+            sources[order_id] = "copy"
+        return sources
+
+    async def protection_observations(
+        self, scope: HistoryScope, symbol: str, start_ms: int, end_ms: int
+    ) -> list[dict]:
+        """Confirmed protection lifecycle rows inside one window, oldest first."""
+        if not symbol:
+            raise ValueError("protection symbol required")
+        if (
+            type(start_ms) is not int
+            or type(end_ms) is not int
+            or start_ms < 0
+            or end_ms < start_ms
+        ):
+            raise ValueError("protection window must be a valid range")
+        rows = await self._db.fetchall(
+            "SELECT order_id,client_order_id,command_key,kind,status,observed_at "
+            "FROM follower_order_observations "
+            "WHERE account_id=? AND environment=? AND symbol=? "
+            "AND kind IN ('PLACE_STOP','PLACE_TP','CANCEL_ORDER') "
+            "AND observed_at BETWEEN ? AND ? ORDER BY observed_at, order_id",
+            (scope.account_id, scope.environment, symbol, start_ms, end_ms),
+        )
+        return [dict(row) for row in rows]
+
+    async def latest_protection_places(
+        self, scope: HistoryScope, symbol: str, before_ms: int
+    ) -> list[dict]:
+        """Newest stop/take-profit placement per slot strictly before a time."""
+        if not symbol or type(before_ms) is not int or before_ms < 0:
+            raise ValueError("protection baseline requires a symbol and time")
+        rows = await self._db.fetchall(
+            "SELECT order_id,client_order_id,command_key,kind,status,observed_at FROM ("
+            "SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY observed_at DESC,"
+            " order_id DESC) AS rn FROM follower_order_observations "
+            "WHERE account_id=? AND environment=? AND symbol=? "
+            "AND kind IN ('PLACE_STOP','PLACE_TP') AND observed_at < ?) WHERE rn=1",
+            (scope.account_id, scope.environment, symbol, before_ms),
+        )
+        return [dict(row) for row in rows]
+
+    async def protection_canceled_before(
+        self, scope: HistoryScope, symbol: str, replaced_coid: str, before_ms: int
+    ) -> bool:
+        """Whether a confirmed cancel removed one protection order earlier."""
+        if not symbol or not replaced_coid or type(before_ms) is not int or before_ms < 0:
+            raise ValueError("cancel check requires a symbol, order id and time")
+        row = await self._db.fetchone(
+            "SELECT 1 FROM follower_order_observations o JOIN execution_commands c "
+            "ON c.account_id=o.account_id AND c.command_key=o.command_key "
+            "WHERE o.account_id=? AND o.environment=? AND o.symbol=? "
+            "AND o.kind='CANCEL_ORDER' AND o.observed_at < ? "
+            "AND c.status='CONFIRMED' "
+            "AND json_valid(c.payload) AND json_extract(c.payload,'$.origClientOrderId')=? "
+            "LIMIT 1",
+            (scope.account_id, scope.environment, symbol, before_ms, replaced_coid),
+        )
+        return row is not None
 
     async def record_order_check(
         self,

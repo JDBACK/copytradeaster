@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
+from copytradeaster.history.capture import HistoryCapture
 from copytradeaster.history.reader import HistoryReader
 from copytradeaster.history.sync import HistorySynchronizer
 from copytradeaster.history.worker import HistoryJob, HistoryWorker
@@ -35,10 +37,34 @@ def build_history_worker(app: App) -> HistoryWorker:
             )
             symbols = set(app.cfg.symbol_whitelist)
             symbols.update(row["symbol"] for row in rows if row["symbol"])
-            jobs.extend(HistoryJob(scope, symbol) for symbol in sorted(symbols))
+            for symbol in sorted(symbols):
+                jobs.append(HistoryJob(scope, symbol))
+                jobs.append(HistoryJob(scope, symbol, capture=True))
         return jobs
 
     def synchronizer(scope: HistoryScope) -> HistorySynchronizer:
         return HistorySynchronizer(HistoryReader(app._client_for(scope.account_id)), app.history)
 
-    return HistoryWorker(discover, synchronizer)
+    capture = build_history_capture(app)
+
+    async def capture_job(scope: HistoryScope, symbol: str) -> bool:
+        return await capture.run_scheduled(
+            scope,
+            symbol,
+            snapshots=app._client_for(scope.account_id),
+            synchronizer=synchronizer(scope),
+            now_ms=int(time.time() * 1000),
+        )
+
+    worker = HistoryWorker(discover, synchronizer, capture_job)
+
+    def mark_dirty(account_id: str, environment: str, symbol: str) -> None:
+        worker.mark_dirty(HistoryScope(account_id, environment), symbol)
+
+    app.history_mark_dirty = mark_dirty
+    return worker
+
+
+def build_history_capture(app: App) -> HistoryCapture:
+    """Share one capture instance per process: its locks serialize a key."""
+    return HistoryCapture(app.history, app.episodes, events=app.user_events, commands=app.commands)

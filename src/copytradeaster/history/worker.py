@@ -21,6 +21,7 @@ class HistoryJob:
     scope: HistoryScope
     symbol: str | None  # None is the account-wide income stream.
     repair: bool = False
+    capture: bool = False
 
 
 class HistoryWorker:
@@ -28,6 +29,7 @@ class HistoryWorker:
         self,
         discover: Callable[[], Awaitable[list[HistoryJob]]],
         synchronizer: Callable[[HistoryScope], HistorySynchronizer],
+        capture: Callable[[HistoryScope, str], Awaitable[bool]] | None = None,
         *,
         interval: float = 5.0,
         clock_ms: Callable[[], int] | None = None,
@@ -36,11 +38,22 @@ class HistoryWorker:
             raise ValueError("history interval must be positive")
         self._discover = discover
         self._synchronizer = synchronizer
+        self._capture = capture
         self._interval = interval
         self._clock = clock_ms or (lambda: int(time.time() * 1000))
         self._task: asyncio.Task | None = None
         self._last_job: HistoryJob | None = None
         self._failures: dict[HistoryJob, tuple[int, int]] = {}
+        self._dirty: set[tuple[str, str, str]] = set()
+
+    def mark_dirty(self, scope: HistoryScope, symbol: str) -> None:
+        """Prioritize one account-symbol on the next rotations.
+
+        A best-effort wake-up hint only: the periodic sweep covers a missed
+        hint, so this state is intentionally not durable.
+        """
+        if symbol:
+            self._dirty.add((scope.account_id, scope.environment, symbol))
 
     async def start(self) -> None:
         if self._task is None:
@@ -56,38 +69,59 @@ class HistoryWorker:
     async def run_once(self) -> None:
         jobs = list(dict.fromkeys(await self._discover()))
         current = set(jobs)
+        known = {(job.scope.account_id, job.scope.environment) for job in jobs}
         self._failures = {job: value for job, value in self._failures.items() if job in current}
-        if not jobs:
-            return
+        self._dirty = {key for key in self._dirty if key[:2] in known}
         if self._last_job in jobs:
             index = jobs.index(self._last_job) + 1
             jobs = jobs[index:] + jobs[:index]
+        jobs = sorted(
+            jobs,
+            key=lambda job: (
+                0
+                if (
+                    job.symbol is not None
+                    and (job.scope.account_id, job.scope.environment, job.symbol) in self._dirty
+                )
+                else 1,
+            ),
+        )
         now = self._clock()
         for job in jobs:
             failures, retry_at = self._failures.get(job, (0, 0))
             if now < retry_at:
                 continue
             self._last_job = job
+            self._dirty.discard((job.scope.account_id, job.scope.environment, job.symbol or ""))
             try:
-                sync = self._synchronizer(job.scope)
-                window = Window(max(0, now - 7 * 86400000), now)
-                if job.repair:
-                    await sync.repair_order(job.scope)
-                elif job.symbol is None:
-                    await sync.sync_income(job.scope, window, request_budget=1)
+                if job.capture:
+                    if self._capture is None:
+                        raise ValueError("capture job without capture wiring")
+                    await self._capture(job.scope, job.symbol or "")
                 else:
-                    await sync.sync_fills(job.scope, job.symbol, window, request_budget=1)
+                    sync = self._synchronizer(job.scope)
+                    window = Window(max(0, now - 7 * 86400000), now)
+                    if job.repair:
+                        await sync.repair_order(job.scope)
+                    elif job.symbol is None:
+                        await sync.sync_income(job.scope, window, request_budget=1)
+                    else:
+                        await sync.sync_fills(job.scope, job.symbol, window, request_budget=1)
             except Exception:
                 count = min(failures + 1, 8)
                 self._failures[job] = (count, now + min(300000, 5000 * 2**count))
                 log.warning(
                     "history sync failed account_id=%s stream=%s",
                     job.scope.account_id,
-                    "income" if job.symbol is None else "fills",
+                    "income"
+                    if job.symbol is None
+                    else f"capture:{job.symbol}"
+                    if job.capture
+                    else "fills",
                 )
             else:
                 self._failures.pop(job, None)
-            return  # One exchange request at most per tick, regardless of account count.
+            return  # One job at most per tick, regardless of account count.
 
     async def _run(self) -> None:
         while True:

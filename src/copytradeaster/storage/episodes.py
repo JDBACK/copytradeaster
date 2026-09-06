@@ -13,6 +13,7 @@ import aiosqlite
 from copytradeaster.domain.models import PosSide
 from copytradeaster.history.models import Episode, FillAllocation
 from copytradeaster.storage.database import Database
+from copytradeaster.storage.events import EventDraft, EventRepository
 from copytradeaster.storage.history import HistoryScope
 
 
@@ -72,6 +73,8 @@ class EpisodeRepository:
         symbol: str,
         episodes: Sequence[Episode],
         expected_revisions: Mapping[str, int],
+        *,
+        events: Sequence[EventDraft] = (),
     ) -> tuple[StoredEpisode, ...]:
         refs = [episode.public_ref for episode in episodes]
         if len(set(refs)) != len(refs) or set(refs) != set(expected_revisions):
@@ -84,6 +87,8 @@ class EpisodeRepository:
                 saved.append(
                     await self._save(conn, scope, episode, expected_revisions[episode.public_ref])
                 )
+            if events:
+                await EventRepository(self._db).insert_many(conn, scope, events)
             return tuple(saved)
 
     async def _save(
@@ -156,6 +161,70 @@ class EpisodeRepository:
         )
         return StoredEpisode(_decode(row["payload"]), int(row["revision"])) if row else None
 
+    async def list_closed(
+        self,
+        scope: HistoryScope,
+        *,
+        symbol: str | None = None,
+        since_ms: int | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> tuple[list[StoredEpisode], str | None]:
+        """Closed episodes, newest first, over immutable ``(closed_at, ref)``.
+
+        The cursor is an opaque ``"<closed_at_ms>:<ref>"`` position; pages
+        stay stable because closed episodes never change their close time.
+        """
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("episode page must be bounded")
+        if symbol is not None and not symbol:
+            raise ValueError("episode symbol filter must be nonempty")
+        if since_ms is not None and (type(since_ms) is not int or since_ms < 0):
+            raise ValueError("episode period must be a nonnegative time")
+        params: list[object] = [scope.account_id, scope.environment]
+        where = "account_id=? AND environment=? AND closed_at IS NOT NULL"
+        if symbol is not None:
+            where += " AND symbol=?"
+            params.append(symbol)
+        if since_ms is not None:
+            where += " AND closed_at>=?"
+            params.append(since_ms)
+        if cursor is not None:
+            closed_at, ref = _parse_cursor(cursor)
+            where += " AND (closed_at<? OR (closed_at=? AND public_ref<?))"
+            params.extend((closed_at, closed_at, ref))
+        rows = await self._db.fetchall(
+            "SELECT payload,revision,closed_at,public_ref FROM follower_episodes"
+            f" WHERE {where} ORDER BY closed_at DESC, public_ref DESC LIMIT ?",
+            (*params, limit + 1),
+        )
+        stored = [
+            StoredEpisode(_decode(row["payload"]), int(row["revision"])) for row in rows[:limit]
+        ]
+        next_cursor = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_cursor = f"{last['closed_at']}:{last['public_ref']}"
+        return stored, next_cursor
+
+    async def list_open(
+        self, scope: HistoryScope, *, symbol: str | None = None
+    ) -> list[StoredEpisode]:
+        """Open episodes; the live set is small enough for one page."""
+        if symbol is not None and not symbol:
+            raise ValueError("episode symbol filter must be nonempty")
+        params: list[object] = [scope.account_id, scope.environment]
+        where = "account_id=? AND environment=? AND closed_at IS NULL"
+        if symbol is not None:
+            where += " AND symbol=?"
+            params.append(symbol)
+        rows = await self._db.fetchall(
+            "SELECT payload,revision FROM follower_episodes"
+            f" WHERE {where} ORDER BY opened_at DESC NULLS LAST, public_ref",
+            tuple(params),
+        )
+        return [StoredEpisode(_decode(row["payload"]), int(row["revision"])) for row in rows]
+
     async def merge_ref(self, scope: HistoryScope, alias: str, target: str) -> None:
         """Explicit proven merge only; never infer that equal symbols are the same episode."""
         if alias == target:
@@ -217,3 +286,10 @@ def _decode(payload: str) -> Episode:
         for item in data["allocations"]
     )
     return Episode(**data)
+
+
+def _parse_cursor(cursor: str) -> tuple[int, str]:
+    closed, _, ref = cursor.partition(":")
+    if not closed.isdigit() or not ref:
+        raise ValueError("episode cursor is invalid")
+    return int(closed), ref

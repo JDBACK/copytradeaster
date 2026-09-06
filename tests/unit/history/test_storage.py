@@ -183,3 +183,128 @@ async def test_order_not_found_preserves_command_and_backs_off(storage):
     assert reader.order.await_count == 1
     assert (await commands.get("missing"))["status"] == "CONFIRMED"
     assert await repo.repair_candidate(scope, 301001) is not None
+
+
+async def test_capture_checkpoint_missing_upsert_and_validation(storage):
+    db, repo, scope = storage
+    assert await repo.capture_state(scope, "BTCUSDT") is None
+    await repo.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=100, now_ms=200)
+    state = await repo.capture_state(scope, "BTCUSDT")
+    assert (state["cap_start_ms"], state["cap_end_ms"], state["last_error"]) == (0, 100, None)
+    await repo.record_capture(
+        scope, "BTCUSDT", start_ms=0, end_ms=100, now_ms=300, error="deferred"
+    )
+    state = await repo.capture_state(scope, "BTCUSDT")
+    assert (state["cap_end_ms"], state["last_error"], state["updated_at"]) == (100, "deferred", 300)
+    assert await repo.capture_state(replace(scope, account_id="b"), "BTCUSDT") is None
+    with pytest.raises(ValueError):
+        await repo.record_capture(scope, "BTCUSDT", start_ms=200, end_ms=100, now_ms=300)
+    with pytest.raises(ValueError):
+        await repo.record_capture(scope, "BTCUSDT", start_ms=-1, end_ms=100, now_ms=300)
+    with pytest.raises(ValueError):
+        await repo.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=100, now_ms=-5)
+
+
+async def _proven_setup(db, repo, scope, *, kind="MARKET_OPEN", status="CONFIRMED", trade_id=7):
+    import json
+
+    from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo
+
+    commands, links = CommandRepo(db), OrderLinkRepo(db)
+    await db.execute_write(
+        "INSERT INTO copy_trades(trade_id, symbol, pos_side, opened_at)"
+        " VALUES (7,'BTCUSDT','BOTH','t')",
+    )
+    payload = json.dumps({"symbol": "BTCUSDT"})
+    await commands.insert("cmd-1", scope.account_id, None, kind, payload, 1, "ct-1")
+    await commands.set_status("cmd-1", status)
+    order = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 11, "clientOrderId": "ct-1"})
+    await repo.observe_order(scope, order, kind=kind, command_key="cmd-1", observed_at=50)
+    await links.add(trade_id, scope.account_id, kind, "ct-1")
+    return commands
+
+
+async def test_proven_order_sources_require_command_link_and_trade(storage):
+    db, repo, scope = storage
+    await _proven_setup(db, repo, scope)
+    assert await repo.proven_order_sources(scope, "BTCUSDT") == {11: "copy"}
+
+
+async def test_proven_order_sources_exclude_unproven_rows(storage):
+    import json
+
+    from copytradeaster.storage.repositories import OrderLinkRepo
+
+    db, repo, scope = storage
+    commands = await _proven_setup(db, repo, scope)
+    payload = json.dumps({"symbol": "BTCUSDT"})
+    await commands.insert("cmd-2", scope.account_id, None, "MARKET_OPEN", payload, 1, "ct-2")
+    await commands.set_status("cmd-2", "FAILED")
+    order = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 12, "clientOrderId": "ct-2"})
+    await repo.observe_order(scope, order, kind="MARKET_OPEN", command_key="cmd-2", observed_at=51)
+    await OrderLinkRepo(db).add(None, scope.account_id, "MARKET_OPEN", "ct-2")
+    await commands.insert("cmd-3", scope.account_id, None, "PLACE_STOP", payload, 1, "ct-3")
+    await commands.set_status("cmd-3", "CONFIRMED")
+    stop = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 13, "clientOrderId": "ct-3"})
+    await repo.observe_order(scope, stop, kind="PLACE_STOP", command_key="cmd-3", observed_at=52)
+    await OrderLinkRepo(db).add(7, scope.account_id, "PLACE_STOP", "ct-3")
+    assert await repo.proven_order_sources(scope, "BTCUSDT") == {11: "copy"}
+    assert await repo.proven_order_sources(scope, "ETHUSDT") == {}
+    with pytest.raises(ValueError):
+        await repo.proven_order_sources(scope, "")
+
+
+async def test_protection_observation_window_and_baseline(storage):
+    db, repo, scope = storage
+    first = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 21, "clientOrderId": "ct-s1"})
+    second = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 22, "clientOrderId": "ct-s2"})
+    taken = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 23, "clientOrderId": "ct-t1"})
+    await repo.observe_order(scope, first, kind="PLACE_STOP", command_key="k1", observed_at=10)
+    await repo.observe_order(scope, second, kind="PLACE_STOP", command_key="k2", observed_at=60)
+    await repo.observe_order(scope, taken, kind="PLACE_TP", command_key="k3", observed_at=70)
+    rows = await repo.protection_observations(scope, "BTCUSDT", 50, 80)
+    assert [(row["client_order_id"], row["kind"]) for row in rows] == [
+        ("ct-s2", "PLACE_STOP"),
+        ("ct-t1", "PLACE_TP"),
+    ]
+    baseline = await repo.latest_protection_places(scope, "BTCUSDT", 50)
+    assert {(row["kind"], row["client_order_id"]) for row in baseline} == {("PLACE_STOP", "ct-s1")}
+    assert await repo.protection_canceled_before(scope, "BTCUSDT", "ct-s1", 50) is False
+    with pytest.raises(ValueError):
+        await repo.protection_observations(scope, "BTCUSDT", 80, 50)
+
+
+async def test_unconfirmed_cancel_does_not_erase_baseline(storage):
+    import json
+
+    from copytradeaster.storage.repositories import CommandRepo
+
+    db, repo, scope = storage
+    commands = CommandRepo(db)
+    payload = json.dumps({"symbol": "BTCUSDT", "origClientOrderId": "ct-s1"})
+    await commands.insert("cmd-x", scope.account_id, None, "CANCEL_ORDER", payload, 1, "ct-x")
+    unsigned = OrderDTO.model_validate({**ORDER_RESPONSE, "orderId": 29, "clientOrderId": "ct-x"})
+    await repo.observe_order(
+        scope, unsigned, kind="CANCEL_ORDER", command_key="cmd-x", observed_at=40
+    )
+    assert await repo.protection_canceled_before(scope, "BTCUSDT", "ct-s1", 50) is False
+    await commands.set_status("cmd-x", "CONFIRMED")
+    assert await repo.protection_canceled_before(scope, "BTCUSDT", "ct-s1", 50) is True
+
+
+async def test_command_lookup_by_client_order_id(storage):
+    import json
+
+    from copytradeaster.storage.repositories import CommandRepo
+
+    db, _, scope = storage
+    commands = CommandRepo(db)
+    assert await commands.by_client_order_id(scope.account_id, "ct-missing") is None
+    await commands.insert(
+        "cmd-a", scope.account_id, None, "PLACE_STOP", json.dumps({"stopPrice": "100"}), 1, "ct-a"
+    )
+    row = await commands.by_client_order_id(scope.account_id, "ct-a")
+    assert row is not None and row["command_key"] == "cmd-a"
+    assert row["status"] == "PENDING"
+    with pytest.raises(ValueError):
+        await commands.by_client_order_id("", "ct-a")

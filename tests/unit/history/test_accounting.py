@@ -85,3 +85,41 @@ def test_separate_builder_only_once_with_explicit_proof():
         builder_income_types=frozenset({"BUILDER_FEE"}),
     )
     assert result.net == D("-1.1")
+
+
+def test_flip_commission_splits_pro_rata_preserving_total():
+    from copytradeaster.history.accounting import account_episodes
+
+    fills = [fill(1, "BUY", "1"), fill(2, "SELL", "2", "110", "10")]
+    long, short = project(fills)
+    money = account_episodes([long, short], fills, [flow(1), flow(2, trade="2")], proof=PROOF)
+    assert money[long.public_ref].issues == () and money[short.public_ref].issues == ()
+    total = money[long.public_ref].commission + money[short.public_ref].commission
+    assert total == D("-0.2")
+    assert money[long.public_ref].commission == D("-0.15")
+    assert money[short.public_ref].commission == D("-0.05")
+    assert money[long.public_ref].net == D("9.85")
+    assert money[short.public_ref].net == D("-0.05")
+
+
+def test_uneven_split_preserves_signed_total_exactly():
+    from copytradeaster.history.accounting import account_episodes
+
+    fills = [fill(1, "BUY", "1"), fill(2, "SELL", "3", "110", "10")]
+    long, short = project(fills)
+    money = account_episodes([long, short], fills, [flow(1), flow(2, trade="2")], proof=PROOF)
+    assert money[long.public_ref].issues == () and money[short.public_ref].issues == ()
+    total = money[long.public_ref].commission + money[short.public_ref].commission
+    assert total == D("-0.2")
+    assert money[long.public_ref].net is not None and money[short.public_ref].net is not None
+
+
+def test_partial_batch_view_keeps_shared_issue():
+    from copytradeaster.history.accounting import account_episodes
+
+    fills = [fill(1, "BUY", "1"), fill(2, "SELL", "2", "110", "10")]
+    long, short = project(fills)
+    money = account_episodes([long], fills, [flow(1), flow(2, trade="2")], proof=PROOF)
+    assert money[long.public_ref].net is None
+    assert "shared_fill_commission" in money[long.public_ref].issues
+    assert short.public_ref not in money

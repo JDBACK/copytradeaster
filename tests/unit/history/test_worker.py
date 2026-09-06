@@ -55,3 +55,79 @@ async def test_stop_cancels_inflight_read_and_start_is_idempotent():
     assert cancelled.is_set()
     assert task.done()
     await worker.stop()
+
+
+async def test_capture_job_runs_capture_callback_with_scope_and_symbol():
+    scope = HistoryScope("a", "testnet")
+    capture = AsyncMock(return_value=True)
+    worker = HistoryWorker(
+        AsyncMock(return_value=[HistoryJob(scope, "BTCUSDT", capture=True)]),
+        Mock(return_value=AsyncMock()),
+        capture,
+        clock_ms=lambda: 1000,
+    )
+    await worker.run_once()
+    capture.assert_awaited_once_with(scope, "BTCUSDT")
+
+
+async def test_capture_deferral_backs_off_without_starving_fills():
+    from copytradeaster.history.reconcile import HistoryReconciliationError
+
+    scope = HistoryScope("a", "testnet")
+    capture = AsyncMock(side_effect=HistoryReconciliationError("deferred"))
+    sync = AsyncMock()
+    worker = HistoryWorker(
+        AsyncMock(
+            return_value=[
+                HistoryJob(scope, "BTCUSDT", capture=True),
+                HistoryJob(scope, "BTCUSDT"),
+            ]
+        ),
+        Mock(return_value=sync),
+        capture,
+        clock_ms=lambda: 1000,
+    )
+    await worker.run_once()
+    assert capture.await_count == 1 and sync.sync_fills.await_count == 0
+    await worker.run_once()
+    assert capture.await_count == 1 and sync.sync_fills.await_count == 1
+
+
+async def test_dirty_hint_prioritizes_symbol_and_clears_on_attempt():
+    scope = HistoryScope("a", "testnet")
+    sync = AsyncMock()
+    worker = HistoryWorker(
+        AsyncMock(return_value=[HistoryJob(scope, "AAA"), HistoryJob(scope, "BBB")]),
+        Mock(return_value=sync),
+        clock_ms=lambda: 1000,
+    )
+    worker.mark_dirty(scope, "BBB")
+    worker.mark_dirty(scope, "")
+    await worker.run_once()
+    assert sync.sync_fills.await_args.args[1] == "BBB"
+    assert worker._dirty == set()
+    await worker.run_once()
+    assert sync.sync_fills.await_args.args[1] == "AAA"
+
+
+async def test_dirty_hint_for_gone_scope_is_pruned():
+    scope = HistoryScope("a", "testnet")
+    worker = HistoryWorker(
+        AsyncMock(return_value=[HistoryJob(scope, "AAA")]),
+        Mock(return_value=AsyncMock()),
+        clock_ms=lambda: 1000,
+    )
+    worker.mark_dirty(HistoryScope("ghost", "testnet"), "BBB")
+    await worker.run_once()
+    assert worker._dirty == set()
+
+
+async def test_capture_job_without_wiring_fails_closed():
+    scope = HistoryScope("a", "testnet")
+    worker = HistoryWorker(
+        AsyncMock(return_value=[HistoryJob(scope, "BTCUSDT", capture=True)]),
+        Mock(return_value=AsyncMock()),
+        clock_ms=lambda: 1000,
+    )
+    await worker.run_once()
+    assert worker._failures != {}
