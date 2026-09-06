@@ -356,8 +356,10 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
             client=recorder,
         )
         assert stop_results[0].status == "CONFIRMED"
+        # The exchange coid is executor-owned (`ct<key>`), so the observation
+        # is matched by journal command key, not by our tag.
         placed = await history.protection_observations(scope, SYMBOL, t0, int(time.time() * 1000))
-        assert any(r["client_order_id"] == stop_coid for r in placed)
+        assert any(r["command_key"] == stop_results[0].command_key for r in placed)
         cancel_results = await executor.submit(
             ExecutionPlan(
                 account_id=ACCOUNT,
