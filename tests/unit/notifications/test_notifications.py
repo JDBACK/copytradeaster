@@ -788,3 +788,42 @@ async def test_worker_start_prunes_old_terminal_rows(db):
         )
     finally:
         await worker.stop()
+
+
+async def test_worker_maintenance_tick_prunes_without_restart(db):
+    await setup_account_owner(db)
+    worker = TelegramOutboxWorker(
+        bot=FakeBot(),
+        db=db,
+        per_chat_interval=0,
+        concurrency=1,
+        poll_interval=3600,
+        maintenance_interval=0.02,
+    )
+    await worker.start()
+    try:
+        # Boot prune already ran: a row enqueued afterwards can only be
+        # removed by the periodic tick, never by a restart.
+        outbox = NotificationOutboxRepo(db)
+        await outbox.enqueue("tick-sent", 1, 101, "k", "INFO", "stale", account_id="a1")
+        old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        await db.execute_write(
+            "UPDATE notification_outbox SET status='SENT', updated_at=? "
+            "WHERE event_key='tick-sent'",
+            (old,),
+        )
+        for _ in range(100):
+            row = await db.fetchone(
+                "SELECT 1 AS one FROM notification_outbox WHERE event_key='tick-sent'"
+            )
+            if row is None:
+                break
+            await asyncio.sleep(0.02)
+        assert (
+            await db.fetchone(
+                "SELECT 1 AS one FROM notification_outbox WHERE event_key='tick-sent'"
+            )
+            is None
+        )
+    finally:
+        await worker.stop()

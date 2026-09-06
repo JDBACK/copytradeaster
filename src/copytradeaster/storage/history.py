@@ -108,6 +108,7 @@ class HistoryRepository:
                 coverage_changed_from_ms=coverage_from,
                 verified_through_ms=frontier[0] if frontier and frontier[0] is not None else None,
                 facts_revision=revision,
+                requests=result.requests,
             )
 
     async def facts_revision(self, scope: HistoryScope, symbol: str) -> int:

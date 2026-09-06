@@ -57,6 +57,7 @@ def build_history_worker(app: App) -> HistoryWorker:
         )
 
     worker = HistoryWorker(discover, synchronizer, capture_job)
+    capture.set_on_request(worker.note_snapshot_request)
 
     def mark_dirty(account_id: str, environment: str, symbol: str) -> None:
         worker.mark_dirty(HistoryScope(account_id, environment), symbol)

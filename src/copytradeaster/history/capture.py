@@ -79,9 +79,11 @@ class HistoryCapture:
         projection: HistoryProjection | None = None,
         commands: CommandRepo | None = None,
         clock_margin_ms: int = 2000,
+        on_request: Callable[[], None] | None = None,
     ) -> None:
         if clock_margin_ms < 0:
             raise ValueError("negative clock margin")
+        self._on_request = on_request
         self._history = history
         self._episodes = episodes
         self._projection = projection or HistoryProjection(
@@ -89,6 +91,10 @@ class HistoryCapture:
         )
         self._margin = clock_margin_ms
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+
+    def set_on_request(self, on_request: Callable[[], None] | None) -> None:
+        """Count boundary snapshot reads toward the request budget."""
+        self._on_request = on_request
 
     def _lock_for(self, scope: HistoryScope, symbol: str) -> asyncio.Lock:
         key = (scope.account_id, scope.environment, symbol)
@@ -217,14 +223,14 @@ class HistoryCapture:
         """
         if not symbol:
             raise ValueError("capture symbol required")
-        before = await read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
+        before = await self._read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
         origin = await self._episodes.load_boundary(scope, symbol, kind="origin")
         import_start = origin.cutoff_ms if origin is not None else window.start
         edge = max(window.end, before.response_received)
         delta = await synchronizer.sync_fills(
             scope, symbol, Span(import_start, edge), request_budget=request_budget
         )
-        after = await read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
+        after = await self._read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
         frontier = await self._complete_frontier(scope, symbol)
         if frontier is None or frontier < window.start:
             raise HistoryReconciliationError("capture window has no complete coverage")
@@ -236,7 +242,7 @@ class HistoryCapture:
             delay_s = (before.response_received + self._margin - after.request_started) / 1000.0
             if delay_s > 0:
                 await (sleep or asyncio.sleep)(delay_s)
-            after = await read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
+            after = await self._read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
             cutoff = min(frontier, after.request_started - self._margin)
         if cutoff < window.start:
             raise HistoryReconciliationError("capture window has no provable coverage")
@@ -256,6 +262,20 @@ class HistoryCapture:
             delta=delta,
         )
         return stored, published
+
+    async def _read_boundary(
+        self,
+        snapshots: PositionSnapshotClient,
+        scope: HistoryScope,
+        symbol: str,
+        *,
+        clock_ms: Callable[[], int] | None = None,
+    ) -> PositionBoundary:
+        """One snapshot read that counts toward the request budget."""
+        boundary = await read_boundary(snapshots, scope, symbol, clock_ms=clock_ms)
+        if self._on_request is not None:
+            self._on_request()
+        return boundary
 
     async def prepare_window(self, scope: HistoryScope, symbol: str, now_ms: int) -> Span | None:
         """Stable import hint from durable state; no exchange reads.

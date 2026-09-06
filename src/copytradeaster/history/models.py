@@ -87,6 +87,7 @@ class ImportDelta:
     coverage_changed_from_ms: int | None
     verified_through_ms: int | None
     facts_revision: int
+    requests: int = 0
 
 
 @dataclass(frozen=True, slots=True)

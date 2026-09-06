@@ -78,6 +78,7 @@ class TelegramOutboxWorker:
         drain_timeout: float = 5.0,
         webapp_base_url: str | None = None,
         trade_links_enabled: bool = False,
+        maintenance_interval: float = 3600.0,
     ) -> None:
         if bot is None and sender is None:
             raise ValueError("bot or sender is required")
@@ -89,6 +90,8 @@ class TelegramOutboxWorker:
             raise ValueError("pacing and retry delays cannot be negative")
         if drain_timeout <= 0:
             raise ValueError("drain_timeout must be positive")
+        if maintenance_interval <= 0:
+            raise ValueError("maintenance_interval must be positive")
         if outbox is None or users is None:
             if db is None:
                 raise ValueError("db is required when repositories are not supplied")
@@ -113,9 +116,11 @@ class TelegramOutboxWorker:
         self._retry_max = retry_max
         self._retry_jitter = retry_jitter
         self._drain_timeout = drain_timeout
+        self._maintenance_interval = maintenance_interval
         self._stop_event = asyncio.Event()
         self._lifecycle_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
+        self._delivery_tasks = 0
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._last_chat_send: dict[int, float] = {}
         self._started = False
@@ -134,10 +139,30 @@ class TelegramOutboxWorker:
                 )
                 for index in range(self._concurrency)
             ]
+            self._delivery_tasks = len(self._tasks)
+            self._tasks.append(
+                asyncio.create_task(self._maintenance_loop(), name=f"{self._worker_id}-maint")
+            )
             self._started = True
 
+    async def _maintenance_loop(self) -> None:
+        """Hourly bounded terminal cleanup; a long-lived process must not
+        rely on boot-only pruning to keep the outbox in-flight-only."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._stop_event.wait()),
+                    timeout=self._maintenance_interval,
+                )
+            except TimeoutError:
+                await self._prune_retention()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - maintenance must not kill delivery
+                log.exception("outbox maintenance tick failed")
+
     async def _prune_retention(self) -> None:
-        """Bounded once-per-boot terminal cleanup; never fails startup."""
+        """Bounded terminal cleanup (boot + hourly tick); never fails startup."""
         try:
             now = datetime.now(UTC)
             await self._outbox.prune_terminal(before=now - timedelta(days=7), statuses=("SENT",))
@@ -211,7 +236,7 @@ class TelegramOutboxWorker:
 
     async def status(self) -> dict[str, int]:
         counts = await self._outbox.counts()
-        counts["WORKER_TASKS"] = len(self._tasks)
+        counts["WORKER_TASKS"] = self._delivery_tasks if self._started else 0
         counts["STARTED"] = int(self._started)
         return counts
 

@@ -105,21 +105,68 @@ async def test_dirty_hint_prioritizes_symbol_and_clears_on_attempt():
     worker.mark_dirty(scope, "")
     await worker.run_once()
     assert sync.sync_fills.await_args.args[1] == "BBB"
-    assert worker._dirty == set()
+    # A finished fills job clears its own import hint but never the capture
+    # hint (mock synchronizers do not chain); the import side is clean.
+    assert worker._dirty_import == set()
+    assert worker._dirty_capture == {(scope.account_id, scope.environment, "BBB")}
     await worker.run_once()
     assert sync.sync_fills.await_args.args[1] == "AAA"
 
 
-async def test_dirty_hint_for_gone_scope_is_pruned():
+async def test_fills_change_rearms_capture_in_fair_slot():
+    from copytradeaster.history.models import ImportDelta
+
     scope = HistoryScope("a", "testnet")
+    changed = ImportDelta(
+        inserted_count=1,
+        changed_from_ms=10,
+        coverage_changed=True,
+        coverage_changed_from_ms=10,
+        verified_through_ms=100,
+        facts_revision=2,
+        requests=1,
+    )
+    sync = AsyncMock()
+    sync.sync_fills.return_value = changed
+    capture = AsyncMock(return_value=True)
     worker = HistoryWorker(
-        AsyncMock(return_value=[HistoryJob(scope, "AAA")]),
-        Mock(return_value=AsyncMock()),
+        AsyncMock(
+            return_value=[
+                HistoryJob(scope, "BTCUSDT"),
+                HistoryJob(scope, "BTCUSDT", capture=True),
+            ]
+        ),
+        Mock(return_value=sync),
+        capture,
         clock_ms=lambda: 1000,
     )
-    worker.mark_dirty(HistoryScope("ghost", "testnet"), "BBB")
     await worker.run_once()
-    assert worker._dirty == set()
+    assert sync.sync_fills.await_count == 1 and capture.await_count == 0
+    assert worker.stats()["sync_requests"] == 1
+    await worker.run_once()
+    assert capture.await_count == 1
+    assert worker.stats()["capture_runs"] == 1
+    assert worker._dirty_capture == set()
+
+
+async def test_skipped_capture_falls_through_to_next_job_same_tick():
+    scope = HistoryScope("a", "testnet")
+    sync = AsyncMock()
+    capture = AsyncMock(side_effect=[False, True])
+    worker = HistoryWorker(
+        AsyncMock(
+            return_value=[
+                HistoryJob(scope, "AAA", capture=True),
+                HistoryJob(scope, "BBB", capture=True),
+            ]
+        ),
+        Mock(return_value=sync),
+        capture,
+        clock_ms=lambda: 1000,
+    )
+    await worker.run_once()
+    assert capture.await_count == 2
+    assert worker.stats()["capture_runs"] == 2
 
 
 async def test_capture_job_without_wiring_fails_closed():

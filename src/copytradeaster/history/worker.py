@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from copytradeaster.history.models import ImportDelta
 from copytradeaster.history.reader import Window
 from copytradeaster.history.sync import HistorySynchronizer
 from copytradeaster.logging_utils import get_logger
@@ -44,16 +45,45 @@ class HistoryWorker:
         self._task: asyncio.Task | None = None
         self._last_job: HistoryJob | None = None
         self._failures: dict[HistoryJob, tuple[int, int]] = {}
-        self._dirty: set[tuple[str, str, str]] = set()
+        # Import dirt (new fills/income/repair) and projection dirt (a
+        # capture is due) are tracked separately: a finished fills job
+        # never clears the capture hint, and fills that actually changed
+        # re-arm the capture of the same scope in the next fair slot.
+        self._dirty_import: set[tuple[str, str, str]] = set()
+        self._dirty_capture: set[tuple[str, str, str]] = set()
+        self._sync_requests = 0
+        self._snapshot_requests = 0
+        self._capture_runs = 0
+
+    @property
+    def _dirty(self) -> set[tuple[str, str, str]]:
+        return self._dirty_import | self._dirty_capture
+
+    def stats(self) -> dict[str, int]:
+        """Observed request/run counters for the capacity budget."""
+        return {
+            "sync_requests": self._sync_requests,
+            "snapshot_requests": self._snapshot_requests,
+            "capture_runs": self._capture_runs,
+            "requests_total": self._sync_requests + self._snapshot_requests,
+        }
+
+    def note_snapshot_request(self) -> None:
+        """Count one boundary snapshot read toward the request budget."""
+        self._snapshot_requests += 1
 
     def mark_dirty(self, scope: HistoryScope, symbol: str) -> None:
         """Prioritize one account-symbol on the next rotations.
 
         A best-effort wake-up hint only: the periodic sweep covers a missed
-        hint, so this state is intentionally not durable.
+        hint, so this state is intentionally not durable. An external hint
+        arms both the import and the capture so a stale hint still gets one
+        prioritized capture attempt.
         """
         if symbol:
-            self._dirty.add((scope.account_id, scope.environment, symbol))
+            key = (scope.account_id, scope.environment, symbol)
+            self._dirty_import.add(key)
+            self._dirty_capture.add(key)
 
     async def start(self) -> None:
         if self._task is None:
@@ -71,7 +101,8 @@ class HistoryWorker:
         current = set(jobs)
         known = {(job.scope.account_id, job.scope.environment) for job in jobs}
         self._failures = {job: value for job, value in self._failures.items() if job in current}
-        self._dirty = {key for key in self._dirty if key[:2] in known}
+        self._dirty_import = {key for key in self._dirty_import if key[:2] in known}
+        self._dirty_capture = {key for key in self._dirty_capture if key[:2] in known}
         if self._last_job in jobs:
             index = jobs.index(self._last_job) + 1
             jobs = jobs[index:] + jobs[:index]
@@ -81,23 +112,35 @@ class HistoryWorker:
                 0
                 if (
                     job.symbol is not None
-                    and (job.scope.account_id, job.scope.environment, job.symbol) in self._dirty
+                    and (job.scope.account_id, job.scope.environment, job.symbol)
+                    in (self._dirty_capture if job.capture else self._dirty_import)
                 )
                 else 1,
             ),
         )
         now = self._clock()
+        attempts = 0
         for job in jobs:
             failures, retry_at = self._failures.get(job, (0, 0))
             if now < retry_at:
                 continue
+            attempts += 1
+            if attempts > len(jobs):
+                return
             self._last_job = job
-            self._dirty.discard((job.scope.account_id, job.scope.environment, job.symbol or ""))
+            key = (job.scope.account_id, job.scope.environment, job.symbol or "")
             try:
                 if job.capture:
                     if self._capture is None:
                         raise ValueError("capture job without capture wiring")
-                    await self._capture(job.scope, job.symbol or "")
+                    published = await self._capture(job.scope, job.symbol or "")
+                    self._capture_runs += 1
+                    if not published:
+                        # Nothing due and no exchange reads happened: try the
+                        # next job in the same tick instead of idling a full
+                        # interval. The rotation bound above keeps this fair.
+                        continue
+                    self._dirty_capture.discard(key)
                 else:
                     sync = self._synchronizer(job.scope)
                     window = Window(max(0, now - 7 * 86400000), now)
@@ -106,7 +149,17 @@ class HistoryWorker:
                     elif job.symbol is None:
                         await sync.sync_income(job.scope, window, request_budget=1)
                     else:
-                        await sync.sync_fills(job.scope, job.symbol, window, request_budget=1)
+                        delta = await sync.sync_fills(
+                            job.scope, job.symbol, window, request_budget=1
+                        )
+                        if isinstance(delta, ImportDelta):
+                            self._sync_requests += delta.requests
+                            if delta.inserted_count > 0 or delta.coverage_changed:
+                                # Fresh facts re-arm the capture of the same
+                                # scope in the next fair slot; other accounts
+                                # keep theirs. Mock synchronizers in tests do
+                                # not chain.
+                                self._dirty_capture.add(key)
             except Exception:
                 count = min(failures + 1, 8)
                 self._failures[job] = (count, now + min(300000, 5000 * 2**count))
@@ -121,7 +174,9 @@ class HistoryWorker:
                 )
             else:
                 self._failures.pop(job, None)
-            return  # One job at most per tick, regardless of account count.
+                if not job.capture:
+                    self._dirty_import.discard(key)
+            return  # One real job per tick; skips and backoffs fall through.
 
     async def _run(self) -> None:
         while True:
