@@ -85,3 +85,88 @@ async def test_fresh_and_upgraded_schemas_converge(tmp_path: Path):
         await fresh.close()
     assert ghost_tables == fresh_tables
     assert ghost_indexes == fresh_indexes
+
+
+async def _build_previous_schema(path: Path) -> Database:
+    database = Database(path)
+    await database.connect()
+    assert database.conn is not None
+    for version, entry in enumerate(MIGRATIONS[:-1]):
+        await database.conn.execute("BEGIN")
+        steps = entry if isinstance(entry, tuple) else (entry,)
+        for step in steps:
+            await database.conn.execute(step)
+        await database.conn.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
+        await database.conn.commit()
+    return database
+
+
+async def test_corrective_g1_t5_v57_upgrade_marks_retained_history_dirty(tmp_path: Path):
+    database = await _build_previous_schema(tmp_path / "v57-history.sqlite3")
+    try:
+        assert database.conn is not None
+        for account in ("a", "b"):
+            await database.conn.execute(
+                "INSERT INTO accounts(id,role,label,user_address) VALUES (?, 'follower',?,?)",
+                (account, account, account),
+            )
+        # Existing state keeps its revision; earliest retained complete
+        # coverage (10) precedes the earliest fill (40), so migration must not
+        # use COALESCE(fill, coverage) and accidentally mark 40.
+        await database.conn.execute(
+            "INSERT INTO history_scope_state VALUES ('a','testnet','BTCUSDT',7,100)"
+        )
+        for account in ("a", "b"):
+            await database.conn.execute(
+                "INSERT INTO follower_fills(account_id,environment,symbol,exchange_trade_id,"
+                "order_id,side,position_side,qty,price,quote_qty,realized_pnl,commission,"
+                "commission_asset,executed_at) VALUES (?, 'testnet','BTCUSDT',?,?,'BUY','BOTH',"
+                "'1','100','100','0','0.1','USDT',40)",
+                (account, f"t-{account}", f"o-{account}"),
+            )
+            await database.conn.execute(
+                "INSERT INTO history_sync_state VALUES (?, 'testnet','fills','BTCUSDT',"
+                "10,50,'complete',100)",
+                (account,),
+            )
+            await database.conn.execute(
+                "INSERT INTO history_sync_state VALUES (?, 'testnet','fills','BTCUSDT',"
+                "70,100,'complete',100)",
+                (account,),
+            )
+        await database.conn.execute(
+            "INSERT INTO follower_episode_refs(public_ref,account_id,environment,symbol,"
+            "position_side,anchor) VALUES ('stable-ref','a','testnet','BTCUSDT','BOTH','legacy')"
+        )
+        await database.conn.commit()
+
+        assert await database.migrate() == 1
+        a = await database.fetchone(
+            "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
+            "WHERE account_id='a' AND environment='testnet' AND symbol='BTCUSDT'"
+        )
+        b = await database.fetchone(
+            "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
+            "WHERE account_id='b' AND environment='testnet' AND symbol='BTCUSDT'"
+        )
+        assert (a["facts_revision"], a["dirty_from_ms"]) == (7, 10)
+        # Scope b had retained facts/coverage but no C1 state row: migration
+        # creates a conservative pending revision rather than losing it.
+        assert (b["facts_revision"], b["dirty_from_ms"]) == (1, 10)
+        assert (
+            await database.fetchone(
+                "SELECT public_ref FROM follower_episode_refs WHERE public_ref='stable-ref'"
+            )
+            is not None
+        )
+        assert len(await database.fetchall("SELECT * FROM follower_fills")) == 2
+        coverage = await database.fetchall(
+            "SELECT start_ms,end_ms,state FROM history_sync_state WHERE account_id='a' "
+            "AND stream='fills' ORDER BY start_ms"
+        )
+        assert [(r["start_ms"], r["end_ms"], r["state"]) for r in coverage] == [
+            (10, 50, "complete"),
+            (70, 100, "complete"),
+        ]
+    finally:
+        await database.close()

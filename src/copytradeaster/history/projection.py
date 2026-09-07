@@ -107,39 +107,49 @@ class HistoryProjection:
                 notify_eligible=notify_eligible,
             )
         origin = await self._episodes.load_boundary(scope, symbol, kind="origin")
-        if delta is None:
-            replay_start = latest.cutoff_ms + 1
-            correction: tuple[int, dict[PosSide, PositionSeed]] | None = None
-        else:
-            decision = choose_replay_range(
-                latest=latest, origin=origin, delta=delta, fallback_start_ms=window.start
+        current_revision, dirty_from = await self._history.projection_state(scope, symbol)
+        effective_delta = (
+            ImportDelta(
+                inserted_count=0,
+                changed_from_ms=None,
+                coverage_changed=False,
+                coverage_changed_from_ms=None,
+                verified_through_ms=None,
+                facts_revision=current_revision,
+                dirty_from_ms=dirty_from,
             )
-            replay_start = decision.start_ms
-            correction = None
-            if decision.from_origin and origin is not None:
-                # The first inference may have missed this late fact, so walk
-                # the authoritative ending back over everything retained.
-                origin_refs = {
-                    leg: seed.public_ref
-                    for leg, seed in origin.seed_map().items()
-                    if seed.public_ref is not None
-                }
-                replay_fills = await self._history.fills(
-                    scope, symbol, Span(origin.cutoff_ms, window.end)
-                )
-                correction = (
-                    origin.cutoff_ms,
-                    derive_starting_seeds(
-                        symbol,
-                        ending,
-                        replay_fills,
-                        placeholder_ref=lambda leg: origin_refs.get(
-                            leg, f"seed:{origin.cutoff_ms}:{leg.value}"
-                        ),
+            if delta is None
+            else replace(delta, facts_revision=current_revision, dirty_from_ms=dirty_from)
+        )
+        decision = choose_replay_range(
+            latest=latest, origin=origin, delta=effective_delta, fallback_start_ms=window.start
+        )
+        if decision.from_origin and origin is None:
+            raise HistoryReconciliationError("open/corrected replay requires an accepted origin")
+        replay_start = decision.start_ms
+        correction: tuple[int, dict[PosSide, PositionSeed]] | None = None
+        if decision.from_origin and decision.refresh_origin_seed and origin is not None:
+            # The first inference may have missed this late fact, so walk
+            # the authoritative ending back over everything retained.
+            origin_refs = {
+                leg: seed.public_ref
+                for leg, seed in origin.seed_map().items()
+                if seed.public_ref is not None
+            }
+            replay_fills = await self._history.fills(
+                scope, symbol, Span(origin.cutoff_ms, window.end)
+            )
+            correction = (
+                origin.cutoff_ms,
+                derive_starting_seeds(
+                    symbol,
+                    ending,
+                    replay_fills,
+                    placeholder_ref=lambda leg: origin_refs.get(
+                        leg, f"seed:{origin.cutoff_ms}:{leg.value}"
                     ),
-                )
-        if replay_start < window.start and delta is None:
-            replay_start = window.start
+                ),
+            )
         if replay_start > window.end:
             # The proven frontier already covers the requested range: there is
             # nothing new to project, so return what the range already shows.
@@ -151,7 +161,13 @@ class HistoryProjection:
             ):
                 raise HistoryReconciliationError("stored projection disagrees with ending snapshot")
             return tuple(await self._episodes.list_range(scope, symbol, window.start, window.end))
-        seeds_for_replay = dict(correction[1]) if correction is not None else latest.seed_map()
+        seeds_for_replay = (
+            dict(correction[1])
+            if correction is not None
+            else origin.seed_map()
+            if decision.from_origin and origin is not None
+            else latest.seed_map()
+        )
         saved = await self.publish_projection(
             scope,
             symbol,
@@ -159,7 +175,7 @@ class HistoryProjection:
             cutoff_ms=window.end,
             seeds=seeds_for_replay,
             ending=ending,
-            coverage_revision=latest.coverage_revision,
+            coverage_revision=current_revision,
             boundary_version=latest.version,
             origin=correction,
             order_sources=order_sources,
@@ -201,7 +217,7 @@ class HistoryProjection:
         replay = Span(replay_start_ms, cutoff_ms)
         for leg, seed in seeds.items():
             if seed.public_ref is not None:
-                ref = await self._episodes.reserve_ref(scope, symbol, leg, seed.public_ref)
+                ref = await self._episodes.resolve_ref(scope, symbol, leg, seed.public_ref)
                 if ref != seed.public_ref:
                     seeds = dict(seeds)
                     seeds[leg] = replace(seed, public_ref=ref)
@@ -331,6 +347,8 @@ class HistoryProjection:
             origin_seeds=tuple(origin[1].items()) if origin is not None else None,
             origin_start_ms=origin[0] if origin is not None else None,
             now_ms=cutoff_ms if stamp is None else stamp,
+            expected_facts_revision=coverage_revision,
+            consume_dirty_through_ms=cutoff_ms,
         )
         if saved or boundary_version is None:
             return saved

@@ -139,6 +139,80 @@ async def test_overlap_coverage_compacts_without_filling_gap(storage):
     assert [(r["start_ms"], r["end_ms"]) for r in rows] == [(0, 20), (30, 40)]
 
 
+async def test_corrective_g1_t5_coverage_gap_and_loss_mark_earliest_dirty(storage):
+    db, repo, scope = storage
+    for window in (Window(0, 49), Window(100, 150)):
+        await repo.commit_fills(
+            scope,
+            "BTCUSDT",
+            window,
+            WindowRead((), (window,), (), (), 1),
+            checked_at=100,
+        )
+    # Model a previously consumed projection revision so the new gap fill is
+    # observable as its own dirty range.
+    await db.execute_write(
+        "UPDATE history_scope_state SET dirty_from_ms=NULL "
+        "WHERE account_id=? AND environment=? AND symbol='BTCUSDT'",
+        (scope.account_id, scope.environment),
+    )
+    before_revision = await repo.facts_revision(scope, "BTCUSDT")
+
+    gap = Window(50, 99)
+    filled = await repo.commit_fills(
+        scope,
+        "BTCUSDT",
+        gap,
+        WindowRead((), (gap,), (), (), 1),
+        checked_at=200,
+    )
+    assert filled.coverage_changed is True
+    assert filled.coverage_changed_from_ms == 50 and filled.dirty_from_ms == 50
+    assert filled.facts_revision == before_revision + 1
+    assert [
+        (row["start_ms"], row["end_ms"], row["state"])
+        for row in await repo.windows(scope, "fills", "BTCUSDT")
+    ] == [(0, 150, "complete")]
+
+    # Coverage loss is also a projection-input change: it must invalidate the
+    # accepted basis rather than silently retaining the old revision.
+    await db.execute_write(
+        "UPDATE history_scope_state SET dirty_from_ms=NULL "
+        "WHERE account_id=? AND environment=? AND symbol='BTCUSDT'",
+        (scope.account_id, scope.environment),
+    )
+    whole = Window(0, 150)
+    lost = await repo.commit_fills(
+        scope,
+        "BTCUSDT",
+        whole,
+        WindowRead((), (), (whole,), (), 1),
+        checked_at=300,
+    )
+    assert lost.coverage_changed is True
+    assert lost.coverage_changed_from_ms == 0 and lost.dirty_from_ms == 0
+    assert lost.facts_revision == filled.facts_revision + 1
+    assert [row["state"] for row in await repo.windows(scope, "fills", "BTCUSDT")] == ["pending"]
+
+
+async def test_fill_import_dirty_revision_is_durable_and_exact_repeat_is_noop(storage):
+    db, repo, scope = storage
+    row = UserTradeDTO.model_validate(FILL)
+    window = Window(0, 100)
+    first = await repo.commit_fills(scope, "BTCUSDT", window, read([row]), checked_at=101)
+    assert first.dirty_from_ms == 0
+    await db.execute_write(
+        "UPDATE history_scope_state SET dirty_from_ms=NULL "
+        "WHERE account_id=? AND environment=? AND symbol='BTCUSDT'",
+        (scope.account_id, scope.environment),
+    )
+    revision = first.facts_revision
+    same = await repo.commit_fills(scope, "BTCUSDT", window, read([row]), checked_at=102)
+    assert same.inserted_count == 0 and same.coverage_changed is False
+    assert same.facts_revision == revision and same.dirty_from_ms is None
+    assert await repo.projection_state(scope, "BTCUSDT") == (revision, None)
+
+
 async def test_repair_missing_observation_then_skip_terminal_order(storage):
     import json
     from unittest.mock import AsyncMock

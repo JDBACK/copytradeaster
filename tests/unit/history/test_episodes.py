@@ -115,3 +115,130 @@ async def test_durable_fills_project_and_republish_same_episode_ref(storage):
             scope, "BTCUSDT", window, seeds=kwargs["seeds"], ending={PosSide.BOTH: D(0)}
         )
     assert await repo.get(scope, first[0].episode.public_ref) == first[0]
+
+
+async def test_corrective_g1_t4_publication_rejects_facts_revision_race(storage, monkeypatch):
+    from decimal import Decimal as D
+
+    from copytradeaster.domain.models import PosSide
+    from copytradeaster.history.models import PositionSeed
+    from copytradeaster.history.projection import HistoryProjection
+    from copytradeaster.history.reader import Window, WindowRead
+    from copytradeaster.storage.events import EventRepository
+
+    db, history, scope = storage
+    window = Window(0, 100)
+    buy = fill(40, "BUY", "1")
+    sell = fill(60, "SELL", "1", "140", "40")
+    await history.commit_fills(
+        scope,
+        "BTCUSDT",
+        window,
+        WindowRead((buy,), (window,), (), (), 1),
+        checked_at=101,
+    )
+    repo = EpisodeRepository(db)
+    events = EventRepository(db)
+    projection = HistoryProjection(history, repo, events)
+    original_publish = repo.publish
+    raced = False
+
+    async def publish_after_new_fact(*args, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            await history.commit_fills(
+                scope,
+                "BTCUSDT",
+                window,
+                WindowRead((buy, sell), (window,), (), (), 1),
+                checked_at=102,
+            )
+        return await original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "publish", publish_after_new_fact)
+    with pytest.raises(EpisodeRevisionConflict, match="history facts revision changed"):
+        await projection.publish_window(
+            scope,
+            "BTCUSDT",
+            window,
+            seeds={PosSide.BOTH: PositionSeed(D(0))},
+            ending={PosSide.BOTH: D(1)},
+            recorded_at=5000,
+        )
+    assert await db.fetchall("SELECT * FROM follower_episodes") == []
+    assert await db.fetchall("SELECT * FROM user_activity_events") == []
+    assert await db.fetchall("SELECT * FROM history_projection_boundaries") == []
+    revision, dirty = await history.projection_state(scope, "BTCUSDT")
+    assert revision == 2 and dirty is not None
+
+    monkeypatch.setattr(repo, "publish", original_publish)
+    (stored,) = await projection.publish_window(
+        scope,
+        "BTCUSDT",
+        window,
+        seeds={PosSide.BOTH: PositionSeed(D(0))},
+        ending={PosSide.BOTH: D(0)},
+        recorded_at=6000,
+    )
+    assert stored.episode.closed_at == 60 and stored.episode.realized_pnl_gross == D(40)
+    assert (await history.projection_state(scope, "BTCUSDT"))[1] is None
+
+
+async def test_corrective_g1_t4_publication_failure_rolls_back_all_visible_state(
+    storage, monkeypatch
+):
+    from decimal import Decimal as D
+
+    from copytradeaster.domain.models import PosSide
+    from copytradeaster.history.models import PositionSeed
+    from copytradeaster.history.projection import HistoryProjection
+    from copytradeaster.history.reader import Window, WindowRead
+    from copytradeaster.storage.events import EventRepository
+
+    db, history, scope = storage
+    window = Window(0, 100)
+    rows = (fill(40, "BUY", "1"), fill(60, "SELL", "1", "140", "40"))
+    await history.commit_fills(
+        scope,
+        "BTCUSDT",
+        window,
+        WindowRead(rows, (window,), (), (), 1),
+        checked_at=101,
+    )
+    repo = EpisodeRepository(db)
+    events = EventRepository(db)
+    projection = HistoryProjection(history, repo, events)
+    original_store_boundary = repo._store_boundary
+
+    async def fail_boundary(*args, **kwargs):
+        raise RuntimeError("publication fault")
+
+    monkeypatch.setattr(repo, "_store_boundary", fail_boundary)
+    with pytest.raises(RuntimeError, match="publication fault"):
+        await projection.publish_window(
+            scope,
+            "BTCUSDT",
+            window,
+            seeds={PosSide.BOTH: PositionSeed(D(0))},
+            ending={PosSide.BOTH: D(0)},
+            recorded_at=5000,
+        )
+    assert await db.fetchall("SELECT * FROM follower_episodes") == []
+    assert await db.fetchall("SELECT * FROM follower_episode_allocations") == []
+    assert await db.fetchall("SELECT * FROM user_activity_events") == []
+    assert await db.fetchall("SELECT * FROM history_projection_boundaries") == []
+    assert (await history.projection_state(scope, "BTCUSDT"))[1] is not None
+
+    monkeypatch.setattr(repo, "_store_boundary", original_store_boundary)
+    (stored,) = await projection.publish_window(
+        scope,
+        "BTCUSDT",
+        window,
+        seeds={PosSide.BOTH: PositionSeed(D(0))},
+        ending={PosSide.BOTH: D(0)},
+        recorded_at=6000,
+    )
+    assert stored.episode.closed_at == 60
+    assert len(await events.list_owned(scope)) == 2
+    assert (await history.projection_state(scope, "BTCUSDT"))[1] is None

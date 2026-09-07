@@ -89,6 +89,28 @@ class EpisodeRepository:
             )
             return str(row["public_ref"])
 
+    async def resolve_ref(
+        self,
+        scope: HistoryScope,
+        symbol: str,
+        leg: PosSide,
+        public_ref: str,
+    ) -> str:
+        """Resolve an already-issued owned ref; never reinterpret it as an anchor."""
+        if not symbol or not public_ref:
+            raise ValueError("episode reference required")
+        row = await self._db.fetchone(
+            "SELECT COALESCE(a.target_ref,r.public_ref) public_ref "
+            "FROM follower_episode_refs r "
+            "LEFT JOIN follower_episode_aliases a ON a.alias_ref=r.public_ref "
+            "WHERE r.public_ref=? AND r.account_id=? AND r.environment=? "
+            "AND r.symbol=? AND r.position_side=?",
+            (public_ref, scope.account_id, scope.environment, symbol, leg.value),
+        )
+        if row is None:
+            raise ValueError("episode reference outside scope")
+        return str(row["public_ref"])
+
     async def save(
         self,
         scope: HistoryScope,
@@ -112,6 +134,8 @@ class EpisodeRepository:
         origin_seeds: tuple | None = None,
         origin_start_ms: int | None = None,
         now_ms: int | None = None,
+        expected_facts_revision: int | None = None,
+        consume_dirty_through_ms: int | None = None,
     ) -> tuple[StoredEpisode, ...]:
         """One atomic publication: episodes, lineage, events, checkpoint.
 
@@ -136,6 +160,35 @@ class EpisodeRepository:
         if (resolutions or boundary is not None) and now_ms is None:
             raise ValueError("lineage publication requires now_ms")
         async with self._db.transaction() as conn:
+            if expected_facts_revision is not None:
+                cursor = await conn.execute(
+                    "SELECT facts_revision FROM history_scope_state WHERE account_id=? "
+                    "AND environment=? AND symbol=?",
+                    (scope.account_id, scope.environment, symbol),
+                )
+                try:
+                    state = await cursor.fetchone()
+                finally:
+                    await cursor.close()
+                current_revision = int(state[0]) if state is not None else 0
+                if current_revision != expected_facts_revision:
+                    raise EpisodeRevisionConflict("history facts revision changed")
+            if boundary is not None:
+                cursor = await conn.execute(
+                    "SELECT version FROM history_projection_boundaries WHERE account_id=? "
+                    "AND environment=? AND symbol=? AND kind='latest'",
+                    (scope.account_id, scope.environment, symbol),
+                )
+                try:
+                    prior = await cursor.fetchone()
+                finally:
+                    await cursor.close()
+                if boundary.version == 1:
+                    changed = prior is not None
+                else:
+                    changed = prior is None or int(prior[0]) != boundary.version - 1
+                if changed:
+                    raise EpisodeRevisionConflict("projection boundary changed")
             saved = []
             for episode in episodes:
                 stored = await self._save(
@@ -157,6 +210,38 @@ class EpisodeRepository:
                     origin_seeds=origin_seeds,
                     origin_start_ms=origin_start_ms,
                 )
+            if expected_facts_revision is not None and consume_dirty_through_ms is not None:
+                # A single dirty_from is deliberately conservative.  Clear it
+                # only when this publication consumed the current facts
+                # revision all the way through the complete frontier; if the
+                # snapshot cutoff lags that frontier, leave dirt armed for the
+                # next scheduled pass.
+                cursor = await conn.execute(
+                    "SELECT MAX(end_ms) FROM history_sync_state WHERE account_id=? "
+                    "AND environment=? AND stream='fills' AND symbol=? AND state='complete'",
+                    (scope.account_id, scope.environment, symbol),
+                )
+                try:
+                    frontier_row = await cursor.fetchone()
+                finally:
+                    await cursor.close()
+                frontier = frontier_row[0] if frontier_row is not None else None
+                if frontier is not None and int(frontier) <= consume_dirty_through_ms:
+                    cursor = await conn.execute(
+                        "UPDATE history_scope_state SET dirty_from_ms=NULL,updated_at=? "
+                        "WHERE account_id=? AND environment=? AND symbol=? "
+                        "AND facts_revision=? AND dirty_from_ms IS NOT NULL "
+                        "AND dirty_from_ms<=?",
+                        (
+                            now_ms if now_ms is not None else consume_dirty_through_ms,
+                            scope.account_id,
+                            scope.environment,
+                            symbol,
+                            expected_facts_revision,
+                            consume_dirty_through_ms,
+                        ),
+                    )
+                    await cursor.close()
             return tuple(saved)
 
     async def _record_resolutions(

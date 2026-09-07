@@ -228,6 +228,27 @@ class StaticSnapshots:
         return list(self._rows)
 
 
+class ScopeSnapshots:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def position_risk(self, account_id, symbol):
+        return list(self._rows)
+
+
+class MutableFillReader:
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+
+    async def fills(self, account_id, symbol, window, request_budget=8):
+        rows = tuple(
+            row
+            for row in self.rows
+            if row.symbol == symbol and window.start <= row.time <= window.end
+        )
+        return WindowRead(rows, (window,), (), (), 1)
+
+
 def manual_clock(values):
     it = iter(values)
     return lambda: next(it)
@@ -408,14 +429,151 @@ async def test_prepare_defers_fresh_frontier_without_exchange_reads(storage):
     assert await capture.prepare_window(scope, "BTCUSDT", 3000) == Span(0, 1000)
 
 
-async def test_prepare_skips_published_frontier_and_reuses_start(storage):
+async def test_prepare_checkpoint_cannot_hide_dirty_and_clean_frontier_skips(storage):
     db, history, scope = storage
     await commit_empty(history, scope, Window(0, 1000))
     await history.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=1000, now_ms=5000)
     capture = scheduled_capture(db, history)
+    # A checkpoint alone is not proof that the current facts revision was
+    # atomically published; durable dirt keeps the scheduled capture armed.
+    assert await capture.prepare_window(scope, "BTCUSDT", 20000) == Span(0, 1000)
+    flat = position(positionAmt="0")
+    assert (
+        await capture.publish_reconciled(
+            scope,
+            "BTCUSDT",
+            Window(0, 1000),
+            before=boundary(flat),
+            after=boundary(flat, started=3100, received=3200),
+            cutoff=1000,
+            recorded_at=3200,
+        )
+        == ()
+    )
+    await history.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=1000, now_ms=5500)
     assert await capture.prepare_window(scope, "BTCUSDT", 20000) is None
     await history.record_capture(scope, "BTCUSDT", start_ms=0, end_ms=500, now_ms=6000)
     assert await capture.prepare_window(scope, "BTCUSDT", 20000) == Span(0, 1000)
+
+
+async def test_corrective_g1_t1_scheduled_bootstrap_uses_continuous_symbol_coverage(storage):
+    db, history, scope = storage
+    reader = MutableFillReader([fill(1500, "BUY", "1")])
+    sync = HistorySynchronizer(reader, history, clock_ms=lambda: 2100)
+
+    # Ordinary import job establishes retained coverage away from epoch.
+    await sync.sync_fills(scope, "BTCUSDT", Window(1000, 2000), request_budget=1)
+    # A wider unrelated symbol must not move BTC's bootstrap origin.
+    await history.commit_fills(
+        scope,
+        "ETHUSDT",
+        Window(0, 5000),
+        WindowRead((), (Window(0, 5000),), (), (), 1),
+        checked_at=2100,
+    )
+    capture = scheduled_capture(db, history)
+    assert await capture.prepare_window(scope, "BTCUSDT", 20_000) == Span(1000, 2000)
+    assert await capture.run_scheduled(
+        scope,
+        "BTCUSDT",
+        snapshots=ScopeSnapshots([position(positionAmt="1", updateTime=1500)]),
+        synchronizer=sync,
+        now_ms=20_000,
+        request_budget=1,
+        clock_ms=manual_clock([1800, 1900, 4100, 4200]),
+    )
+    origin = await EpisodeRepository(db).load_boundary(scope, "BTCUSDT", kind="origin")
+    assert origin is not None and origin.cutoff_ms == 1000
+    assert len(await EpisodeRepository(db).list_open(scope, symbol="BTCUSDT")) == 1
+
+    # Legacy failed checkpoint start=0 is a hint only: without an accepted
+    # origin, a second scope recomputes bootstrap from its own complete span.
+    other = HistoryScope("b", "testnet")
+    reader.rows = [fill(3500, "BUY", "1")]
+    other_sync = HistorySynchronizer(reader, history, clock_ms=lambda: 4100)
+    await other_sync.sync_fills(other, "BTCUSDT", Window(3000, 4000), request_budget=1)
+    await history.record_capture(
+        other,
+        "BTCUSDT",
+        start_ms=0,
+        end_ms=None,
+        now_ms=4200,
+        error="HistoryReconciliationError",
+    )
+    assert await capture.prepare_window(other, "BTCUSDT", 30_000) == Span(3000, 4000)
+    assert await capture.run_scheduled(
+        other,
+        "BTCUSDT",
+        snapshots=ScopeSnapshots([position(positionAmt="1", updateTime=3500)]),
+        synchronizer=other_sync,
+        now_ms=30_000,
+        request_budget=1,
+        clock_ms=manual_clock([3800, 3900, 6100, 6200]),
+    )
+    other_origin = await EpisodeRepository(db).load_boundary(other, "BTCUSDT", kind="origin")
+    assert other_origin is not None and other_origin.cutoff_ms == 3000
+
+
+async def test_corrective_g1_t3_dirty_survives_restart_and_same_frontier_noop_import(storage):
+    db, history, scope = storage
+    flat = position(positionAmt="0", updateTime=9000)
+    reader = MutableFillReader()
+    sync = HistorySynchronizer(reader, history, clock_ms=lambda: 10_100)
+    capture = scheduled_capture(db, history)
+
+    await sync.sync_fills(scope, "BTCUSDT", Window(9000, 10_000), request_budget=1)
+    assert await capture.run_scheduled(
+        scope,
+        "BTCUSDT",
+        snapshots=ScopeSnapshots([flat]),
+        synchronizer=sync,
+        now_ms=20_000,
+        request_budget=1,
+        clock_ms=manual_clock([9800, 9900, 12_100, 12_200]),
+    )
+    assert (await history.projection_state(scope, "BTCUSDT"))[1] is None
+
+    # Late facts land behind an already accepted flat cutoff; frontier stays 10_000.
+    reader.rows = [
+        fill(9400, "BUY", "1", "100", "0"),
+        fill(9600, "SELL", "1", "140", "40"),
+    ]
+    late = await sync.sync_fills(scope, "BTCUSDT", Window(9000, 10_000), request_budget=1)
+    assert late.inserted_count == 2 and late.dirty_from_ms == 9400
+    revision = late.facts_revision
+
+    await db.close()
+    await db.connect()
+    history = type(history)(db)
+    capture = scheduled_capture(db, history)
+    sync = HistorySynchronizer(reader, history, clock_ms=lambda: 10_200)
+    assert await capture.prepare_window(scope, "BTCUSDT", 30_000) == Span(9000, 10_000)
+    assert await capture.run_scheduled(
+        scope,
+        "BTCUSDT",
+        snapshots=ScopeSnapshots([flat]),
+        synchronizer=sync,
+        now_ms=30_000,
+        request_budget=1,
+        clock_ms=manual_clock([9800, 9900, 12_100, 12_200]),
+    )
+    state = await history.projection_state(scope, "BTCUSDT")
+    assert state == (revision, None)
+    (closed,) = (await EpisodeRepository(db).list_closed(scope, symbol="BTCUSDT"))[0]
+    assert closed.episode.closed_at == 9600 and closed.episode.realized_pnl_gross == D(40)
+    assert len(await db.fetchall("SELECT * FROM follower_episodes WHERE closed_at IS NULL")) == 0
+    assert (
+        await capture.run_scheduled(
+            scope,
+            "BTCUSDT",
+            snapshots=ScopeSnapshots([flat]),
+            synchronizer=sync,
+            now_ms=40_000,
+            request_budget=1,
+            clock_ms=manual_clock([9800, 9900, 12_100, 12_200]),
+        )
+        is False
+    )
 
 
 async def test_prepare_returns_unclamped_import_hint(storage):

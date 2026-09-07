@@ -448,6 +448,52 @@ MIGRATIONS: list[str | tuple[str, ...]] = [
       updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
       PRIMARY KEY(account_id, environment))
     """,
+    # Corrective G1 / N3: durable projection dirt.  A fills/coverage commit
+    # advances facts_revision and moves dirty_from_ms backwards to the
+    # earliest unconsumed change.  Existing history scopes are conservatively
+    # marked from their earliest retained fill/complete coverage so an
+    # upgraded process cannot treat pre-migration facts as already consumed.
+    (
+        "ALTER TABLE history_scope_state ADD COLUMN dirty_from_ms INTEGER "
+        "CHECK(dirty_from_ms IS NULL OR dirty_from_ms >= 0)",
+        "INSERT OR IGNORE INTO history_scope_state"
+        "(account_id,environment,symbol,facts_revision,updated_at,dirty_from_ms) "
+        "SELECT q.account_id,q.environment,q.symbol,1,0,("
+        " SELECT MIN(ts) FROM ("
+        "   SELECT MIN(f.executed_at) AS ts FROM follower_fills f "
+        "   WHERE f.account_id=q.account_id AND f.environment=q.environment "
+        "   AND f.symbol=q.symbol "
+        "   UNION ALL "
+        "   SELECT MIN(s.start_ms) AS ts FROM history_sync_state s "
+        "   WHERE s.account_id=q.account_id AND s.environment=q.environment "
+        "   AND s.symbol=q.symbol AND s.stream='fills' AND s.state='complete'"
+        " )) FROM ("
+        " SELECT account_id,environment,symbol FROM follower_fills "
+        " UNION SELECT account_id,environment,symbol FROM history_sync_state "
+        " WHERE stream='fills' AND state='complete'"
+        ") q",
+        "UPDATE history_scope_state SET dirty_from_ms=("
+        " SELECT MIN(ts) FROM ("
+        "   SELECT MIN(f.executed_at) AS ts FROM follower_fills f "
+        "   WHERE f.account_id=history_scope_state.account_id "
+        "   AND f.environment=history_scope_state.environment "
+        "   AND f.symbol=history_scope_state.symbol "
+        "   UNION ALL "
+        "   SELECT MIN(s.start_ms) AS ts FROM history_sync_state s "
+        "   WHERE s.account_id=history_scope_state.account_id "
+        "   AND s.environment=history_scope_state.environment "
+        "   AND s.symbol=history_scope_state.symbol "
+        "   AND s.stream='fills' AND s.state='complete'"
+        " )) WHERE EXISTS (SELECT 1 FROM follower_fills f "
+        " WHERE f.account_id=history_scope_state.account_id "
+        " AND f.environment=history_scope_state.environment "
+        " AND f.symbol=history_scope_state.symbol) OR EXISTS ("
+        " SELECT 1 FROM history_sync_state s "
+        " WHERE s.account_id=history_scope_state.account_id "
+        " AND s.environment=history_scope_state.environment "
+        " AND s.symbol=history_scope_state.symbol "
+        " AND s.stream='fills' AND s.state='complete')",
+    ),
 ]
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version

@@ -185,9 +185,8 @@ class HistoryCapture:
 
     async def _complete_frontier(self, scope: HistoryScope, symbol: str) -> int | None:
         """Newest complete fills-coverage end, or None when nothing is due."""
-        states = await self._history.windows(scope, "fills", symbol)
-        ends = [row["end_ms"] for row in states if row["state"] == "complete"]
-        return max(ends) if ends else None
+        span = await self._history.complete_frontier_span(scope, symbol)
+        return span.end if span is not None else None
 
     async def capture_and_publish(
         self,
@@ -294,32 +293,33 @@ class HistoryCapture:
 
         Returns None when nothing is due: no complete fills coverage, the
         frontier is already published, or it is too fresh to bracket with the
-        clock margin. The start pins to the accepted origin (or the legacy
-        checkpoint, or zero) so late facts anywhere after it are picked up;
-        there is no span clamp — seven days bound the exchange request, not
-        the replay. The end is a hint: capture extends the import to the
-        live edge and publishes whatever the fresh snapshots can bracket.
+        clock margin. The start pins to the accepted origin, or on first
+        acceptance to the beginning of the continuous complete coverage span
+        containing the frontier, so a failed legacy checkpoint cannot invent
+        epoch coverage. There is no span clamp — seven days bound the exchange
+        request, not the replay. The end is a hint: capture extends the import
+        to the live edge and publishes whatever the fresh snapshots can bracket.
         """
         if not symbol:
             raise ValueError("capture symbol required")
         if type(now_ms) is not int or now_ms < 0:
             raise ValueError("capture clock must be a nonnegative integer")
-        frontier = await self._complete_frontier(scope, symbol)
-        if frontier is None:
+        coverage = await self._history.complete_frontier_span(scope, symbol)
+        if coverage is None:
             return None
+        frontier = coverage.end
         if frontier + self._margin > now_ms:
             return None
         checkpoint = await self._history.capture_state(scope, symbol)
         captured_end = checkpoint["cap_end_ms"] if checkpoint else None
-        if captured_end is not None and frontier <= captured_end:
+        _, dirty_from = await self._history.projection_state(scope, symbol)
+        if dirty_from is None and captured_end is not None and frontier <= captured_end:
             return None
         origin = await self._episodes.load_boundary(scope, symbol, kind="origin")
-        if origin is not None:
-            start = origin.cutoff_ms
-        elif checkpoint is not None and checkpoint["cap_start_ms"] is not None:
-            start = checkpoint["cap_start_ms"]
-        else:
-            start = 0
+        # No accepted origin exists yet: a failed legacy checkpoint must never
+        # pin zero (or another stale hint) before retained coverage. Bootstrap
+        # from the continuous complete interval that contains the frontier.
+        start = origin.cutoff_ms if origin is not None else coverage.start
         return Span(start, frontier)
 
     async def run_scheduled(

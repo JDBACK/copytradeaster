@@ -31,10 +31,17 @@ def choose_replay_range(
     if latest is None:
         return ReplayDecision(start_ms=fallback_start_ms, from_origin=False)
     late: int | None = None
-    for candidate in (delta.changed_from_ms, delta.coverage_changed_from_ms):
+    for candidate in (delta.dirty_from_ms, delta.changed_from_ms, delta.coverage_changed_from_ms):
         if candidate is not None and (late is None or candidate < late):
             late = candidate
     if late is not None and late <= latest.cutoff_ms:
+        start = origin.cutoff_ms if origin is not None else fallback_start_ms
+        return ReplayDecision(start_ms=start, from_origin=True, refresh_origin_seed=True)
+    # Quantity-only continuation cannot safely resume an open episode at the
+    # latest cutoff: its original entries/exits are needed to update the same
+    # public episode.  The accepted origin is the deliberately simple,
+    # correct fallback for the 10-30 account target.
+    if latest.mode == "partial":
         start = origin.cutoff_ms if origin is not None else fallback_start_ms
         return ReplayDecision(start_ms=start, from_origin=True)
     return ReplayDecision(start_ms=latest.cutoff_ms + 1, from_origin=False)

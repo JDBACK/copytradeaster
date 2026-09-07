@@ -74,10 +74,10 @@ async def accepted_trade(tmp_path: Path):
     scope = HistoryScope("h1", "testnet")
     history = HistoryRepository(db)
     fills = (
-        fill(1, "BUY", "1", price="100", pnl="0", leg="BOTH"),
-        fill(2, "BUY", "1", price="100", pnl="0", leg="BOTH"),
-        fill(3, "SELL", "1", price="140", pnl="40", leg="BOTH"),
-        fill(4, "SELL", "1", price="140", pnl="40", leg="BOTH"),
+        fill(1, "BUY", "2", price="100", pnl="0", leg="BOTH"),
+        fill(2, "BUY", "1", price="130", pnl="0", leg="BOTH"),
+        fill(3, "SELL", "1", price="140", pnl="10", leg="BOTH"),
+        fill(4, "SELL", "2", price="140", pnl="60", leg="BOTH"),
     )
     live = tuple(
         item.model_copy(update={"time": FLOOR_MS - 4000 + item.time * 1000}) for item in fills
@@ -126,11 +126,11 @@ async def test_all_surfaces_share_one_ref_and_facts(accepted_trade):
     assert (
         item.trade_ref == detail.trade.trade_ref == feed_item.trade_ref == row["trade_ref"] == ref
     )
-    assert item.executed_qty == detail.trade.executed_qty == "2"
-    assert detail.average_entry == "100" and detail.average_exit == "140"
-    assert item.realized_pnl_gross_usdt == detail.trade.realized_pnl_gross_usdt == "80"
-    assert feed_item.facts["realized_gross"] == "80"
-    assert feed_item.facts["entry_price"] == "100" and feed_item.facts["exit_price"] == "140"
+    assert item.executed_qty == detail.trade.executed_qty == "3"
+    assert detail.average_entry == "110" and detail.average_exit == "140"
+    assert item.realized_pnl_gross_usdt == detail.trade.realized_pnl_gross_usdt == "70"
+    assert feed_item.facts["realized_gross"] == "70"
+    assert feed_item.facts["entry_price"] == "110" and feed_item.facts["exit_price"] == "140"
     # One event per semantic allocation, identical for a single batch and
     # for sequential publications (R3): the increase/partial fills settle
     # the same episode and each carries its own qty/gross.

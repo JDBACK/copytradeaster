@@ -76,9 +76,11 @@ class ImportDelta:
     ``changed_from_ms`` is the earliest newly stored fact time, None when the
     import stored nothing new. ``coverage_changed`` reports newly completed
     coverage even with zero new facts; ``coverage_changed_from_ms`` locates
-    the earliest newly verified start so replay can tell late verification
-    of an old gap from normal growth past the frontier. ``facts_revision``
-    is the durable scope/symbol revision after the import transaction.
+    the earliest timestamp whose complete-coverage truth changed, so replay
+    can distinguish an old gap/loss from normal growth past the frontier.
+    ``facts_revision`` is the durable scope/symbol revision after the import
+    transaction and ``dirty_from_ms`` is the durable earliest unconsumed
+    projection change (it can therefore predate this individual batch).
     """
 
     inserted_count: int
@@ -87,6 +89,7 @@ class ImportDelta:
     coverage_changed_from_ms: int | None
     verified_through_ms: int | None
     facts_revision: int
+    dirty_from_ms: int | None = None
     requests: int = 0
 
 
@@ -133,6 +136,7 @@ class ReplayDecision:
 
     start_ms: int
     from_origin: bool
+    refresh_origin_seed: bool = False
 
 
 #: Maximum age of a fact (``recorded_at - occurred_at``) that may still push

@@ -88,9 +88,10 @@ class HistoryRepository:
             after = await _complete_intervals(conn, scope, "fills", symbol)
             changed_from = min((row.time for row in result.rows), default=None)
             coverage_changed = before != after
-            coverage_from = _new_coverage_start(before, after)
-            revision = await _bump_scope_revision(
-                conn, scope, symbol, checked_at, changed=inserted > 0 or coverage_changed
+            coverage_from = _coverage_change_start(before, after)
+            dirty_from = _earliest(changed_from if inserted > 0 else None, coverage_from)
+            revision, pending_from = await _bump_scope_revision(
+                conn, scope, symbol, checked_at, dirty_from_ms=dirty_from
             )
             states = await conn.execute(
                 "SELECT MAX(end_ms) FROM history_sync_state WHERE account_id=? "
@@ -108,6 +109,7 @@ class HistoryRepository:
                 coverage_changed_from_ms=coverage_from,
                 verified_through_ms=frontier[0] if frontier and frontier[0] is not None else None,
                 facts_revision=revision,
+                dirty_from_ms=pending_from,
                 requests=result.requests,
             )
 
@@ -119,6 +121,28 @@ class HistoryRepository:
             (scope.account_id, scope.environment, symbol),
         )
         return int(row["facts_revision"]) if row is not None else 0
+
+    async def projection_state(self, scope: HistoryScope, symbol: str) -> tuple[int, int | None]:
+        """Current facts revision and earliest unconsumed projection change."""
+        row = await self._db.fetchone(
+            "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
+            "WHERE account_id=? AND environment=? AND symbol=?",
+            (scope.account_id, scope.environment, symbol),
+        )
+        if row is None:
+            return 0, None
+        dirty = row["dirty_from_ms"]
+        return int(row["facts_revision"]), None if dirty is None else int(dirty)
+
+    async def complete_frontier_span(self, scope: HistoryScope, symbol: str) -> Span | None:
+        """Latest continuous complete fills interval, which contains the frontier."""
+        row = await self._db.fetchone(
+            "SELECT start_ms,end_ms FROM history_sync_state WHERE account_id=? "
+            "AND environment=? AND stream='fills' AND symbol=? AND state='complete' "
+            "ORDER BY end_ms DESC,start_ms DESC LIMIT 1",
+            (scope.account_id, scope.environment, symbol),
+        )
+        return None if row is None else Span(int(row["start_ms"]), int(row["end_ms"]))
 
     async def commit_income(
         self,
@@ -661,13 +685,31 @@ async def _complete_intervals(
 def _new_coverage_start(
     before: tuple[tuple[int, int], ...], after: tuple[tuple[int, int], ...]
 ) -> int | None:
-    """Earliest start the ``after`` set covers that ``before`` did not."""
-    starts = [
-        start
-        for start, _ in after
-        if not any(prev_start <= start <= prev_end for prev_start, prev_end in before)
-    ]
-    return min(starts) if starts else None
+    """Earliest timestamp newly covered by ``after`` (including filled inner gaps)."""
+    earliest: int | None = None
+    for start, end in after:
+        cursor = start
+        for prev_start, prev_end in before:
+            if prev_end < cursor:
+                continue
+            if prev_start > end:
+                break
+            if prev_start > cursor:
+                earliest = cursor if earliest is None else min(earliest, cursor)
+                break
+            cursor = max(cursor, prev_end + 1)
+            if cursor > end:
+                break
+        if cursor <= end:
+            earliest = cursor if earliest is None else min(earliest, cursor)
+    return earliest
+
+
+def _coverage_change_start(
+    before: tuple[tuple[int, int], ...], after: tuple[tuple[int, int], ...]
+) -> int | None:
+    """Earliest timestamp whose complete-coverage truth changed either way."""
+    return _earliest(_new_coverage_start(before, after), _new_coverage_start(after, before))
 
 
 async def _bump_scope_revision(
@@ -676,10 +718,10 @@ async def _bump_scope_revision(
     symbol: str,
     checked_at: int,
     *,
-    changed: bool,
-) -> int:
+    dirty_from_ms: int | None,
+) -> tuple[int, int | None]:
     cursor = await conn.execute(
-        "SELECT facts_revision FROM history_scope_state "
+        "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
         "WHERE account_id=? AND environment=? AND symbol=?",
         (scope.account_id, scope.environment, symbol),
     )
@@ -688,16 +730,26 @@ async def _bump_scope_revision(
     finally:
         await cursor.close()
     revision = int(row[0]) if row is not None else 0
-    if changed:
+    pending_from = None if row is None or row[1] is None else int(row[1])
+    if dirty_from_ms is not None:
         revision += 1
+        pending_from = _earliest(pending_from, dirty_from_ms)
         cursor = await conn.execute(
-            "INSERT INTO history_scope_state VALUES (?,?,?,?,?) "
+            "INSERT INTO history_scope_state"
+            "(account_id,environment,symbol,facts_revision,updated_at,dirty_from_ms) "
+            "VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(account_id,environment,symbol) DO UPDATE SET "
-            "facts_revision=excluded.facts_revision,updated_at=excluded.updated_at",
-            (scope.account_id, scope.environment, symbol, revision, checked_at),
+            "facts_revision=excluded.facts_revision,updated_at=excluded.updated_at,"
+            "dirty_from_ms=excluded.dirty_from_ms",
+            (scope.account_id, scope.environment, symbol, revision, checked_at, pending_from),
         )
         await cursor.close()
-    return revision
+    return revision, pending_from
+
+
+def _earliest(*values: int | None) -> int | None:
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
 
 
 async def _insert_facts(

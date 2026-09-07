@@ -53,7 +53,7 @@ copytradeaster/
 │   ├── master/                # MasterProjector: WS -> normalized state deltas & copy_trades
 │   ├── risk/                  # RiskEngine: pure sizing math, 80% margin cap (MARGIN_SAFETY=0.8)
 │   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution
-│   ├── storage/               # SQLite Database, MIGRATIONS (0..51), async repositories
+│   ├── storage/               # SQLite Database, MIGRATIONS (0..58), async repositories
 │   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
 │   ├── notifications/         # NotificationRouter, SQLite outbox, TelegramOutboxWorker
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services

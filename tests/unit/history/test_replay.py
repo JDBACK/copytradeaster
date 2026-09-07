@@ -7,15 +7,29 @@ re-derives the origin seeds instead of duplicating the trade.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal as D
 
+from copytradeaster.domain.models import PosSide
 from copytradeaster.history.capture import HistoryCapture
-from copytradeaster.history.models import ImportDelta, ProjectionBoundary
+from copytradeaster.history.models import ImportDelta, PositionSeed, ProjectionBoundary
+from copytradeaster.history.projection import HistoryProjection
 from copytradeaster.history.reader import Window, WindowRead
 from copytradeaster.history.replay import choose_replay_range
+from copytradeaster.history.sync import HistorySynchronizer
+from copytradeaster.storage.database import Database
 from copytradeaster.storage.episodes import EpisodeRepository
 from copytradeaster.storage.events import EventRepository
-from tests.unit.history.test_capture import after_boundary, boundary, commit, position
+from copytradeaster.storage.history import HistoryRepository, HistoryScope
+from tests.unit.history.test_capture import (
+    MutableFillReader,
+    ScopeSnapshots,
+    after_boundary,
+    boundary,
+    commit,
+    manual_clock,
+    position,
+)
 from tests.unit.history.test_projector import fill
 
 
@@ -102,6 +116,222 @@ async def test_replay_growth_past_frontier_does_not_roll_back(storage):
         fallback_start_ms=50,
     )
     assert (decision.start_ms, decision.from_origin) == (101, False)
+
+
+async def test_open_frontier_replays_from_origin_without_rederiving_seed(storage):
+    db, history, scope = storage
+    repo = EpisodeRepository(db)
+    capture = HistoryCapture(history, repo)
+    first_window = Window(0, 100)
+    await commit(history, scope, [fill(60, "BUY", "2")], first_window)
+    held = position(positionAmt="5")
+    (first,) = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        first_window,
+        before=boundary(held),
+        after=after_boundary(held),
+        cutoff=100,
+    )
+    origin = await repo.load_boundary(scope, "BTCUSDT", kind="origin")
+    assert origin is not None and origin.mode == "partial"
+    origin_seed = origin.seed_map()[PosSide.BOTH]
+    assert origin_seed.quantity == D(3) and origin_seed.public_ref == first.episode.public_ref
+    refs_before = len(await db.fetchall("SELECT * FROM follower_episode_refs"))
+
+    second_window = Window(0, 200)
+    await commit(
+        history,
+        scope,
+        [fill(60, "BUY", "2"), fill(160, "BUY", "1", "130")],
+        second_window,
+    )
+    held_more = position(positionAmt="6", updateTime=160)
+    (second,) = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        second_window,
+        before=boundary(held_more),
+        after=boundary(held_more, started=2300, received=2400),
+        cutoff=200,
+    )
+    assert second.episode.public_ref == first.episode.public_ref
+    assert second.episode.quality == "partial_history"
+    assert second.episode.remaining_qty == D(6) and second.episode.entry_qty == D(3)
+    assert len(await db.fetchall("SELECT * FROM follower_episode_refs")) == refs_before
+
+
+async def _scheduled_stage(
+    capture,
+    sync,
+    reader,
+    history,
+    scope,
+    rows,
+    *,
+    cutoff,
+    quantity,
+):
+    reader.rows = list(rows)
+    await sync.sync_fills(scope, "BTCUSDT", Window(9000, cutoff), request_budget=1)
+    snapshots = ScopeSnapshots(
+        [position(positionAmt=str(quantity), updateTime=rows[-1].time if rows else 9000)]
+    )
+    assert await capture.run_scheduled(
+        scope,
+        "BTCUSDT",
+        snapshots=snapshots,
+        synchronizer=sync,
+        now_ms=cutoff + 10_000,
+        request_budget=1,
+        clock_ms=manual_clock([cutoff - 200, cutoff - 100, cutoff + 2100, cutoff + 2200]),
+    )
+    repo = EpisodeRepository(history._db)
+    opens = await repo.list_open(scope, symbol="BTCUSDT")
+    closed, _ = await repo.list_closed(scope, symbol="BTCUSDT")
+    return opens[0] if opens else closed[0]
+
+
+async def test_incremental_open_increase_partial_close_keeps_one_ref_and_full_basis(storage):
+    db, history, scope = storage
+    reader = MutableFillReader()
+    sync = HistorySynchronizer(reader, history, clock_ms=lambda: 50_000)
+    capture = HistoryCapture(history, EpisodeRepository(db), events=EventRepository(db))
+    rows = [
+        fill(10_000, "BUY", "2", "100", "0"),
+        fill(11_000, "BUY", "1", "130", "0"),
+        fill(12_000, "SELL", "1", "140", "10"),
+        fill(13_000, "SELL", "2", "140", "60"),
+    ]
+
+    first = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows[:1], cutoff=10_000, quantity=D(2)
+    )
+    ref = first.episode.public_ref
+    assert first.episode.entry_qty == D(2) and first.episode.average_entry == D(100)
+
+    increased = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows[:2], cutoff=11_000, quantity=D(3)
+    )
+    assert increased.episode.public_ref == ref
+    assert increased.episode.entry_qty == D(3) and increased.episode.average_entry == D(110)
+
+    partial = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows[:3], cutoff=12_000, quantity=D(2)
+    )
+    assert partial.episode.public_ref == ref
+    assert partial.episode.remaining_qty == D(2) and partial.episode.exit_qty == D(1)
+
+    final = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows, cutoff=13_000, quantity=D(0)
+    )
+    episode = final.episode
+    assert episode.public_ref == ref and episode.closed_at == 13_000
+    assert episode.entry_qty == D(3) and episode.average_entry == D(110)
+    assert episode.exit_qty == D(3) and episode.average_exit == D(140)
+    assert episode.realized_pnl_gross == D(70) and episode.remaining_qty == D(0)
+    assert [item.role for item in episode.allocations] == ["entry", "entry", "exit", "exit"]
+    assert len(await db.fetchall("SELECT * FROM follower_episodes")) == 1
+    assert await EpisodeRepository(db).list_open(scope, symbol="BTCUSDT") == []
+    assert len(await db.fetchall("SELECT * FROM follower_episode_allocations")) == 4
+    assert [row.event.kind for row in await EventRepository(db).list_owned(scope)] == [
+        "POSITION_OPENED",
+        "POSITION_INCREASED",
+        "POSITION_REDUCED",
+        "POSITION_CLOSED",
+    ]
+
+
+async def test_incremental_open_episode_ref_survives_restart_and_matches_batch(storage, tmp_path):
+    db, history, scope = storage
+    rows = [
+        fill(10_000, "BUY", "2", "100", "0"),
+        fill(11_000, "BUY", "1", "130", "0"),
+        fill(12_000, "SELL", "1", "140", "10"),
+        fill(13_000, "SELL", "2", "140", "60"),
+    ]
+    reader = MutableFillReader()
+    sync = HistorySynchronizer(reader, history, clock_ms=lambda: 50_000)
+    capture = HistoryCapture(history, EpisodeRepository(db), events=EventRepository(db))
+    first = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows[:1], cutoff=10_000, quantity=D(2)
+    )
+    second = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows[:2], cutoff=11_000, quantity=D(3)
+    )
+    assert second.episode.public_ref == first.episode.public_ref
+
+    # Restart exactly between increase and partial close.
+    await db.close()
+    await db.connect()
+    history = HistoryRepository(db)
+    sync = HistorySynchronizer(reader, history, clock_ms=lambda: 50_000)
+    capture = HistoryCapture(history, EpisodeRepository(db), events=EventRepository(db))
+    partial = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows[:3], cutoff=12_000, quantity=D(2)
+    )
+    final = await _scheduled_stage(
+        capture, sync, reader, history, scope, rows, cutoff=13_000, quantity=D(0)
+    )
+    assert partial.episode.public_ref == final.episode.public_ref == first.episode.public_ref
+    events_before = await EventRepository(db).list_owned(scope)
+    allocations_before = await db.fetchall("SELECT * FROM follower_episode_allocations")
+    assert (
+        await capture.run_scheduled(
+            scope,
+            "BTCUSDT",
+            snapshots=ScopeSnapshots([position(positionAmt="0", updateTime=13_000)]),
+            synchronizer=sync,
+            now_ms=40_000,
+            request_budget=1,
+        )
+        is False
+    )
+    assert await EventRepository(db).list_owned(scope) == events_before
+    assert await db.fetchall("SELECT * FROM follower_episode_allocations") == allocations_before
+
+    # Independent batch publication over the same facts must have identical
+    # financial/position truth and logical transitions (UUIDs are DB-local).
+    batch_db = Database(tmp_path / "history-batch.sqlite3")
+    await batch_db.connect()
+    await batch_db.migrate()
+    await batch_db.execute_write(
+        "INSERT INTO accounts(id,role,label,user_address) VALUES "
+        "('batch','follower','batch','batch')"
+    )
+    try:
+        batch_scope = HistoryScope("batch", "testnet")
+        batch_history = HistoryRepository(batch_db)
+        full = Window(9000, 13_000)
+        await batch_history.commit_fills(
+            batch_scope,
+            "BTCUSDT",
+            full,
+            WindowRead(tuple(rows), (full,), (), (), 1),
+            checked_at=50_000,
+        )
+        batch_events = EventRepository(batch_db)
+        (batch,) = await HistoryProjection(
+            batch_history, EpisodeRepository(batch_db), batch_events
+        ).publish_window(
+            batch_scope,
+            "BTCUSDT",
+            full,
+            seeds={PosSide.BOTH: PositionSeed(D(0))},
+            ending={PosSide.BOTH: D(0)},
+            recorded_at=60_000,
+        )
+        assert replace(batch.episode, public_ref=final.episode.public_ref) == final.episode
+        logical_incremental = [
+            (item.event.kind, item.event.occurred_at, item.event.facts) for item in events_before
+        ]
+        logical_batch = [
+            (item.event.kind, item.event.occurred_at, item.event.facts)
+            for item in await batch_events.list_owned(batch_scope)
+        ]
+        assert logical_batch == logical_incremental
+    finally:
+        await batch_db.close()
 
 
 async def test_rolling_window_keeps_single_episode(storage):
