@@ -808,3 +808,14 @@ Watch 4 мин после остановки работ: тихо. Exchange FLAT
 зафиксирована как гипотеза). Scope — решение owner'а.
 Вердикт: review-фиксы QUALIFIED (engine + targeted live). Mainnet решению
 owner'а; load-гейт требует чистого прогона.
+
+## 2026-09-07 — LC1 clean GREEN на исправленном дереве + compat-счёт
+LC1 (`test_shared_hedge_leverage_rejection_retry_and_worker_restart`)
+перепрогнан на effective-is-truth дереве: **1 passed 137s**
+(`data/review-lc1-junit.xml`), фронт молчал всё окно. Downshift 13x и
+restart-геометрия не затронуты сменой 1x-семантики (все значения >= 2
+идут тем же путём: min(ceiling, observed), no-op при равенстве).
+Compat-счёт уточнён по XML: 24 теста = 20 passed + 2 failed + 2 skipped;
+оба failure закрыты зелёными rerun (f3fix2, l1fix) → **22 nodeids green
++ 2 honest skip** (dust2 бюджет, limit-reduction full-fill), как и считало
+ревью. TL;DR исправлен с «20/20».
