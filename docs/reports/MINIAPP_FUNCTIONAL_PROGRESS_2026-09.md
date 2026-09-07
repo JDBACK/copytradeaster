@@ -1,7 +1,7 @@
 # Реализация функционального Mini App — 2026-09-06
 
 Источник требований: [план](MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md), §14.
-Кампания IN PROGRESS. G1/G2/G3 открыты. Реализация небольшими проверяемыми шагами.
+Кампания IN PROGRESS. G1 закрыт; G2/G3 открыты. Реализация небольшими проверяемыми шагами.
 
 ## Рабочий todo
 
@@ -10,7 +10,7 @@
 - [ ] S1.3: episodes, partial/flip, cashflows, stable refs, user events.
 - [ ] S1.4: application/HTTP contracts, ownership, aggregate, settings/scope/freshness.
 - [ ] S1.5: общий presenter, durable structured notifications.
-- [ ] S1.6 / G1: offline + signed acceptance по §10.9.
+- [x] G1 corrective acceptance: обязательные N1–N3, T1–T6 и §6 offline gate; live follow-ups N6/SL остаются до rollout/G3.
 - [ ] S2: baseline, session resources, transport/lifecycle, nested settings cache, G2.
 - [ ] S3: Home summary, Open/Closed/detail, activity/deep links, settings/copy, G3.
 - [ ] После основы: независимый review выполненной шкалы и исправление найденных дефектов.
@@ -764,3 +764,129 @@ R4/R5/R7/R9 приняты в пределах исходных findings. R1/R2/
 счётчики suite прежние. После исполнения §6 реализатор сам вносит evidence
 §7 и закрывает G1, не запрашивая повторный вердикт автора. Live SL fill/STOP
 evidence остаётся до production rollout новой истории, совместить с G3.
+
+## Шаг 30 — corrective N1–N3, G1 CLOSED (2026-09-07)
+
+Дата / ветка / tested commit: 2026-09-07 / `feature/frontend` /
+`84cabfb01c2c0febb4dc1327cd565b922392f284` (`84cabfb`).
+Scope: только обязательный corrective N1–N3 по
+[MINIAPP_S1_FIX_HANDOFF_2026-09.md](MINIAPP_S1_FIX_HANDOFF_2026-09.md),
+масштаб 10–30 аккаунтов. Новый общий аудит, переработка движка и 100-account
+campaign не выполнялись и не являются этим gate.
+
+Изменённая архитектура: первый scheduled bootstrap теперь начинается с начала
+непрерывного complete coverage интервала нужного symbol, содержащего frontier;
+failed legacy checkpoint `start=0` без accepted origin не может выдумать coverage
+от epoch. Продолжение открытого episode replay-ится от accepted origin с его
+сохранённым seed, а late correction отдельно разрешает re-derive origin seed.
+Уже выданный `public_ref` проходит scope/leg resolver и не переиспользуется как
+новый anchor. Импорт хранит `facts_revision` + durable `dirty_from_ms`;
+publication в одной SQLite-транзакции CAS-ит facts revision и boundary version,
+записывает episodes/allocations/aliases/events/boundary и только после принятого
+frontier очищает покрытый dirty. Migration **58** append-only добавляет marker и
+консервативно помечает существующие facts/complete coverage, включая scopes без
+старой `history_scope_state` строки; существующие facts/refs/coverage не удаляет.
+
+**N1: CLOSED.** До исправления fresh scheduled capture на review/baseline мог
+выбрать `start=0` при наличии только недавнего complete coverage и упасть на
+coverage gap; failed checkpoint закреплял тот же неверный hint. После исправления
+`tests/unit/history/test_capture.py::test_corrective_g1_t1_scheduled_bootstrap_uses_continuous_symbol_coverage`
+проводит обычный import → реальный `run_scheduled`, проверяет origin от BTC
+coverage start, игнорирование более широкого unrelated ETH coverage и вариант
+failed checkpoint `start=0` для второго account.
+
+**N2: CLOSED.** До исправления continuation от `latest.cutoff+1` восстанавливал
+только quantity seed, терял старый entry basis/allocations и мог зарезервировать
+старый UUID как новый anchor: baseline probe давал новый ref и stale open row.
+После исправления
+`tests/unit/history/test_replay.py::test_incremental_open_increase_partial_close_keeps_one_ref_and_full_basis`
+проводит четыре отдельных scheduled capture: BUY 2@100 → BUY 1@130 → SELL 1@140
+(`realized=10`) → SELL 2@140 (`realized=60`). На всех шагах один canonical ref;
+итог `entry_qty=3`, `average_entry=110`, после partial `open_qty=2`, финально
+`exit_qty=3`, `average_exit=140`, gross `70`, четыре allocations, одна closed row,
+stale open rows отсутствуют. `test_incremental_open_episode_ref_survives_restart_and_matches_batch`
+перезапускает DB между increase и partial, сравнивает incremental с независимой
+batch projection и доказывает no-op без дублей events/allocations.
+`test_open_frontier_replays_from_origin_without_rederiving_seed` отдельно фиксирует
+разницу normal open continuation и late correction, включая отсутствие нового
+ref reservation.
+
+**N3: CLOSED.** До исправления `changed_from` жил только в текущем `ImportDelta`:
+отдельный late BUY/SELL после уже принятого flat frontier терялся после restart,
+а stale projection мог пройти между чтением facts и publication commit. Теперь
+`tests/unit/history/test_capture.py::test_corrective_g1_t3_dirty_survives_restart_and_same_frontier_noop_import`
+сохраняет late roundtrip, reopens SQLite, получает пустой следующий import delta
+при том же frontier и всё равно запускает scheduled capture; появляется ровно
+один closed episode, dirty очищается только publication, следующий pass — no-op.
+`tests/unit/history/test_episodes.py::test_corrective_g1_t4_publication_rejects_facts_revision_race`
+вставляет новый fact прямо между projection read и real publish: stale commit
+отклонён, dirty остаётся, retry публикует новую revision. Отдельный
+`test_corrective_g1_t4_publication_failure_rolls_back_all_visible_state` роняет
+boundary write внутри transaction и проверяет отсутствие половины episode /
+allocation / event / boundary. Coverage symmetric-diff и upgrade закреплены
+`tests/unit/history/test_storage.py::test_corrective_g1_t5_coverage_gap_and_loss_mark_earliest_dirty`
+и `tests/unit/storage/test_database_upgrade.py::test_corrective_g1_t5_v57_upgrade_marks_retained_history_dirty`.
+
+**T1–T6:** focused corrective matrix через реальные repositories/capture/service:
+
+```text
+T1  tests/unit/history/test_capture.py::test_corrective_g1_t1_scheduled_bootstrap_uses_continuous_symbol_coverage
+T2  tests/unit/history/test_replay.py::test_incremental_open_increase_partial_close_keeps_one_ref_and_full_basis
+T2b tests/unit/history/test_replay.py::test_incremental_open_episode_ref_survives_restart_and_matches_batch
+T3  tests/unit/history/test_capture.py::test_corrective_g1_t3_dirty_survives_restart_and_same_frontier_noop_import
+T4  tests/unit/history/test_episodes.py::test_corrective_g1_t4_publication_rejects_facts_revision_race
+    tests/unit/history/test_episodes.py::test_corrective_g1_t4_publication_failure_rolls_back_all_visible_state
+T5  tests/unit/history/test_storage.py::test_corrective_g1_t5_coverage_gap_and_loss_mark_earliest_dirty
+    tests/unit/storage/test_database_upgrade.py::test_corrective_g1_t5_v57_upgrade_marks_retained_history_dirty
+T6  tests/unit/application/test_history_acceptance.py::test_all_surfaces_share_one_ref_and_facts
+    tests/unit/application/test_history_acceptance.py::test_foreign_user_sees_nothing_on_any_surface
+```
+
+Focused набор (`test_capture.py`, `test_replay.py`, `test_storage.py`,
+`test_episodes.py`, application history acceptance и database upgrade) —
+**80 passed**. T6 использует те же T2 totals: один owner `trade_ref`, qty 3,
+average entry 110, exit 140, gross 70 на list/detail/feed/outbox; foreign scope
+пуст/denied по существующему контракту.
+
+Полный §6 gate **точно на tested commit `84cabfb`**:
+
+```text
+PYTHONPATH=src:. .venv/bin/pytest -q -m 'not testnet'
+  1439 passed, 2 skipped, 45 deselected
+.venv/bin/ruff check .
+  PASS
+.venv/bin/ruff format --check .
+  PASS (274 files)
+python3 scripts/check_doc_links.py
+  PASS (49 files scanned)
+git diff --check
+  PASS
+```
+
+Три независимых blocker-only re-review текущего corrective дерева также не нашли
+оставшихся блокеров N1, N2 или N3; это дополнительная проверка, а не новый общий
+acceptance cycle.
+
+**N4: DEFERRED до S3 details.** Известное ограничение pagination семейства events
+после первых 200 записей не исправлялось этим corrective; перед включением details
+нужен repository-level `after_seq` / owned alias family paging test на 201 event.
+
+**N5: DEFERRED до event-delivery rollout.** Старый default recovery path при
+`False` всё ещё не считается корректно отключённым для user-event sweep и имеет
+известный capped сценарий >1000. Новый event delivery не включать до N5; durable
+consumer C6 остаётся отдельным уже существующим механизмом.
+
+**N6: DEFERRED до следующего signed live harness.** До следующего запуска harness
+обязан отменять именно journal-generated placement `clientOrderId`, затем cleanup
+защитных orders и финально доказывать `flat + open_orders=[]`. Этот corrective
+live не запускал и не объявляет старый user label правильным target.
+
+Live: новый signed run не выполнялся и для §6 не требовался. Existing 26.56s PASS
+сохранён как evidence прежнего сценария, но не превращён в доказательство N6 или
+фактического SL fill. До production rollout новой истории вместе с G3 остаются
+фактический SL fill и STOP cleanup evidence. Отдельный 10–30 worker smoke полезен,
+но не является обязательным §6 gate; 100-account load campaign намеренно не
+повторялась.
+
+**Вердикт: G1 CLOSED по §6.** Повторный общий verdict автора ревью не требуется.
+Следующее действие — продолжить S2 по общему плану, сохраняя сроки N4–N6 выше.

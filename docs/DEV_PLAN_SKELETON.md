@@ -404,22 +404,22 @@ snap-stop A/B) **отложена на потом — устройства не�
   с событиями, worker-активация capture (durable checkpoints, settled-gate,
   dirty hints, runtime wiring), order-link источники copy, protection-события
   SET/CHANGED/UNCONFIRMED, batch shared-fill split с сохранением суммы.
-- [ ] S1.3 integration acceptance: C1/C3 реализованы, но N1–N3 блокируют
-  scheduled bootstrap, сохранение эпизода между публикациями и late replay.
-  C4 leg-keyed protection + writers принят в пределах R4.
+- [x] S1.3 integration acceptance: corrective N1–N3 закрыт на `84cabfb` —
+  scheduled bootstrap берёт реальный continuous coverage, open episode сохраняет
+  один `public_ref` между публикациями/restart, late replay переживает restart
+  через durable dirty revision. C4 leg-keyed protection + writers принят в пределах R4.
 - [ ] S1.4 acceptance: C2 allocation-fills принят; events pagination после
   200 записей требует N4. C5 money proof и C7 snapshot-feed приняты (R5/R9).
 - [ ] S1.5 acceptance: C6 durable consumer написан, но default composition
   остаётся на старом recovery (N5/R6). Gate кнопок принят (R7).
-- [ ] S1.6 acceptance: storage forecast C8 полезен; worker queue/publication
-  latency не измерена. C9 live PASS сохранён, но N6 требует journal-coid
-  для отмены STOP, SL fill и промежуточных scheduled captures.
-- [ ] G1: OPEN / REQUEST CHANGES после повторного ревью `9a0dd98`.
-  Закрыть N1–N3 по §6 FIX_HANDOFF; реализатор фиксирует evidence и закрывает
-  самостоятельно без нового общего ревью. N4 — до details, N5 — до event
-  delivery, N6 — до повторного live harness. SL fill/STOP live evidence —
-  до production rollout, совместить с G3. Worker smoke 10–30 полезен,
-  100-account benchmark не является gate. Изолированные slices S2 допустимы по §14.
+- [ ] S1.6 broader live follow-up: storage forecast C8 полезен; worker queue/publication
+  latency отдельно не измерена. C9 live PASS сохранён; N6 ещё требует journal-coid
+  для отмены STOP, а фактический SL fill + STOP cleanup остаются до rollout/G3.
+- [x] G1: **CLOSED 2026-09-07**, corrective tested commit `84cabfb`.
+  N1–N3 + T1–T6 и §6 offline gate закрыты; отдельный повторный общий review не
+  требуется. N4 — до S3 details, N5 — до event delivery, N6 — до повторного live
+  harness. SL fill/STOP live evidence — до production rollout, совместить с G3.
+  100-account benchmark не является этим gate; целевой масштаб corrective — 10–30.
 - [ ] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings; S2.1–S2.6.
 - [ ] G2: Скорость принята на нынешних экранах; разрешён старт S3.
 - [ ] S3: Интерфейс и функциональность — Home, Open/Closed/detail, Activity/бот, Settings; S3.1–S3.5.

@@ -195,6 +195,17 @@ depends_on_action_id` с входом и защитой: FAILED prerequisite б�
 `aster/shadow.py`; режим разрешён только явным opt-in на testnet и не является
 production execution path. Миграции — упорядоченный список в
 `storage/database.py` (`MIGRATIONS`), репозитории — `storage/repositories.py`.
+
+History projection использует отдельный durable revision contract. Импорт fills и
+изменение complete coverage в одной транзакции повышают `facts_revision` и держат
+самый ранний не опубликованный `dirty_from_ms`. Публикация episodes/events/boundary
+делает CAS по ожидаемой revision и версии boundary в той же SQLite-транзакции;
+dirty очищается только когда принятый cutoff покрывает текущий complete frontier.
+Open episode при continuation replay-ится от принятого origin, а уже выданный
+`public_ref` разрешается как identity, но никогда повторно не используется как
+новый anchor. Это сохраняет одну карточку/аллокации через incremental capture,
+restart и late backfill без отдельного accumulator-сервиса.
+
 Финальный hybrid gate: 30 slots (3 REAL + 27 SHADOW), 100 циклов, 12 302
 подтверждённые команды (пост-фикс rerun 20260823: 12 207/12 207);
 подробности в `docs/reports/HYBRID_LOAD_TEST_REPORT_2026-08.md`.

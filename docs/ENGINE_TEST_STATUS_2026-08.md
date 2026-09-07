@@ -3,9 +3,9 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-07, повторное ревью `9a0dd98`):** S1/G1 — **OPEN / REQUEST CHANGES** из-за N1–N3 (bootstrap, continuation/identity, dirty range). Актуальная задача и самостоятельное закрытие реализатором — [FIX_HANDOFF §6](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md). N4/N5 — локальные follow-ups до details/event delivery; N6 — до повторного live harness. G2/G3 открыты.
-> R4/R5/R7/R9 приняты в пределах исходных findings; R1/R2/R3/R6/R8 полностью не закрыты. Записанный live PASS (26.56s) сохранён как evidence конкретного сценария; он не доказывает scheduled continuation и SL fill. Подробности — MINIAPP_S1_REVIEW_2026-09.md, повторный проход.
-> Offline 1429/2/45 (2026-09-07), миграции 0..57, ruff clean.
+> **TL;DR (2026-09-07, corrective tested `84cabfb`):** S1/G1 — **CLOSED по [FIX_HANDOFF §6](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md)**. Обязательные N1–N3 исправлены в production history path: bootstrap от реального continuous coverage, continuation одного open episode с устойчивым `public_ref`, durable `dirty_from_ms` + revision/boundary CAS и атомарный consume. T1–T6 и полный offline gate зелёные; фактическая запись — [MINIAPP_FUNCTIONAL_PROGRESS, шаг 30](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md#шаг-30--corrective-n1n3-g1-closed-2026-09-07). G2/G3 открыты.
+> Предыдущий `REQUEST CHANGES` на `9a0dd98` остаётся историческим evidence причин corrective, но больше не блокирует G1. N4 отложен до S3 details, N5 — до event-delivery rollout, N6 — до следующего signed live harness. Записанный live PASS (26.56s) сохранён; новый corrective live не запускался, поэтому фактический SL fill и STOP cleanup по journal-coid остаются до production rollout/G3.
+> Offline **1439 passed / 2 skipped / 45 deselected** (точно на `84cabfb`, 2026-09-07), миграции **0..58**, ruff check/format clean, doc links clean (49 файлов).
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
