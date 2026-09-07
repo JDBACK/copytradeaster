@@ -390,7 +390,7 @@ export function AccountBuilderScreen({
       <div className="screen">
         {brand}
         <h1 className="h1" style={{ marginTop: 4 }}>
-          Аккаунт и Builder
+          Подключение Aster
         </h1>
         <div className="skeleton" style={{ minHeight: 148 }} aria-label="Загрузка аккаунта" />
         <div className="skeleton" style={{ minHeight: 64 }} aria-label="Загрузка проверки" />
@@ -405,7 +405,7 @@ export function AccountBuilderScreen({
       <div className="screen">
         {brand}
         <h1 className="h1" style={{ marginTop: 4 }}>
-          Аккаунт и Builder
+          Подключение Aster
         </h1>
         <ErrorBox title={error.title} hint={error.hint} code={load.code}>
           <button
@@ -436,7 +436,7 @@ export function AccountBuilderScreen({
     <div className="screen">
       {brand}
       <h1 className="h1" style={{ marginTop: 4 }}>
-        Аккаунт и Builder
+        Подключение Aster
       </h1>
 
       <section className={`status-hero tone-${hero.tone}`} aria-live="polite">
@@ -470,13 +470,13 @@ export function AccountBuilderScreen({
 
       <div className="kv-list" aria-label="Разрешения Agent">
         <Row
-          label="Perps-торговля"
-          value={dto.permission.can_perp_trade ? 'Разрешена' : 'Запрещена'}
-          valueClass={dto.permission.can_perp_trade ? undefined : 'tone-danger'}
+          label="Торговля фьючерсами"
+          value={dto.permission.can_perp_trade == null ? 'Не удалось проверить' : dto.permission.can_perp_trade ? 'Разрешена' : 'Запрещена'}
+          valueClass={dto.permission.can_perp_trade === false ? 'tone-danger' : undefined}
         />
         <Row
           label="Вывод средств"
-          value={dto.permission.can_withdraw ? 'Разрешён' : 'Запрещён'}
+          value={dto.permission.can_withdraw == null ? 'Не удалось проверить' : dto.permission.can_withdraw ? 'Разрешён' : 'Запрещён'}
           valueClass={dto.permission.can_withdraw ? 'tone-danger' : undefined}
         />
         <Row

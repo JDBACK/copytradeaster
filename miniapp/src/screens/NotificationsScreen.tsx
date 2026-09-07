@@ -225,7 +225,7 @@ export function NotificationsScreen({
         />
         <Row label="В очереди" value={String(dto.pending)} />
         <Row
-          label="Не доставлено"
+          label="Не доставлено ранее"
           value={String(dto.failed)}
           valueClass={failedCountTone(dto.failed) === 'danger' ? 'tone-danger' : ''}
         />
@@ -244,6 +244,7 @@ export function NotificationsScreen({
       </div>
 
       <span data-notifications-saving={String(saving || ownerSaving)} hidden />
+      <section className="panel"><h2 className="h2">Пример уведомления</h2><p className="lede">Позиция сокращена. В сообщении будут инструмент, исполненный объём, цена и PnL закрытой части. История сохраняется и при выключенных уведомлениях.</p></section>
     </div>
   )
 }

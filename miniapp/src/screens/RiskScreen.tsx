@@ -14,10 +14,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import { RiskRuler } from '../components/RiskRuler'
 import { Brand, ErrorBox } from '../components/ui'
+import { formatUsdt, formatDateTime } from '../format'
 import { describeError } from '../errors'
 import {
-  RISK_DEMO_BALANCE_USDT,
-  demoLossUsdt,
   enumerateRiskSteps,
   formatRiskPercent,
   isRiskAllowed,
@@ -76,6 +75,7 @@ export function RiskScreen({
     strength: ownerMutationState === 'unknown' ? 'strong' : 'weak',
     foregroundSignal,
   })
+  const preview = useResource({ resources, key: 'riskPreview', active: true, foregroundSignal })
   const resourceDto = resource.snapshot.data
   const lastServerValueRef = useRef<string | null>(null)
   const ownerSaving = ownerMutationState !== null
@@ -342,22 +342,13 @@ export function RiskScreen({
       </section>
 
       <section className="panel risk-demo">
-        <div className="risk-demo-head">
-          <span>Что это значит</span>
-          <span className="risk-demo-badge">Демо-расчёт</span>
-        </div>
-        <div className="risk-demo-body">
-          <span className="risk-demo-icon" aria-hidden>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <rect x="5" y="3.5" width="14" height="17" rx="2.5" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M8.5 7.5h7M8.5 12h.01M12 12h.01M15.5 12h.01M8.5 15.5h.01M12 15.5h.01M15.5 15.5h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
-          </span>
-          <span>
-            При балансе {RISK_DEMO_BALANCE_USDT.toLocaleString('ru-RU')} USDT торговое ядро рассчитает
-            позицию так, чтобы убыток до Stop был около {demoLossUsdt(RISK_DEMO_BALANCE_USDT, active)}.
-          </span>
-        </div>
+        <h2 className="h2">Что это значит</h2>
+        {preview.snapshot.data?.available_usdt != null && preview.snapshot.data.steps.some(step => !isRiskDirty(step.risk_percent, active)) ? <>
+          <p className="lede">При доступных {formatUsdt(preview.snapshot.data.available_usdt)} расчётный бюджет на сделку — около {formatUsdt(preview.snapshot.data.steps.find(step => !isRiskDirty(step.risk_percent, active))?.budget_usdt)}.</p>
+          <p className="freshness">{preview.snapshot.data.freshness !== 'fresh' || preview.snapshot.stale || preview.snapshot.error ? 'Пример по прежнему снимку' : 'Снимок'}: {formatDateTime(preview.snapshot.data.snapshot_captured_at)}</p>
+        </> : <p className="lede">Денежный пример появится после обновления баланса.</p>}
+        <p className="footer-note">Это бюджет расчёта объёма, а не гарантированный предел убытка: цена исполнения стопа и доступная сумма могут измениться.</p>
+        <p className="footer-note">Новое значение используется в последующих расчётах. При проверке открытой позиции её объём может быть сокращён.</p>
       </section>
 
       <div className="info-box risk-leverage-note">

@@ -35,6 +35,7 @@ from copytradeaster.application.models import (
 )
 from copytradeaster.history.accounting import EpisodeMoney
 from copytradeaster.history.models import Episode, TradeResolutionDTO
+from copytradeaster.notifications.trade_cards import format_user_event
 from copytradeaster.storage.episodes import AllocatedFill, EpisodeRepository, StoredEpisode
 from copytradeaster.storage.events import EVENT_KINDS, StoredEvent
 from copytradeaster.storage.history import HistoryScope
@@ -126,6 +127,8 @@ def present_trade(
         quality=HistoryQuality(episode.quality),
         result_state=view.result_state if view is not None else "gross_only",
         money=view,
+        average_entry=_money(episode.average_entry) if episode.average_entry is not None else None,
+        average_exit=_money(episode.average_exit) if episode.average_exit is not None else None,
     )
 
 
@@ -224,6 +227,7 @@ def present_event(stored: StoredEvent) -> TradeEventItem:
         trade_ref=event.trade_ref,
         occurred_at=_as_datetime(event.occurred_at),
         facts=dict(event.facts),
+        text=format_user_event(event, quantity_asset=event.facts.get("quantity_asset")),
     )
 
 

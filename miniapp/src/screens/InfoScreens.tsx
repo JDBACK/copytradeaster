@@ -5,9 +5,10 @@
  * Agent permissions/expiry belong to the Account+Builder attestation screen
  * (a later part), so nothing here pretends to prove them. */
 
+import type { NestedScreen } from '../navigation'
 import { Brand } from '../components/ui'
 
-export function HelpScreen({ accountMasked }: { accountMasked?: string | null }) {
+export function HelpScreen({ accountMasked, onOpen }: { accountMasked?: string | null; onOpen?: (route: NestedScreen) => void }) {
   return (
     <div className="screen">
       <Brand
@@ -49,9 +50,12 @@ export function HelpScreen({ accountMasked }: { accountMasked?: string | null })
         </p>
       </section>
 
+      <section className="panel"><h2 className="h2">Почему отличаются объёмы?</h2><p className="lede">Размер зависит от вашей доступной суммы, риска на стоп и ограничений инструмента. Он не обязан совпадать с объёмом мастера.</p><button type="button" className="btn btn-ghost" onClick={() => onOpen?.({ kind: 'risk' })}>Настроить риск</button></section>
+      <section className="panel"><h2 className="h2">Почему PnL сейчас отличается от итога?</h2><p className="lede">PnL открытой позиции меняется по маркировочной цене. Итог закрытой сделки учитывает подтверждённые исполнения и начисления. Пока комиссии и funding не сверены, показан PnL до комиссий.</p><button type="button" className="btn btn-ghost" onClick={() => onOpen?.({ kind: 'trade-list', state: 'closed', period: 'all' })}>Открыть историю сделок</button></section>
+      <section className="panel"><h2 className="h2">Почему не открылась сделка?</h2><p className="lede">Вход может быть остановлен паузой, недостатком доступной суммы, отсутствием стопа или неподтверждённым подключением. Причина видна в активности и статусе.</p><button type="button" className="btn btn-ghost" onClick={() => onOpen?.({ kind: 'system-status' })}>Проверить подключение</button></section>
+      <button type="button" className="btn btn-secondary" onClick={() => onOpen?.({ kind: 'account-builder' })}>Как отключить аккаунт</button>
       <div className="info-box">
-        Подключение, отключение и экстренные действия выполняются в боте —
-        мини-ап показывает состояние и безопасные настройки.
+        Экстренные действия доступны администратору. Отключение аккаунта в сервисе не закрывает позиции и автоматически не отзывает разрешения Agent на Aster.
       </div>
     </div>
   )
@@ -74,11 +78,11 @@ export function SecurityScreen({ accountMasked }: { accountMasked?: string | nul
       </h1>
 
       <section className="panel">
-        <h2 className="h2">Ключи остаются у вас</h2>
+        <h2 className="h2">Ключ основного кошелька остаётся у вас</h2>
         <p className="lede" style={{ margin: 0 }}>
           Приватный ключ основного кошелька не вводится в сервис и не хранится
           в нём. Подключение работает через отдельный Agent-ключ, который
-          выдаётся подписью авторизации.
+          выдаётся подписью авторизации. Сервис хранит отдельный Agent-ключ зашифрованно.
         </p>
       </section>
 

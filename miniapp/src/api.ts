@@ -1,6 +1,8 @@
 /** Typed API client: every call carries the signed Telegram initData header. */
 
+import { validTrades, validTrade, validTradeEvents, validFeed, validRiskPreview } from './historyValidation'
 import type {
+  TradePeriod,
   AccountBuilderDTO,
   ActivityFilter,
   ActivityPageDTO,
@@ -267,6 +269,17 @@ export const api = {
     page = 0,
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => post<ActivityPageDTO>('/miniapp/api/activity', { filter, page }, auth, options, validators.activity),
+
+  trades: (auth: AuthContext, query: { period?: TradePeriod; cursor?: string | null; limit?: number; symbol?: string } = {}, options?: { signal?: AbortSignal }) =>
+    post('/miniapp/api/trades', query, auth, options, validTrades),
+  trade: (auth: AuthContext, tradeRef: string, options?: { signal?: AbortSignal }) =>
+    post('/miniapp/api/trade', { trade_ref: tradeRef }, auth, options, validTrade),
+  tradeEvents: (auth: AuthContext, tradeRef: string, query: { fills_cursor?: string | null; events_cursor?: string | null; fills_limit?: number; events_limit?: number } = {}, options?: { signal?: AbortSignal }) =>
+    post('/miniapp/api/trade/events', { trade_ref: tradeRef, ...query }, auth, options, validTradeEvents),
+  activityFeed: (auth: AuthContext, filter: ActivityFilter = 'all', cursor: string | null = null, options?: { signal?: AbortSignal }) =>
+    post('/miniapp/api/activity/feed', { filter, cursor, limit: 20 }, auth, options, validFeed),
+  riskPreview: (auth: AuthContext, options?: { signal?: AbortSignal }) =>
+    post('/miniapp/api/risk/preview', {}, auth, options, validRiskPreview),
 
   notifications: (
     auth: AuthContext,

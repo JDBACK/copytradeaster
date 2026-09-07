@@ -951,3 +951,19 @@ corrective ledger и финальные verdicts — `MINIAPP_S2_REVIEW_HANDOFF_
 **Вердикт: S2/G2 CLOSED.** Физические Telegram WebKit/haptics/snap-stop и итоговая
 device acceptance остаются в S3.5/G3 по уже принятому разделению этапов; S3 можно
 начинать. N4/N5/N6 сохраняют сроки corrective G1 и этим gate не переопределяются.
+
+## Шаг 32 — S3 WIP: Home, history, Activity и Settings (2026-09-07)
+
+Начат S3 на базе `41fba43`. Реализованы рабочие срезы overview Home,
+Open/Closed/Trade detail, bounded session history resources, structured Activity
+feed, owned launch intent и display-контракты Settings/Risk/permissions. На
+backend добавлены alias-family `after_seq` paging для N4, 251-event regression,
+event presenter text и удалён default capped user-event recovery scan в
+`Stage2Process`. Текущий TODO, архитектура и ограничения вынесены в
+`MINIAPP_S3_PROGRESS_2026-09.md`; G3 не закрыт.
+
+Промежуточные проверки: targeted backend **59 passed**, TypeScript/Vite build
+**PASS**, oxlint **PASS с 2 предупреждениями**, полный frontend Vitest **272
+passed / 44 failed** из-за ещё не обновлённых legacy S2 contract/lifecycle
+assertions. Продолжение: сначала frontend test/contracts и S3.2/S3.3 rollout,
+затем offline/browser/live evidence по TODO в S3-журнале.

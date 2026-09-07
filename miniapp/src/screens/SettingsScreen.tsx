@@ -12,7 +12,6 @@ import type { AuthContext } from '../api'
 import { formatPercent } from '../format'
 import type { NestedScreen } from '../navigation'
 import {
-  copySummary,
   notificationsValue,
   systemStatusValue,
   type SettingsTone,
@@ -39,9 +38,11 @@ export function SettingsScreen({
   warm = true,
   resources: providedResources,
   foregroundSignal,
+  environment,
   invalidateSignal: _invalidateSignal,
 }: {
   auth: AuthContext
+  environment?: string | null
   accountMasked?: string | null
   onOpen: (screen: NestedScreen) => void
   onNotConnected: () => void
@@ -153,6 +154,7 @@ export function SettingsScreen({
       accountMasked={accountMasked}
       onOpen={openNested}
       transportStale={transportStale}
+      environment={environment}
     />
   )
 }
@@ -178,13 +180,14 @@ export function SettingsView({
   accountMasked,
   onOpen,
   transportStale = false,
+  environment,
 }: {
   dashboard: DashboardDTO
   accountMasked?: string | null
   onOpen: (screen: NestedScreen) => void
   transportStale?: boolean
+  environment?: string | null
 }) {
-  const copy = copySummary(dashboard.copy_state)
   const status = systemStatusValue(
     transportStale ? 'stale' : dashboard.system_state,
     dashboard.snapshot_captured_at,
@@ -216,45 +219,24 @@ export function SettingsView({
         Настройки
       </h1>
 
-      <section className="panel settings-summary" aria-label={`Копирование: ${copy.label}`}>
-        <div className="settings-summary-icon" aria-hidden>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-            <circle
-              cx="12"
-              cy="12"
-              r="8"
-              stroke={toneColor(copy.tone)}
-              strokeWidth="1.8"
-              opacity="0.55"
-            />
-            <circle cx="12" cy="12" r="3" fill={toneColor(copy.tone)} />
-          </svg>
-        </div>
-        <div className="settings-summary-body">
-          <div className="settings-summary-title">Копирование</div>
-          <div className={`settings-summary-state tone-${copy.tone}`}>{copy.label}</div>
-        </div>
-        <span className={`dot ${copy.tone === 'muted' ? '' : copy.tone}`} aria-hidden />
-      </section>
-
       <SettingsSection label="Настройки копирования" />
       <div className="settings-list">
         <SettingsRow
           icon={<RiskIcon />}
-          label="Риск на Stop"
-          value={formatPercent(dashboard.risk_percent)}
+          label="Риск на сделку"
+          value={`${formatPercent(dashboard.risk_percent)} · по стопу`}
           onClick={() => open({ kind: 'risk' })}
         />
         <SettingsRow
           icon={<BellIcon />}
-          label="Уведомления"
+          label="Уведомления в Telegram"
           value={notif.label}
           valueTone={notif.tone}
           onClick={() => open({ kind: 'notifications' })}
         />
         <SettingsRow
           icon={<PulseIcon />}
-          label="Статус Aster"
+          label="Статус подключения"
           value={status.label}
           valueTone={status.tone}
           onClick={() => open({ kind: 'system-status' })}
@@ -265,7 +247,7 @@ export function SettingsView({
       <div className="settings-list">
         <SettingsRow
           icon={<UserIcon />}
-          label="Аккаунт и Builder"
+          label="Подключение Aster"
           value={account ?? 'Подключено'}
           valueTone="muted"
           onClick={() => open({ kind: 'account-builder' })}
@@ -286,20 +268,10 @@ export function SettingsView({
           value="Как работает копирование"
           onClick={() => open({ kind: 'help' })}
         />
-        <SettingsRow icon={<GlobeIcon />} label="Среда" value="Aster testnet" valueTone="muted" />
+        <SettingsRow icon={<GlobeIcon />} label="Среда" value={environment ? `Aster ${environment}` : 'Не определена'} valueTone="muted" />
       </div>
 
-      <div className="info-box settings-safe-note">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-          <path
-            d="M12 3.5 19 6v5.2c0 4.6-2.9 7.6-7 9.3-4.1-1.7-7-4.7-7-9.3V6l7-2.5Z"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinejoin="round"
-          />
-        </svg>
-        <span>Секреты и ключи не хранятся в мини-апе</span>
-      </div>
+
     </div>
   )
 }
@@ -367,19 +339,6 @@ function Chevron() {
       />
     </svg>
   )
-}
-
-function toneColor(tone: SettingsTone): string {
-  switch (tone) {
-    case 'success':
-      return 'var(--success)'
-    case 'warning':
-      return 'var(--warning)'
-    case 'danger':
-      return 'var(--danger)'
-    default:
-      return 'var(--text-muted)'
-  }
 }
 
 const ICON_STROKE = {

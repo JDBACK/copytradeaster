@@ -36,22 +36,44 @@ export function formatDateFromMs(ms: number): string {
   return new Date(ms).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
 }
 
+const priceFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 20 })
+const pnlFormat = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const fullDateFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+
 export function formatPrice(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return '—'
-  const num = typeof value === 'string' ? Number(value) : value
+  if (value == null) return '—'
+  const num = Number(value)
   if (!Number.isFinite(num)) return '—'
-  return num.toLocaleString('ru-RU', { maximumFractionDigits: 4 })
+  if (num !== 0 && Math.abs(num) < 1e-20) return `${num < 0 ? '−' : ''}< 0,00000000000000000001`
+  return priceFormat.format(Object.is(num, -0) ? 0 : num)
+}
+
+export function formatQuantity(value: string | number | null | undefined, asset?: string | null): string {
+  return `${formatPrice(value)} ${asset || '(единица не проверена)'}`
 }
 
 export function formatPnl(value: string | number | null | undefined): { text: string; tone: 'positive' | 'negative' | 'neutral' } {
-  if (value === null || value === undefined) return { text: '—', tone: 'neutral' }
-  const num = typeof value === 'string' ? Number(value) : value
-  if (!Number.isFinite(num)) return { text: '—', tone: 'neutral' }
-  const prefix = num > 0 ? '+' : ''
-  return {
-    text: `${prefix}${num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT`,
-    tone: num > 0 ? 'positive' : num < 0 ? 'negative' : 'neutral',
-  }
+  if (value == null || !Number.isFinite(Number(value))) return { text: '—', tone: 'neutral' }
+  const num = Number(value)
+  const prefix = num > 0 ? '+' : num < 0 ? '−' : ''
+  const amount = num !== 0 && Math.abs(num) < 0.01 ? '< 0,01' : pnlFormat.format(Math.abs(num))
+  return { text: `${prefix}${amount} USDT`, tone: num > 0 ? 'positive' : num < 0 ? 'negative' : 'neutral' }
+}
+
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso || !Number.isFinite(Date.parse(iso))) return '—'
+  return fullDateFormat.format(new Date(iso))
+}
+
+export function formatDuration(start: string | null, end: string | null, now = Date.now()): string {
+  if (!start) return 'Начало уточняется'
+  const duration = (end ? Date.parse(end) : now) - Date.parse(start)
+  if (!Number.isFinite(duration) || duration < 0) return '—'
+  const minutes = Math.floor(duration / 60000)
+  if (minutes < 1) return 'менее минуты'
+  if (minutes < 60) return `${minutes} мин`
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`
+  return `${Math.floor(minutes / 1440)} дн ${Math.floor(minutes / 60) % 24} ч`
 }
 
 export function countdownMinutes(targetMs: number, nowMs: number): number {

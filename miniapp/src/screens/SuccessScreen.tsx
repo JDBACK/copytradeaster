@@ -50,7 +50,7 @@ export function SuccessScreen({
         <Row label="Agent" value={result.signer_masked} />
         <Row label="Builder" value={result.builder_name} />
         <Row label="Комиссия Builder" value={formatFeeRate(result.max_fee_rate)} />
-        <Row label="Баланс" value={formatUsdt(result.available_usdt)} />
+        <Row label="Доступно для торговли" value={formatUsdt(result.available_usdt)} />
         <Row label="Авторизация до" value={formatDateFromMs(result.agent_expires_at_ms)} />
       </section>
 
@@ -68,7 +68,7 @@ export function SuccessScreen({
       </div>
 
       <p className="footer-note">
-        Снять паузу можно на главной или в боте. Копирование начнётся с новых входов мастера.
+        Аккаунт подключён. Новые входы на паузе. Проверьте риск перед включением. При возобновлении могут открыться текущие позиции мастера.
       </p>
     </div>
   )

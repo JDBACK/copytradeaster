@@ -81,6 +81,7 @@ def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) ->
     guessed. Raises ValueError on an unknown kind.
     """
     facts = dict(event.facts)
+    quantity_asset = quantity_asset or facts.get("quantity_asset")
     symbol = str(facts.get("symbol") or "—")
     kind = event.kind
     if kind == "POSITION_OPENED":
@@ -129,7 +130,7 @@ def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) ->
             lines.append(f"Средний выход: {exit_price}")
         gross = _num(facts.get("realized_gross"))
         if gross is not None:
-            lines.append(f"Итог сделки: {gross} USDT до комиссий")
+            lines.append(f"PnL до комиссий: {gross} USDT")
         else:
             lines.append("Результат уточняется")
         duration = _duration(facts.get("duration_ms"))
@@ -167,6 +168,8 @@ def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) ->
         return "Связь с биржей потеряна. Проверяем состояние позиций."
     if kind == "CONNECTIVITY_RESTORED":
         return "Связь с биржей восстановлена."
+    if kind == "HISTORY_CORRECTED":
+        return "История сделки уточнена. Откройте детали для актуального результата."
     if kind == "ENTRY_SKIPPED":
         reason = str(facts.get("reason") or "").strip()
         if reason:

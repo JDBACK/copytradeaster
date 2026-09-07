@@ -5,18 +5,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { HOME_REVALIDATE_MS } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import { describeError } from '../errors'
-import { formatPercent } from '../format'
+import { formatPercent, formatPnl, formatUsdt } from '../format'
 import {
-  RESUME_CONFIRM_BODY,
+  resumeConfirmBody,
   RESUME_CONFIRM_TITLE,
   homeViewModel,
   snapshotLabel,
-  trustSummary,
 } from '../home'
 import { hapticImpact, hapticNotify } from '../telegram'
-import type { ConfirmationDTO, DashboardDTO, PositionSummaryDTO } from '../types'
+import type { ConfirmationDTO, DashboardDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
-import { PositionCard } from './PositionsScreen'
+import type { NestedScreen, RootTab } from '../navigation'
 import { MiniAppResources } from '../resources'
 import { useResource, useScreenResources } from '../useResource'
 
@@ -30,8 +29,6 @@ type LoadState =
   | {
       kind: 'ready'
       dashboard: DashboardDTO
-      firstPosition: PositionSummaryDTO | null
-      positionsPending: boolean
     }
   | { kind: 'error'; code: string }
 
@@ -43,6 +40,8 @@ export function HomeScreen({
   onMutated,
   resources: providedResources,
   foregroundSignal,
+  onOpen,
+  onTab,
 }: {
   auth: AuthContext
   onNotConnected: () => void
@@ -53,6 +52,8 @@ export function HomeScreen({
   onMutated?: () => void
   resources?: MiniAppResources
   foregroundSignal?: number
+  onOpen?: (screen: NestedScreen) => void
+  onTab?: (tab: RootTab) => void
 }) {
   const [acting, setActing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -69,18 +70,7 @@ export function HomeScreen({
     strength: 'strong',
     foregroundSignal,
   })
-  const positionsResource = useResource({
-    resources,
-    key: 'positions',
-    enabled: dashboardResource.snapshot.data !== null,
-    active,
-    ttlMs: HOME_REVALIDATE_MS,
-    strength: 'weak',
-    foregroundSignal,
-  })
-
   const resourceDashboard = dashboardResource.snapshot.data
-  const positions = positionsResource.snapshot.data
   const transportStale =
     resourceDashboard !== null &&
     (dashboardResource.snapshot.stale || dashboardResource.snapshot.error !== null)
@@ -92,9 +82,6 @@ export function HomeScreen({
     ? {
         kind: 'ready',
         dashboard: resourceDashboard,
-        firstPosition: positions?.positions[0] ?? null,
-        positionsPending:
-          positions === null && positionsResource.snapshot.error === null,
       }
     : dashboardResource.snapshot.error
       ? { kind: 'error', code: dashboardResource.snapshot.error }
@@ -304,22 +291,16 @@ export function HomeScreen({
 
   const dashboard = load.dashboard
   const view = homeViewModel(dashboard)
-  const trust = trustSummary(dashboard)
-  const systemDot =
-    transportStale
-      ? 'warning'
-      : dashboard.system_state === 'ready'
-      ? 'success'
-      : dashboard.system_state === 'stale'
-        ? 'warning'
-        : 'danger'
+  const overview = dashboard.overview
+  const pnl = formatPnl(overview?.unrealized_pnl_usdt)
+  const stale = transportStale || overview?.freshness !== 'fresh'
 
   return (
     <div className="screen">
       <Brand
         right={
           dashboard.account_masked ? (
-            <span className="wallet-chip num">{dashboard.account_masked}</span>
+            <button type="button" className="wallet-chip num" onClick={() => onOpen?.({ kind: 'account-builder' })}>{dashboard.account_masked}</button>
           ) : (
             <span className="badge-testnet">Aster testnet</span>
           )
@@ -333,98 +314,28 @@ export function HomeScreen({
         <ErrorBox {...describeError((error ?? dashboardResource.snapshot.error)!)} />
       )}
 
-      <section className="panel rail trust-strip" aria-label="Статус подключения">
-        <ol style={{ display: 'contents', listStyle: 'none', padding: 0, margin: 0 }}>
-          {trust.map((item) => (
-            <li
-              key={item.key}
-              className={`rail-step${item.done ? ' done' : ''}`}
-              aria-label={`${item.label}: ${item.done ? 'проверено' : 'не проверено'}`}
-            >
-              <div className="rail-circle">
-                {item.done ? (
-                  <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden>
-                    <path
-                      d="M4 10.5 8.2 14.5 16 6"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : (
-                  <span className="trust-pending" aria-hidden />
-                )}
-              </div>
-              <div className="rail-label" aria-hidden="true">{item.label}</div>
-            </li>
-          ))}
-        </ol>
+      <button type="button" className="summary-status" onClick={() => onOpen?.({ kind: 'system-status' })}>
+        <span className={`dot ${stale ? 'warning' : view.tone === 'active' ? 'success' : 'warning'}`} aria-hidden />
+        <span>{transportStale ? 'Данные требуют проверки' : view.title}</span>
+        <span className="summary-chevron" aria-hidden>›</span>
+      </button>
+      <section className="panel account-summary" aria-label="Сводка аккаунта">
+        <h1 className="summary-label">PnL открытых позиций</h1>
+        <button type="button" className={`summary-pnl num pnl-${pnl.tone}`} onClick={() => onTab?.('positions')}>
+          {pnl.text}
+        </button>
+        <p className="freshness">По маркировочной цене · {stale ? 'данные требуют обновления' : 'обновлено'} {snapshotLabel(overview?.as_of)}</p>
+        <button type="button" className="summary-row" onClick={() => onTab?.('positions')}><span>Открытые позиции</span><strong className="num">{overview?.open_count ?? '—'}</strong></button>
+        <div className="summary-row"><span>Стоп подтверждён</span><strong>{stale ? 'Не обновлён' : `${overview?.protected_count ?? '—'} из ${overview?.open_count ?? '—'}`}</strong></div>
+        <div className="summary-row"><span>Доступно для торговли</span><strong className="num">{formatUsdt(overview?.available_usdt)}</strong></div>
+        <button type="button" className="summary-row" onClick={() => onOpen?.({ kind: 'risk' })}><span>Риск на сделку</span><strong className="num">{formatPercent(dashboard.risk_percent)}</strong></button>
       </section>
-
-      <section className="panel state-card">
-        <div className="state-icon" aria-hidden>
-          {view.tone === 'active' ? (
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M5 12.5 9.5 17 19 7"
-                stroke="var(--success)"
-                strokeWidth="2.4"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          ) : view.tone === 'paused' ? (
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-              <rect x="6" y="5" width="4" height="14" rx="1.5" fill="var(--warning)" />
-              <rect x="14" y="5" width="4" height="14" rx="1.5" fill="var(--warning)" />
-            </svg>
-          ) : (
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="9" stroke="var(--danger)" strokeWidth="2" />
-              <path d="M12 8v5M12 16h.01" stroke="var(--danger)" strokeWidth="2.2" strokeLinecap="round" />
-            </svg>
-          )}
-        </div>
-        <h1 className="h1" style={{ margin: 0 }}>
-          {view.title}
-        </h1>
-        <div
-          className={`status-text ${
-            view.tone === 'active' ? 'tone-success' : view.tone === 'paused' ? 'tone-warning' : 'tone-danger'
-          }`}
-        >
-          {view.subtitle}
-        </div>
-        <div className="freshness">
-          <span className={`dot ${systemDot}`} aria-hidden />
-          Система: {transportStale ? 'данные требуют проверки' : systemLabel(dashboard.system_state)} · Снимок:{' '}
-          {snapshotLabel(dashboard.snapshot_captured_at)}
-        </div>
-      </section>
-
-      <div className="metric-grid">
-        <div className="metric">
-          <div className="metric-label">Риск на стоп</div>
-          <div className="metric-value num">{formatPercent(dashboard.risk_percent)}</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Открытые позиции</div>
-          <div className="metric-value num">{dashboard.open_positions ?? '—'}</div>
-        </div>
-      </div>
-
-      {load.firstPosition ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div className="section-label" style={{ marginTop: 2 }}>
-            Активная позиция
-          </div>
-          <PositionCard position={load.firstPosition} />
-        </div>
-      ) : (
-        load.positionsPending && (
-          <div className="skeleton" style={{ minHeight: 96 }} aria-label="Загрузка позиций" />
-        )
+      {!overview && <p className="info-box">Получаем данные аккаунта</p>}
+      {overview?.open_count === 0 && overview.freshness === 'fresh' && <p className="info-box">Нет открытых позиций. {dashboard.copy_state === 'active' ? 'Копирование включено. Открытые позиции появятся здесь.' : 'Новые входы на паузе.'}</p>}
+      {overview?.open_count != null && overview.protected_count != null && overview.open_count > overview.protected_count && (
+        <button type="button" className="position-warning" onClick={() => onOpen?.({ kind: 'trade-list', state: 'open', period: 'all', attention: true })}>
+          У {overview.open_count - overview.protected_count} позиций стоп не подтверждён
+        </button>
       )}
 
       {view.actionLabel === 'pause' && (
@@ -502,7 +413,7 @@ export function HomeScreen({
       {pendingConfirmation && (
         <Sheet
           title={RESUME_CONFIRM_TITLE}
-          body={RESUME_CONFIRM_BODY}
+          body={resumeConfirmBody(pendingConfirmation.resume_context)}
           onClose={() => {
             if (!acting) setPendingConfirmation(null)
           }}
@@ -527,19 +438,4 @@ export function HomeScreen({
       )}
     </div>
   )
-}
-
-function systemLabel(state: DashboardDTO['system_state']): string {
-  switch (state) {
-    case 'ready':
-      return 'готова'
-    case 'stale':
-      return 'данные устарели'
-    case 'degraded':
-      return 'деградация'
-    case 'blocked':
-      return 'заблокирована'
-    default:
-      return 'неизвестно'
-  }
 }

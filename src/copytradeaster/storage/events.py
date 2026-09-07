@@ -224,6 +224,30 @@ class EventRepository:
         )
         return [_decode(scope, row) for row in rows]
 
+    async def list_by_family(
+        self,
+        scope: HistoryScope,
+        refs: tuple[str, ...],
+        *,
+        after_seq: int,
+        limit: int,
+    ) -> list[StoredEvent]:
+        """Owned alias family in one globally ordered, cursor-bounded SQL read."""
+        if not refs or any(not isinstance(ref, str) or not ref for ref in refs):
+            raise ValueError("trade refs required")
+        if type(after_seq) is not int or after_seq < 0:
+            raise ValueError("feed cursor must be a nonnegative integer")
+        _check_limit(limit)
+        placeholders = ",".join("?" for _ in refs)
+        rows = await self._db.fetchall(
+            "SELECT seq,event_ref,trade_ref,kind,occurred_at,recorded_at,"
+            "facts,dedup_key,notify_eligible FROM user_activity_events"
+            " WHERE account_id=? AND environment=?"
+            f" AND trade_ref IN ({placeholders}) AND seq>? ORDER BY seq ASC LIMIT ?",
+            (scope.account_id, scope.environment, *refs, after_seq, limit),
+        )
+        return [_decode(scope, row) for row in rows]
+
     async def list_feed_page(
         self,
         scope: HistoryScope,

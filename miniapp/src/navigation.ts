@@ -14,6 +14,9 @@ export type NestedScreen =
   | { kind: 'account-builder' }
   | { kind: 'security' }
   | { kind: 'help' }
+  | { kind: 'trade-list'; state: 'open' | 'closed'; period: '7d' | '30d' | 'all'; attention?: boolean }
+  | { kind: 'trade-detail'; tradeRef: string }
+  | { kind: 'position-detail'; symbol: string; side: 'LONG' | 'SHORT' }
 
 export interface RouteState {
   tab: RootTab

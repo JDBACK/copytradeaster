@@ -471,6 +471,9 @@ class PositionSummaryDTO:
     take_profit_price: Decimal | None = None
     risk_to_stop_usdt: Decimal | None = None
 
+    quantity_asset: str | None = None
+    trade_ref: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class PositionPageDTO:
@@ -590,6 +593,9 @@ class TradeListItem:
     result_state: str = "gross_only"
     money: EpisodeMoneyView | None = None
 
+    average_entry: str | None = None
+    average_exit: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class TradeListPage:
@@ -633,6 +639,7 @@ class TradeEventItem:
     trade_ref: str | None
     occurred_at: datetime
     facts: dict[str, str | int | bool | None]
+    text: str = ""
 
 
 @dataclass(frozen=True, slots=True)

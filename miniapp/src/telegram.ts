@@ -125,3 +125,13 @@ export function setBackButton(visible: boolean, onClick?: () => void): void {
     /* older clients without BackButton control */
   }
 }
+
+
+/** Navigation intent only; every detail read still requires server ownership. */
+export function launchTradeRef(): string | null {
+  const query = new URLSearchParams(window.location.search).get('trade')
+  const start = new URLSearchParams(initData()).get('start_param')
+  const ref = query ?? start
+  if (ref === null) return null
+  return /^[A-Za-z0-9_-]{1,128}$/.test(ref) ? ref : 'unavailable-link'
+}

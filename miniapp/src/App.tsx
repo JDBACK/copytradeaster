@@ -10,7 +10,7 @@ import { BuilderWizard } from './screens/BuilderWizard'
 import { BuilderAttemptRecovery } from './screens/BuilderAttemptRecovery'
 import { SessionGate, type GateState } from './screens/SessionGate'
 import { SuccessScreen } from './screens/SuccessScreen'
-import { initData, isTelegram, setupTelegram } from './telegram'
+import { initData, isTelegram, setupTelegram, launchTradeRef } from './telegram'
 import type { BuilderOnboardedDTO, MiniAppSessionDTO } from './types'
 import { sessionDestination } from './session'
 
@@ -26,6 +26,8 @@ const DEV_USER_ID = Number(
 )
 
 export default function App() {
+  const [launchRef] = useState(launchTradeRef)
+  const [environment, setEnvironment] = useState<string | null>(null)
   const [phase, setPhase] = useState<Phase>({ kind: 'gate', state: 'loading' })
   const [devMode] = useState(() => !isTelegram() && Boolean(DEV_USER_ID))
   const [gateError, setGateError] = useState<string | undefined>()
@@ -84,6 +86,7 @@ export default function App() {
 
   const routeSession = useCallback((session: MiniAppSessionDTO) => {
     setGateError(undefined)
+    setEnvironment(session.environment)
     lastSessionIdentityRef.current = { userId: session.user_id, environment: session.environment }
     if (session.account_masked) {
       setAccountMasked(session.account_masked)
@@ -230,6 +233,8 @@ export default function App() {
             auth={auth}
             resources={resources}
             banner={devBanner}
+            launchRef={launchRef}
+            environment={environment}
             accountMasked={accountMasked}
             onNotConnected={handleNotConnected}
           />

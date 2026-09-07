@@ -226,38 +226,12 @@ async def recover_notification_outbox(
         await notifier.recover_confirmed_commands(CommandRepo(db), since=floor)
         if enable_user_event_delivery:
             await _recover_user_events_durable(db, notifier, now=current_now)
-        else:
-            await _recover_user_events(db, notifier, floor)
     elif enable_user_event_delivery:
         # Console-only mode advances durable cursors without enqueueing, so
         # a later enable never retroactively sends the muted backlog.
         await _recover_user_events_durable(db, None, now=current_now)
     next_floor = max(floor, current_now)
     await settings.set_flag(NOTIFICATION_RECOVERY_FLOOR_KEY, next_floor.isoformat())
-
-
-async def _recover_user_events(db: Database, notifier: NotificationRouter, floor: datetime) -> int:
-    """Emit eligible user events recorded after the recovery floor.
-
-    Crash-window trades notify from saved facts with their proven trade
-    ref instead of re-guessing text from the command journal; backfill
-    rows stay silent via notify_eligible. Only REAL follower accounts are
-    scanned; SHADOW rows have no recipients and notify nobody.
-    """
-    # Mainnet is fail-closed (CT_ALLOW_MAINNET=false), so every history
-    # scope is testnet today; revisit if mainnet is ever enabled.
-    environment = "testnet"
-    rows = await AccountRepo(db).get_all("follower")
-    scopes = [
-        HistoryScope(str(row["id"]), environment)
-        for row in rows
-        if str(row["execution_mode"] or "REAL") == "REAL"
-    ]
-    return await notifier.recover_user_events(
-        EventRepository(db),
-        scopes,
-        since_ms=int(floor.timestamp() * 1000),
-    )
 
 
 async def _recover_user_events_durable(

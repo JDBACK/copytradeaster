@@ -19,7 +19,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
@@ -1798,7 +1798,10 @@ class UserApplicationService:
                 if summary is not None:
                     parsed_list.append(summary)
 
-            parsed_list.sort(key=lambda item: item.symbol)
+            assets = await self._quantity_assets(account_id, [item.symbol for item in parsed_list])
+            parsed_list = [replace(item, quantity_asset=assets.get(item.symbol))
+                           for item in parsed_list]
+            parsed_list.sort(key=lambda item: (item.symbol, item.side))
 
             return PositionPageDTO(
                 positions=tuple(parsed_list),
@@ -2936,7 +2939,7 @@ class UserApplicationService:
                 raise ValidationError("trade page limit is invalid")
             if not 1 <= page_limit <= 50:
                 raise ValidationError("trade page limit is invalid")
-            if period not in _TRADE_PERIODS:
+            if not isinstance(period, str) or period not in _TRADE_PERIODS:
                 raise ValidationError("trade period is invalid")
             if cursor is not None and not isinstance(cursor, str):
                 raise ValidationError("trade cursor is invalid")
@@ -3076,7 +3079,9 @@ class UserApplicationService:
                 raise HistoryPageChangedError("trade history changed under this page") from exc
             except ValueError as exc:
                 raise ValidationError("trade events fills cursor is invalid") from exc
-            rows = await self._family_events(events, scope, owned.family_refs, after_seq)
+            rows = await events.list_by_family(
+                scope, owned.family_refs, after_seq=after_seq, limit=events_page + 1
+            )
             shown = rows[:events_page]
             next_seq = str(shown[-1].seq) if len(rows) > events_page else None
             return TradeEventsPage(
@@ -3092,30 +3097,6 @@ class UserApplicationService:
             raise
         except Exception:
             raise ServiceUnavailableError("trade events are unavailable") from None
-
-    @staticmethod
-    async def _family_events(
-        events: EventRepository,
-        scope: HistoryScope,
-        family_refs: tuple[str, ...],
-        after_seq: int,
-    ) -> list:
-        """User events for the whole proven ref family, oldest first.
-
-        One bounded read per family member (families are tiny: a canonical
-        ref plus its proven aliases), merged by immutable seq past the
-        events cursor. Aliases share the canonical history instead of each
-        showing a partial slice.
-        """
-        merged: list = []
-        for family_ref in family_refs:
-            try:
-                rows = await events.list_by_trade(scope, family_ref, after_seq=0, limit=200)
-            except ValueError as exc:
-                raise ValidationError("trade reference is invalid") from exc
-            merged.extend(row for row in rows if row.seq > after_seq)
-        merged.sort(key=lambda row: row.seq)
-        return merged
 
     async def activity_feed(
         self,

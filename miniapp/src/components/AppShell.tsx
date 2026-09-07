@@ -17,6 +17,8 @@ import {
   type RootTab,
 } from '../navigation'
 import { hapticImpact, setBackButton } from '../telegram'
+import { TradeListScreen } from '../screens/TradeListScreen'
+import { TradeDetailScreen, PositionDetailScreen } from '../screens/TradeDetailScreen'
 import { Sheet } from './ui'
 import { AccountBuilderScreen } from '../screens/AccountBuilderScreen'
 import { ActivityScreen } from '../screens/ActivityScreen'
@@ -34,8 +36,12 @@ export function AppShell({
   banner,
   onNotConnected,
   accountMasked,
+  launchRef = null,
+  environment,
 }: {
   auth: AuthContext
+  launchRef?: string | null
+  environment?: string | null
   resources?: MiniAppResources
   banner?: ReactNode
   onNotConnected: () => void
@@ -45,7 +51,7 @@ export function AppShell({
     () => providedResources ?? new MiniAppResources(auth, `standalone-shell:${auth.devUserId ?? auth.initData}`),
     [providedResources, auth],
   )
-  const [route, setRoute] = useState(initialRoute)
+  const [route, setRoute] = useState(() => launchRef ? { tab: 'positions' as const, nested: [{ kind: 'trade-detail' as const, tradeRef: launchRef }] } : initialRoute())
   const nested = currentNested(route)
   const [visited, setVisited] = useState<ReadonlySet<RootTab>>(
     () => new Set<RootTab>([initialRoute().tab]),
@@ -59,8 +65,9 @@ export function AppShell({
   // single invalidation generation for it until its stable-id merge lands.
   const [activityInvalidation, setActivityInvalidation] = useState(0)
   const handleHomeMutated = useCallback(() => {
+    resources.history.invalidate()
     setActivityInvalidation((value) => value + 1)
-  }, [])
+  }, [resources])
   const [foregroundSignal, setForegroundSignal] = useState(0)
   const lastForegroundAt = useRef(0)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -74,7 +81,7 @@ export function AppShell({
   const nestedFocusTargets = useRef(
     new Map<string, { element: HTMLElement | null; nestedFocusableIndex: number | null }>(),
   )
-  const nestedEntryKeys = useRef<string[]>([])
+  const nestedEntryKeys = useRef<string[]>(launchRef ? ['launch-detail'] : [])
   const nextNestedEntryId = useRef(0)
   const [riskDirty, setRiskDirty] = useState(false)
   const [leaveIntent, setLeaveIntent] = useState<
@@ -248,6 +255,8 @@ export function AppShell({
             active={homeActive}
             onReady={handleHomeReady}
             onMutated={handleHomeMutated}
+            onOpen={openNested}
+            onTab={handleTab}
             foregroundSignal={foregroundSignal}
           />
         </div>
@@ -258,12 +267,15 @@ export function AppShell({
             accountMasked={accountMasked}
             active={positionsActive}
             warm={warmReady || visited.has('positions')}
+            onOpen={openNested}
             foregroundSignal={foregroundSignal}
           />
         </div>
         <div hidden={!!nested || route.tab !== 'activity'}>
           <ActivityScreen
             auth={auth}
+            resources={resources}
+            onOpen={openNested}
             accountMasked={accountMasked}
             active={activityActive}
             warm={warmReady || visited.has('activity')}
@@ -277,27 +289,21 @@ export function AppShell({
             resources={resources}
             accountMasked={accountMasked}
             onOpen={openNested}
+            environment={environment}
             onNotConnected={onNotConnected}
             active={settingsActive}
             warm={warmReady || visited.has('settings')}
             foregroundSignal={foregroundSignal}
           />
         </div>
-        {nested && (
-          <div data-nested-surface>
-            <NestedRoute
-              nested={nested}
-              auth={auth}
-              resources={resources}
-              accountMasked={accountMasked}
-              onNotConnected={onNotConnected}
-              onActivityInvalidated={() => setActivityInvalidation((value) => value + 1)}
-              foregroundSignal={foregroundSignal}
-              onRiskDirtyChange={setRiskDirty}
-              setBackOverride={setNestedBackOverride}
-            />
+        {route.nested.map((screen, index) => (
+          <div key={nestedEntryKeys.current[index]} hidden={index !== route.nested.length - 1} data-nested-surface={index === route.nested.length - 1 ? '' : undefined}>
+            <NestedRoute nested={screen} auth={auth} resources={resources} accountMasked={accountMasked}
+              onNotConnected={onNotConnected} onOpen={openNested} active={index === route.nested.length - 1}
+              onActivityInvalidated={() => { resources.history.invalidate(); setActivityInvalidation(value => value + 1) }}
+              foregroundSignal={foregroundSignal} onRiskDirtyChange={setRiskDirty} setBackOverride={setNestedBackOverride} />
           </div>
-        )}
+        ))}
         {leaveIntent && (
           <Sheet
             title="Отменить изменения?"
@@ -364,8 +370,12 @@ export function NestedRoute({
   foregroundSignal,
   onRiskDirtyChange,
   setBackOverride,
+  onOpen = () => {},
+  active = true,
 }: {
   nested: NestedScreen
+  onOpen?: (route: NestedScreen) => void
+  active?: boolean
   auth: AuthContext
   resources?: MiniAppResources
   accountMasked?: string | null
@@ -380,6 +390,12 @@ export function NestedRoute({
   const handleNotConnected = onNotConnected ?? (() => {})
   const notify = onInvalidate ?? (() => {})
   switch (nested.kind) {
+    case 'trade-list':
+      return resources ? <TradeListScreen auth={auth} resources={resources} route={nested} onOpen={onOpen} active={active} foregroundSignal={foregroundSignal} /> : null
+    case 'trade-detail':
+      return resources ? <TradeDetailScreen resources={resources} tradeRef={nested.tradeRef} onOpen={onOpen} active={active} foregroundSignal={foregroundSignal} /> : null
+    case 'position-detail':
+      return resources ? <PositionDetailScreen resources={resources} symbol={nested.symbol} side={nested.side} active={active} foregroundSignal={foregroundSignal} /> : null
     case 'risk':
       // A saved risk percent is read by Home and Settings from their own
       // dashboard snapshots — both go stale here, without unmount or skeleton.
@@ -430,7 +446,7 @@ export function NestedRoute({
     case 'security':
       return <SecurityScreen accountMasked={accountMasked} />
     case 'help':
-      return <HelpScreen accountMasked={accountMasked} />
+      return <HelpScreen accountMasked={accountMasked} onOpen={onOpen} />
     default:
       return null
   }

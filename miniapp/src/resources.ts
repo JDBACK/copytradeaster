@@ -5,6 +5,7 @@
  * no localStorage, no secrets, no wallet/signature/confirmation state.
  */
 
+import { HistoryResources } from './historyResources'
 import { api, ApiError, type AuthContext } from './api'
 import type {
   AccountBuilderDTO,
@@ -12,6 +13,7 @@ import type {
   NotificationSettingsDTO,
   PositionPageDTO,
   RiskDTO,
+  RiskPreviewDTO,
   StatusDTO,
 } from './types'
 
@@ -19,6 +21,7 @@ export type ResourceKey =
   | 'dashboard'
   | 'positions'
   | 'risk'
+  | 'riskPreview'
   | 'notifications'
   | 'status'
   | 'accountBuilder'
@@ -27,6 +30,7 @@ export interface ResourceValues {
   dashboard: DashboardDTO
   positions: PositionPageDTO
   risk: RiskDTO
+  riskPreview: RiskPreviewDTO
   notifications: NotificationSettingsDTO
   status: StatusDTO
   accountBuilder: AccountBuilderDTO
@@ -38,6 +42,7 @@ export const RESOURCE_TTL_MS: Record<ResourceKey, number> = {
   dashboard: 30_000,
   positions: 30_000,
   risk: 60_000,
+  riskPreview: 30_000,
   notifications: 30_000,
   status: 30_000,
   accountBuilder: 30_000,
@@ -122,6 +127,7 @@ function emptyEntry<T>(): Entry<T> {
 
 export class MiniAppResources {
   readonly scope: string
+  readonly history: HistoryResources
   private readonly auth: AuthContext
   private readonly onInvalidSession?: () => void
   private invalidSessionReported = false
@@ -131,12 +137,14 @@ export class MiniAppResources {
     dashboard: emptyEntry<DashboardDTO>(),
     positions: emptyEntry<PositionPageDTO>(),
     risk: emptyEntry<RiskDTO>(),
+    riskPreview: emptyEntry<RiskPreviewDTO>(),
     notifications: emptyEntry<NotificationSettingsDTO>(),
     status: emptyEntry<StatusDTO>(),
     accountBuilder: emptyEntry<AccountBuilderDTO>(),
   }
 
   constructor(auth: AuthContext, scope: string, onInvalidSession?: () => void) {
+    this.history = new HistoryResources(auth, this)
     this.auth = auth
     this.scope = scope
     this.onInvalidSession = onInvalidSession
@@ -365,6 +373,7 @@ export class MiniAppResources {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.history.dispose()
     this.locks.clear()
     for (const key of Object.keys(this.entries) as ResourceKey[]) {
       const entry = this.entry(key)
@@ -464,6 +473,8 @@ export class MiniAppResources {
         return api.dashboard(this.auth, strength === 'strong', { signal }) as Promise<ResourceValues[K]>
       case 'positions':
         return api.positions(this.auth, strength === 'strong', { signal }) as Promise<ResourceValues[K]>
+      case 'riskPreview':
+        return api.riskPreview(this.auth, { signal }) as Promise<ResourceValues[K]>
       case 'risk':
         return api.risk(this.auth, { signal }) as Promise<ResourceValues[K]>
       case 'notifications':
