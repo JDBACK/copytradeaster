@@ -699,3 +699,28 @@ open→increase→STOP place+cancel→partial→close(UNKNOWN→query-before-ret
 всех поверхностях, recovery `open_trade`, foreign пуст. Аккаунт flat,
 ордеров нет. Контест второй ветки к моменту прогона остановлен,
 exclusivity-гарды прошли.
+
+## Шаг 27 — независимая перепроверка S1 по частям (2026-09-07, без live)
+
+Шесть reviewer-агентов параллельно, только offline (live не трогали —
+эксклюзивное окно чужой ветки). Все части — correct, MUST-FIX нет:
+- S1.1 capture: 67/67; per-key Lock, margin-ожидание однократное +
+  fail-closed, checkpoint только опубликованным end, replay к origin,
+  вырожденный replay>cutoff без краша (NOTE: прямой тест ветки
+  Span(x,x) отсутствует — покрыт соседний случай e00e564).
+- S1.2 store: 40/40 + 20 смежных; first-wins, scope-изоляция, seq-курсоры
+  1..200, атомарный publish, allocation-fills, миграция 56 без потерь.
+- S1.3 деривация: 72/72; transitions при apply, dedup scope+fill+seq,
+  leg-keyed protection из CONFIRMED, net=None без proof, single-count
+  комиссий (NOTE: мёртвое pro-rata-поле flip-close transition —
+  на события не влияет).
+- S1.4 reads: 93 + 441 application/miniapp; allocation-пагинация,
+  ownership везде, стабильные курсоры, cached-only preview,
+  resume-контекст только RESUME, Decimal без float в деньгах.
+- S1.5 notify: 48 + 40 + 10 + 1; durable high-water, кнопка dormant до S3,
+  rollout floor, retention только терминальных.
+- S1.6 offline: acceptance 4 passed (один trade_ref, чужой пуст),
+  ghost-v33 converge, миграции честно append-only (58 entries 0..57),
+  suite 1429/2/45 воспроизведён, бенчмарк smoke консервативен.
+Сквозная: ruff check/format чистые, doc links OK (48 файлов).
+Файлы ревьюера (UX_PLAN/S1_REVIEW/docs/AGENTS) не трогал — их ветка.
