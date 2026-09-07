@@ -377,6 +377,12 @@ Activity/бот, local-calendar tests, flat resume, новые снимки и �
 Подробности, зависимости, файлы и критерии:
 [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
 Кампания находится в реализации: S1 backend начат, но G1 ещё не принят;
+независимое ревью `f77a3fd` — **REQUEST CHANGES**, есть ошибки кода, а не
+только недостающий live-прогон. Находки и критерии исправления:
+[MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
+Конкретная архитектура исправлений — §23 UX-плана: C1–C9, contracts,
+миграции, порядок PR и условия G1. Это план оставшейся реализации, а не
+отметка об уже внесённых исправлениях.
 прежние acceptance-статусы не переоткрываются. Изолированный первый slice —
 шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
 2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
@@ -397,20 +403,17 @@ snap-stop A/B) **отложена на потом — устройства не�
   с событиями, worker-активация capture (durable checkpoints, settled-gate,
   dirty hints, runtime wiring), order-link источники copy, protection-события
   SET/CHANGED/UNCONFIRMED, batch shared-fill split с сохранением суммы.
-- [ ] S1.3 integration: system-события application-слоя (риск/пауза/связность/
-  пропуск) в S1.5 поверх ленты; из журнала не выводятся.
-- [x] S1.4 contracts: trade list/detail/events/feed DTO и презентеры,
-  ownership, stable cursors, dashboard overview, snapshot singleflight, units
-  из exchange metadata, risk preview для всех шагов линейки, resume-контекст
-  в begin_confirmation, 5 новых POST (стало 26). Остаются net-атрибуция (S1.6)
-- [x] S1.5 backend: общий event presenter, structured outbox (trade_ref/action,
-  keyboard payload dormant до S3), recovery из сохранённых событий поверх
-  legacy, system-писатели риска/паузы/resume поверх ленты. Активация новых
-  push-сообщений/кнопок, замена live-текстов и menu — S3.
-- [x] S1.6 offline: §10.9.5/6 cross-surface acceptance, §10.9.7 изоляция,
-  restart-идемпотентность, ремонт апгрейда pre-S1 БД, retention decision.
-  Live §10.9-цикл написан, ждёт ревью и запуска.
-- [ ] G1: live §10.9 evidence, затем приёмка S1 и старт S2.
+- [x] S1.3 integration acceptance: C1 стабильная проекция/границы/replay,
+  C3 transitions вместо diff, C4 leg-keyed protection + ENTRY_SKIPPED/
+  CONNECTIVITY writers (R2–R4 закрыты кодом и регрессиями).
+- [x] S1.4 acceptance: C2 allocation-fills и split-пагинация, C5 money proof,
+  C7 snapshot-feed (R1/R5/R9 закрыты).
+- [x] S1.5 acceptance: C6 durable delivery cursor, rollout floor,
+  trade_links_enabled=False до S3 (R6/R7 закрыты).
+- [x] S1.6 acceptance: C8 worker budget/maintenance/benchmark (p95 552ms,
+  прогноз 365d 1.56GB), C9 live §10.9 PASS 26.56s (R8 закрыт).
+- [x] G1: findings MINIAPP_S1_REVIEW устранены (C1–C9), evidence §10.9
+  принято (live PASS, flat после). S1 принят, разрешён старт S2.
 - [ ] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings; S2.1–S2.6.
 - [ ] G2: Скорость принята на нынешних экранах; разрешён старт S3.
 - [ ] S3: Интерфейс и функциональность — Home, Open/Closed/detail, Activity/бот, Settings; S3.1–S3.5.

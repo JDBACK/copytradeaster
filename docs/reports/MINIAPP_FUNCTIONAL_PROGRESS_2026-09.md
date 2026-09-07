@@ -683,3 +683,19 @@ per-step operation_id + сверка journal-coid↔биржа после каж
 Счёт: offline **1428 passed / 2 skipped / 45 deselected**, ruff + format
 чистые, миграции 0..57. G1 остаётся открытым: нужен эксклюзивный прогон
 исправленного харнеса.
+
+## Шаг 26 — live §10.9 PASS, G1 evidence собран (2026-09-07)
+
+Прогоны 6–8 доводили харнес и один инвариант ядра: STOP-сверка по journal
+key (`e00e564` до этого), пустой replay при подросшем фронтире возвращал
+`[]` — сначала чинилось не тем диапазоном (replay-срез вместо
+запрошенного окна), затем перекрытие взято от исходного окна capture
+(`e00e564`): пустая публикация отчитывается `list_range` запрошенного
+окна; офлайн-регрессия `test_recapture_after_frontier_growth_returns_
+stored_episode`. Прогон 8: **1 passed за 26.56s** — полный цикл
+open→increase→STOP place+cancel→partial→close(UNKNOWN→query-before-retry)
+через Executor/journal, импорт, один closed episode, gross == бирже,
+комиссии single-count, рестарт пересозданием с тем же ref, HTTP (HMAC) на
+всех поверхностях, recovery `open_trade`, foreign пуст. Аккаунт flat,
+ордеров нет. Контест второй ветки к моменту прогона остановлен,
+exclusivity-гарды прошли.
