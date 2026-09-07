@@ -376,14 +376,15 @@ Activity/бот, local-calendar tests, flat resume, новые снимки и �
 приёмкой touch/мыши/trackpad. Геометрия Aster-шкалы и risk policy сохраняются.
 Подробности, зависимости, файлы и критерии:
 [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
-Кампания находится в реализации: S1 backend начат, но G1 ещё не принят;
-независимое ревью `f77a3fd` — **REQUEST CHANGES**, есть ошибки кода, а не
-только недостающий live-прогон. Находки и критерии исправления:
+Кампания находится в реализации: повторное ревью C1–C9 на `9a0dd98`
+(2026-09-07) — **REQUEST CHANGES**, G1 открыт. Найдены ошибки scheduled
+publication, continuation, recovery и acceptance harness. Находки N1–N6:
 [MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
-Конкретная архитектура исправлений — §23 UX-плана: C1–C9, contracts,
-миграции, порядок PR и условия G1. Это план оставшейся реализации, а не
-отметка об уже внесённых исправлениях.
-прежние acceptance-статусы не переоткрываются. Изолированный первый slice —
+Архитектура — §23–24 UX-плана. **Актуальный corrective scope и условия G1**
+после уточнения масштаба 10–30: [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md).
+Обязательны N1–N3 и T1–T6; N4–N6 имеют отдельные сроки. Реализация пакетов
+не равна прохождению их acceptance.
+Прежние acceptance-статусы вне S1 не переоткрываются. Изолированный первый slice —
 шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
 2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
 [MINIAPP_RISK_RULER_2026-09.md](reports/MINIAPP_RISK_RULER_2026-09.md));
@@ -403,17 +404,22 @@ snap-stop A/B) **отложена на потом — устройства не�
   с событиями, worker-активация capture (durable checkpoints, settled-gate,
   dirty hints, runtime wiring), order-link источники copy, protection-события
   SET/CHANGED/UNCONFIRMED, batch shared-fill split с сохранением суммы.
-- [x] S1.3 integration acceptance: C1 стабильная проекция/границы/replay,
-  C3 transitions вместо diff, C4 leg-keyed protection + ENTRY_SKIPPED/
-  CONNECTIVITY writers (R2–R4 закрыты кодом и регрессиями).
-- [x] S1.4 acceptance: C2 allocation-fills и split-пагинация, C5 money proof,
-  C7 snapshot-feed (R1/R5/R9 закрыты).
-- [x] S1.5 acceptance: C6 durable delivery cursor, rollout floor,
-  trade_links_enabled=False до S3 (R6/R7 закрыты).
-- [x] S1.6 acceptance: C8 worker budget/maintenance/benchmark (p95 552ms,
-  прогноз 365d 1.56GB), C9 live §10.9 PASS 26.56s (R8 закрыт).
-- [x] G1: findings MINIAPP_S1_REVIEW устранены (C1–C9), evidence §10.9
-  принято (live PASS, flat после). S1 принят, разрешён старт S2.
+- [ ] S1.3 integration acceptance: C1/C3 реализованы, но N1–N3 блокируют
+  scheduled bootstrap, сохранение эпизода между публикациями и late replay.
+  C4 leg-keyed protection + writers принят в пределах R4.
+- [ ] S1.4 acceptance: C2 allocation-fills принят; events pagination после
+  200 записей требует N4. C5 money proof и C7 snapshot-feed приняты (R5/R9).
+- [ ] S1.5 acceptance: C6 durable consumer написан, но default composition
+  остаётся на старом recovery (N5/R6). Gate кнопок принят (R7).
+- [ ] S1.6 acceptance: storage forecast C8 полезен; worker queue/publication
+  latency не измерена. C9 live PASS сохранён, но N6 требует journal-coid
+  для отмены STOP, SL fill и промежуточных scheduled captures.
+- [ ] G1: OPEN / REQUEST CHANGES после повторного ревью `9a0dd98`.
+  Закрыть N1–N3 по §6 FIX_HANDOFF; реализатор фиксирует evidence и закрывает
+  самостоятельно без нового общего ревью. N4 — до details, N5 — до event
+  delivery, N6 — до повторного live harness. SL fill/STOP live evidence —
+  до production rollout, совместить с G3. Worker smoke 10–30 полезен,
+  100-account benchmark не является gate. Изолированные slices S2 допустимы по §14.
 - [ ] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings; S2.1–S2.6.
 - [ ] G2: Скорость принята на нынешних экранах; разрешён старт S3.
 - [ ] S3: Интерфейс и функциональность — Home, Open/Closed/detail, Activity/бот, Settings; S3.1–S3.5.

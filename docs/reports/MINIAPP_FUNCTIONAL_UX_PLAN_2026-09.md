@@ -1942,3 +1942,438 @@ idle не расходует rAF; haptics не дублируются. Длит�
 не меняет размеры панели; control выглядит законченным даже без motion/haptics.
 Запрос владельца считается выполненным сочетанием внешнего вида и плавности,
 а не одним добавленным easing или вибрацией.
+
+## 22. Уточнение исполнения после независимого S1 review (2026-09-06)
+
+Проверенная реализация `4f1a86a..f77a3fd` не закрывает S1/G1. Актуальные
+findings и критерии исправления:
+[MINIAPP_S1_REVIEW_2026-09.md](MINIAPP_S1_REVIEW_2026-09.md), R1–R9.
+Offline suite проходит; это не заменяет acceptance корректности данных и §10.9.
+
+Сохраняются исходные требования: fills именно своего эпизода и их доли,
+одна identity при rolling/backfill, последовательные события с собственными
+числами, независимая HEDGE protection, known costs и конкретные gaps при null
+net, crash-recovery без пропусков, отключённая до S3 кнопка, high-water feed.
+Предложенные исполнителем исключения «fills без лимита», «settled-placeholder
+до закрытия», «seq вместо §11.2 без snapshot» не принимаются как готовая
+реализация: они связаны с воспроизведёнными дефектами и описаны в review.
+
+Порядок трёх stages сохраняется. Перед новым verdict G1 — исправить findings,
+закончить capacity/retention под 100 accounts и проверить publication lag,
+затем выполнить исправленный production-path testnet сценарий. Нынешний
+live harness требует исправлений до запуска; его отдельный PASS не доказывает
+настоящий restart, journal, SL/UNKNOWN/open-start/backfill. UI-click и device
+приёмка шкалы остаются G3. Новая инфраструктура или повторный аудит всего
+торгового ядра для этого не требуются.
+
+## 23. Архитектура исправлений S1 после review
+
+Статус: **к исполнению, код этих исправлений ещё не написан**. Основание —
+R1–R9 в [review](MINIAPP_S1_REVIEW_2026-09.md). Это оставшиеся work packages
+внутри S1, не четвёртый stage. Имена новых методов/DTO ниже — предлагаемый
+контракт для исполнителя; существующие публичные routes сохраняются аддитивно.
+При конфликте с прежними отметками CONFORM руководствоваться §22–23.
+
+### 23.1 Границы модулей и итоговый поток
+
+`HistorySynchronizer` импортирует биржевые факты и сообщает, какой диапазон
+изменился. `HistoryCapture` владеет сериализацией одного account/environment/
+symbol, boundary proof и выбором диапазона пересборки. Чистый projector
+возвращает episodes, allocations и последовательные transitions. Repository
+атомарно публикует проекцию, её lineage, события и projection checkpoint.
+Application читает опубликованный результат и financial proof, собирает DTO.
+Notification recovery переносит immutable events в outbox с собственным
+durable cursor. Telegram worker занимается только доставкой.
+
+Не помещать правила атрибуции/эпизодов в aiohttp handlers, frontend или
+notification formatter. Не копировать расчёт PnL в service. Сохраняются
+существующие Database.write_lock, weighted limiter и один history worker.
+Новые I/O выполняются вне write transaction; публикация — короткая транзакция.
+Один account/symbol lock обслуживает и import, и projection; при отложенном
+recheck lock отпускается. После возобновления сравнить durable facts revision
+и checkpoint revision с подготовленным состоянием. Если facts изменились,
+перестроить proof/проекцию; нельзя публиковать по старому снимку новых fills.
+
+### 23.2 C1 — стабильная проекция, checkpoints и corrections (R2)
+
+**Файлы:** `history/capture.py`, `history/sync.py`, `history/projection.py`,
+`history/models.py`, `storage/history.py`, `storage/episodes.py`,
+`storage/database.py`.
+
+Разделить import frontier и projection replay boundary. Семь дней — размер
+биржевого запроса, не срок жизни эпизода и не причина смены public_ref.
+Убрать clamp, который обрезает начало уже известной позиции.
+
+Предлагаемые контракты:
+
+- `ImportDelta`: `inserted_count`, `changed_from_ms`, `coverage_changed`,
+  `verified_through_ms`, `facts_revision`. Повторный импорт не делает всю
+  историю dirty. Завершение прежнего gap инициирует повторную проверку.
+- `ProjectionBoundary`: scope, symbol, cutoff, mode, seed quantity/ref по leg,
+  coverage evidence и revision. Граница сохраняется только после успешной
+  сверки; `flat` — доказанное состояние, не нулевой default.
+- `choose_replay_range(checkpoint, delta, stored_episodes)` возвращает
+  начало пересборки и затронутые refs. Обычный путь берёт последнюю доказанную
+  границу до новых фактов; открытые эпизоды включаются от своего устойчивого
+  seed/начала. Late fill откатывает replay к доказанной границе перед ним.
+  Завершённые эпизоды вне диапазона не переписываются.
+- `publish_reconciled_batch(...)` принимает expected revision, episodes,
+  allocation index, events, corrections и новый checkpoint. Их commit один;
+  crash до commit оставляет прежнюю публикацию и dirty диапазон для retry.
+
+`facts_revision` хранить в существующем scope/symbol state и увеличивать вместе
+с изменившимися facts/coverage в их import transaction. Replay boundaries позже
+самого раннего late change требуют повторного доказательства; нельзя использовать
+их как неизменный seed, если эта поправка опровергает прежний flat interval.
+
+Хранить устойчивые replay boundaries в небольшой таблице
+`history_projection_boundaries` (scope/symbol/cutoff + seed JSON/version).
+Сохранять исходную принятую boundary и точки завершения диапазонов/позиций,
+не каждый polling snapshot. Если нет подходящей поздней границы, пересборка
+начинается с исходной принятой. Полная retained history читается из SQLite;
+сетевой import по-прежнему разбивается на допустимые окна с budget.
+
+При запуске с открытой позицией создать один partial episode на доказанную leg
+с постоянным opaque ref и неизвестной entry basis. Удалить общий
+`require_settled` запрет на такие публикации после подключения устойчивого seed.
+Отсутствующая цена/история остаётся unknown, однако текущий остаток и новые
+подтверждённые reductions доступны. HEDGE seeds и transitions независимы.
+
+Сопоставление при replay: сначала существующий ref по entry fill или сохранённому
+seed; затем доказанное совпадение allocations/границ. Symbol сам по себе не
+доказывает identity. Дополнение сохраняет ref; доказанный merge — canonical
+alias. Для split реализовать §20.2: typed `TradeResolutionDTO` с owned target
+refs и причиной вместо выбора случайного потомка. Хранить split lineage в
+`follower_episode_resolutions`; обычный get остаётся простым direct/alias path.
+Удаление superseded rows, lineage и revision change — в той же публикации.
+
+Существующие некорректные episodes нельзя объявить принятыми только после
+установки нового кода. До G1 выполнить управляемый replay из сохранённых facts,
+silent для push, с сохранением разрешимых старых ссылок. Не удалять fills,
+cashflows или журнал исполнения. Неоднозначные старые ссылки получают resolution
+state. Повторная correction не создаёт новые aliases/events.
+
+### 23.3 C2 — принадлежность fills и bounded details (R1)
+
+**Файлы:** `storage/episodes.py`, `storage/history.py`, `application/models.py`,
+`application/service.py`, `application/trade_views.py`, `miniapp/server.py`.
+
+Добавить materialized index `follower_episode_allocations`:
+`account_id/environment/symbol/position_side/trade_ref/exchange_trade_id/role`,
+`allocated_qty`, `allocated_realized_gross`, `occurred_at`. Unique по scope,
+trade_ref, fill и role; деньги — TEXT. Это индекс уже имеющихся allocations,
+а не второй источник биржевых фактов. Он заменяется только вместе с revision
+эпизода; migration/rebuild заполняет его из опубликованных данных.
+
+`list_allocated_fills(scope, canonical_refs, cursor, limit)` делает JOIN с
+`follower_fills` по полному scope и exchange_trade_id. Никакого отбора только
+по времени или side. DTO: exchange fill qty/price отдельно от allocated_qty,
+role, allocated gross и position_side. Flip показывает долю эпизода; сумма
+долей равна исходному fill. Идентификаторы в JSON — строки.
+
+У `trade/events` раздельные `fills_cursor`/`events_cursor` и `next_*_cursor`;
+лимиты по умолчанию 20, максимум 50 для каждого массива. Fill cursor включает
+episode revision и `(occurred_at, trade_id, role)`. При изменившейся revision
+вернуть явный `history_page_changed`, не продолжать несогласованную страницу.
+Старый `cursor` временно трактовать только как events cursor.
+
+`resolve_owned_ref` использовать один раз до details/fills/events: direct →
+canonical, merge → canonical + aliases, split → resolution DTO. Events выбирать
+по доказанной семье refs; чужие scope и missing остаются одинаково недоступными.
+Недоказанно распределяемые старые split events показываются как correction
+context, а не автоматически приписываются всем потомкам.
+
+### 23.4 C3 — детерминированные события из transitions (R3)
+
+**Файлы:** `history/projector.py`, `history/models.py`, `history/event_builder.py`,
+`history/projection.py`, `storage/events.py`.
+
+Добавить чистый результат `ProjectionResult(episodes, transitions)`.
+`EpisodeTransition` несёт ref/anchor, symbol/leg, fill id/role, время, delta qty,
+остаток после перехода, цену этого исполнения и gross именно закрытой доли.
+Сортировка fills — существующая стабильная `(time, trade_id)` внутри symbol.
+Projector вычисляет transition сразу при применении allocation, пока доступно
+состояние после неё. Event builder только переводит transition в EventDraft.
+
+Для S1 принять минимальную семантику: событие на смысловую allocation;
+несколько fills одного order не схлопываются скрытым debounce. Первый entry
+даёт OPENED с его qty/ценой, следующие — INCREASED, неполный exit — REDUCED,
+обнуление — CLOSED. CLOSED содержит итог episode, REDUCED — gross своего exit.
+События одинаковы при одном batch и при последовательных публикациях.
+
+Dedup identity: полный scope + устойчивый fill/role + семантический transition.
+Не включать в key polling time, размер batch, формат Decimal и случайный UUID
+проекции. First-wins сохраняется для доказанного факта. Неподтверждённое событие
+не публиковать как окончательное. Уже записанный ошибочный legacy event не
+переписывать: связать с исправляющим `HISTORY_CORRECTED` событием/lineage,
+исключить superseded трактовку из нового presenter; correction push молчит.
+Новое kind включить в closed set SQLite/event DTO через migration.
+
+Eligibility вычисляется для каждого события: время факта после rollout floor,
+возраст в пределах принятой live policy, отсутствие backfill/correction.
+Свежесть frontier не делает недельные fills live. Финализация costs обновляет
+detail revision, не создаёт второй CLOSED или повторный push.
+
+### 23.5 C4 — независимые protection и system facts (R4)
+
+**Файлы:** `history/protection.py`, `storage/history.py`,
+`history/projection.py`, application/coordinator/notification source paths.
+
+`ProtectionFact` и `BaselineSlot` дополнить доказанными position_side,
+command_key и operation time. State key — `(symbol, leg, stop|take_profit)`;
+baseline query partition совпадает с этим ключом. CANCEL связывать с исходным
+placement по account/coid, извлекая leg и slot из placement payload.
+Unknown leg не превращать в BOTH. Replacement новой защиты на одной leg
+не изменяет slot другой leg.
+
+Источником lifecycle служат отдельные CONFIRMED journal commands и exchange
+observations; mutable order row подтверждает текущее состояние, но не хранит
+всю историю placement/cancel. Восстанавливать placement из его исходной команды,
+отмену — из cancel-команды. Evidence/time provenance хранить явно; отсутствие
+exchange timestamp не маскировать выдуманным точным временем исполнения.
+Доказанная привязка protection к follower episode возможна по leg и принятому
+интервалу; без неё оставить ref=null и отобразить account-level факт.
+
+Для ENTRY_SKIPPED брать решение risk/planner с account/symbol/reason и
+устойчивой identity попытки; для CONNECTIVITY_* — переход состояния конкретного
+account adapter. Не генерировать событие на каждый одинаковый sweep. Риск/
+pause/resume фиксировать после успешной операции, previous risk читать внутри
+того же account lock. Сбой записи не превращает успешное управление в ошибку;
+восстановимость trade events обеспечивает durable projection path.
+
+### 23.6 C5 — финансовая модель в application contracts (R5)
+
+**Файлы:** `history/accounting.py`, `storage/history.py`,
+`application/trade_views.py`, `application/models.py`, `application/service.py`.
+
+Один orchestration метод `load_episode_money(scope, refs)` читает согласованный
+срез episodes/allocations/cashflows/coverage и вызывает существующий
+`account_episodes`. Чтение фиксируется SQLite read transaction или revision
+проверкой до/после; сеть внутри отсутствует. Результат используется list/detail
+и formatter, отдельно денежные формулы в них не реализуются.
+
+В batch accountant ключ fills/claims — `(symbol, trade_id)`. Для shared fill
+загрузить все относящиеся sibling allocations, даже если второй episode вне
+текущей страницы. Signed COMMISSION учитывается один раз; pro-rata остаток
+распределяется детерминированно. Финальную сумму считать в том же Decimal
+precision context, что и доли.
+
+Существующий `AccountingProof` строится из durable coverage, фактической fee
+policy и доказанной attribution. Непустой income response не означает complete.
+Funding без однозначной leg/episode остаётся unattributed; builder cap никогда
+не становится расходом. Для каждого компонента DTO возвращает `known_amount`,
+`state: complete|partial|unavailable`, `issues`; отсутствие факта не равно нулю.
+Общие поля: `gross`, `net|null`, `result_state`, `as_of`, `revision`.
+History quality и money finality — разные признаки. Нужен конкретный gap даже
+если точный net пока недоступен по всем реальным Builder-сделкам.
+
+Metadata base asset сохранять/кешировать по symbol/environment для истории,
+включая инструменты, уже не имеющие status TRADING. Передавать одну и ту же
+quantity_asset в detail и notification presenter; при недоступности — null.
+В HTTP ответах все amounts — canonical strings, не float.
+
+### 23.7 C6 — durable recovery и управление включением кнопки (R6/R7)
+
+**Файлы:** `notifications/router.py`, `notifications/worker.py`,
+`application/engine.py`, `storage/events.py`, `storage/repositories.py`.
+
+Новый user-event recovery не использует legacy timestamp floor для progress.
+Добавить `user_event_delivery_state` с `(account_id, environment, scanned_seq)`.
+Rollout floor eligibility хранится отдельно и не двигается при достижении
+лимита. На sweep фиксируется target high-water, выбирается batch до 200 строк
+`scanned_seq < seq <= target`. Неeligible строки тоже продвигают scan.
+
+В одной DB transaction вставить все предназначенные outbox rows batch и
+обновить scanned_seq до последней рассмотренной строки. После crash возможен
+идемпотентный replay (`user-event:{event_ref}`), но не пропуск. Если достигнут
+budget, следующий tick продолжает сохранённую позицию; startup не ждёт
+исчерпания большой ленты. Legacy command recovery остаётся отдельным до S3;
+миграция consumers позже устраняет дублирование трактовок по H5.
+В production новый delivery consumer включается в S3 вместе с переходом
+consumers: `enable_user_event_delivery=False` до rollout отключает его boot
+hook и recurring drain, но не сбор истории. При первом включении отдельно
+зафиксировать rollout floor, чтобы не рассылать накопленный backfill.
+В S1 его полный путь проверяется на test DB с включённым capability.
+
+Форматирование/выбор recipients вынести перед коротким commit, ошибки сохранять
+как диагностируемое состояние с policy retry/skip; не продвигать cursor через
+необработанную eligible запись молча. Отсутствие получателя/отключённые
+уведомления — явный deliberate skip, без ретроактивной рассылки при включении.
+
+`trade_links_enabled: bool = False` — отдельный constructor capability worker,
+не наличие miniapp_public_url. Проверять его до сборки markup. Action/ref уже
+могут храниться; menu URL работает независимо. В S3 включить только после
+приёмки owned route и launch intent. Testnet acceptance проверяет payload,
+а не принудительно включает отсутствующий frontend.
+
+### 23.8 C7 — пользовательские страницы со стабильным срезом (R9)
+
+**Файлы:** `storage/events.py`, `storage/episodes.py`,
+`application/service.py`, `application/models.py`, `miniapp/server.py`.
+
+Разделить `scan_after_seq` для delivery и `list_feed_page` для UI.
+Первая UI-страница фиксирует high_water и читает `seq <= high_water`
+в порядке `occurred_at DESC, seq DESC`. Последующие страницы добавляют keyset
+предикат `< (last_occurred_at, last_seq)` и тот же high_water.
+Cursor version 1 содержит scope token, filter, high_water и last tuple;
+он не является авторизацией. Все запросы повторно проверяют ownership.
+Лимиты и decoded значения валидировать, включая тип period до membership
+check. Невалидный cursor — 400, не непреднамеренный 500.
+
+Новые/late events выше high_water не вклиниваются; `latest_seq` позволяет UI
+показать «Есть новые события». Для closed cursor зафиксировать filter/since,
+tuple closed_at/ref и account history revision. При correction границ возвращать
+`history_page_changed`; не продолжать старую страницу через изменившуюся модель.
+Full snapshot caching на сервере не нужен. Cursor round-trip проверять через HTTP.
+
+### 23.9 C8 — worker budget, retention и миграции
+
+**Файлы:** `history/worker.py`, `history/composition.py`,
+`notifications/worker.py`, `storage/database.py`, `scripts/benchmark_history.py`.
+
+Разделить `dirty_import` и `dirty_projection`: завершённый fills job не снимает
+hint capture. После изменения fills ставить capture того же scope в ближайший
+fair queue slot; остальные accounts не голодают. No-op jobs пропускать внутри
+bounded tick. Не заводить 100 самостоятельных polling loops: общий worker,
+round-robin и существующий limiter достаточны. Считать все snapshot/recheck
+запросы в request budget; ожидание margin хранить как due_at этапа capture,
+чтобы пауза одного аккаунта не блокировала остальные. При recheck заново
+проверять boundary/revision, не доверять устаревшей RAM-подготовке.
+
+Сначала измерить bulk change на 10/30/100 accounts со Shadow/fake read endpoints:
+fill-observed→published lag, очередь, число reads и влияние на trading loop.
+Предлагаемый инженерный ориентир — p95 публикации до 30 s на 30 accounts,
+до 60 s на 100 при принятой нагрузке; это цель проверки, не обещание биржевой
+задержки. Зафиксировать actual workload/rate weights и честный attainable budget
+до G1. Сеть может дать longer gap; DTO показывает freshness/pending.
+
+Один периодический maintenance tick (например, часовой) удаляет bounded batch
+terminal outbox по уже выбранным 7/30 дням; незавершённые строки не удаляет.
+Если backlog больше batch, продолжение отдельным следующим tick с yield.
+Cursor delivery не зависит от наличия старых SENT rows. Каноническая история
+без TTL; измерить полную новую схему с events/allocations/boundaries/indexes,
+WAL и backup. Таблица прогноза 30/90/365 дней содержит fills/день/account,
+events/fill, protection churn, итоговые GB и запас. Порог места задаётся из
+этого измерения; при исчерпании бюджета нужен явный degraded/ops signal.
+
+Новые migrations append после текущего index 51; не перенумеровывать ранее
+применённые записи. Добавлять только описанные materialized indexes/state/
+lineage. Upgrade поддерживает fresh, ghost-v33 и текущий S1 DB; существующие
+facts сохраняются. Изменение SQLite CHECK event kinds выполнять table-rebuild
+с копированием строк и проверкой целостности внутри migration transaction.
+
+### 23.10 C9 — исправленный harness и итоговая приёмка (R8)
+
+**Файлы:** `tests/testnet/test_history_acceptance_live.py`, существующий
+integration harness, `tests/unit/history/`, `tests/unit/application/`,
+`tests/unit/notifications/`, `tests/AGENTS.md`.
+
+Сначала исправить tuple unpack list_closed, убрать `gross > 0`, сравнивать
+подписанные amounts с конкретными order/fill IDs. Cleanup по каждой ненулевой
+leg: обратная сторона, точный residual и leg, reduceOnly в one-way; ambiguous
+send сначала query по coid, только после разрешения решение о следующем order.
+Перед live подтвердить выделенный follower и отсутствие конкурирующего
+управления им. Зафиксировать реальную policy nonce: shared configured store
+пишется и так и называется; не выдавать его за временную копию.
+
+Дополнить ограниченный AsterClient smoke сценарием через настоящий follower
+executor/journal и history worker. Реальный restart: остановить owners/tasks,
+закрыть DB, пересоздать process/dependencies на том же test DB, выполнить
+recovery и повторную публикацию. Аутентифицированным HTTP прочитать list/detail/
+events; outbox payload проверить без отправки людям. SL и контролируемый
+UNKNOWN после send доказать отдельно, с итоговым flat.
+
+Компактная regression matrix до signed запуска: allocation HEDGE/flip/alias;
+rolling >7d и late split/merge; batch vs incremental transitions; два protection
+slots разных legs; known costs/нет proof; >1000 events и crash на границе
+outbox/cursor; disabled keyboard; paging с late insert; fresh/upgrade migrations.
+Перебор всех сочетаний в live не нужен. Итоговые счётчики — ENGINE_TEST_STATUS,
+evidence и закрытие C-пакетов — execution journal; обновить tests map.
+
+### 23.11 Порядок PR и условия готовности
+
+1. **C1 → C2/C3/C4.** Сначала стабильный диапазон/identity и atomic publication,
+   затем зависимые reads/events/protection. C6 gate кнопки можно исправить сразу.
+2. **C5, C6, C7.** На принятой модели подключить деньги, delivery cursor и UI
+   страницы. Эти PR не включают новый frontend и push rollout.
+3. **C8.** Измерить итоговую схему/worker; завершить эксплуатационный budget.
+4. **C9 → G1.** После regression checks провести исправленную signed приёмку.
+
+После каждого PR фиксировать: C/R номера, изменённые contracts/migrations,
+воспроизведение → результат, незакрытые зависимости. Наличие нового класса,
+route или зелёной suite само по себе не закрывает соответствующий пакет.
+G1 принимается по §10.9 с устранёнными findings, затем продолжаются S2/S3.
+
+## 24. Повторный G1 review: обязательные уточнения C1–C9 (2026-09-07)
+
+На `9a0dd98` **G1 OPEN / REQUEST CHANGES**. Пакеты C1–C9 написаны, но
+проверка production composition и последовательных публикаций выявила N1–N6.
+Подробные воспроизведения и границы принятия R1–R9:
+[MINIAPP_S1_REVIEW_2026-09.md](MINIAPP_S1_REVIEW_2026-09.md), повторный проход.
+Эта секция уточняет §23; новую подсистему вместо существующей строить не нужно.
+
+1. **N1 / C1 — bootstrap из доказанного coverage.** В `HistoryCapture.prepare_window`
+   старт нового scope выбирать по непрерывному принятому coverage данного symbol,
+   содержащему frontier, либо по сохранённому initial import intent. Нельзя
+   подставлять epoch 0 или минимум другого symbol. Публиковать origin только после
+   успешного reconciliation. Проверка: fresh DB → обычный worker import → scheduled
+   capture, без ручного `Window` и без coverage gap на всём времени до первого import.
+2. **N2 / C1 — полноценный state carry между публикациями.** Разделить уже
+   выданный `public_ref` и anchor для нового `reserve_ref`. Одного qty/ref seed
+   недостаточно. Предпочтительный путь в текущей replay-архитектуре — replay
+   незавершённого эпизода от его доказанного origin с исходным boundary seed,
+   сохраняя ref и allocations; не создавать новый partial episode из qty при
+   каждом cutoff. Если вместо replay выбран accumulator, он обязан хранить весь
+   entry/exit/cost/source state и версии. Выбрать один путь до правки кода.
+   Приёмка: open → increase → partial → close с отдельной публикацией после каждого
+   шага равен batch по ref, totals, allocations и событиям; stale open rows отсутствуют.
+3. **N3 / C1+C3 — durable unpublished changes.** Вместе с импортом facts
+   атомарно сохранять минимальный dirty timestamp и `facts_revision` по scope/symbol.
+   Capture выбирает replay по этому состоянию; atomic publication отмечает
+   consumed revision и очищает dirty только если версия не изменилась. RAM hint
+   остаётся ускорителем. Изменение coverage вычислять разностью интервалов,
+   включая заполнение внутренних gaps. Проверка: поздний closed roundtrip,
+   отдельный import job, restart до capture, затем пустой delta повторного import —
+   эпизод всё равно публикуется ровно один раз.
+4. **N4 / C2 — events cursor в SQL.** В `_family_events` передавать реальный
+   `after_seq`, читать `limit + 1` по alias family с глобальным порядком seq
+   (один IN query либо корректный merge). Не фильтровать cursor после первых 200.
+   Проверить больше 200 events и alias family; fills cursor остаётся независимым.
+5. **N5 / C6 — единственный user-event recovery path.** В composition при
+   `enable_user_event_delivery=False` оставить legacy command recovery, но не
+   вызывать старый user-event scan и не продвигать user-event cursor. При True
+   использовать только durable consumer с rollout floor. Удалить production
+   переход в старый capped scan. Проверять default и enabled composition на
+   >1000 events и двух boot, включая атомарность outbox/cursor.
+6. **N6 / C9 — правильная цель STOP и достаточный acceptance.** Cancel получает
+   фактический journal-generated `clientOrderId`, затем проверяется состояние
+   именно этого ордера. CONFIRMED после `-2011` само по себе не доказательство
+   отмены. Cleanup отменяет созданные protective orders; final assertion — flat
+   и `open_orders == []`. Дополнить существующий harness scheduled captures между
+   lifecycle шагами и отдельным SL fill, сохранив Executor/journal, UNKNOWN,
+   reopen и HMAC HTTP. Новый signed прогон — после offline regressions N1–N5.
+
+**C8:** существующие 552 ms обозначать как service time прямого capture;
+это не latency очереди worker. Измерить actual worker path для 10/30/100 accounts
+с fake exchange, production interval/margin, конкурирующими jobs и backlog.
+Счётчики должны включать income/repair и повторные reads внутри capture.
+Forecast БД сохранить с его workload assumptions. Новая инфраструктура для
+этого не требуется; нужен небольшой hermetic scheduler workload.
+
+Порядок: согласованное исправление N1–N3 → N4/N5 → worker timing → N6/live →
+новый G1 verdict. Принятые части R4/R5/R7/R9 сохраняются. Три stage S1/S2/S3
+и возможность независимых slices §14 не меняются.
+
+## 25. Передача реализатору и окончательный scope corrective G1
+
+2026-09-07, после обсуждения масштаба 10–30 аккаунтов с владельцем:
+[MINIAPP_S1_FIX_HANDOFF_2026-09.md](MINIAPP_S1_FIX_HANDOFF_2026-09.md) —
+актуальная инструкция исполнения и закрытия. Она уточняет обязательность
+§23–24: N1–N3 — до G1; N4 — до details; N5 — до event delivery; N6 — до
+повторного live harness. Отдельное live evidence SL fill/STOP завершить до
+production rollout, совместив с G3. 100-account benchmark не блокирует G1.
+
+В FIX_HANDOFF выбрана replay-архитектура продолжения, описаны durable dirty
+revision, миграция, T1–T6 и шаблон фактического закрытия. После успешного
+checklist реализатор сам фиксирует G1 CLOSED; возвращение к автору review
+и повторный аудит всего проекта не требуются. До evidence статус OPEN.

@@ -3,8 +3,8 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-07):** S1 принят, G1 закрыт. C1–C9 исполнены и запушены, live §10.9 PASS (26.56s, flat после). S2 разрешён, G2/G3 открыты.
-> Ревью S1 (REQUEST CHANGES) отработано: R1–R9 закрыты кодом + регрессиями; live-путь — Executor/journal, рестарт, HTTP, SL, UNKNOWN.
+> **TL;DR (2026-09-07, повторное ревью `9a0dd98`):** S1/G1 — **OPEN / REQUEST CHANGES** из-за N1–N3 (bootstrap, continuation/identity, dirty range). Актуальная задача и самостоятельное закрытие реализатором — [FIX_HANDOFF §6](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md). N4/N5 — локальные follow-ups до details/event delivery; N6 — до повторного live harness. G2/G3 открыты.
+> R4/R5/R7/R9 приняты в пределах исходных findings; R1/R2/R3/R6/R8 полностью не закрыты. Записанный live PASS (26.56s) сохранён как evidence конкретного сценария; он не доказывает scheduled continuation и SL fill. Подробности — MINIAPP_S1_REVIEW_2026-09.md, повторный проход.
 > Offline 1429/2/45 (2026-09-07), миграции 0..57, ruff clean.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
@@ -1553,3 +1553,24 @@ Live `CT_TESTNET=1` FAIL за 96s: (1) copyc2 торгует чужой бот (
 journal key — open-b был тихим no-op (ядро право, харнес починен:
 per-step operation_id + journal-coid↔биржа после каждого submit).
 Аккаунт оставлен flat. G1 открыт.
+
+## 2026-09-07 — повторное ревью C1–C9: G1 OPEN
+
+На `9a0dd98` повторён полный offline gate:
+`PYTHONPATH=src:. .venv/bin/pytest -q -m 'not testnet'` — **1429 passed /
+2 skipped / 45 deselected**, 22.03 s. `ruff check .` и `ruff format --check .`
+чистые. Новых suite-тестов в рамках review не добавлено; миграции 0..57.
+
+Отдельные probes на временных SQLite подтвердили N1–N5 (scheduled bootstrap,
+continuation/identity, потеря durable dirty range, events >200, default recovery
+>1000). N6 установлен по коду harness/Executor: STOP cancel направлен на label,
+а не фактический journal-generated clientOrderId; CONFIRMED допускает `-2011`.
+Подробности и точный порядок исправлений:
+[MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
+
+Записанный live PASS 26.56 s сохранён как evidence конкретного запуска, без
+нового signed прогона в этом review. Он не проверяет scheduled continuation,
+реальный SL fill и успешность отмены нужного STOP. Прямой capture benchmark
+также не доказывает publication latency рабочего scheduler.
+**S1/G1 OPEN / REQUEST CHANGES**; R4/R5/R7/R9 приняты в исходном scope,
+остальные findings требуют указанной доработки. Рабочая БД/биржа не затронуты.
