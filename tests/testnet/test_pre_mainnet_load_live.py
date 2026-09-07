@@ -1442,6 +1442,7 @@ async def test_hybrid_load_real_plus_shadow(tmp_path):
                 f"request_weight_per_min missing; snapshot={snapshot!r}"
             )
             phase_metrics.append(f"final: {_fmt_metrics(snapshot)}")
+            print(f"LOAD_METRICS {_fmt_metrics(snapshot)}", flush=True)
 
     finally:
         # This path also runs for boot/assertion/cancellation failures and phase subsets.

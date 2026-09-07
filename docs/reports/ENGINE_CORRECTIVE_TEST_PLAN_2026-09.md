@@ -191,3 +191,12 @@ L1 GREEN 69.3s (`data/review-l1-junit2.xml`), A5 GREEN 8.13s.
 Фронт молчал все три окна (проверено его журналом), финальный
 независимый flat audit чист. Review-тройка закрыта вживую.
 Остаток: load-переквалификация в тихом окне (scope — owner).
+
+## Чистый load 0.3 GREEN (2026-09-07, owner scope)
+Полный `CT_LOAD_SCALE=0.3 CT_LOAD_PHASES=all` в тихом окне после килла
+фронта: **1 passed 3989.74s, exit 0** (`data/review-load-clean2-junit.xml`,
+база `data/review-load-clean2/...`). Журнал 1981 CONFIRMED / 0 FAILED —
+P8a strict без moot, P8b ассёрты внутри. Фронт: 0 строк за весь прогон.
+-4226 в тихом окне отсутствует полностью → прошлый шторм признан
+интерференцией двух движков. Load-гейт закрыт чисто. Остаток плана:
+coverage 86→87 (документарно), 3 honest shape-skip.

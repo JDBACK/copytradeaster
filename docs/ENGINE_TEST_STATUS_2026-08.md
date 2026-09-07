@@ -3,19 +3,17 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-07, review-фиксы QUALIFIED):** P1/P1/P2 ревью исправлены
-> (post-fill generation-freshness, effective-is-truth 1x без апшифта,
-> строгий P8a-хелпер) и проверены вживую: **F3 clean GREEN 131.8s**
-> (denial + heal + steady-state 1x с нулём set_leverage POSTs), **L1 clean
-> GREEN 69.3s**, A5 green 8.13s. Офлайн **1157 passed, 2 skipped**, ruff
-> чист. Фронт-стенд найден и убит по приказу owner'а (preview-движок,
-> 23 часа на тех же ключах; все ghost-fills были его). Финальный flat
-> audit: всё FLAT, zero orders.
-> Открыто: load-переквалификация в тихом окне (scope — owner), coverage
-> 86→87, 3 honest shape-skip.
-> **Вердикт: review-фиксы QUALIFIED. Mainnet — решению owner'а.**
+> **TL;DR (2026-09-07, QUALIFIED + чистый load):** P1/P1/P2 ревью исправлены
+> и проверены вживую: **F3 clean GREEN 131.8s**, **L1 clean GREEN 69.3s**,
+> LC1 clean GREEN 137s, A5 green 8.13s. **Load 0.3 clean GREEN: 1 passed
+> за 3989.74s, exit 0, журнал 1981 CONFIRMED / 0 FAILED**, все фолт-фазы,
+> P8a/P8b внутри. Офлайн **1157 passed, 2 skipped**, ruff чист.
+> Фронт-стенд убит по приказу owner'а; **-4226 доказан интерференцией**
+> (в тихом окне 0 за ~2000 команд). Финальный flat audit чист.
+> Открыто: coverage 86→87, 3 honest shape-skip.
+> **Вердикт: full QUALIFIED (owner scope 0.3). Mainnet — решению owner'а.**
 >
-> **2026-09-06, corrective qualification (ОТОЗВАНА для load 2026-09-07, см. выше):**
+> **2026-09-06, corrective qualification (load переквалифицирован чисто 2026-09-07, см. выше):**
 > live-матрица исправленного дерева закрыта: UNKNOWN 6/6 (A4 переведён на
 > ETHUSDT — все BTCUSDT allOrders-окна забиты 1000/1000), network 3/3, LC1–LC6
 > 6/6, совместимость 22 nodeids green + 2 honest skip (dust2 бюджет фолловера,
