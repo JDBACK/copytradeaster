@@ -18,8 +18,9 @@
 > **2026-09-06, corrective qualification (ОТОЗВАНА для load 2026-09-07, см. выше):**
 > live-матрица исправленного дерева закрыта: UNKNOWN 6/6 (A4 переведён на
 > ETHUSDT — все BTCUSDT allOrders-окна забиты 1000/1000), network 3/3, LC1–LC6
-> 6/6, совместимость 20/20 (master 5/5, risk 5/6, isolation 3/3, limit 2/4,
-> hedge 7/7), load 0.3: 30/30 циклов + restart/SIGTERM/SIGKILL + метрики,
+> 6/6, совместимость 22 nodeids green + 2 honest skip (dust2 бюджет фолловера,
+> limit-reduction full-fill; F3+L1 из 2 failures закрыты зелёными rerun),
+> load 0.3: 30/30 циклов + restart/SIGTERM/SIGKILL + метрики,
 > финальный FLAT-ALL. Офлайн: **1147 passed, 2 skipped**, coverage **86%**
 > (документарная цель 87% открыта). Ruff check/format чистые.
 > Найдено и починено вживую 3 прод-бага: 1x unset-marker как ready
