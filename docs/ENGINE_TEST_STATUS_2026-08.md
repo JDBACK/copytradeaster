@@ -3,21 +3,17 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-07, review-фиксы + КОНТАМИНАЦИЯ live):** P1/P1/P2 ревью
-> исправлены: post-fill generation-freshness, effective-is-truth 1x (без
-> апшифта), строгий P8a-хелпер (allowlist+intent+moot-только-CLOSE).
-> Офлайн **1157 passed, 2 skipped**, ruff чист, 3 repro зелены, A5 rerun
-> live-green 8.13s (окно чистое — результат стоит).
-> **КРИТИЧНО: фронт-стенд (`copytradeaster-front/.../miniapp-preview.sqlite3`,
-> 2301 команда с 2026-09-02) торгует ТЕМИ ЖЕ main/copyc1-3/tg-8264892202.**
-> Все ghost-fills найдены у него как CONFIRMED. Чистые: Step-2, compat,
-> fix-reruns, A5-rerun, офлайн. **Контаминированы: load5/6/7 (фронт 1900+
-> команд в тех же окнах; -4226-шторм теперь кандидат в интерференцию, а не
-> в глюк тестнета), L1-rerun (даблы доказаны), F3/F3b (ghost-open).**
-> Live-работы остановлены, exchange FLAT. Дальше — решение owner'а
-> (стоп стенда / развод ключей) + чистая переквалификация F3, L1, load.
-> **Вердикт: mainnet NO-GO. Прошлая COMPLETE-квалификация load отозвана
-> до чистого прогона.**
+> **TL;DR (2026-09-07, review-фиксы QUALIFIED):** P1/P1/P2 ревью исправлены
+> (post-fill generation-freshness, effective-is-truth 1x без апшифта,
+> строгий P8a-хелпер) и проверены вживую: **F3 clean GREEN 131.8s**
+> (denial + heal + steady-state 1x с нулём set_leverage POSTs), **L1 clean
+> GREEN 69.3s**, A5 green 8.13s. Офлайн **1157 passed, 2 skipped**, ruff
+> чист. Фронт-стенд найден и убит по приказу owner'а (preview-движок,
+> 23 часа на тех же ключах; все ghost-fills были его). Финальный flat
+> audit: всё FLAT, zero orders.
+> Открыто: load-переквалификация в тихом окне (scope — owner), coverage
+> 86→87, 3 honest shape-skip.
+> **Вердикт: review-фиксы QUALIFIED. Mainnet — решению owner'а.**
 >
 > **2026-09-06, corrective qualification (ОТОЗВАНА для load 2026-09-07, см. выше):**
 > live-матрица исправленного дерева закрыта: UNKNOWN 6/6 (A4 переведён на

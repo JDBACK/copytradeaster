@@ -786,3 +786,25 @@ main/copyc1-3/tg-8264892202 теми же ключами** — 2301 команд
 Watch 4 мин после остановки работ: тихо. Exchange FLAT везде.
 Вердикт: код-фиксы qualify (офлайн + repro + A5-clean); live-матрица
 ТРЕБУЕТ чистой переквалификации затронутого (F3, L1, load) — mainnet NO-GO.
+
+## 2026-09-07 — Чистые F3+L1 green после килла фронта (owner: "ебни все")
+
+Фронт найден и убит по приказу owner'а: `preview_miniapp_engine.py
+--confirm-engine-preview` (PID 53685, 23 часа жизни, 70 сокетов) гонял
+полноценный живой движок на тех же ключах. После килла: новых строк в его
+журнале нет, процесса нет, биржа FLAT.
+- **F3 clean GREEN 131.8s** (`data/review-f3-junit4.xml`): executor-denial
+  (FAILED SET -1003 + BLOCKED + 0 sends) + heal-конвергенция +
+  steady-state 1x (copyc1 сошёлся на 1x, **ноль set_leverage POSTs** —
+  живой пин effective-is-truth) + flat audit. Фронт молчал весь прогон.
+- **L1 clean GREEN 69.3s** (`data/review-l1-junit2.xml`): без даблов,
+  residual только по filled. Фронт молчал.
+- A5 green 8.13s остаётся чистым (окно проверено).
+Итого по ревью: P1/P1/P2 исправлены и проверены вживую на затронутых
+сценариях (F3 — leverage, L1 — post-fill, A5 — артефакт). Финальный
+независимый flat audit: main/copyc1-3 FLAT, zero open orders.
+Открытым остаётся только load-переквалификация в тихом окне (нагрузка
+0.3 контаминирована фронтом; -4226-корреляция с dual-engine окнами
+зафиксирована как гипотеза). Scope — решение owner'а.
+Вердикт: review-фиксы QUALIFIED (engine + targeted live). Mainnet решению
+owner'а; load-гейт требует чистого прогона.
