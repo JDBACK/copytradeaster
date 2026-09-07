@@ -7,7 +7,7 @@
  * internal exception text.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ACTIVITY_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import {
@@ -20,7 +20,9 @@ import {
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { formatTime } from '../format'
+import { hapticImpact } from '../telegram'
 import type { ActivityFilter, ActivityItemDTO, ActivityPageDTO, ActivityStatus } from '../types'
+import { useResourceScope } from '../resourceScopeContext'
 
 type LoadState =
   | { kind: 'loading' }
@@ -39,6 +41,7 @@ export function ActivityScreen({
   active = true,
   warm = true,
   invalidateSignal,
+  foregroundSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
@@ -47,6 +50,8 @@ export function ActivityScreen({
   warm?: boolean
   /** Shell-owned mutation counter; see useWarmRevalidation. */
   invalidateSignal?: number
+  /** App-wide foreground edge; active Activity re-checks its TTL on change. */
+  foregroundSignal?: number
 }) {
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [filter, setFilter] = useState<ActivityFilter>('all')
@@ -55,6 +60,9 @@ export function ActivityScreen({
   const seq = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const fetchedRef = useRef<{ filter: ActivityFilter } | null>(null)
+  const lifecycleLeaseRef = useRef(0)
+  const sessionResources = useResourceScope()
+  const scopeOwnerRef = useRef(sessionResources)
 
   const groups = useMemo(
     () => groupActivityByDay(load.kind === 'ready' ? load.items : [], now),
@@ -65,6 +73,7 @@ export function ActivityScreen({
     ttlMs: ACTIVITY_REVALIDATE_MS,
     busy: load.kind === 'loading' || loadingMore,
     invalidateSignal,
+    foregroundSignal,
     onRefresh: (reason: WarmReason) => {
       // Revalidation must not reset the client-side pagination position:
       // a silent page-0 refresh replaces the accumulated timeline, so it
@@ -96,6 +105,7 @@ export function ActivityScreen({
           return { ...prev, data, items: [...prev.items, ...data.items], page }
         })
       } catch (err) {
+        if (sessionResources?.handleInvalidSessionError(err)) return
         if (err instanceof ApiError && err.code === 'aborted') return
         if (seq.current !== my) return
         if (append || silent) {
@@ -107,27 +117,59 @@ export function ActivityScreen({
           setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
         }
       } finally {
-        setLoadingMore(false)
+        if (seq.current === my) setLoadingMore(false)
       }
     },
-    [auth, markFresh],
+    [auth, markFresh, sessionResources],
   )
 
+  useLayoutEffect(() => {
+    if (scopeOwnerRef.current === sessionResources) return
+    scopeOwnerRef.current = sessionResources
+
+    // Activity remains screen-owned in S2, so resource-owner replacement must
+    // establish its generation boundary manually. Fence and abort before paint,
+    // then remove all old-scope admission/state before launching fresh truth.
+    seq.current += 1
+    abortRef.current?.abort()
+    abortRef.current = null
+    fetchedRef.current = null
+    lifecycleLeaseRef.current += 1
+    setLoadingMore(false)
+    setLoad({ kind: 'loading' })
+
+    // A new connected owner always gets its own page-0 read, even when this
+    // keep-alive root is hidden. Mark admission first so the passive warm/filter
+    // effect cannot duplicate the request.
+    fetchedRef.current = { filter }
+    void fetchPage(filter, 0, false, false)
+  }, [fetchPage, filter, sessionResources])
+
   useEffect(() => {
+    const lease = ++lifecycleLeaseRef.current
     // First fetch only: shell warmup or the user's first tap, whichever is
     // earlier; filter changes below refetch through the same gate record.
-    if (!warm) return
-    if (fetchedRef.current && fetchedRef.current.filter === filter) return
-    fetchedRef.current = { filter }
-    // oxlint-disable-next-line react/set-state-in-effect
-    setLoad({ kind: 'loading' })
-    void fetchPage(filter, 0, false, false)
-    return () => abortRef.current?.abort()
+    if (warm && (!fetchedRef.current || fetchedRef.current.filter !== filter)) {
+      fetchedRef.current = { filter }
+      // oxlint-disable-next-line react/set-state-in-effect
+      setLoad({ kind: 'loading' })
+      void fetchPage(filter, 0, false, false)
+    }
+    const controller = abortRef.current
+    return () => {
+      // React StrictMode performs cleanup→setup synchronously. Defer only the
+      // transport abort: a second setup bumps the lease and keeps the first
+      // shared initial request alive; a real unmount has no successor and aborts.
+      queueMicrotask(() => {
+        // oxlint-disable-next-line react-hooks/exhaustive-deps
+        if (lifecycleLeaseRef.current === lease) controller?.abort()
+      })
+    }
   }, [warm, filter, fetchPage])
 
   const handleFilter = useCallback((next: ActivityFilter) => {
     setFilter(next)
-    hapticTap()
+    hapticImpact('light')
   }, [])
 
   const handleLoadMore = useCallback(() => {
@@ -340,15 +382,4 @@ function StatusGlyph({ status }: { status: ActivityStatus }) {
       />
     </svg>
   )
-}
-
-function hapticTap() {
-  try {
-    const tg = typeof window !== 'undefined'
-      ? (window as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred?: (s: string) => void } } } }).Telegram
-      : undefined
-    tg?.WebApp?.HapticFeedback?.impactOccurred?.('light')
-  } catch {
-    /* noop: Telegram WebApp is not available in standalone preview */
-  }
 }

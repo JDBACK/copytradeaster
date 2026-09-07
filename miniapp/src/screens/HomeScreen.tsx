@@ -2,7 +2,7 @@
  * открытые позиции, freshness и одна primary action — pause/resume. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
+import { HOME_REVALIDATE_MS } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import { describeError } from '../errors'
 import { formatPercent } from '../format'
@@ -17,6 +17,8 @@ import { hapticImpact, hapticNotify } from '../telegram'
 import type { ConfirmationDTO, DashboardDTO, PositionSummaryDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
 import { PositionCard } from './PositionsScreen'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 // Re-exported for existing importers (behavior tests); the value lives in
 // the shared warm-activation primitive and doubles as the 30 s client floor
@@ -39,7 +41,8 @@ export function HomeScreen({
   active = true,
   onReady,
   onMutated,
-  invalidateSignal,
+  resources: providedResources,
+  foregroundSignal,
 }: {
   auth: AuthContext
   onNotConnected: () => void
@@ -48,164 +51,226 @@ export function HomeScreen({
   onReady?: () => void
   /** Fired after a successful pause/resume so the shell can stale dependents. */
   onMutated?: () => void
-  /** Shell-owned mutation counter; see useWarmRevalidation. */
-  invalidateSignal?: number
+  resources?: MiniAppResources
+  foregroundSignal?: number
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [acting, setActing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pendingConfirmation, setPendingConfirmation] = useState<ConfirmationDTO | null>(null)
-  const seq = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
+  const actingRef = useRef(false)
   const readyNotifiedRef = useRef(false)
+  const resources = useScreenResources(providedResources, auth)
 
-  const { markFresh } = useWarmRevalidation({
+  const dashboardResource = useResource({
+    resources,
+    key: 'dashboard',
     active,
     ttlMs: HOME_REVALIDATE_MS,
-    busy: load.kind === 'loading' || (load.kind === 'ready' && load.positionsPending),
-    invalidateSignal,
-    onRefresh: (reason: WarmReason) => {
-      if (reason === 'retry') return fetchAll('foreground')
-      return fetchAll('background')
-    },
+    strength: 'strong',
+    foregroundSignal,
+  })
+  const positionsResource = useResource({
+    resources,
+    key: 'positions',
+    enabled: dashboardResource.snapshot.data !== null,
+    active,
+    ttlMs: HOME_REVALIDATE_MS,
+    strength: 'weak',
+    foregroundSignal,
   })
 
-  const fetchAll = useCallback(
-    async (mode: 'foreground' | 'background', isUserTriggered = false) => {
-      const my = ++seq.current
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      const signal = controller.signal
+  const resourceDashboard = dashboardResource.snapshot.data
+  const positions = positionsResource.snapshot.data
+  const transportStale =
+    resourceDashboard !== null &&
+    (dashboardResource.snapshot.stale || dashboardResource.snapshot.error !== null)
+  const ownerMutationState = resources.mutationState('pause-resume')
+  const ownerActing = ownerMutationState !== null
+  const ownerActive = ownerMutationState === 'active'
+  const ownerUnknownSince = resources.mutationUnknownSinceRevision('pause-resume')
+  const load: LoadState = resourceDashboard
+    ? {
+        kind: 'ready',
+        dashboard: resourceDashboard,
+        firstPosition: positions?.positions[0] ?? null,
+        positionsPending:
+          positions === null && positionsResource.snapshot.error === null,
+      }
+    : dashboardResource.snapshot.error
+      ? { kind: 'error', code: dashboardResource.snapshot.error }
+      : { kind: 'loading' }
+
+  useEffect(() => {
+    if (ownerMutationState !== 'unknown' || ownerUnknownSince === null) return
+    const snapshot = dashboardResource.snapshot
+    if (
+      snapshot.revision > ownerUnknownSince &&
+      snapshot.data !== null &&
+      snapshot.error === null &&
+      !snapshot.stale &&
+      snapshot.strength === 'strong'
+    ) {
+      resources.resolveUnknownMutation('pause-resume')
+      // The authoritative late recovery closes the same mutation boundary as
+      // an immediate pause/resume response. Positions are already invalidated
+      // by accepted strong Dashboard publication; stale the remaining
+      // dependents and notify Activity through the shell-owned generation.
+      resources.invalidate(['status'])
+      onMutated?.()
+    }
+  }, [dashboardResource.snapshot, onMutated, ownerMutationState, ownerUnknownSince, resources])
+
+  const refresh = useCallback(
+    async (isUserTriggered = false) => {
       if (isUserTriggered) setActing(true)
+      setError(null)
       try {
-        const dashboard = await api.dashboard(auth, true, { signal })
-        if (seq.current !== my) return
-        if (dashboard.copy_state === 'empty') {
-          onNotConnected()
-          return
-        }
-        // Partial-ready: paint the dashboard before the cheap positions read,
-        // keeping the previous preview (if any) instead of flashing.
-        setLoad((prev) => ({
-          kind: 'ready',
-          dashboard,
-          firstPosition: prev.kind === 'ready' ? prev.firstPosition : null,
-          positionsPending: true,
-        }))
-        // Read positions cheaply from cached snapshot refreshed by dashboard.
-        // The dashboard refresh above must stay strictly before this read —
-        // never Promise.all: positions must see the refreshed snapshot.
-        const posPage = await api.positions(auth, false, { signal }).catch((err: unknown) => {
-          if (err instanceof ApiError && err.code === 'aborted') throw err
-          return null
-        })
-        if (seq.current !== my) return
-        markFresh()
-        setLoad({
-          kind: 'ready',
-          dashboard,
-          firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
-          positionsPending: false,
-        })
-        if (mode === 'foreground') setError(null)
+        await dashboardResource.refresh('strong')
       } catch (err) {
-        if (err instanceof ApiError && err.code === 'aborted') return
-        if (seq.current !== my) return
-        const code = err instanceof ApiError ? err.code : 'network_error'
-        if (mode === 'background') {
-          // Warm failure keeps the stale UI and only fills the error slot.
-          setError(code)
-        } else {
-          setLoad({ kind: 'error', code })
+        if (!(err instanceof ApiError && err.code === 'aborted')) {
+          setError(err instanceof ApiError ? err.code : 'network_error')
         }
       } finally {
         if (isUserTriggered) setActing(false)
       }
     },
-    [auth, onNotConnected, markFresh],
-  )
-
-  const refresh = useCallback(
-    (isUserTriggered = false) => fetchAll('foreground', isUserTriggered),
-    [fetchAll],
+    [dashboardResource],
   )
 
   useEffect(() => {
-    // Initial data fetch: fetchAll() only sets state after await (async), so
-    // this is the standard external-system sync, not a cascading render.
-    // oxlint-disable-next-line react/set-state-in-effect
-    void fetchAll('foreground')
-    return () => abortRef.current?.abort()
-  }, [fetchAll])
+    if (resourceDashboard?.copy_state === 'empty') onNotConnected()
+  }, [resourceDashboard, onNotConnected])
 
   useEffect(() => {
-    if (load.kind === 'ready' && !readyNotifiedRef.current) {
+    if (resourceDashboard && resourceDashboard.copy_state !== 'empty' && !readyNotifiedRef.current) {
       readyNotifiedRef.current = true
       onReady?.()
     }
-  }, [load, onReady])
+  }, [resourceDashboard, onReady])
+
+  useEffect(() => {
+    // A keep-alive root may become hidden without unmounting. Confirmation
+    // tokens are interaction state, not cached DTO data: do not leave a hidden
+    // Sheet holding body overflow/focus listeners, and do not resurrect an old
+    // confirmation when the user returns to Home.
+    if (!active && pendingConfirmation !== null) {
+      // oxlint-disable-next-line react/set-state-in-effect
+      setPendingConfirmation(null)
+    }
+  }, [active, pendingConfirmation])
 
   async function pause() {
+    if (actingRef.current) return
+    const release = resources.acquireMutation('pause-resume')
+    if (!release) return
+    actingRef.current = true
     setActing(true)
     setError(null)
     try {
-      const dashboard = await api.pause(auth)
+      const next = await api.pause(auth)
       hapticImpact('medium')
-      markFresh()
-      setLoad((prev) =>
-        prev.kind === 'ready'
-          ? { ...prev, dashboard }
-          : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
-      )
+      resources.publishConfirmed('dashboard', next)
+      resources.invalidate(['positions', 'status'])
       onMutated?.()
     } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
+      const code = err instanceof ApiError ? err.code : 'network_error'
+      if (code === 'network_error' || code === 'timeout_error') {
+        try {
+          // Mutation outcome is ambiguous. Fence every Dashboard read that
+          // began before the write boundary so refreshCurrent cannot accept a
+          // pre-mutation strong flight as authoritative reconciliation.
+          resources.invalidate(['dashboard'])
+          const current = await resources.refreshCurrent('dashboard', 'strong')
+          if (current.copy_state === 'paused') {
+            resources.invalidate(['positions', 'status'])
+            hapticNotify('success')
+            onMutated?.()
+            return
+          }
+        } catch (verifyErr) {
+          if (resources.handleInvalidSessionError(verifyErr)) return
+          // The write may have committed even though neither response reached
+          // us. Retain typed uncertainty across remount until a later strong
+          // Dashboard read proves current server state.
+          resources.markMutationUnknown('pause-resume', 'pause')
+        }
+      }
       hapticNotify('error')
-      setError(err instanceof ApiError ? err.code : 'network_error')
+      setError(code)
     } finally {
       setActing(false)
+      actingRef.current = false
+      release()
     }
   }
 
   async function handleStartResume() {
     if (load.kind !== 'ready') return
+    if (actingRef.current) return
     if (load.dashboard.system_state !== 'ready') {
       setError('stale_operation')
       return
     }
+    actingRef.current = true
     setActing(true)
     setError(null)
     try {
       const pending = await api.beginConfirmation(auth, 'resume')
       setPendingConfirmation(pending)
     } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
       hapticNotify('error')
       setError(err instanceof ApiError ? err.code : 'network_error')
     } finally {
       setActing(false)
+      actingRef.current = false
     }
   }
 
   async function handleConfirmResume(confirmation: ConfirmationDTO) {
+    if (actingRef.current) return
+    const release = resources.acquireMutation('pause-resume')
+    if (!release) return
+    actingRef.current = true
     setActing(true)
     setError(null)
     try {
-      const dashboard = await api.resume(auth, confirmation)
+      const next = await api.resume(auth, confirmation)
       hapticNotify('success')
       setPendingConfirmation(null)
-      markFresh()
-      setLoad((prev) =>
-        prev.kind === 'ready'
-          ? { ...prev, dashboard }
-          : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
-      )
+      resources.publishConfirmed('dashboard', next)
+      resources.invalidate(['positions', 'status'])
       onMutated?.()
     } catch (err) {
-      hapticNotify('error')
-      setError(err instanceof ApiError ? err.code : 'network_error')
       setPendingConfirmation(null)
+      if (resources.handleInvalidSessionError(err)) return
+      const code = err instanceof ApiError ? err.code : 'network_error'
+      if (code === 'network_error' || code === 'timeout_error') {
+        try {
+          // A pre-confirmation strong Dashboard flight is not evidence of the
+          // resume outcome. Fence it before performing authoritative recovery.
+          resources.invalidate(['dashboard'])
+          const current = await resources.refreshCurrent('dashboard', 'strong')
+          if (current.copy_state === 'active') {
+            resources.invalidate(['positions', 'status'])
+            hapticNotify('success')
+            onMutated?.()
+            return
+          }
+        } catch (verifyErr) {
+          if (resources.handleInvalidSessionError(verifyErr)) return
+          // Confirmation tokens are single-use. Retain typed uncertainty until
+          // a later strong Dashboard read proves current state; never replay.
+          resources.markMutationUnknown('pause-resume', 'resume')
+        }
+      }
+      hapticNotify('error')
+      setError(code)
     } finally {
       setActing(false)
+      actingRef.current = false
+      release()
     }
   }
 
@@ -241,7 +306,9 @@ export function HomeScreen({
   const view = homeViewModel(dashboard)
   const trust = trustSummary(dashboard)
   const systemDot =
-    dashboard.system_state === 'ready'
+    transportStale
+      ? 'warning'
+      : dashboard.system_state === 'ready'
       ? 'success'
       : dashboard.system_state === 'stale'
         ? 'warning'
@@ -262,7 +329,9 @@ export function HomeScreen({
       {/* Error slot honesty: partial-ready paints over dashboard data without
           clearing a visible error, and a failed background revalidation only
           fills this slot — the stale ready UI underneath is never wiped. */}
-      {error && <ErrorBox {...describeError(error)} />}
+      {(error ?? dashboardResource.snapshot.error) && (
+        <ErrorBox {...describeError((error ?? dashboardResource.snapshot.error)!)} />
+      )}
 
       <section className="panel rail trust-strip" aria-label="Статус подключения">
         <ol style={{ display: 'contents', listStyle: 'none', padding: 0, margin: 0 }}>
@@ -329,7 +398,7 @@ export function HomeScreen({
         </div>
         <div className="freshness">
           <span className={`dot ${systemDot}`} aria-hidden />
-          Система: {systemLabel(dashboard.system_state)} · Снимок:{' '}
+          Система: {transportStale ? 'данные требуют проверки' : systemLabel(dashboard.system_state)} · Снимок:{' '}
           {snapshotLabel(dashboard.snapshot_captured_at)}
         </div>
       </section>
@@ -360,7 +429,7 @@ export function HomeScreen({
 
       {view.actionLabel === 'pause' && (
         <div className="btn-stack">
-          <button type="button" className="btn btn-primary" disabled={acting} onClick={() => void pause()}>
+          <button type="button" className="btn btn-primary" disabled={acting || ownerActing} onClick={() => void pause()}>
             {acting ? (
               'Ставим на паузу…'
             ) : (
@@ -373,6 +442,16 @@ export function HomeScreen({
               </>
             )}
           </button>
+          {ownerMutationState === 'unknown' && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => void refresh(true)}
+              disabled={acting || ownerActive}
+            >
+              Обновить данные
+            </button>
+          )}
           <p className="footer-note">Пауза останавливает только новые входы — защита продолжит работать.</p>
         </div>
       )}
@@ -382,7 +461,7 @@ export function HomeScreen({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={acting || dashboard.system_state !== 'ready'}
+            disabled={acting || ownerActing || dashboard.system_state !== 'ready'}
             onClick={() => void handleStartResume()}
           >
             {acting ? (
@@ -400,7 +479,7 @@ export function HomeScreen({
             type="button"
             className="btn btn-secondary"
             onClick={() => void refresh(true)}
-            disabled={acting}
+            disabled={acting || ownerActive}
           >
             Обновить данные
           </button>
@@ -412,7 +491,7 @@ export function HomeScreen({
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={acting}
+            disabled={acting || ownerActive}
             onClick={() => void refresh(true)}
           >
             {acting ? 'Обновляем…' : 'Обновить данные'}
@@ -431,7 +510,7 @@ export function HomeScreen({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={acting}
+            disabled={acting || ownerActing}
             onClick={() => void handleConfirmResume(pendingConfirmation)}
           >
             {acting ? 'Возобновляем…' : 'Подтвердить возобновление'}
@@ -440,7 +519,7 @@ export function HomeScreen({
             type="button"
             className="btn btn-secondary"
             onClick={() => setPendingConfirmation(null)}
-            disabled={acting}
+            disabled={acting || ownerActing}
           >
             Отмена
           </button>

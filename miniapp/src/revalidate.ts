@@ -41,6 +41,8 @@ export function useWarmRevalidation(args: {
   busy: boolean
   /** Shell-owned mutation counter; a newer value marks this snapshot stale. */
   invalidateSignal?: number
+  /** App-wide foreground edge. Unlike invalidation this only re-checks TTL. */
+  foregroundSignal?: number
   /**
    * `retry` (never freshly loaded: rerun the foreground fetch, error UI on
    * failure) vs `revalidate` (stale ready snapshot: background refresh that
@@ -101,7 +103,7 @@ export function useWarmRevalidation(args: {
     // Both handlers settle: the derived promise always fulfills, so a
     // rejecting onRefresh can never surface as unhandled.
     Promise.resolve(result).then(settle, settle)
-  }, [args.active, args.invalidateSignal])
+  }, [args.active, args.invalidateSignal, args.foregroundSignal])
 
   return { markFresh }
 }

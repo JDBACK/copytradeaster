@@ -2,15 +2,17 @@
  * Строго read-only экран для просмотра открытых позиций фолловера.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
-import { api, ApiError, type AuthContext } from '../api'
+import { useCallback, useState } from 'react'
+import { HOME_REVALIDATE_MS } from '../revalidate'
+import { ApiError, type AuthContext } from '../api'
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { formatPnl, formatPrice, formatUsdt } from '../format'
 import { snapshotLabel } from '../home'
 import { PROTECTION_WARNING } from '../protectionWarning'
 import type { PositionPageDTO, PositionSummaryDTO } from '../types'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 const WarningIcon = ({ size }: { size: number }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -29,66 +31,49 @@ export function PositionsScreen({
   accountMasked,
   active = true,
   warm = true,
-  invalidateSignal,
+  resources: providedResources,
+  foregroundSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   active?: boolean
   /** Gate for the first fetch: shell warmup or the user's first tap. */
   warm?: boolean
-  /** Shell-owned mutation counter; see useWarmRevalidation. */
-  invalidateSignal?: number
+  resources?: MiniAppResources
+  foregroundSignal?: number
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
-
-  const seq = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
-  const startedRef = useRef(false)
-
-  const { markFresh } = useWarmRevalidation({
+  const resources = useScreenResources(providedResources, auth)
+  const resource = useResource({
+    resources,
+    key: 'positions',
+    enabled: warm,
     active,
     ttlMs: HOME_REVALIDATE_MS,
-    busy: load.kind === 'loading' || refreshing,
-    invalidateSignal,
-    onRefresh: (reason: WarmReason) =>
-      fetchPositions(reason === 'retry' ? 'foreground' : 'background', false),
+    strength: 'weak',
+    foregroundSignal,
   })
 
+  const load: LoadState = resource.snapshot.data
+    ? { kind: 'ready', data: resource.snapshot.data }
+    : resource.snapshot.error
+      ? { kind: 'error', code: resource.snapshot.error }
+      : { kind: 'loading' }
+
   const fetchPositions = useCallback(
-    async (mode: 'foreground' | 'background', refresh = false) => {
-      const my = ++seq.current
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
+    async (_mode: 'foreground' | 'background', refresh = false) => {
       if (refresh) setRefreshing(true)
       try {
-        const data = await api.positions(auth, refresh, { signal: controller.signal })
-        if (seq.current !== my) return
-        markFresh()
-        setLoad({ kind: 'ready', data })
+        await resource.refresh(refresh ? 'strong' : 'weak')
+        if (refresh) resources.invalidate(['dashboard', 'status'])
       } catch (err) {
         if (err instanceof ApiError && err.code === 'aborted') return
-        if (seq.current !== my) return
-        // Background refresh never wipes ready UI; the next activation
-        // past TTL retries automatically.
-        if (mode === 'foreground') {
-          setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-        }
       } finally {
         if (refresh) setRefreshing(false)
       }
     },
-    [auth, markFresh],
+    [resource, resources],
   )
-
-  useEffect(() => {
-    if (!warm || startedRef.current) return
-    startedRef.current = true
-    // oxlint-disable-next-line react/set-state-in-effect
-    void fetchPositions('foreground', false)
-    return () => abortRef.current?.abort()
-  }, [warm, fetchPositions])
 
   if (load.kind === 'loading') {
     return (
@@ -133,7 +118,11 @@ export function PositionsScreen({
   }
 
   const { data } = load
-  const isStale = data.is_stale || data.system_state === 'stale'
+  const isStale =
+    resource.snapshot.stale ||
+    resource.snapshot.error !== null ||
+    data.is_stale ||
+    data.system_state === 'stale'
 
   return (
     <div className="screen">

@@ -25,8 +25,9 @@ import {
   nearestRiskStep,
 } from '../riskView'
 import type { RiskDTO } from '../types'
-import { createToggleGate, type ToggleGate } from '../notificationsView'
 import { hapticNotify } from '../telegram'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -37,15 +38,18 @@ export function RiskScreen({
   auth,
   accountMasked,
   onSaved,
+  onDirtyChange,
+  resources: providedResources,
+  foregroundSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   /** Fired after a successful save so the shell can stale dependent tabs. */
   onSaved?: () => void
+  onDirtyChange?: (dirty: boolean) => void
+  resources?: MiniAppResources
+  foregroundSignal?: number
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
-  // Last server-confirmed fraction; the only save truth.
-  const [confirmed, setConfirmed] = useState<string | null>(null)
   // Currently selected fraction (a strip position by construction).
   const [selected, setSelected] = useState<string | null>(null)
   // Synchronous mirror of `selected`: save reads the draft from here, not
@@ -58,38 +62,73 @@ export function RiskScreen({
   // Success toast text ("Сохранено · 4,0%"); null hides it.
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<number | null>(null)
-  // Synchronous double-tap lock: state.saving exists only after re-render.
-  const gate = useRef<ToggleGate | null>(null)
-  if (gate.current === null) gate.current = createToggleGate()
-
-  const loadInitial = useCallback(async () => {
-    setLoad({ kind: 'loading' })
-    try {
-      const dto = await api.risk(auth)
-      // Legacy guard: a stored value may predate the current grid (policy
-      // change).  Never silently rewrite it — keep it as the confirmed truth
-      // and pre-select the nearest grid step, so the user explicitly picks
-      // and saves.  The banner below explains the situation.
-      const grid = enumerateRiskSteps(dto)
-      const selected =
-        grid.length > 0 && !isRiskAllowed(dto, dto.risk_percent)
-          ? (nearestRiskStep(dto, dto.risk_percent) ?? dto.risk_percent)
-          : dto.risk_percent
-      setConfirmed(dto.risk_percent)
-      setSelected(selected)
-      selectedRef.current = selected
-      setSaveError(null)
-      setLoad({ kind: 'ready', dto })
-    } catch (err) {
-      setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-    }
-  }, [auth])
+  const resources = useScreenResources(providedResources, auth)
+  const ownerMutationState = resources.mutationState('risk')
+  const ownerUnknownSince = resources.mutationUnknownSinceRevision('risk')
+  const resource = useResource({
+    resources,
+    key: 'risk',
+    active: true,
+    // A retained ambiguous mutation is recovered only by post-boundary
+    // authoritative evidence. Risk has one read endpoint, but marking this
+    // owner read strong keeps the reconciliation contract typed and prevents a
+    // stale pre-mutation weak flight from clearing the lock.
+    strength: ownerMutationState === 'unknown' ? 'strong' : 'weak',
+    foregroundSignal,
+  })
+  const resourceDto = resource.snapshot.data
+  const lastServerValueRef = useRef<string | null>(null)
+  const ownerSaving = ownerMutationState !== null
+  const busy = saving || ownerSaving
+  const transportStale =
+    resourceDto !== null && (resource.snapshot.stale || resource.snapshot.error !== null)
+  const load: LoadState = resourceDto
+    ? { kind: 'ready', dto: resourceDto }
+    : resource.snapshot.error
+      ? { kind: 'error', code: resource.snapshot.error }
+      : { kind: 'loading' }
+  const leaveDirty = resourceDto
+    ? isRiskDirty(resourceDto.risk_percent, selected ?? initialRiskSelection(resourceDto))
+    : false
 
   useEffect(() => {
-    // Initial fetch only: loadInitial awaits before its first setState.
+    onDirtyChange?.(leaveDirty && !busy)
+    return () => onDirtyChange?.(false)
+  }, [busy, leaveDirty, onDirtyChange])
+
+  useEffect(() => {
+    if (!resourceDto) return
+    const previousServer = lastServerValueRef.current
+    const currentDraft = selectedRef.current
+    const draftWasClean = currentDraft === null || (previousServer !== null && currentDraft === previousServer)
+    lastServerValueRef.current = resourceDto.risk_percent
+    if (!draftWasClean) return
+    const next = initialRiskSelection(resourceDto)
+    selectedRef.current = next
+    // External server updates replace only a clean draft. A dirty draft keeps
+    // the user's choice and is revalidated against the new policy below.
     // oxlint-disable-next-line react/set-state-in-effect
-    void loadInitial()
-  }, [loadInitial])
+    setSelected(next)
+    setSaveError(null)
+  }, [resourceDto])
+
+  useEffect(() => {
+    if (ownerMutationState !== 'unknown' || ownerUnknownSince === null) return
+    const snapshot = resource.snapshot
+    if (
+      snapshot.revision > ownerUnknownSince &&
+      snapshot.data !== null &&
+      snapshot.error === null &&
+      !snapshot.stale &&
+      snapshot.strength === 'strong'
+    ) {
+      resources.resolveUnknownMutation('risk')
+      // We no longer know whether the timed-out write committed. Conservatively
+      // stale every dependent projection after authoritative Risk truth arrives.
+      resources.invalidate(['dashboard', 'positions', 'status'])
+      onSaved?.()
+    }
+  }, [onSaved, ownerMutationState, ownerUnknownSince, resource.snapshot, resources])
 
   useEffect(
     () => () => {
@@ -149,7 +188,11 @@ export function RiskScreen({
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
         <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void loadInitial()}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void resource.refresh('weak').catch(() => {})}
+          >
             Повторить
           </button>
         </div>
@@ -158,42 +201,71 @@ export function RiskScreen({
   }
 
   const dto = load.dto
-  const current = confirmed ?? dto.risk_percent
-  const active = selected ?? dto.risk_percent
+  const current = dto.risk_percent
+  const active = selected ?? initialRiskSelection(dto)
   const steps = enumerateRiskSteps(dto)
   // Stored value off the current grid (legacy policy): no tick is the truth,
   // the ruler pre-selects the nearest step, and the banner asks for an
   // explicit save.  Proven empty on the live DB (all rows on-grid) — this is
   // pure defence for future policy changes.
   const legacy = steps.length > 0 && !isRiskAllowed(dto, current)
-  const dirty = confirmed !== null && selected !== null && isRiskDirty(current, active)
+  const dirty = isRiskDirty(current, active)
   const allowed = steps.includes(active) && isRiskAllowed(dto, active)
-  const canSave = dirty && allowed && !saving
+  const canSave = dirty && allowed && !busy && !transportStale
 
   const save = async () => {
     // Read the freshest draft synchronously: a gesture may have updated the
     // ref in the same tick whose state update has not been flushed yet.
     const fraction = selectedRef.current ?? selected
     if (fraction === null || !isRiskAllowed(dto, fraction)) return
-    // Gate first: two taps in the same tick must admit exactly one mutation.
-    if (!gate.current?.tryBegin()) return
+    const release = resources.acquireMutation('risk')
+    if (!release) return
     setSaving(true)
     setSaveError(null)
     try {
       const next = await api.setRiskPercent(auth, fraction)
-      setConfirmed(next.risk_percent)
+      resources.publishConfirmed('risk', next)
+      resources.invalidate(['dashboard', 'positions', 'status'])
       setSelected(next.risk_percent)
       selectedRef.current = next.risk_percent
-      setLoad({ kind: 'ready', dto: next })
       flashToast(`Сохранено · ${formatRiskPercent(next.risk_percent)}`)
       hapticNotify('success')
       onSaved?.()
     } catch (err) {
-      setSaveError(err instanceof ApiError ? err.code : 'network_error')
-      hapticNotify('error')
+      if (resources.handleInvalidSessionError(err)) return
+      const code = err instanceof ApiError ? err.code : 'network_error'
+      let verified = false
+      if (code === 'network_error' || code === 'timeout_error') {
+        // Fence any Risk read admitted before the ambiguous write. The first
+        // await may join that old flight, but refreshCurrent performs at most
+        // one post-boundary follow-up before we classify the outcome.
+        resources.invalidate(['risk'])
+        try {
+          const currentDto = await resources.refreshCurrent('risk', 'strong')
+          if (currentDto.risk_percent === fraction) {
+            resources.publishConfirmed('risk', currentDto)
+            resources.invalidate(['dashboard', 'positions', 'status'])
+            setSelected(currentDto.risk_percent)
+            selectedRef.current = currentDto.risk_percent
+            flashToast(`Сохранено · ${formatRiskPercent(currentDto.risk_percent)}`)
+            hapticNotify('success')
+            onSaved?.()
+            verified = true
+          }
+        } catch {
+          // Both mutation outcome and reconciliation are unknown. Retain the
+          // session owner lock across Back/remount; only a later authoritative
+          // read (manual/reactivation/foreground) may resolve it.
+          resources.markMutationUnknown('risk', 'risk')
+        }
+      }
+      if (!verified) {
+        setSaveError(code)
+        hapticNotify('error')
+      }
     } finally {
       setSaving(false)
-      gate.current?.end()
+      release()
     }
   }
 
@@ -214,12 +286,24 @@ export function RiskScreen({
         />
       )}
 
+      {transportStale && (
+        <div className="info-box risk-legacy-note" role="status">
+          Показано последнее подтверждённое значение. Данные требуют проверки перед сохранением.
+        </div>
+      )}
+
       {legacy && (
         <div className="info-box risk-legacy-note">
           <span>
             Сохранено {formatRiskPercent(current)} — такое значение больше недоступно. Выберите
             ближайшее на шкале и нажмите Сохранить.
           </span>
+        </div>
+      )}
+
+      {dirty && !allowed && !legacy && (
+        <div className="info-box risk-legacy-note" role="status">
+          Параметры риска изменились на сервере. Выберите доступное значение заново перед сохранением.
         </div>
       )}
 
@@ -239,13 +323,17 @@ export function RiskScreen({
           <div className="risk-ruler-fallback">
             <ErrorBox title="Шкала недоступна" hint="Сервер вернул пустую шкалу риска. Попробуйте обновить." />
             <div className="btn-stack">
-              <button type="button" className="btn btn-secondary" onClick={() => void loadInitial()}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => void resource.refresh('weak').catch(() => {})}
+              >
                 Повторить
               </button>
             </div>
           </div>
         ) : (
-          <RiskRuler steps={steps} active={active} onPick={pick} disabled={saving} />
+          <RiskRuler steps={steps} active={active} onPick={pick} disabled={busy} />
         )}
         <div className="risk-dirty-line num">
           <span>Сейчас {formatRiskPercent(current)}</span>
@@ -285,14 +373,28 @@ export function RiskScreen({
           type="button"
           className="btn btn-primary num"
           disabled={!canSave}
-          aria-busy={saving}
+          aria-busy={busy}
           onClick={() => void save()}
         >
-          {saving ? 'Сохранение…' : `Сохранить ${formatRiskPercent(active)}`}
+          {busy ? 'Сохранение…' : `Сохранить ${formatRiskPercent(active)}`}
         </button>
+        {(ownerMutationState === 'unknown' || resource.snapshot.error !== null) && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={resource.snapshot.inflight}
+            onClick={() =>
+              void resource
+                .refresh(ownerMutationState === 'unknown' ? 'strong' : 'weak')
+                .catch(() => {})
+            }
+          >
+            Обновить данные
+          </button>
+        )}
       </div>
 
-      <span data-risk-saving={String(saving)} hidden />
+      <span data-risk-saving={String(busy)} hidden />
 
       {toast && (
         <div className="risk-toast" role="status">
@@ -311,4 +413,11 @@ export function RiskScreen({
       )}
     </div>
   )
+}
+
+function initialRiskSelection(dto: RiskDTO): string {
+  const grid = enumerateRiskSteps(dto)
+  return grid.length > 0 && !isRiskAllowed(dto, dto.risk_percent)
+    ? (nearestRiskStep(dto, dto.risk_percent) ?? dto.risk_percent)
+    : dto.risk_percent
 }

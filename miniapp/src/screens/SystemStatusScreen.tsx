@@ -11,8 +11,8 @@
  * the Telegram chat via the existing ``closeMiniApp()``.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError, type AuthContext } from '../api'
+import { useCallback, useState } from 'react'
+import { ApiError, type AuthContext } from '../api'
 import { Brand, ErrorBox, Row } from '../components/ui'
 import { describeError } from '../errors'
 import {
@@ -32,6 +32,8 @@ import {
 import { closeMiniApp, hapticImpact, hapticNotify } from '../telegram'
 import { formatTime } from '../format'
 import type { StatusDTO } from '../types'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -41,52 +43,46 @@ type LoadState =
 export function SystemStatusScreen({
   auth,
   accountMasked,
+  resources: providedResources,
+  foregroundSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
+  resources?: MiniAppResources
+  foregroundSignal?: number
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
-  const seq = useRef(0)
-
-  const loadInitial = useCallback(async () => {
-    const my = ++seq.current
-    try {
-      const dto = await api.status(auth, true)
-      if (seq.current !== my) return
-      setLoad({ kind: 'ready', dto, transportStale: false })
-    } catch (err) {
-      if (seq.current !== my) return
-      setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-    }
-  }, [auth])
-
-  useEffect(() => {
-    // Diagnostic screen: the first open always runs a real refresh.
-    // loadInitial awaits before its first setState.
-    // oxlint-disable-next-line react/set-state-in-effect
-    void loadInitial()
-  }, [loadInitial])
+  const resources = useScreenResources(providedResources, auth)
+  const resource = useResource({
+    resources,
+    key: 'status',
+    active: true,
+    strength: 'strong',
+    foregroundSignal,
+  })
+  const dto = resource.snapshot.data
+  const transportStale =
+    dto !== null &&
+    (resource.snapshot.error !== null || resource.snapshot.stale || resource.snapshot.strength !== 'strong')
+  const load: LoadState = dto
+    ? { kind: 'ready', dto, transportStale }
+    : resource.snapshot.error
+      ? { kind: 'error', code: resource.snapshot.error }
+      : { kind: 'loading' }
 
   const refresh = useCallback(async () => {
-    if (load.kind !== 'ready') return
-    const previous = load.dto
-    const my = ++seq.current
+    if (!resource.snapshot.data || refreshing) return
     hapticImpact('light')
     setRefreshing(true)
     try {
-      const dto = await api.status(auth, true)
-      // A late response must never overwrite a newer refresh result.
-      if (seq.current !== my) return
-      setLoad({ kind: 'ready', dto, transportStale: false })
-    } catch {
-      if (seq.current !== my) return
+      await resource.refresh('strong')
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'aborted') return
       hapticNotify('error')
-      setLoad({ kind: 'ready', dto: previous, transportStale: true })
     } finally {
-      if (seq.current === my) setRefreshing(false)
+      setRefreshing(false)
     }
-  }, [auth, load])
+  }, [refreshing, resource])
 
   const openBot = useCallback(() => {
     hapticImpact('light')
@@ -132,10 +128,7 @@ export function SystemStatusScreen({
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={() => {
-              setLoad({ kind: 'loading' })
-              void loadInitial()
-            }}
+            onClick={() => void resource.refresh('strong').catch(() => {})}
           >
             Повторить
           </button>

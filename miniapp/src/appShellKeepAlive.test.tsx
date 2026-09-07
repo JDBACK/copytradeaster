@@ -10,17 +10,20 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { act } from 'react'
+import { act, StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { api, ApiError } from './api'
 import App from './App'
 import { AppShell } from './components/AppShell'
 import { ActivityScreen } from './screens/ActivityScreen'
+import { ACTIVITY_REVALIDATE_MS } from './revalidate'
 import { HOME_REVALIDATE_MS, HomeScreen } from './screens/HomeScreen'
 import { PositionsScreen } from './screens/PositionsScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
+import { MiniAppResources } from './resources'
 import type {
+  AccountBuilderDTO,
   ActivityItemDTO,
   ActivityPageDTO,
   DashboardDTO,
@@ -131,6 +134,26 @@ function riskDto(overrides: Partial<RiskDTO> = {}): RiskDTO {
   }
 }
 
+function accountBuilderDto(overrides: Partial<AccountBuilderDTO> = {}): AccountBuilderDTO {
+  return {
+    identity_source: 'builder',
+    state: 'verified',
+    reason: 'none',
+    remediation: null,
+    account_masked: '0xABC…DEF',
+    signer_masked: '0x111…222',
+    builder_address_masked: '0x2576…6EF8',
+    builder_name: 'copytradeaster',
+    max_fee_rate: '0.0001',
+    permission: { can_read: true, can_perp_trade: true, can_withdraw: false },
+    agent_expires_at_ms: 2_000_000_000_000,
+    verified_at: '2026-09-03T12:00:00+00:00',
+    last_check_at: '2026-09-03T12:00:00+00:00',
+    age_seconds: 0,
+    ...overrides,
+  }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -151,7 +174,7 @@ function tabButton(name: string): HTMLElement {
 }
 
 describe('AppShell keep-alive', () => {
-  it('startup budget is session-free shell: Home 2 + warmup 3, then zero on every leg', async () => {
+  it('startup budget is session-free shell: one shared dashboard + positions + activity', async () => {
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
     const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
@@ -161,10 +184,10 @@ describe('AppShell keep-alive', () => {
     // Shell warmup settles: settings and activity prefetched while hidden.
     await screen.findByText('Настройки копирования')
     await screen.findByText('Показаны только данные без секретов')
-    // Home dashboard(true) + preview positions(false); warmup adds settings
-    // dashboard(false), positions(false) and activity(all, 0).
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
-    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    // S2 resource sharing: Settings joins Home's dashboard and Positions joins
+    // Home's preview resource instead of starting duplicate reads.
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
     expect(activitySpy).toHaveBeenCalledTimes(1)
 
     // Full second round over all four tabs: zero new requests, no skeletons.
@@ -182,8 +205,8 @@ describe('AppShell keep-alive', () => {
     expect(screen.queryByLabelText('Загрузка позиций')).toBeNull()
     expect(screen.queryByLabelText('Загрузка журнала')).toBeNull()
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
-    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
     expect(activitySpy).toHaveBeenCalledTimes(1)
   })
 
@@ -269,7 +292,7 @@ describe('AppShell keep-alive', () => {
 
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
     const saveButton = await screen.findByRole('button', { name: /сохранить/i })
@@ -281,7 +304,7 @@ describe('AppShell keep-alive', () => {
     })
     const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
     expect(isHidden(restoredHeading)).toBe(false)
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
   })
 
   it('nested open saves the root scroll; back restores it, not the nested one', async () => {
@@ -333,6 +356,281 @@ describe('AppShell keep-alive', () => {
     expect(isHidden(restoredHeading)).toBe(false)
     expect(scroller!.scrollTop).toBe(200)
   })
+
+  it('StrictMode reaches ready with one shared dashboard, positions and activity read', async () => {
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
+    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
+
+    render(
+      <StrictMode>
+        <AppShell auth={AUTH} onNotConnected={noop} />
+      </StrictMode>,
+    )
+
+    await screen.findByText('Настройки копирования')
+    await screen.findByText('Показаны только данные без секретов')
+    expect(screen.queryByLabelText('Загрузка состояния')).toBeNull()
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('reopens cached nested Risk inside TTL without another API read', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    const riskSpy = vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    vi.spyOn(api, 'notifications').mockResolvedValue({
+      enabled: true,
+      last_delivery_at: null,
+      pending: 0,
+      failed: 0,
+    })
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    expect(riskSpy).toHaveBeenCalledTimes(1)
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    expect(riskSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('dirty Risk prompts on Back and tab leave, while explicit discard leaves without saving', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    const setter = vi.spyOn(api, 'setRiskPercent')
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+
+    back.press()
+    expect(await screen.findByText('Отменить изменения?')).toBeDefined()
+    // Native Back obeys modal stack order: close the discard Sheet first,
+    // keep the dirty Risk screen underneath, then a later Back may ask again.
+    back.press()
+    expect(screen.queryByText('Отменить изменения?')).toBeNull()
+    expect(screen.getByRole('button', { name: /сохранить 2,0%/i })).toBeDefined()
+    back.press()
+    expect(await screen.findByText('Отменить изменения?')).toBeDefined()
+    fireEvent.click(screen.getByRole('button', { name: 'Остаться' }))
+    expect(screen.queryByText('Отменить изменения?')).toBeNull()
+
+    fireEvent.click(tabButton('Позиции'))
+    expect(await screen.findByText('Отменить изменения?')).toBeDefined()
+    fireEvent.click(screen.getByRole('button', { name: 'Выйти без сохранения' }))
+    await screen.findByText('Нет открытых позиций')
+    expect(setter).not.toHaveBeenCalled()
+  })
+
+  it('can leave during an in-flight Risk save and re-entry cannot start a second POST', async () => {
+    const back = installBackButton()
+    const saveGate = deferred<RiskDTO>()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    const setter = vi.spyOn(api, 'setRiskPercent').mockReturnValue(saveGate.promise)
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+    fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
+    expect(setter).toHaveBeenCalledTimes(1)
+
+    // The session-scoped mutation lock intentionally outlives this nested
+    // component. Back is allowed while the write is already admitted.
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+    expect(screen.queryByText('Отменить изменения?')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    const savingButton = await screen.findByRole('button', { name: /сохранение/i })
+    expect(savingButton).toBeDisabled()
+    fireEvent.click(savingButton)
+    expect(setter).toHaveBeenCalledTimes(1)
+
+    saveGate.resolve(riskDto({ risk_percent: '0.02' }))
+    await screen.findByText(/сейчас 2,0%/i)
+    expect(setter).toHaveBeenCalledTimes(1)
+  })
+
+  it('can leave during an in-flight Notifications save and remount cannot duplicate it', async () => {
+    const back = installBackButton()
+    const saveGate = deferred<NotificationSettingsDTO>()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'notifications').mockResolvedValue({
+      enabled: true,
+      last_delivery_at: null,
+      pending: 0,
+      failed: 0,
+    })
+    const setter = vi.spyOn(api, 'setNotifications').mockReturnValue(saveGate.promise)
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    fireEvent.click(screen.getByRole('button', { name: /уведомления/i }))
+    const toggle = await screen.findByRole('switch', { name: 'Уведомления о сделках' })
+    fireEvent.click(toggle)
+    expect(setter).toHaveBeenCalledTimes(1)
+
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+    fireEvent.click(screen.getByRole('button', { name: /уведомления/i }))
+    const reopened = await screen.findByRole('switch', { name: 'Уведомления о сделках' })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(setter).toHaveBeenCalledTimes(1)
+
+    saveGate.resolve({ enabled: false, last_delivery_at: null, pending: 0, failed: 0 })
+    await act(async () => {})
+    expect(screen.getByRole('switch', { name: 'Уведомления о сделках' })).toHaveAttribute(
+      'aria-checked',
+      'false',
+    )
+    expect(setter).toHaveBeenCalledTimes(1)
+  })
+
+  it('native Back closes AccountBuilder confirmation Sheet before leaving the nested screen', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'accountBuilder').mockResolvedValue(accountBuilderDto())
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'disconnect-token',
+      action: 'disconnect',
+      account_id: 'copyc1',
+      expires_at: null,
+    })
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    fireEvent.click(screen.getByRole('button', { name: /аккаунт и builder/i }))
+    await screen.findByText('Builder подтверждён')
+    fireEvent.click(screen.getByRole('button', { name: 'Отключить аккаунт' }))
+    await screen.findByText('Отключить аккаунт?')
+
+    back.press()
+    expect(screen.queryByText('Отключить аккаунт?')).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Аккаунт и Builder' })).toBeDefined()
+
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+  })
+
+  it('deactivates a Home confirmation Sheet when its keep-alive root is hidden', async () => {
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard({ copy_state: 'paused' }))
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'resume-token',
+      action: 'resume',
+      account_id: 'copyc1',
+      expires_at: null,
+    })
+    const resume = vi.spyOn(api, 'resume')
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(await screen.findByRole('button', { name: /возобновить/i }))
+    await screen.findByText('Возобновить копирование?')
+    expect(document.body.style.overflow).toBe('hidden')
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    await act(async () => {})
+    expect(screen.queryByText('Возобновить копирование?')).toBeNull()
+    expect(document.body.style.overflow).toBe('')
+
+    fireEvent.click(tabButton('Главная'))
+    await screen.findByRole('button', { name: /возобновить/i })
+    expect(screen.queryByText('Возобновить копирование?')).toBeNull()
+    expect(resume).not.toHaveBeenCalled()
+  })
+
+  it('50 Settings → Risk → Back cycles keep DOM and API ownership bounded', async () => {
+    const back = installBackButton()
+    const resources = new MiniAppResources(AUTH, 'lifecycle-50')
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    const riskSpy = vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    const notificationsSpy = vi.spyOn(api, 'notifications').mockResolvedValue({
+      enabled: true,
+      last_delivery_at: null,
+      pending: 0,
+      failed: 0,
+    })
+    const statusSpy = vi.spyOn(api, 'status').mockResolvedValue({} as never)
+    const accountSpy = vi.spyOn(api, 'accountBuilder').mockResolvedValue({} as never)
+
+    render(<AppShell auth={AUTH} resources={resources} onNotConnected={noop} />)
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    // Let the bounded Settings prefetch pass settle before taking the baseline.
+    await act(async () => {})
+    await act(async () => {})
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+
+    const baselineNodes = document.querySelectorAll('*').length
+    const baselineCalls = () => [
+      dashboardSpy.mock.calls.length,
+      positionsSpy.mock.calls.length,
+      activitySpy.mock.calls.length,
+      riskSpy.mock.calls.length,
+      notificationsSpy.mock.calls.length,
+      statusSpy.mock.calls.length,
+      accountSpy.mock.calls.length,
+    ]
+    const calls = baselineCalls()
+
+    for (let i = 0; i < 50; i += 1) {
+      fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+      expect(screen.getByRole('button', { name: /сохранить/i })).toBeDefined()
+      back.press()
+      expect(screen.getByRole('heading', { name: 'Настройки' })).toBeDefined()
+    }
+
+    expect(baselineCalls()).toEqual(calls)
+    expect(document.querySelectorAll('*').length).toBe(baselineNodes)
+    expect(document.body.style.overflow).toBe('')
+    for (const key of [
+      'dashboard',
+      'positions',
+      'risk',
+      'notifications',
+      'status',
+      'accountBuilder',
+    ] as const) {
+      expect(resources.getSnapshot(key).inflight).toBe(false)
+    }
+  })
 })
 function installBackButton(): { press: () => void } {
   let handler: (() => void) | null = null
@@ -361,6 +659,210 @@ function installBackButton(): { press: () => void } {
 
 
 describe('HomeScreen loading lifecycle', () => {
+  it('keeps pause locked across remount until an ambiguous timeout is authoritatively reconciled', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-pause-ambiguous')
+    resources.publishConfirmed('dashboard', dashboard({ copy_state: 'active' }))
+    resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
+    const reconcile = deferred<DashboardDTO>()
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockReturnValue(reconcile.promise)
+    const pauseSpy = vi
+      .spyOn(api, 'pause')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+
+    const first = render(
+      <HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /поставить на паузу/i }))
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(1))
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+    expect(resources.mutationLocked('pause-resume')).toBe(true)
+
+    first.unmount()
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+    const reopened = screen.getByRole('button', { name: /поставить на паузу/i })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+
+    reconcile.resolve(dashboard({ copy_state: 'paused' }))
+    await screen.findByRole('button', { name: /возобновить/i })
+    await waitFor(() => expect(resources.mutationLocked('pause-resume')).toBe(false))
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('ambiguous pause never treats a pre-mutation strong Dashboard flight as reconciliation', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-pause-causal-fence')
+    resources.publishConfirmed('dashboard', dashboard({ copy_state: 'active' }))
+    resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
+    const oldGate = deferred<DashboardDTO>()
+    const currentGate = deferred<DashboardDTO>()
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockReturnValueOnce(oldGate.promise)
+      .mockReturnValueOnce(currentGate.promise)
+    const pauseSpy = vi
+      .spyOn(api, 'pause')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+
+    // Simulate a TTL/foreground strong read that was admitted before the
+    // mutation. Home is still allowed to act from its cached confirmed DTO.
+    const oldRead = resources.refresh('dashboard', 'strong')
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+    fireEvent.click(screen.getByRole('button', { name: /поставить на паузу/i }))
+    await waitFor(() => expect(pauseSpy).toHaveBeenCalledTimes(1))
+
+    // Old pre-write evidence says "active". It must be discarded and cause a
+    // fresh post-boundary strong read rather than unlocking the mutation.
+    oldGate.resolve(dashboard({ copy_state: 'active' }))
+    await oldRead
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(2))
+    expect(resources.mutationState('pause-resume')).toBe('active')
+    expect(screen.getByRole('button', { name: /пауз/i })).toBeDisabled()
+
+    currentGate.resolve(dashboard({ copy_state: 'paused' }))
+    await screen.findByRole('button', { name: /возобновить/i })
+    await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull())
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps pause fail-closed across remount, then a later strong read unlocks exactly one fresh user retry', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-pause-double-unknown')
+    const onMutated = vi.fn()
+    resources.publishConfirmed('dashboard', dashboard({ copy_state: 'active' }))
+    resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockRejectedValueOnce(new ApiError(0, 'network_error', 'verify lost'))
+      .mockResolvedValueOnce(dashboard({ copy_state: 'active' }))
+    const pauseSpy = vi
+      .spyOn(api, 'pause')
+      .mockRejectedValueOnce(new ApiError(0, 'timeout_error', 'response lost'))
+      .mockResolvedValueOnce(dashboard({ copy_state: 'paused' }))
+
+    const first = render(
+      <HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} onMutated={onMutated} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /поставить на паузу/i }))
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(resources.mutationLocked('pause-resume')).toBe(true))
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+
+    first.unmount()
+    render(
+      <HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} onMutated={onMutated} />,
+    )
+    const reopened = screen.getByRole('button', { name: /поставить на паузу/i })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+    expect(resources.mutationLocked('pause-resume')).toBe(true)
+    expect(resources.mutationState('pause-resume')).toBe('unknown')
+
+    // Network later recovers. Unknown keeps pause blocked, but explicit
+    // authoritative recovery remains available in the UI. Active in-flight
+    // mutations still disable that button; only retained uncertainty may use it.
+    const recover = screen.getByRole('button', { name: 'Обновить данные' })
+    expect(recover).toBeEnabled()
+    fireEvent.click(recover)
+    await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull())
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
+    expect(onMutated).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /поставить на паузу/i })).toBeEnabled()
+
+    // A new user gesture may now admit one fresh mutation; double-click cannot
+    // turn recovery into a replay loop.
+    const retry = screen.getByRole('button', { name: /поставить на паузу/i })
+    fireEvent.click(retry)
+    fireEvent.click(retry)
+    await screen.findByRole('button', { name: /возобновить/i })
+    expect(pauseSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('qualifies cached Home and Positions as transport-stale while refresh is pending', async () => {
+    const resources = new MiniAppResources(AUTH, 'root-stale-honesty')
+    resources.publishConfirmed('dashboard', dashboard({ system_state: 'ready' }))
+    resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
+    resources.invalidate(['dashboard', 'positions'])
+    vi.spyOn(api, 'dashboard').mockReturnValue(new Promise(() => {}))
+    vi.spyOn(api, 'positions').mockReturnValue(new Promise(() => {}))
+
+    const home = render(
+      <HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} active={true} />,
+    )
+    expect(screen.getByText(/система: данные требуют проверки/i)).toBeDefined()
+    home.unmount()
+
+    render(<PositionsScreen auth={AUTH} resources={resources} active={true} warm={true} />)
+    expect(screen.getByText(/данные устарели/i)).toBeDefined()
+  })
+
+  it('reconciles an ambiguous resume timeout from authoritative Dashboard without replaying resume', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-resume-ambiguous')
+    resources.publishConfirmed('dashboard', dashboard({ copy_state: 'paused' }))
+    resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'resume-ambiguous',
+      action: 'resume',
+      account_id: 'copyc1',
+      expires_at: null,
+    })
+    const resumeSpy = vi
+      .spyOn(api, 'resume')
+      .mockRejectedValue(new ApiError(0, 'network_error', 'response lost'))
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockResolvedValue(dashboard({ copy_state: 'active' }))
+
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+    fireEvent.click(screen.getByRole('button', { name: /возобновить/i }))
+    await screen.findByText('Возобновить копирование?')
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить возобновление' }))
+
+    await screen.findByRole('button', { name: /поставить на паузу/i })
+    expect(resumeSpy).toHaveBeenCalledTimes(1)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(resources.mutationLocked('pause-resume')).toBe(false)
+  })
+
+  it('ambiguous resume fences a pre-mutation strong Dashboard flight before recovery', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-resume-causal-fence')
+    resources.publishConfirmed('dashboard', dashboard({ copy_state: 'paused' }))
+    resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
+    const oldGate = deferred<DashboardDTO>()
+    const currentGate = deferred<DashboardDTO>()
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockReturnValueOnce(oldGate.promise)
+      .mockReturnValueOnce(currentGate.promise)
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'resume-causal-fence',
+      action: 'resume',
+      account_id: 'copyc1',
+      expires_at: null,
+    })
+    const resumeSpy = vi
+      .spyOn(api, 'resume')
+      .mockRejectedValue(new ApiError(0, 'network_error', 'response lost'))
+
+    const oldRead = resources.refresh('dashboard', 'strong')
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+    fireEvent.click(screen.getByRole('button', { name: /возобновить/i }))
+    await screen.findByText('Возобновить копирование?')
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить возобновление' }))
+    await waitFor(() => expect(resumeSpy).toHaveBeenCalledTimes(1))
+
+    oldGate.resolve(dashboard({ copy_state: 'paused' }))
+    await oldRead
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(2))
+    expect(resources.mutationState('pause-resume')).toBe('active')
+
+    currentGate.resolve(dashboard({ copy_state: 'active' }))
+    await screen.findByRole('button', { name: /поставить на паузу/i })
+    await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull())
+    expect(resumeSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('a late first response never overwrites a newer one', async () => {
     const oldPage = deferred<DashboardDTO>()
     const newPage = deferred<DashboardDTO>()
@@ -454,7 +956,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     }
   }
 
-  it('full startup budget is session 1 + Home 2 + warmup 3', async () => {
+  it('full startup budget is four reads total: session + shared dashboard + positions + activity', async () => {
     mockTelegramSession()
     const sessionSpy = vi.spyOn(api, 'session').mockResolvedValue({
       user_id: 777,
@@ -472,9 +974,61 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     await screen.findByText('Настройки копирования')
     await screen.findByText('Показаны только данные без секретов')
     expect(sessionSpy).toHaveBeenCalledTimes(1)
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
-    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
     expect(activitySpy).toHaveBeenCalledTimes(1)
+    expect(
+      sessionSpy.mock.calls.length +
+        dashboardSpy.mock.calls.length +
+        positionsSpy.mock.calls.length +
+        activitySpy.mock.calls.length,
+    ).toBe(4)
+  })
+
+  it('a resource-level invalid session disposes the connected scope and returns App to the gate', async () => {
+    mockTelegramSession()
+    vi.spyOn(api, 'session').mockResolvedValue({
+      user_id: 777,
+      access_state: 'approved',
+      environment: 'testnet',
+      connection_state: 'connected',
+      account_connected: true,
+      account_masked: '0xABC…DEF',
+    })
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockRejectedValue(new ApiError(401, 'invalid_session', 'expired'))
+    const positionsSpy = vi.spyOn(api, 'positions')
+    const activitySpy = vi.spyOn(api, 'activity')
+
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Откройте из бота' })
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).not.toHaveBeenCalled()
+    expect(activitySpy).not.toHaveBeenCalled()
+  })
+
+  it('a direct Home mutation 401 uses the same hard scope teardown and returns App to the gate', async () => {
+    mockTelegramSession()
+    vi.spyOn(api, 'session').mockResolvedValue({
+      user_id: 777,
+      access_state: 'approved',
+      environment: 'testnet',
+      connection_state: 'connected',
+      account_connected: true,
+      account_masked: '0xABC…DEF',
+    })
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard({ copy_state: 'active' }))
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    const pauseSpy = vi
+      .spyOn(api, 'pause')
+      .mockRejectedValue(new ApiError(401, 'invalid_session', 'expired'))
+
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /поставить на паузу/i }))
+    await screen.findByRole('heading', { name: 'Откройте из бота' })
+    expect(pauseSpy).toHaveBeenCalledTimes(1)
   })
 
   it('warmup waits until Home reaches ready', async () => {
@@ -497,28 +1051,41 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     await screen.findByText('Риск на стоп')
     positionsGate.resolve(positionPage({ positions: [], count: 0 }))
     await screen.findByText('Настройки копирования')
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
-    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).toHaveBeenCalledTimes(1)
     expect(activitySpy).toHaveBeenCalledTimes(1)
   })
 
-  it('an early tap fetches immediately and warmup never doubles it', async () => {
+  it('an early Positions tap gets exactly one correctness follow-up after Home strong refresh', async () => {
     const dashboardGate = deferred<DashboardDTO>()
     vi.spyOn(api, 'dashboard').mockReturnValue(dashboardGate.promise)
     const positionsSpy = vi
       .spyOn(api, 'positions')
-      .mockResolvedValue(positionPage({ positions: [], count: 0 }))
+      .mockResolvedValueOnce(positionPage({ positions: [], count: 0 }))
+      .mockResolvedValueOnce(positionPage({ positions: [position({ symbol: 'ETHUSDT' })], count: 1 }))
     vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
 
-    // Home still loading, user taps Positions: cold path, no waiting.
+    // Home still loading, user taps Positions: cold path is immediate and can
+    // only see the server cache that predates Home's strong refresh.
     fireEvent.click(tabButton('Позиции'))
     await screen.findByText('Нет открытых позиций')
     expect(positionsSpy).toHaveBeenCalledTimes(1)
 
     dashboardGate.resolve(dashboard())
     await screen.findByText('Настройки копирования')
-    // Home preview added its own read; warmup skipped the visited tab.
+    // A successful strong dashboard defines a newer server snapshot. The
+    // already-settled weak positions DTO is therefore invalidated and the
+    // active Positions consumer performs exactly one correctness follow-up.
+    await screen.findByText('Открытые позиции · 1')
+    // Both the active Positions root and hidden Home preview consume the same
+    // refreshed DTO; this is sharing, not an extra network read.
+    expect(screen.getAllByText('ETHUSDT')).toHaveLength(2)
+    expect(positionsSpy).toHaveBeenCalledTimes(2)
+    expect(positionsSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
+
+    // Home's later preview/warmup shares that refreshed DTO: no third POST.
+    await act(async () => {})
     expect(positionsSpy).toHaveBeenCalledTimes(2)
   })
 
@@ -565,6 +1132,39 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     expect(activitySpy).toHaveBeenCalledTimes(1)
     await bounce(65_000)
     expect(activitySpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('Activity ignores foreground while hidden, then TTL-refreshes on activation and active foreground', async () => {
+    const t0 = 1_800_000_000_000
+    const now = vi.spyOn(Date, 'now').mockReturnValue(t0)
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    const activitySpy = vi
+      .spyOn(api, 'activity')
+      .mockResolvedValue(activityPage({ items: [], has_next: false }))
+
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    await screen.findByText('Показаны только данные без секретов')
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+
+    // Activity is still a hidden keep-alive root. Foreground must not make it
+    // poll even though its cached page is now older than the 60 s floor.
+    now.mockReturnValue(t0 + ACTIVITY_REVALIDATE_MS + 5_000)
+    act(() => window.dispatchEvent(new Event('focus')))
+    await act(async () => {})
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+
+    // Showing the aged tab is a legitimate refresh edge.
+    fireEvent.click(tabButton('Активность'))
+    await act(async () => {})
+    expect(activitySpy).toHaveBeenCalledTimes(2)
+
+    // Once Activity is active, a later app foreground also re-checks TTL.
+    now.mockReturnValue(t0 + (ACTIVITY_REVALIDATE_MS + 5_000) * 2)
+    act(() => window.dispatchEvent(new Event('focus')))
+    await act(async () => {})
+    expect(activitySpy).toHaveBeenCalledTimes(3)
+    now.mockRestore()
   })
 
   it('revalidation past TTL never resets appended pagination', async () => {
@@ -640,12 +1240,11 @@ describe('Corrective: mutation-driven invalidation', () => {
     return { enabled: true, last_delivery_at: null, pending: 0, failed: 0, ...overrides }
   }
 
-  it('Risk save stales Home and Settings: instant old UI, one background refresh, new value', async () => {
+  it('Risk save shares Dashboard immediately, then Settings performs only its required stale follow-up', async () => {
     const back = installBackButton()
     const bgGate = deferred<DashboardDTO>()
     const dashboardSpy = vi
       .spyOn(api, 'dashboard')
-      .mockResolvedValueOnce(dashboard({ risk_percent: '0.01' }))
       .mockResolvedValueOnce(dashboard({ risk_percent: '0.01' }))
       .mockReturnValue(bgGate.promise)
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
@@ -658,7 +1257,7 @@ describe('Corrective: mutation-driven invalidation', () => {
 
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
     expect(screen.getByRole('button', { name: /риск на stop.*1%/i })).toBeDefined()
 
     fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
@@ -671,10 +1270,11 @@ describe('Corrective: mutation-driven invalidation', () => {
     back.press()
     const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
     expect(isHidden(restoredHeading)).toBe(false)
-    // Old UI instantly: exactly one background refresh, hanging on the gate.
+    // Old shared DTO paints instantly; exactly one stale follow-up hangs on
+    // the gate instead of a screen-local duplicate read.
     await act(async () => {})
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
     expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
     expect(screen.getByRole('button', { name: /риск на stop.*1%/i })).toBeDefined()
 
@@ -683,22 +1283,14 @@ describe('Corrective: mutation-driven invalidation', () => {
     // Settles quiet: invalidation fires once, never loops.
     await act(async () => {})
     await act(async () => {})
-    expect(dashboardSpy).toHaveBeenCalledTimes(3)
-
-    // Home was staled by the same save: one background dashboard(true).
-    fireEvent.click(tabButton('Главная'))
-    await screen.findByText('Риск на стоп')
-    await act(async () => {})
-    expect(dashboardSpy).toHaveBeenCalledTimes(4)
-    expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, true])
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('Notifications save stales Settings: one background refresh on return', async () => {
+  it('Notifications save shares Dashboard immediately, then Settings performs one stale follow-up', async () => {
     const back = installBackButton()
     const bgGate = deferred<DashboardDTO>()
     const dashboardSpy = vi
       .spyOn(api, 'dashboard')
-      .mockResolvedValueOnce(dashboard())
       .mockResolvedValueOnce(dashboard())
       .mockReturnValue(bgGate.promise)
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
@@ -711,7 +1303,7 @@ describe('Corrective: mutation-driven invalidation', () => {
 
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     fireEvent.click(screen.getByRole('button', { name: /уведомления/i }))
     const toggle = await screen.findByRole('switch', { name: 'Уведомления о сделках' })
@@ -724,13 +1316,13 @@ describe('Corrective: mutation-driven invalidation', () => {
     await screen.findByRole('heading', { name: 'Настройки' })
     await act(async () => {})
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
     bgGate.resolve(dashboard())
     await act(async () => {})
-    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('Home pause stales Settings and Activity despite a fresh TTL', async () => {
+  it('Home pause publishes the shared Dashboard immediately while Activity still invalidates', async () => {
     const dashboardSpy = vi
       .spyOn(api, 'dashboard')
       .mockResolvedValue(dashboard({ copy_state: 'active' }))
@@ -747,12 +1339,14 @@ describe('Corrective: mutation-driven invalidation', () => {
     await screen.findByRole('button', { name: /возобновить/i })
     expect(pauser).toHaveBeenCalledTimes(1)
 
-    // Fresh TTL everywhere, yet Settings revalidates on the mutation signal.
+    // The confirmed pause response is the shared Dashboard. Settings should
+    // paint it immediately without another read or a skeleton.
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
     await act(async () => {})
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(dashboardSpy).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('На паузе')).toBeDefined()
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     fireEvent.click(tabButton('Активность'))
     await screen.findByText('Показаны только данные без секретов')
@@ -852,48 +1446,94 @@ describe('Corrective: nested screens open at the top', () => {
     expect(isHidden(restoredHeading)).toBe(false)
     expect(scroller!.scrollTop).toBe(300)
   })
+
+  it('reopening the same nested route gets a fresh scroll slot and starts at the top', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    const scroller = document.querySelector('.shell-content') as HTMLElement
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    scroller.scrollTop = 180
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+
+    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    await screen.findByRole('button', { name: /сохранить/i })
+    expect(scroller.scrollTop).toBe(0)
+  })
+
+  it('Back restores focus to the Settings row that opened the nested screen', async () => {
+    const back = installBackButton()
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+
+    fireEvent.click(tabButton('Настройки'))
+    await screen.findByText('Настройки копирования')
+    const opener = screen.getByRole('button', { name: /риск на stop/i })
+    opener.focus()
+    expect(opener).toHaveFocus()
+
+    fireEvent.click(opener)
+    await screen.findByRole('button', { name: /сохранить/i })
+    back.press()
+    await screen.findByRole('heading', { name: 'Настройки' })
+    await waitFor(() => expect(opener).toHaveFocus())
+  })
 })
 
-describe('Corrective: retry after a failed invalidation refresh', () => {
-  function settings(active: boolean, invalidateSignal = 0) {
+describe('Corrective: resource invalidation retry', () => {
+  function settings(resources: MiniAppResources, active: boolean) {
     return (
       <SettingsScreen
         auth={AUTH}
+        resources={resources}
         onOpen={noop}
         onNotConnected={noop}
         active={active}
         warm={true}
-        invalidateSignal={invalidateSignal}
       />
     )
   }
 
-  it('failed background refresh stays stale: fast return retries, then quiet', async () => {
+  it('failed invalidation refresh stays stale and waits for reactivation before one retry', async () => {
+    const resources = new MiniAppResources(AUTH, 'settings-retry')
     const dashboardSpy = vi
       .spyOn(api, 'dashboard')
       .mockResolvedValueOnce(dashboard())
       .mockRejectedValueOnce(new ApiError(500, 'network_error', 'down'))
       .mockResolvedValue(dashboard())
-    const { rerender } = render(settings(true))
+    const { rerender } = render(settings(resources, true))
     await screen.findByText('Настройки копирования')
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
-    // Mutation lands while away; the background refresh fails silently.
-    rerender(settings(false, 1))
-    rerender(settings(true, 1))
+    act(() => resources.invalidate(['dashboard']))
     await act(async () => {})
     expect(dashboardSpy).toHaveBeenCalledTimes(2)
-    // Stale UI kept: ready content, no skeleton, no error screen.
+    // Stale UI stays visible and a failed background refresh must not create
+    // an immediate retry loop while the activation edge is unchanged.
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
     expect(screen.getByText('Настройки копирования')).toBeDefined()
+    await act(async () => {})
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
 
-    // Fast return with a fresh TTL: immediate retry, then quiet — no loop.
-    rerender(settings(false, 1))
-    rerender(settings(true, 1))
+    // A real foreground edge retries once, then returns to quiet.
+    rerender(settings(resources, false))
+    await act(async () => {})
+    rerender(settings(resources, true))
     await act(async () => {})
     expect(dashboardSpy).toHaveBeenCalledTimes(3)
-    rerender(settings(false, 1))
-    rerender(settings(true, 1))
+    rerender(settings(resources, false))
+    await act(async () => {})
+    rerender(settings(resources, true))
     await act(async () => {})
     expect(dashboardSpy).toHaveBeenCalledTimes(3)
   })

@@ -6,88 +6,114 @@
  * Delivery facts (last delivery, pending, failed counts) come from the
  * same safe DTO — no outbox internals ever reach this screen. */
 
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError, type AuthContext } from '../api'
 import {
-  createToggleGate,
   failedCountTone,
-  initialNotificationsState,
-  reduceNotifications,
-  type ToggleGate,
 } from '../notificationsView'
 import { hapticImpact, hapticNotify } from '../telegram'
 import { Brand, ErrorBox, Row } from '../components/ui'
 import { describeError } from '../errors'
 import { formatTime } from '../format'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 export function NotificationsScreen({
   auth,
   accountMasked,
   onSaved,
+  resources: providedResources,
+  foregroundSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   /** Fired after a successful save so the shell can stale dependent tabs. */
   onSaved?: () => void
+  resources?: MiniAppResources
+  foregroundSignal?: number
 }) {
-  const [state, dispatch] = useReducer(reduceNotifications, undefined, initialNotificationsState)
-  const [initError, setInitError] = useState<string | null>(null)
-  // Latest onSaved without re-keying the save callback: NestedRoute builds
-  // its arrow inline, so a dep would churn identity every shell render.
-  const onSavedRef = useRef(onSaved)
-  useEffect(() => {
-    onSavedRef.current = onSaved
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const resources = useScreenResources(providedResources, auth)
+  const ownerMutationState = resources.mutationState('notifications')
+  const ownerUnknownSince = resources.mutationUnknownSinceRevision('notifications')
+  const resource = useResource({
+    resources,
+    key: 'notifications',
+    active: true,
+    strength: ownerMutationState === 'unknown' ? 'strong' : 'weak',
+    foregroundSignal,
   })
-  // Synchronous double-tap lock, created once per screen lifetime: state.saving
-  // only exists after a re-render, so two taps in one tick must be gated here.
-  const gate = useRef<ToggleGate | null>(null)
-  if (gate.current === null) gate.current = createToggleGate()
-
-  const loadInitial = useCallback(async () => {
-    setInitError(null)
-    try {
-      const dto = await api.notifications(auth)
-      dispatch({ type: 'save_succeeded', dto })
-    } catch (err) {
-      setInitError(err instanceof ApiError ? err.code : 'network_error')
-    }
-  }, [auth])
+  const dto = resource.snapshot.data
+  const ownerSaving = ownerMutationState !== null
+  const transportStale =
+    dto !== null && (resource.snapshot.stale || resource.snapshot.error !== null)
 
   useEffect(() => {
-    // Initial fetch only: loadInitial awaits before its first setState.
-    // oxlint-disable-next-line react/set-state-in-effect
-    void loadInitial()
-  }, [loadInitial])
+    if (ownerMutationState !== 'unknown' || ownerUnknownSince === null) return
+    const snapshot = resource.snapshot
+    if (
+      snapshot.revision > ownerUnknownSince &&
+      snapshot.data !== null &&
+      snapshot.error === null &&
+      !snapshot.stale &&
+      snapshot.strength === 'strong'
+    ) {
+      resources.resolveUnknownMutation('notifications')
+      resources.invalidate(['dashboard'])
+    }
+  }, [ownerMutationState, ownerUnknownSince, resource.snapshot, resources])
 
   const save = useCallback(
     async (next: boolean) => {
+      const release = resources.acquireMutation('notifications')
+      if (!release) return
+      setSaving(true)
+      setSaveError(null)
       try {
-        const dto = await api.setNotifications(auth, next)
-        dispatch({ type: 'save_succeeded', dto })
+        const confirmed = await api.setNotifications(auth, next)
+        resources.publishConfirmed('notifications', confirmed)
+        resources.invalidate(['dashboard'])
         hapticNotify('success')
-        onSavedRef.current?.()
+        onSaved?.()
       } catch (err) {
-        dispatch({
-          type: 'save_failed',
-          code: err instanceof ApiError ? err.code : 'network_error',
-        })
-        hapticNotify('error')
+        if (resources.handleInvalidSessionError(err)) return
+        const code = err instanceof ApiError ? err.code : 'network_error'
+        let verified = false
+        if (code === 'network_error' || code === 'timeout_error') {
+          resources.invalidate(['notifications'])
+          try {
+            const current = await resources.refreshCurrent('notifications', 'strong')
+            if (current.enabled === next) {
+              resources.publishConfirmed('notifications', current)
+              resources.invalidate(['dashboard'])
+              onSaved?.()
+              hapticNotify('success')
+              verified = true
+            }
+          } catch {
+            // Double-unknown is retained by the session owner across remount;
+            // later authoritative evidence may resolve it, but the write is
+            // never replayed automatically.
+            resources.markMutationUnknown('notifications', 'notifications')
+          }
+        }
+        if (!verified) {
+          setSaveError(code)
+          hapticNotify('error')
+        }
       } finally {
-        // The mutation settled: reopen the synchronous lock.
-        gate.current?.end()
+        setSaving(false)
+        release()
       }
     },
-    [auth],
+    [auth, onSaved, resources],
   )
 
   const handleToggle = useCallback(() => {
-    if (state.confirmed === null) return
-    // Gate first: two taps in the same tick (before React re-renders saving)
-    // must admit exactly one mutation; state.saving is only a render backstop.
-    if (!gate.current?.tryBegin()) return
-    dispatch({ type: 'save_requested' })
-    void save(!state.confirmed.enabled)
-  }, [state, save])
+    if (!dto || ownerSaving) return
+    void save(!dto.enabled)
+  }, [dto, ownerSaving, save])
 
   const brand = (
     <Brand
@@ -101,9 +127,9 @@ export function NotificationsScreen({
     />
   )
 
-  if (state.confirmed === null) {
-    if (initError) {
-      const copy = describeError(initError)
+  if (dto === null) {
+    if (resource.snapshot.error) {
+      const copy = describeError(resource.snapshot.error)
       return (
         <div className="screen">
           {brand}
@@ -112,7 +138,11 @@ export function NotificationsScreen({
           </h1>
           <ErrorBox title={copy.title} hint={copy.hint} />
           <div className="btn-stack">
-            <button type="button" className="btn btn-secondary" onClick={() => void loadInitial()}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => void resource.refresh('weak').catch(() => {})}
+            >
               Повторить
             </button>
           </div>
@@ -134,8 +164,6 @@ export function NotificationsScreen({
     )
   }
 
-  const dto = state.confirmed
-
   return (
     <div className="screen">
       {brand}
@@ -144,11 +172,17 @@ export function NotificationsScreen({
       </h1>
       <div className="lede tone-muted">События копирования в чат с ботом</div>
 
-      {state.error && (
+      {saveError && (
         <ErrorBox
-          title={describeError(state.error).title}
+          title={describeError(saveError).title}
           hint="Настройка не изменилась — показано последнее подтверждённое состояние."
         />
+      )}
+
+      {transportStale && (
+        <div className="info-box notifications-safe-note" role="status">
+          Показано последнее подтверждённое состояние. Данные требуют проверки перед изменением.
+        </div>
       )}
 
       <section className="panel notifications-toggle-panel">
@@ -160,8 +194,29 @@ export function NotificationsScreen({
               : 'Доставка выключена. Копирование не меняется — сделки продолжают исполняться.'}
           </div>
         </div>
-        <NotificationToggle enabled={dto.enabled} saving={state.saving} onToggle={handleToggle} />
+        <NotificationToggle
+          enabled={dto.enabled}
+          saving={saving || ownerSaving || transportStale}
+          onToggle={handleToggle}
+        />
       </section>
+
+      {(ownerMutationState === 'unknown' || resource.snapshot.error !== null) && (
+        <div className="btn-stack">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={resource.snapshot.inflight}
+            onClick={() =>
+              void resource
+                .refresh(ownerMutationState === 'unknown' ? 'strong' : 'weak')
+                .catch(() => {})
+            }
+          >
+            Обновить данные
+          </button>
+        </div>
+      )}
 
       <div className="panel">
         <Row
@@ -188,7 +243,7 @@ export function NotificationsScreen({
         <span>Отключение уведомлений не влияет на торговлю</span>
       </div>
 
-      <span data-notifications-saving={String(state.saving)} hidden />
+      <span data-notifications-saving={String(saving || ownerSaving)} hidden />
     </div>
   )
 }

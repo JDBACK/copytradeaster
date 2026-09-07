@@ -1,7 +1,7 @@
 # Реализация функционального Mini App — 2026-09-06
 
 Источник требований: [план](MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md), §14.
-Кампания IN PROGRESS. G1 закрыт; G2/G3 открыты. Реализация небольшими проверяемыми шагами.
+Кампания IN PROGRESS. G1 и G2 закрыты; G3 открыт. Реализация небольшими проверяемыми шагами.
 
 ## Рабочий todo
 
@@ -11,7 +11,9 @@
 - [ ] S1.4: application/HTTP contracts, ownership, aggregate, settings/scope/freshness.
 - [ ] S1.5: общий presenter, durable structured notifications.
 - [x] G1 corrective acceptance: обязательные N1–N3, T1–T6 и §6 offline gate; live follow-ups N6/SL остаются до rollout/G3.
-- [ ] S2: baseline, session resources, transport/lifecycle, nested settings cache, G2.
+- [x] S2/G2: baseline, session resources, transport/lifecycle, nested settings cache,
+  measured performance acceptance; закрыто 2026-09-07, отдельный журнал —
+  `MINIAPP_S2_PROGRESS_2026-09.md`.
 - [ ] S3: Home summary, Open/Closed/detail, activity/deep links, settings/copy, G3.
 - [ ] После основы: независимый review выполненной шкалы и исправление найденных дефектов.
 - [ ] Финал: Telegram smoke шкалы и новых flows, screenshots, performance acceptance.
@@ -505,7 +507,7 @@ sync+capture путём, сверка gross с биржей, объяснённ�
 окнах (`cutoff is not bracketed`) — решать в рамках live-ревью, не меняя
 инвариант вслепую.
 
-Full offline: **1314 passed / 2 skipped / 45 deselected**. Ruff + format
+Full offline: **1316 passed / 2 skipped / 45 deselected**. Ruff + format
 всего репо clean.
 
 ## Шаг 22 — пред-ревью аудит S1 сторонними ревьюерами и фиксы
@@ -890,3 +892,62 @@ Live: новый signed run не выполнялся и для §6 не тре�
 
 **Вердикт: G1 CLOSED по §6.** Повторный общий verdict автора ревью не требуется.
 Следующее действие — продолжить S2 по общему плану, сохраняя сроки N4–N6 выше.
+
+## Шаг 31 — S2.1–S2.6 / G2 CLOSED (2026-09-07)
+
+S2 выполнен на текущем четырёхвкладочном UI без S3-редизайна. Один
+session-scoped `MiniAppResources` владеет Dashboard/Positions/Risk/Notifications/
+Status/AccountBuilder DTO, weak/strong singleflight, read/write/invalidation
+generations, scope disposal и mutation locks. `api.ts` держит timeout через чтение
+body, снимает внешний abort-listener и fail-safe отклоняет invalid JSON. Root
+keep-alive сохранён; Home/Settings и Home/Positions делят ресурсы, foreground/TTL
+сведены к одному lifecycle owner. Settings prefetch стартует только после входа,
+не более двух weak reads одновременно; cached nested reopen не показывает skeleton.
+
+Финальный corrective после трёх blocker-only аудитов закрыл прямые hard-session
+границы и unknown-outcome semantics: connected `401`/`invalid_session` из shared
+reads и Activity/Risk/Notifications/Home/AccountBuilder уничтожает owner и возвращает
+session gate; ambiguous Risk/Notifications/pause/resume/reauthorize/disconnect не
+повторяет mutation автоматически, а сначала делает authoritative reconciliation.
+Поздние аудиты добавили causal fence и симметричный retained-unknown lifecycle для
+всех mutation owners: Risk/Notifications/pause-resume/AccountBuilder перед recovery
+инвалидируют свой resource, поэтому pre-mutation flight не может быть принят за
+post-write truth; при необходимости выполняется один новый post-boundary follow-up.
+Double-unknown остаётся fail-closed под session mutation lock через Back/remount и
+снимается только более поздним authoritative evidence либо сменой scope, без blind
+replay.
+Settings stale Dashboard больше не выглядит fresh green; Activity получает app
+foreground edge; Agent expiry, modal Back order, nested scroll/focus и dirty Risk
+policy conflict закреплены regressions.
+
+Frontend gate на current S2 WIP (base HEAD `b10f01a`): **27 test files / 316
+passed**, oxlint **0 warnings/errors**, `tsc -b && vite build` PASS,
+`git diff --check` clean. Финальный production artifact: main JS **336.56 kB raw /
+96.46 kB gzip**, CSS **19.42 / 4.41 kB**.
+
+Recorded production-bundle evidence на engine preview (`copyc1`, Headless Chrome
+152, 390×844): cold startup **4 read POST**; warm root 160 samples p95 **1.0 ms**,
+warm cached nested 120 samples p95 **1.9 ms**, при искусственных 300 ms network
+latency warm root p95 **6.0 ms** — во всех трёх warm сериях **0 API reads**.
+Settings speculative peak **2**. 50-cycle browser lifecycle: visible DOM
+**319→319**, `Memory.getDOMCounters` documents/nodes/listeners
+**1/443/160 → 1/443/160**, post-GC heap **+3.25%**, global listeners **4→4**,
+timers/intervals/rAF **0**, long tasks >50 ms **0**, page errors **0**.
+
+Эти browser latency/DOM/heap числа относятся к G2 measurement run до финальных
+post-audit correctness-only corrective; current tree после них повторно прошёл
+полный automated gate/build, но новый CDP performance run здесь не заявляется.
+
+Explicit signed `status(refresh=true)` через тот же testnet application path:
+5 reads **1.45–2.21 s**, median **2.05 s**, `age_seconds=0`, Aster `ok`, permissions
+valid. Cached UI поэтому измеряется отдельно от strong verification и не выдаёт
+старое evidence за fresh. Полный журнал архитектуры, regressions и measurement:
+`MINIAPP_S2_PROGRESS_2026-09.md`.
+
+После первоначального post-fix review выполнен отдельный трёхчастный аудит новыми
+review agents по transport/resources, shell/lifecycle и Settings/performance. Его
+corrective ledger и финальные verdicts — `MINIAPP_S2_REVIEW_HANDOFF_2026-09.md`.
+
+**Вердикт: S2/G2 CLOSED.** Физические Telegram WebKit/haptics/snap-stop и итоговая
+device acceptance остаются в S3.5/G3 по уже принятому разделению этапов; S3 можно
+начинать. N4/N5/N6 сохраняют сроки corrective G1 и этим gate не переопределяются.

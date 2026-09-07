@@ -40,6 +40,8 @@ import {
 } from '../accountBuilder'
 import { TRANSPORT_STALE_WARNING } from '../systemStatus'
 import type { AccountBuilderDTO, BuilderPrepareDTO, ConfirmationDTO } from '../types'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -57,57 +59,135 @@ export function AccountBuilderScreen({
   auth,
   accountMasked,
   onNotConnected,
+  resources: providedResources,
+  foregroundSignal,
+  setBackOverride,
 }: {
   auth: AuthContext
   accountMasked?: string | null
   onNotConnected: () => void
+  resources?: MiniAppResources
+  foregroundSignal?: number
+  /** Nested-shell modal stack hook: visible confirmation Sheet handles Back first. */
+  setBackOverride?: (handler: (() => boolean) | null) => void
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [refreshing, setRefreshing] = useState(false)
   const [reauth, setReauth] = useState<ReauthState>({ kind: 'idle' })
   const [pendingDisconnect, setPendingDisconnect] = useState<ConfirmationDTO | null>(null)
   const [acting, setActing] = useState(false)
   const [fatalError, setFatalError] = useState<string | null>(null)
-  const seq = useRef(0)
+  const [openedAt] = useState(() => Date.now())
+  const [expiryReached, setExpiryReached] = useState(false)
   const adapterRef = useRef<WalletAdapter | null>(null)
+  const resources = useScreenResources(providedResources, auth)
+  const resource = useResource({
+    resources,
+    key: 'accountBuilder',
+    active: true,
+    strength: 'weak',
+    foregroundSignal,
+  })
+  const resourceDto = resource.snapshot.data
+  const expired = Boolean(
+    resourceDto?.agent_expires_at_ms &&
+      (resourceDto.agent_expires_at_ms <= openedAt ||
+        resourceDto.agent_expires_at_ms <= resource.snapshot.receivedAt ||
+        expiryReached),
+  )
+  const resourceTransportStale =
+    resourceDto !== null && (resource.snapshot.error !== null || resource.snapshot.stale || expired)
+  const load: LoadState = resourceDto
+    ? { kind: 'ready', dto: resourceDto, transportStale: resourceTransportStale }
+    : resource.snapshot.error
+      ? { kind: 'error', code: resource.snapshot.error }
+      : { kind: 'loading' }
+  const ownerMutationState = resources.mutationState('account-builder')
+  const ownerActing = ownerMutationState !== null
+  const ownerActive = ownerMutationState === 'active'
+  const ownerUnknownReason = resources.mutationUnknownReason('account-builder')
+  const ownerUnknownSince = resources.mutationUnknownSinceRevision('account-builder')
 
-  const loadInitial = useCallback(async () => {
-    const my = ++seq.current
-    try {
-      const dto = await api.accountBuilder(auth, false)
-      if (seq.current !== my) return
-      setLoad({ kind: 'ready', dto, transportStale: false })
-    } catch (err) {
-      if (seq.current !== my) return
-      setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-    }
-  }, [auth])
+  const closeDisconnectSheetFromBack = useCallback(() => {
+    if (pendingDisconnect === null) return false
+    setPendingDisconnect(null)
+    return true
+  }, [pendingDisconnect])
 
   useEffect(() => {
-    // Initial fetch only: loadInitial awaits before its first setState.
+    setBackOverride?.(pendingDisconnect ? closeDisconnectSheetFromBack : null)
+    return () => setBackOverride?.(null)
+  }, [closeDisconnectSheetFromBack, pendingDisconnect, setBackOverride])
+
+  useEffect(() => {
+    const expiresAt = resourceDto?.agent_expires_at_ms ?? null
+    // A new attestation can extend the deadline; reset the local semantic
+    // deadline watcher to that authoritative value.
     // oxlint-disable-next-line react/set-state-in-effect
-    void loadInitial()
-  }, [loadInitial])
+    setExpiryReached(false)
+    if (!expiresAt) return
+    let timer: number | null = null
+    const arm = () => {
+      const remaining = expiresAt - Date.now()
+      if (remaining <= 0) {
+        setExpiryReached(true)
+        return
+      }
+      // Browsers clamp 32-bit timeouts. Re-arm after the maximum safe delay
+      // rather than overflowing a far-future Agent expiry into an immediate
+      // callback. This is a one-shot semantic deadline, never polling.
+      timer = window.setTimeout(arm, Math.min(remaining, 2_147_483_647))
+    }
+    arm()
+    return () => {
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [resourceDto?.agent_expires_at_ms])
 
   const refresh = useCallback(async () => {
-    if (load.kind !== 'ready' || refreshing) return
-    const previous = load.dto
-    const my = ++seq.current
+    if (!resourceDto || refreshing) return
     hapticImpact('light')
     setRefreshing(true)
     try {
-      const dto = await api.accountBuilder(auth, true)
-      // A late response must never overwrite a newer refresh result.
-      if (seq.current !== my) return
-      setLoad({ kind: 'ready', dto, transportStale: false })
-    } catch {
-      if (seq.current !== my) return
+      if (ownerUnknownReason === 'account-disconnect') {
+        const session = await api.session(auth)
+        if (!session.account_connected && session.connection_state !== 'connected') {
+          resources.resolveUnknownMutation('account-builder')
+          onNotConnected()
+          return
+        }
+        resources.resolveUnknownMutation('account-builder')
+        return
+      }
+      await resource.refresh('strong')
+      if (ownerUnknownReason === 'account-reauthorize') {
+        resources.resolveUnknownMutation('account-builder')
+      }
+      resources.invalidate(['dashboard', 'status'])
+    } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
+      if (err instanceof ApiError && err.code === 'aborted') return
       hapticNotify('error')
-      setLoad({ kind: 'ready', dto: previous, transportStale: true })
     } finally {
-      if (seq.current === my) setRefreshing(false)
+      setRefreshing(false)
     }
-  }, [auth, load, refreshing])
+  }, [auth, onNotConnected, ownerUnknownReason, refreshing, resource, resourceDto, resources])
+
+  useEffect(() => {
+    if (
+      ownerUnknownReason !== 'account-reauthorize' ||
+      ownerUnknownSince === null
+    ) return
+    const snapshot = resource.snapshot
+    if (
+      snapshot.revision > ownerUnknownSince &&
+      snapshot.data !== null &&
+      snapshot.error === null &&
+      !snapshot.stale &&
+      snapshot.strength === 'strong'
+    ) {
+      resources.resolveUnknownMutation('account-builder')
+    }
+  }, [ownerUnknownReason, ownerUnknownSince, resource.snapshot, resources])
 
   async function resolveAdapter(): Promise<WalletAdapter> {
     if (adapterRef.current) return adapterRef.current
@@ -132,8 +212,11 @@ export function AccountBuilderScreen({
     [auth],
   )
   const startReauthorize = useCallback(async () => {
-    if (load.kind !== 'ready' || load.dto.remediation !== 'reauthorize') return
+    if (!resourceDto || resourceDto.remediation !== 'reauthorize') return
+    const release = resources.acquireMutation('account-builder')
+    if (!release) return
     if (reauth.kind === 'preparing' || reauth.kind === 'signing' || reauth.kind === 'submitting') {
+      release()
       return
     }
     hapticImpact('medium')
@@ -148,18 +231,30 @@ export function AccountBuilderScreen({
       }
       setReauth({ kind: 'signing', prepare })
     } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
       hapticNotify('error')
       const code =
         err instanceof ApiError ? err.code : err instanceof WalletError ? err.code : 'network_error'
       if (err instanceof ApiError) reportApi('reauthorize_prepare_failed', err)
       setReauth({ kind: 'failed', code })
+    } finally {
+      // Only the prepare request is admitted here. Once the signing prompt is
+      // ready there is no network mutation in flight; submit takes a fresh
+      // owner lock below. Back/unmount during prepare therefore cannot start a
+      // duplicate prepare from a newly mounted screen.
+      release()
     }
-  }, [auth, load, reauth.kind, reportApi])
+  }, [auth, resourceDto, reauth.kind, reportApi, resources])
 
   const signReauthorize = useCallback(async () => {
     if (reauth.kind !== 'signing') return
+    const release = resources.acquireMutation('account-builder')
+    if (!release) return
     const { prepare } = reauth
-    if (!prepare.pending_id || !prepare.eip712) return
+    if (!prepare.pending_id || !prepare.eip712) {
+      release()
+      return
+    }
     hapticImpact('medium')
     setReauth({ kind: 'submitting' })
     try {
@@ -167,26 +262,59 @@ export function AccountBuilderScreen({
       const address = await wallet.connect()
       const signature = await wallet.signTypedData(address, prepare.eip712)
       await api.reauthorizeSubmit(auth, prepare.pending_id, signature)
+      // The proof was rebuilt server-side: a strong owner read is shared with
+      // equivalent post-write checks. Fence any read that began before submit,
+      // then wait for the current invalidation revision (max one follow-up).
+      resources.invalidate(['accountBuilder', 'dashboard', 'status'])
+      try {
+        await resources.refreshCurrent('accountBuilder', 'strong')
+      } catch (verifyErr) {
+        if (resources.handleInvalidSessionError(verifyErr)) return
+        // The submit returned success, but until a later authoritative
+        // attestation lands the old remediation must not enable another write.
+        resources.markMutationUnknown('account-builder', 'account-reauthorize')
+        setReauth({ kind: 'failed', code: verifyErr instanceof ApiError ? verifyErr.code : 'network_error' })
+        return
+      }
       hapticNotify('success')
       setReauth({ kind: 'idle' })
-      // The proof was rebuilt server-side: re-read the authoritative DTO.
-      // Same sequence guard as manual refresh: a late post-reauth response
-      // must never overwrite a newer refresh issued while it was in flight.
-      const my = ++seq.current
-      const dto = await api.accountBuilder(auth, true)
-      if (seq.current !== my) return
-      setLoad({ kind: 'ready', dto, transportStale: false })
     } catch (err) {
-      hapticNotify('error')
+      if (resources.handleInvalidSessionError(err)) return
       const code =
         err instanceof ApiError ? err.code : err instanceof WalletError ? err.code : 'network_error'
+      if (code === 'network_error' || code === 'timeout_error') {
+        try {
+          // The submit may have committed. A strong attestation that began
+          // before submit is causally too old to reconcile that outcome, so
+          // fence it and let refreshCurrent perform at most one post-boundary
+          // follow-up before deciding whether the authorization is verified.
+          resources.invalidate(['accountBuilder'])
+          const current = await resources.refreshCurrent('accountBuilder', 'strong')
+          if (isAccountBuilderVerified(current)) {
+            resources.invalidate(['dashboard', 'status'])
+            hapticNotify('success')
+            setReauth({ kind: 'idle' })
+            return
+          }
+        } catch (verifyErr) {
+          if (resources.handleInvalidSessionError(verifyErr)) return
+          // Mutation outcome + attestation are both unknown. Retain typed
+          // uncertainty across Back/remount; a later strong attestation may clear it.
+          resources.markMutationUnknown('account-builder', 'account-reauthorize')
+        }
+      }
+      hapticNotify('error')
       if (err instanceof ApiError) reportApi('reauthorize_submit_failed', err)
       setReauth({ kind: 'failed', code })
+    } finally {
+      release()
     }
-  }, [auth, reauth, reportApi])
+  }, [auth, reauth, reportApi, resources])
 
   const startDisconnect = useCallback(async () => {
     if (acting || pendingDisconnect) return
+    const release = resources.acquireMutation('account-builder')
+    if (!release) return
     hapticImpact('medium')
     setActing(true)
     setFatalError(null)
@@ -194,15 +322,22 @@ export function AccountBuilderScreen({
       const pending = await api.beginConfirmation(auth, 'disconnect')
       setPendingDisconnect(pending)
     } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
       hapticNotify('error')
       setFatalError(err instanceof ApiError ? err.code : 'network_error')
     } finally {
       setActing(false)
+      // beginConfirmation is admission-only; the returned token is local UI
+      // state and confirm acquires a new owner lock. A Back/unmount while this
+      // request is pending cannot issue a second begin from a remount.
+      release()
     }
-  }, [acting, auth, pendingDisconnect])
+  }, [acting, auth, pendingDisconnect, resources])
 
   const confirmDisconnect = useCallback(async () => {
-    if (!pendingDisconnect || acting) return
+    if (!pendingDisconnect || acting || ownerActing) return
+    const release = resources.acquireMutation('account-builder')
+    if (!release) return
     hapticImpact('medium')
     setActing(true)
     try {
@@ -212,13 +347,31 @@ export function AccountBuilderScreen({
       // Local identity is gone: return to the onboarding/session flow.
       onNotConnected()
     } catch (err) {
-      hapticNotify('error')
       setPendingDisconnect(null)
-      setFatalError(err instanceof ApiError ? err.code : 'network_error')
+      if (resources.handleInvalidSessionError(err)) return
+      const code = err instanceof ApiError ? err.code : 'network_error'
+      if (code === 'network_error' || code === 'timeout_error') {
+        try {
+          const session = await api.session(auth)
+          if (!session.account_connected && session.connection_state !== 'connected') {
+            hapticNotify('success')
+            onNotConnected()
+            return
+          }
+        } catch (verifyErr) {
+          if (resources.handleInvalidSessionError(verifyErr)) return
+          // Disconnect may already have committed and consumed the token. Keep
+          // typed uncertainty until a later authoritative session check.
+          resources.markMutationUnknown('account-builder', 'account-disconnect')
+        }
+      }
+      hapticNotify('error')
+      setFatalError(code)
     } finally {
       setActing(false)
+      release()
     }
-  }, [acting, auth, onNotConnected, pendingDisconnect])
+  }, [acting, auth, onNotConnected, ownerActing, pendingDisconnect, resources])
 
   const brand = (
     <Brand
@@ -259,8 +412,7 @@ export function AccountBuilderScreen({
             type="button"
             className="btn btn-secondary"
             onClick={() => {
-              setLoad({ kind: 'loading' })
-              void loadInitial()
+              void resource.refresh('weak').catch(() => {})
             }}
           >
             Попробовать снова
@@ -346,7 +498,7 @@ export function AccountBuilderScreen({
         <button
           type="button"
           className="btn btn-secondary"
-          disabled={refreshing || reauthBusy || acting}
+          disabled={refreshing || reauthBusy || acting || ownerActive}
           onClick={() => void refresh()}
         >
           {refreshing ? 'Проверяем…' : 'Перепроверить разрешения'}
@@ -356,7 +508,7 @@ export function AccountBuilderScreen({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={reauthBusy || refreshing || acting}
+            disabled={reauthBusy || refreshing || acting || ownerActing}
             onClick={() => void startReauthorize()}
           >
             {reauth.kind === 'preparing'
@@ -407,7 +559,7 @@ export function AccountBuilderScreen({
         <button
           type="button"
           className="btn btn-danger"
-          disabled={acting || reauthBusy}
+          disabled={acting || reauthBusy || ownerActing}
           onClick={() => void startDisconnect()}
         >
           {acting && !pendingDisconnect ? 'Готовим…' : 'Отключить аккаунт'}
@@ -425,10 +577,10 @@ export function AccountBuilderScreen({
           <button
             type="button"
             className="btn btn-danger"
-            disabled={acting}
+            disabled={acting || ownerActing}
             onClick={() => void confirmDisconnect()}
           >
-            {acting ? 'Отключаем…' : 'Подтвердить отключение'}
+            {acting || ownerActing ? 'Отключаем…' : 'Подтвердить отключение'}
           </button>
           <button
             type="button"

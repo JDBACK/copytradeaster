@@ -3,13 +3,33 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-07, corrective tested `84cabfb`):** S1/G1 — **CLOSED по [FIX_HANDOFF §6](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md)**. Обязательные N1–N3 исправлены в production history path: bootstrap от реального continuous coverage, continuation одного open episode с устойчивым `public_ref`, durable `dirty_from_ms` + revision/boundary CAS и атомарный consume. T1–T6 и полный offline gate зелёные; фактическая запись — [MINIAPP_FUNCTIONAL_PROGRESS, шаг 30](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md#шаг-30--corrective-n1n3-g1-closed-2026-09-07). G2/G3 открыты.
+> **TL;DR (2026-09-07):** S1/G1 — **CLOSED по [FIX_HANDOFF §6](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md)** на corrective `84cabfb`; S2/G2 — **CLOSED** на current `feature/frontend` WIP от base `b10f01a`, evidence — [MINIAPP_S2_PROGRESS](reports/MINIAPP_S2_PROGRESS_2026-09.md) и [MINIAPP_FUNCTIONAL_PROGRESS, шаг 31](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md#шаг-31--s21s26--g2-closed-2026-09-07). S3/G3 открыты.
 > Предыдущий `REQUEST CHANGES` на `9a0dd98` остаётся историческим evidence причин corrective, но больше не блокирует G1. N4 отложен до S3 details, N5 — до event-delivery rollout, N6 — до следующего signed live harness. Записанный live PASS (26.56s) сохранён; новый corrective live не запускался, поэтому фактический SL fill и STOP cleanup по journal-coid остаются до production rollout/G3.
 > Offline **1439 passed / 2 skipped / 45 deselected** (точно на `84cabfb`, 2026-09-07), миграции **0..58**, ruff check/format clean, doc links clean (49 файлов).
+> S2 frontend current WIP: **27 test files / 316 passed**, oxlint 0/0, TypeScript + Vite production build PASS; main JS **336.56 kB / 96.46 kB gzip**; recorded G2 browser evidence: cold 4 POST, warm root p95 1.0 ms/160, nested p95 1.9 ms/120, 300 ms RTT p95 6.0 ms/160, все warm 0 reads; browser DOM/listeners bounded, long tasks/errors 0. Финальные corrective после этого browser trace затронули transport validation/cancellation/error edges, поэтому latency/DOM числа ниже остаются reference evidence того G2 прогона, а не заявлением о новом CDP rerun.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
 
+- **Mini App S2 / G2 — CLOSED (2026-09-07, `feature/frontend`, base
+  `b10f01a`):** session-scoped shared resources, weak/strong singleflight,
+  read/write/invalidation fencing, hard invalid-session scope reset, root
+  keep-alive sharing, foreground/TTL, bounded Settings prefetch, nested cached
+  first paint, session mutation locks, unknown-outcome reconciliation,
+  nested scroll/focus + modal lifecycle. Frontend **27 files / 316 tests PASS**,
+  oxlint 0/0, build PASS. Production-bundle CDP: cold 4 reads; root p95 1.0 ms
+  (160), cached nested p95 1.9 ms (120), 300 ms RTT root p95 6.0 ms (160),
+  warm API delta 0; Settings prefetch peak 2; 50-cycle DOM/listener counters
+  unchanged, post-GC heap +3.25%, 0 long tasks/page errors. Explicit signed
+  `status(true)` 5 reads: 1.45–2.21 s, median 2.05 s, fresh age=0/valid
+  permissions. Поздние blocker-only аудиты дополнительно нашли causal-order race и
+  неполную retained-unknown симметрию: ambiguous pause/resume/AccountBuilder и
+  Risk/Notifications recovery теперь fence'ят pre-mutation read invalidation
+  barrier'ом, а double-unknown остаётся locked через Back/remount до более позднего
+  authoritative recovery без replay. Финальный post-fix независимый blocker-only
+  re-review: **NONE**; полный verdict хранится в
+  `MINIAPP_S2_PROGRESS_2026-09.md`. Device-only
+  Telegram/WebKit/haptics acceptance остаётся S3.5/G3.
 - **UX-кампания Mini App (план 2026-09), slice «шкала риска» — браузерная
   часть CLOSED (2026-09-06):** первый vertical slice по
   `MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md` §14/§21 (S2.5 input lifecycle +
@@ -1495,7 +1515,7 @@ fills) — entry 34 стал table-ensure, индекс переехал в 51, 
 IF NOT EXISTS; копия prod-БД мигрируется, fresh/upgraded конвергируют;
 регрессия `test_database_upgrade.py`. Retention: facts без TTL, outbox
 `prune_terminal` (SENT 7d / FAILED 30d, bounded, на старте worker).
-Тесты: acceptance +2, upgrade +2, prune +2. Full offline **1314 passed /
+Тесты: acceptance +2, upgrade +2, prune +2. Full offline **1316 passed /
 2 skipped / 45 deselected**, ~19 s. Ruff + format clean. Live §10.9-цикл
 написан (`test_history_acceptance_live.py`), не запущен — ждёт ревью; G1
 не закрыт.

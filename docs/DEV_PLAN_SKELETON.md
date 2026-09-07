@@ -376,14 +376,15 @@ Activity/бот, local-calendar tests, flat resume, новые снимки и �
 приёмкой touch/мыши/trackpad. Геометрия Aster-шкалы и risk policy сохраняются.
 Подробности, зависимости, файлы и критерии:
 [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
-Кампания находится в реализации: повторное ревью C1–C9 на `9a0dd98`
-(2026-09-07) — **REQUEST CHANGES**, G1 открыт. Найдены ошибки scheduled
-publication, continuation, recovery и acceptance harness. Находки N1–N6:
-[MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
-Архитектура — §23–24 UX-плана. **Актуальный corrective scope и условия G1**
-после уточнения масштаба 10–30: [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md).
-Обязательны N1–N3 и T1–T6; N4–N6 имеют отдельные сроки. Реализация пакетов
-не равна прохождению их acceptance.
+Кампания находится в реализации: историческое повторное ревью C1–C9 на
+`9a0dd98` дало REQUEST CHANGES, после чего corrective N1–N3/T1–T6 закрыт на
+`84cabfb` и **G1 принят 2026-09-07**. S2.1–S2.6 затем выполнены на ветке
+`feature/frontend` и **G2 принят 2026-09-07**; текущая детальная evidence —
+[MINIAPP_S2_PROGRESS_2026-09.md](reports/MINIAPP_S2_PROGRESS_2026-09.md).
+Исходные находки N1–N6: [MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md),
+corrective scope 10–30: [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md).
+N4–N6 сохраняют отдельные сроки; закрытие G2 их не переопределяет. Следующий
+этап кампании — S3/G3.
 Прежние acceptance-статусы вне S1 не переоткрываются. Изолированный первый slice —
 шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
 2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
@@ -420,8 +421,10 @@ snap-stop A/B) **отложена на потом — устройства не�
   требуется. N4 — до S3 details, N5 — до event delivery, N6 — до повторного live
   harness. SL fill/STOP live evidence — до production rollout, совместить с G3.
   100-account benchmark не является этим gate; целевой масштаб corrective — 10–30.
-- [ ] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings; S2.1–S2.6.
-- [ ] G2: Скорость принята на нынешних экранах; разрешён старт S3.
+- [x] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings;
+  S2.1–S2.6 CLOSED 2026-09-07. Frontend 27/316, measured production-bundle
+  evidence и corrective blocker audits — `MINIAPP_S2_PROGRESS_2026-09.md`.
+- [x] G2: Скорость принята на нынешних экранах 2026-09-07; разрешён старт S3.
 - [ ] S3: Интерфейс и функциональность — Home, Open/Closed/detail, Activity/бот, Settings; S3.1–S3.5.
 - [ ] G3: Итоговая сквозная, визуальная и performance-приёмка; кампания завершена.
 

@@ -6,9 +6,9 @@
  * Values come from the authoritative DashboardDTO — nothing is hardcoded
  * and stale/degraded never reads «Всё работает». */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
-import { api, ApiError, type AuthContext } from '../api'
+import { useCallback, useEffect, useMemo } from 'react'
+import { HOME_REVALIDATE_MS } from '../revalidate'
+import type { AuthContext } from '../api'
 import { formatPercent } from '../format'
 import type { NestedScreen } from '../navigation'
 import {
@@ -21,6 +21,9 @@ import { hapticImpact } from '../telegram'
 import type { DashboardDTO } from '../types'
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
+import { MiniAppResources } from '../resources'
+import { createSettingsPrefetch, type SettingsPrefetchKey } from '../settingsPrefetch'
+import { useResource, useScreenResources } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -34,7 +37,9 @@ export function SettingsScreen({
   onNotConnected,
   active = true,
   warm = true,
-  invalidateSignal,
+  resources: providedResources,
+  foregroundSignal,
+  invalidateSignal: _invalidateSignal,
 }: {
   auth: AuthContext
   accountMasked?: string | null
@@ -43,61 +48,53 @@ export function SettingsScreen({
   active?: boolean
   /** Gate for the first fetch: shell warmup or the user's first tap. */
   warm?: boolean
-  /** Shell-owned mutation counter; see useWarmRevalidation. */
+  resources?: MiniAppResources
+  foregroundSignal?: number
+  /** @deprecated S2 resources own invalidation; kept for standalone legacy tests. */
   invalidateSignal?: number
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
-
-  const seq = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
-  const startedRef = useRef(false)
-
-  const { markFresh } = useWarmRevalidation({
+  void _invalidateSignal
+  const resources = useScreenResources(providedResources, auth)
+  const resource = useResource({
+    resources,
+    key: 'dashboard',
+    enabled: warm,
     active,
     ttlMs: HOME_REVALIDATE_MS,
-    busy: load.kind === 'loading',
-    invalidateSignal,
-    onRefresh: (reason: WarmReason) => refresh(reason === 'retry' ? 'foreground' : 'background'),
+    strength: 'weak',
+    foregroundSignal,
   })
-
-  const refresh = useCallback(
-    async (mode: 'foreground' | 'background') => {
-      const my = ++seq.current
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      try {
-        const dashboard = await api.dashboard(auth, false, { signal: controller.signal })
-        if (seq.current !== my) return
-        if (dashboard.copy_state === 'empty') {
-          // The shell is only rendered for connected accounts; an empty
-          // dashboard means the session desynced — route back to onboarding.
-          onNotConnected()
-          return
-        }
-        markFresh()
-        setLoad({ kind: 'ready', dashboard })
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'aborted') return
-        if (seq.current !== my) return
-        // Background refresh never wipes ready UI; the next activation
-        // past TTL retries automatically.
-        if (mode === 'foreground') {
-          setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-        }
-      }
-    },
-    [auth, onNotConnected, markFresh],
-  )
+  const prefetch = useMemo(() => createSettingsPrefetch(resources), [resources])
+  const dashboard = resource.snapshot.data
+  const transportStale =
+    dashboard !== null &&
+    (resource.snapshot.stale || resource.snapshot.error !== null || resource.snapshot.inflight)
+  const load: LoadState = dashboard
+    ? { kind: 'ready', dashboard }
+    : resource.snapshot.error
+      ? { kind: 'error', code: resource.snapshot.error }
+      : { kind: 'loading' }
 
   useEffect(() => {
-    if (!warm || startedRef.current) return
-    startedRef.current = true
-    // Initial fetch only: refresh() awaits before its first setState.
-    // oxlint-disable-next-line react/set-state-in-effect
-    void refresh('foreground')
-    return () => abortRef.current?.abort()
-  }, [warm, refresh])
+    if (dashboard?.copy_state === 'empty') onNotConnected()
+  }, [dashboard, onNotConnected])
+
+  useEffect(() => {
+    // Hidden warm Settings may consume Dashboard, but nested speculative reads
+    // begin only after the user actually enters the visible Settings root.
+    if (active && dashboard) prefetch.start()
+    else prefetch.stop()
+    return () => prefetch.stop()
+  }, [active, dashboard, prefetch])
+
+  const openNested = useCallback(
+    (screen: NestedScreen) => {
+      const key = settingsResourceKey(screen)
+      if (key) prefetch.prioritize(key)
+      onOpen(screen)
+    },
+    [onOpen, prefetch],
+  )
 
   if (load.kind === 'loading') {
     return (
@@ -138,7 +135,11 @@ export function SettingsScreen({
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
         <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh('foreground')}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void resource.refresh('weak').catch(() => {})}
+          >
             Повторить
           </button>
         </div>
@@ -147,8 +148,28 @@ export function SettingsScreen({
   }
 
   return (
-    <SettingsView dashboard={load.dashboard} accountMasked={accountMasked} onOpen={onOpen} />
+    <SettingsView
+      dashboard={load.dashboard}
+      accountMasked={accountMasked}
+      onOpen={openNested}
+      transportStale={transportStale}
+    />
   )
+}
+
+function settingsResourceKey(screen: NestedScreen): SettingsPrefetchKey | null {
+  switch (screen.kind) {
+    case 'risk':
+      return 'risk'
+    case 'notifications':
+      return 'notifications'
+    case 'system-status':
+      return 'status'
+    case 'account-builder':
+      return 'accountBuilder'
+    default:
+      return null
+  }
 }
 
 /** Presentational settings list over an authoritative dashboard snapshot. */
@@ -156,13 +177,18 @@ export function SettingsView({
   dashboard,
   accountMasked,
   onOpen,
+  transportStale = false,
 }: {
   dashboard: DashboardDTO
   accountMasked?: string | null
   onOpen: (screen: NestedScreen) => void
+  transportStale?: boolean
 }) {
   const copy = copySummary(dashboard.copy_state)
-  const status = systemStatusValue(dashboard.system_state, dashboard.snapshot_captured_at)
+  const status = systemStatusValue(
+    transportStale ? 'stale' : dashboard.system_state,
+    dashboard.snapshot_captured_at,
+  )
   const notif = notificationsValue(dashboard.notification_enabled)
   const account = dashboard.account_masked ?? accountMasked ?? null
 
