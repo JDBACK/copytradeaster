@@ -3,11 +3,14 @@
 Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
 `main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
 
-> **TL;DR (2026-09-07, QUALIFIED + чистый load):** P1/P1/P2 ревью исправлены
-> и проверены вживую: **F3 clean GREEN 131.8s**, **L1 clean GREEN 69.3s**,
+> **TL;DR (2026-09-07, QUALIFIED + чистый load):** остаточный post-fill race
+> re-review `ac161b2` закрыт: master/TTL теперь выбираются после `fr.lock` +
+> executor mutation lock; reviewer-repro и штатные race/TTL регрессии green.
+> Повторный затронутый live: **L1 post-race GREEN 88.18s**. Ранее также
+> подтверждены **F3 clean GREEN 131.8s**,
 > LC1 clean GREEN 137s, A5 green 8.13s. **Load 0.3 clean GREEN: 1 passed
 > за 3989.74s, exit 0, журнал 1981 CONFIRMED / 0 FAILED**, все фолт-фазы,
-> P8a/P8b внутри. Офлайн **1157 passed, 2 skipped**, ruff чист.
+> P8a/P8b внутри. Офлайн **1159 passed, 2 skipped**, ruff чист.
 > Фронт-стенд убит по приказу owner'а; **-4226 доказан интерференцией**
 > (в тихом окне 0 за ~2000 команд). Финальный flat audit чист.
 > Открыто: coverage 86→87, 3 honest shape-skip.

@@ -846,3 +846,28 @@ junit.
 под этим кодом не наблюдалось. Независимый flat audit после прогона:
 FLAT везде, zero orders.
 Load-гейт ПЕРЕКВАЛИФИЦИРОВАН чисто. Mainnet — решению owner'а.
+
+## 2026-09-07 — Остаточный post-fill fr.lock race закрыт + L1 rerun
+
+Независимый re-review `ac161b2` нашёл оставшийся TOCTOU: post-fill перечитывал
+master после `wait_until_idle`, но до ожидания `fr.lock`; свежий authoritative
+refresh в этом окне мог оставить задаче старый flat и вызвать лишний
+`MARKET_CLOSE`. Reviewer-repro до фикса детерминированно отправлял SELL 0.01.
+
+Фикс в `trading/coordinator.py`: post-fill по-прежнему ждёт originating executor
+sequence, затем входит в штатный порядок `fr.lock -> executor mutation lock`, и
+только внутри него выбирает текущий master + timestamp и проверяет TTL именно
+для выбранного latest перед `_recompute_follower_locked`. Добавлены штатные
+регрессии на refresh во время ожидания `fr.lock` и TTL superseded-state.
+
+Evidence после фикса: reviewer-repro **1 passed**; затронутая unit/integration
+матрица **75 passed**; полный offline **1159 passed, 2 skipped, 85 deselected**;
+Ruff check/format и `git diff --check` чистые. Перед live preview-процессов не
+было. Запрошенный L1
+`test_limit_entry_partials_track_filled_only` — **1 passed за 88.18s**,
+JUnit `data/review-l1-postfill-race-junit.xml`; cleanup/flat audit внутри теста
+прошёл. Часовой load повторно не запускался — owner прямо исключил его для
+этого локального исправления.
+
+Вердикт: оставшийся post-fill P1 закрыт и targeted live переквалифицирован.
+Mainnet — только отдельным решением owner'а.

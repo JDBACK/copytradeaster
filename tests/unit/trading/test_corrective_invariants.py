@@ -402,3 +402,97 @@ async def test_postfill_uses_newer_delta_arriving_during_lock_wait(coordinator_e
     await coordinator.drain_postfill_tasks(timeout_s=5)
     closes = [p for p in fr.client.placed if p["type"] == "MARKET" and p["side"] == "SELL"]
     assert not closes, f"stale capture won over newer delta: {closes}"
+
+
+async def test_postfill_refresh_while_waiting_for_follower_lock(coordinator_env):
+    """Remaining review race: freshness must be chosen after fr.lock too.
+
+    The post-fill task has already passed Executor.wait_until_idle but is still
+    queued on the follower lock. A fresh authoritative reconcile published in
+    that window must win over the original flat capture.
+    """
+    from copytradeaster.domain.models import ExecutionAction
+    from tests.unit.trading.test_coordinator_routing import delta_of, master_state
+
+    coordinator, followers, _, _ = coordinator_env
+    fr = followers[0]
+    await coordinator.on_master_delta(delta_of(master_state(qty=D(0), stop=None)))
+    fr.client.positions[PositionKey("BTCUSDT")] = {
+        "qty": D("0.01"),
+        "stop": D("64500"),
+        "leverage": 20,
+    }
+    entered_recompute = asyncio.Event()
+    original = coordinator._recompute_follower
+
+    async def observe_recompute(runtime, delta, **kwargs):
+        if runtime is fr:
+            entered_recompute.set()
+        return await original(runtime, delta, **kwargs)
+
+    coordinator._recompute_follower = observe_recompute
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT"},
+        client_order_id="remaining-race",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    async with fr.lock:
+        await coordinator.on_command_confirmed(fr.account_id, action)
+        await asyncio.wait_for(entered_recompute.wait(), timeout=2)
+        fresh = master_state()
+        await coordinator.recompute_follower(followers[1], delta_of(fresh))
+        assert coordinator._last_master_state is fresh
+        fr.client.placed.clear()
+    await coordinator.drain_postfill_tasks(timeout_s=5)
+    closes = [p for p in fr.client.placed if p["type"] == "MARKET" and p["side"] == "SELL"]
+    assert not closes, f"old flat snapshot closed a live leg after fresh refresh: {closes}"
+
+
+async def test_postfill_rechecks_ttl_for_latest_state_after_follower_lock(
+    coordinator_env, monkeypatch
+):
+    """The post-lock TTL must apply to the state selected after the wait."""
+    from copytradeaster.domain.models import ExecutionAction
+    from tests.unit.trading.test_coordinator_routing import delta_of, master_state
+
+    coordinator, followers, _, _ = coordinator_env
+    fr = followers[0]
+    await coordinator.on_master_delta(delta_of(master_state()))
+    fr.client.positions[PositionKey("BTCUSDT")] = {
+        "qty": D("0.01"),
+        "stop": D("64500"),
+        "leverage": 20,
+    }
+    entered_recompute = asyncio.Event()
+    original = coordinator._recompute_follower
+
+    async def observe_recompute(runtime, delta, **kwargs):
+        if runtime is fr:
+            entered_recompute.set()
+        return await original(runtime, delta, **kwargs)
+
+    coordinator._recompute_follower = observe_recompute
+    action = ExecutionAction(
+        kind=ActionKind.MARKET_OPEN,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT"},
+        client_order_id="latest-ttl",
+        replaces_client_order_id=None,
+        priority=1,
+    )
+    async with fr.lock:
+        await coordinator.on_command_confirmed(fr.account_id, action)
+        await asyncio.wait_for(entered_recompute.wait(), timeout=2)
+        latest_flat = master_state(qty=D(0), stop=None)
+        await coordinator.recompute_follower(followers[1], delta_of(latest_flat))
+        assert coordinator._last_master_state is latest_flat
+        # Admission already used the original fresh capture. From here on, a
+        # zero TTL makes only the newly selected latest state stale.
+        monkeypatch.setattr("copytradeaster.trading.coordinator.POSTFILL_STATE_MAX_AGE_S", 0)
+        fr.client.placed.clear()
+    await coordinator.drain_postfill_tasks(timeout_s=5)
+    closes = [p for p in fr.client.placed if p["type"] == "MARKET" and p["side"] == "SELL"]
+    assert not closes, f"aged latest state drove a post-fill close: {closes}"

@@ -389,45 +389,25 @@ class Coordinator:
         async with self._postfill_admission_lock:
             if not self._postfill_admission_open:
                 return
-            task = asyncio.create_task(self._postfill_recompute(fr, state, captured_at))
+            task = asyncio.create_task(self._postfill_recompute(fr, state))
             self._postfill_tasks.add(task)
             task.add_done_callback(self._postfill_tasks.discard)
 
-    async def _postfill_recompute(
-        self, fr: FollowerRuntime, state: MasterState, captured_at: float
-    ) -> None:
+    async def _postfill_recompute(self, fr: FollowerRuntime, state: MasterState) -> None:
         try:
             # on_confirmed is called while Executor holds the account mutation
             # lock. Wait for the whole originating plan (including its new
             # protection) before taking the snapshot; otherwise a post-fill
             # task can observe the brief pre-STOP window and place a duplicate.
             await self._executor.wait_until_idle(fr.account_id)
-            # Review 636dfff P1: the capture above predates the lock wait. A
-            # newer authoritative refresh (REST sweep/boundary via
-            # recompute_follower, or a newer WS delta) may have superseded it
-            # while we waited — a TTL alone cannot see that, and recomputing
-            # against the stale capture closes live legs on a phantom
-            # MASTER_CLOSED. Re-read the cache after the wait and converge
-            # on whatever is current (the cache only moves forward: the
-            # projector discards out-of-order frames before they reach it).
-            latest = self._last_master_state
-            if latest is None:
-                return
-            if (
-                latest is not state
-                or latest.generation != state.generation
-                or self._last_master_state_at != captured_at
-            ):
-                state = latest
-            elif time.monotonic() - captured_at > POSTFILL_STATE_MAX_AGE_S:
-                # Nothing newer arrived and the capture aged out while we
-                # waited: same stale-cache hazard as at admission.
-                log.info(
-                    "post-fill recompute skipped for %s: cached master state aged out",
-                    _safe_fragment(fr.account_id),
-                )
-                return
-            await self._recompute_follower(fr, MasterDelta(frozenset({"*"}), state))
+            # The actual master selection must happen only after _recompute_follower
+            # owns both follower/executor mutation locks. A refresh can land after
+            # wait_until_idle while this task is still queued on fr.lock.
+            await self._recompute_follower(
+                fr,
+                MasterDelta(frozenset({"*"}), state),
+                use_latest_master=True,
+            )
         except Exception as exc:  # noqa: BLE001 - notification path must not raise
             log.warning("post-fill recompute failed for %s: %s", fr.account_id, exc)
 
@@ -543,6 +523,7 @@ class Coordinator:
         delta: MasterDelta,
         *,
         master_fresh: bool | None = None,
+        use_latest_master: bool = False,
     ) -> int:
         # Snapshot and mutation must be one per-follower generation. The
         # executor lock serializes exchange writes, but without this outer lock
@@ -554,6 +535,24 @@ class Coordinator:
             await resolve_boot_unknowns(
                 lambda _: fr.client, self.commands, self._links, only_account=fr.account_id
             )
+            if use_latest_master:
+                # Post-fill is a safety net, not an independent source of
+                # intent. Select the cache only after every lock wait that can
+                # let a newer authoritative master refresh win. The TTL belongs
+                # to the state actually selected here, not to the admission
+                # capture that may already have been superseded.
+                latest = self._last_master_state
+                latest_at = self._last_master_state_at
+                if latest is None:
+                    return 0
+                if time.monotonic() - latest_at > POSTFILL_STATE_MAX_AGE_S:
+                    log.info(
+                        "post-fill recompute skipped for %s: cached master state aged out",
+                        _safe_fragment(fr.account_id),
+                    )
+                    return 0
+                delta = MasterDelta(frozenset({"*"}), latest)
+                master_fresh = None
             return await self._recompute_follower_locked(fr, delta, master_fresh=master_fresh)
 
     async def _recompute_follower_locked(
