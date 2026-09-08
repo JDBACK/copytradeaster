@@ -258,6 +258,12 @@ credentials появились.
 `NotificationRouter` быстро и идемпотентно пишет recipient-specific rows в
 SQLite outbox, а bounded `TelegramOutboxWorker` доставляет их независимо с
 lease/retry/backoff и изоляцией Telegram 403. Console sink сохраняется.
+S3 production factory включает durable user-event consumer: per-scope cursor
+и outbox commit атомарны, первый enable записывает rollout floor. Boot и
+периодический sweep используют один consumer; выключенные уведомления не
+останавливают историю. Mini App/menu/push используют `format_user_event`;
+command confirmations в S3 не доставляются как факты позиции. Keyboard строится
+из configured HTTPS Mini App URL и owned opaque trade ref, только private chat.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.
 
@@ -568,10 +574,11 @@ connect/migrate → bootstrap configured admins/recovery floor
 ```
 
 Shutdown идёт в обратной зависимости: закрыть admission/drain Telegram
-handlers → остановить и осушить outbox при живых Bot/DB → `App.stop()` → один
-раз закрыть Bot session. На старте процесс ставит notification recovery
-floor: исторические confirmations не рассылаются, восстанавливаются только
-недоставленные confirmed commands после этого floor.
+handlers → остановить user-event sweep → осушить outbox при живых Bot/DB
+→ остановить Mini App/history worker → `App.stop()` → закрыть Bot session.
+S3 production восстанавливает user events после отдельного rollout floor и
+запускает recurring sweep раз в 2 секунды. Explicit delivery=False seam
+сохраняет прежний command recovery без user-event scan/cursor advance.
 
 Операционный лог — отдельный локальный durable sink, не SQLite и не outbox:
 `setup_logging()` всегда поднимает console handler и bounded

@@ -69,7 +69,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks |
 | `historyResources.ts` / `historyResources.test.ts` | Session history cache and invalidation revision fence; regressions for late responses, coalesced follow-up and inactive reads |
 | `useHistory.ts` | External-store subscription for history list/feed/detail/events |
-| `screens/TradeListScreen.tsx` / `screens/TradeDetailScreen.tsx` | S3 history list and detail surfaces (WIP) |
+| `screens/TradeListScreen.tsx` / `screens/TradeDetailScreen.tsx` | S3 history lists, independent fills/events pagination, grouped executions, owned split choice and stale/partial detail states |
 | `components/PositionSummaryCard.tsx` / `TradeSummaryCard.tsx` / `TradeEventRow.tsx` | S3 position, trade and event presentation |
 | `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL |
 | `resourceScopeContext.ts` | Connected-session owner context for direct screen-owned paths such as Activity so auth loss still hits the hard session boundary |
@@ -88,9 +88,9 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 
 | Screen | Contract | Backend routes |
 |---|---|---|
-| `HomeScreen.tsx` (+`home.ts`) | MUTATES pause/resume (+ confirm Sheet); trust strip, metrics, first position | `dashboard`, `pause`, `resume`, `confirmation/begin`, `confirmation/confirm` |
+| `HomeScreen.tsx` (+`home.ts`) | MUTATES pause/resume (+ confirm Sheet); account overview, freshness, compact copy state and contextual navigation | `dashboard`, `pause`, `resume`, `confirmation/begin`, `confirmation/confirm` |
 | `PositionsScreen.tsx` | READ-ONLY list + exported `PositionCard` (entry/now/stop/TP/risk-to-stop/leverage); refresh-only | `positions` |
-| `ActivityScreen.tsx` (+`activityView.ts`) | READ-ONLY journal timeline, filter tabs, append-pagination | `activity` |
+| `ActivityScreen.tsx` (+`activityView.ts`) | READ-ONLY user-event feed, pending operations, pinned cursor pages and trade links | `activity/feed` |
 | `RiskScreen.tsx` (+`riskView.ts`) | MUTATES risk-on-Stop: draft/confirmed/save integration, exact 1e-5 integer math; ruler control lives in `components/RiskRuler.tsx` | `risk`, `risk/percent` |
 | `SettingsScreen.tsx` (+`settingsView.ts`) | READ-ONLY capability list; navigation only | — (routes to nested) |
 | `NotificationsScreen.tsx` (+`notificationsView.ts`) | MUTATES single toggle (`role=switch`), server-confirmed flip + double-tap gate | `notifications`, `notifications/enabled` |

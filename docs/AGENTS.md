@@ -54,7 +54,8 @@
 
 | Файл | Кампания |
 |---|---|
-| `MINIAPP_S3_PROGRESS_2026-09.md` | S3 IN PROGRESS: конкретный TODO, архитектурные решения, промежуточные итоги и evidence; G3 OPEN |
+| `MINIAPP_S3_PROGRESS_2026-09.md` | S3.0–S3.4 реализованы, проверка отложена; журнал решений и изменений; G3 OPEN |
+| `MINIAPP_S3_TESTING_HANDOFF_2026-09.md` | Передача итогового S3 на offline/browser/device/N6 live проверку: контракты, rollout, сценарии и ограничения |
 | `REFACTOR_STAGE1_REPORT.md` | Базовый рефакторинг Stage 1 + инвентаризация первого ревью (2026-08-22) |
 | `FINAL_STAGE1_FOLLOWUP_REPORT_2026-08.md` | Follow-up по второму ревью + первый hybrid gate 30×100 (2026-08-22/23) |
 | `FINAL_STAGE1_FOLLOWUP_JOURNAL_2026-08.md` | Хронология разработки того follow-up (журнал к отчёту выше) |

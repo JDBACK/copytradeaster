@@ -12,6 +12,15 @@
 
 ## Текущее состояние
 
+- **S3 implementation handoff (2026-09-08):** menu/feed/push migration,
+  production durable delivery и owned split/link/detail changes реализованы.
+  По просьбе владельца тестовые suites и browser/live не запускались.
+  TypeScript compilation и ruff по изменённым Python-файлам проходят.
+  Прежние counters ниже — baseline, не доказательство текущего diff.
+  Старые command Activity/recovery tests требуют миграции на новые контракты;
+  список и порядок — [S3 testing handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md).
+  N6 harness не изменялся; G3 OPEN.
+
 - **S3 cache bounds (2026-09-08):** history regressions — **9 passed**;
   TypeScript и oxlint PASS. Проверены три inactive filters, mounted Back target
   и whole-slice eviction после release. Полный suite после этого не повторён.

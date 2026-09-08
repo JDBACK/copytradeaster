@@ -250,3 +250,39 @@ menu/push presenter, N5 durable-only delivery и owned deep links. Затем о
 проходом выполнить offline gate (frontend/backend/ruff/docs), после чего перейти
 к browser/device/live evidence S3.5/G3. Мелкие targeted checks допустимы только
 для нового риска и не заменяют завершение функционального объёма.
+
+### 15. Завершение реализации перед отдельной приёмкой (2026-09-08)
+
+Уточнение владельца: этот проход посвящён реализации; тесты, browser/device и
+signed live выполняются следующей сессией. G3 до evidence остаётся OPEN.
+Конкретный TODO текущего прохода:
+
+- [x] S3.3: перевести Telegram Activity и совместимый HTTP activity на user events;
+  удалить командный mapper пользовательских фактов.
+- [x] S3.3/N5: включить durable delivery в production composition, добавить
+  периодический drain и корректный shutdown; исключить двойные command push.
+- [x] S3.3: согласовать query ссылки worker и frontend, включить owned trade links.
+- [x] S3.2/S3.4: закончить состояния detail/loading/partial/unknown и проверить
+  по коду оставшиеся требования Settings/resume/calendar.
+- [x] S3.5: обновить guides и передать конкретную матрицу приёмки без её запуска.
+
+### 16. Реализация остатка S3 перед передачей (2026-09-08)
+
+TODO §15 выполнен по коду. Telegram menu переведён на user-event feed с
+bounded cursor history и ссылками; legacy HTTP activity стал временным
+adapter к той же модели. Удалены command Activity mapper/readers и capped
+user-event recovery. Production factory включает durable delivery с recurring
+sweep/shutdown, rollout floor и подавлением старых command push. Link URL
+согласован (`trade`), старый `trade_ref` читается для совместимости.
+
+Trade detail поддерживает owned split resolution с выбором successor, явные
+loading/empty/partial состояния и группировку fills по order/role. Missing ref
+очищает cached detail. Closed list показывает время сверки, changed revision
+блокирует continuation. Исправлен отрицательный дробный знак общего presenter.
+Сохранены S2 ownership/fences, серверная денежная арифметика, read-only позиции.
+
+S3.0–S3.4 функционально реализованы; исходные acceptance checkboxes выше
+остаются открытыми до проверки. S3.5 guides готовы; offline/browser/device/N6
+signed приёмка отложена владельцем. Тесты не запускались; TypeScript и static
+Python checks проходят. Детальный порядок проверки, изменённые контракты и
+границы — [S3 testing handoff](MINIAPP_S3_TESTING_HANDOFF_2026-09.md).

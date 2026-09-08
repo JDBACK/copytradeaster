@@ -967,3 +967,12 @@ event presenter text и удалён default capped user-event recovery scan в
 passed / 44 failed** из-за ещё не обновлённых legacy S2 contract/lifecycle
 assertions. Продолжение: сначала frontend test/contracts и S3.2/S3.3 rollout,
 затем offline/browser/live evidence по TODO в S3-журнале.
+
+### S3: остаток реализации передан на отдельную проверку (2026-09-08)
+
+Функциональные S3.0–S3.4 реализованы: завершены menu/push/feed consistency,
+production durable delivery, owned links/split choices и detail edge states.
+S3.5 документация готова; проверка отложена по просьбе владельца. G3 OPEN,
+нового offline/browser/live evidence нет. Источник текущего состояния —
+[журнал S3, §16](MINIAPP_S3_PROGRESS_2026-09.md) и
+[передача тестирования](MINIAPP_S3_TESTING_HANDOFF_2026-09.md).

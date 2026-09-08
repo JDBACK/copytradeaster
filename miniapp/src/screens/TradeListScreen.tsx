@@ -20,14 +20,15 @@ export function ClosedTrades({ resources, onOpen, active = true, preview = false
   return <>
     {!preview && <>
       <div className="history-segments" aria-label="Период истории">{(['7d', '30d', 'all'] as const).map(value => <button key={value} type="button" aria-pressed={period === value} onClick={() => setPeriod(value)}>{value === '7d' ? '7 дней' : value === '30d' ? '30 дней' : 'Вся доступная'}</button>)}</div>
-      <form className="history-search" onSubmit={event => { event.preventDefault(); setSymbol(search.trim().toUpperCase()) }}><label>Инструмент<input value={search} onChange={event => setSearch(event.target.value)} placeholder="BTCUSDT" /></label><button type="submit" className="btn btn-secondary">Найти</button></form>
+      <form className="history-search" onSubmit={event => { event.preventDefault(); setSymbol(search.trim().toUpperCase()) }}><label>Инструмент<input value={search} onChange={event => setSearch(event.target.value)} placeholder="BTCUSDT" maxLength={24} /></label><button type="submit" className="btn btn-secondary">Найти</button></form>
     </>}
     {history.data && <p className="freshness">{history.data.coverage_from ? `История доступна с ${formatDateTime(history.data.coverage_from)}` : 'Диапазон истории уточняется'} · {history.data.coverage_complete ? 'сверена' : 'может быть неполной'}</p>}
+    {history.data && <p className="freshness">Последняя сверка: {formatDateTime(history.data.as_of)}</p>}
     {history.error && <><ErrorBox {...describeError(history.error)} /><button type="button" className="btn btn-secondary" onClick={() => void history.retry()}>{history.changed ? 'История изменилась — обновить' : 'Повторить загрузку'}</button></>}
     {!history.data && !history.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка истории" />}
     {history.data?.items.map(trade => <TradeSummaryCard key={trade.trade_ref} trade={trade} onOpen={() => onOpen({ kind: 'trade-detail', tradeRef: trade.trade_ref })} />)}
     {history.data?.items.length === 0 && <p className="info-box">{history.data.coverage_from ? 'Закрытых сделок за этот период нет' : 'Загружаем историю. Доступный диапазон пока не подтверждён.'}</p>}
-    {history.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={history.loading} onClick={() => preview ? onOpen({ kind: 'trade-list', state: 'closed', period }) : void history.more()}>{history.loading ? 'Загружаем…' : preview ? 'Вся история' : 'Показать ещё 20'}</button>}
+    {history.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={history.loading || history.changed} onClick={() => preview ? onOpen({ kind: 'trade-list', state: 'closed', period }) : void history.more()}>{history.loading ? 'Загружаем…' : preview ? 'Вся история' : 'Показать ещё 20'}</button>}
     {history.data && <button type="button" className="btn btn-ghost" disabled={history.loading} onClick={() => void history.refresh()}>Обновить историю</button>}
   </>
 }
@@ -39,7 +40,7 @@ export function TradeListScreen({ resources, route, onOpen, active = true, foreg
   const data = positions.snapshot.data
   return <div className="screen"><h1 className="h1">{route.state === 'closed' ? 'Закрытые сделки' : 'Открытые позиции'}</h1>
     {route.state === 'closed' ? <ClosedTrades resources={resources} onOpen={onOpen} active={active} initialPeriod={route.period} foregroundSignal={foregroundSignal} /> : <>
-      <label className="history-search">Инструмент<input value={search} onChange={event => setSearch(event.target.value)} placeholder="Поиск по инструменту" /></label>
+      <label className="history-search">Инструмент<input value={search} onChange={event => setSearch(event.target.value)} placeholder="Поиск по инструменту" maxLength={24} /></label>
       <div className="history-segments"><button type="button" aria-pressed={!attention} onClick={() => setAttention(false)}>Все</button><button type="button" aria-pressed={attention} onClick={() => setAttention(true)}>Требуют внимания</button></div>
       {positions.snapshot.error && <ErrorBox {...describeError(positions.snapshot.error)} />}
       {!data && !positions.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} />}

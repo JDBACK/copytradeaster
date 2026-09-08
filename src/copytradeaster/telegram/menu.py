@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -26,7 +27,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from copytradeaster.application.models import (
     AccessRequestDTO,
     AccessRequestStatus,
-    ActivityPage,
+    ActivityFeedPage,
     AdminAccessRequestPage,
     AdminDashboardDTO,
     AdminFollowerPage,
@@ -46,6 +47,7 @@ from copytradeaster.application.models import (
     StatusState,
     SystemState,
 )
+from copytradeaster.notifications.worker import trade_keyboard
 from copytradeaster.onboarding.errors import OnboardingErrorCode
 from copytradeaster.telegram.access import (
     AccessDecisionAction,
@@ -207,10 +209,13 @@ class MenuEngine:
         application: ApplicationProtocol | None = None,
         sessions: MenuSessionStore | None = None,
         admin_ids: set[int] | frozenset[int] | None = None,
+        miniapp_public_url: str | None = None,
     ) -> None:
         self.application = application
         self.sessions = sessions or MenuSessionStore()
+        self.miniapp_public_url = miniapp_public_url
         self.admin_ids = admin_ids
+        self._activity_cursors: OrderedDict[int, list[str | None]] = OrderedDict()
 
     async def dashboard(self, user_id: int, revision: int = 0) -> MenuView:
         dto = DashboardDTO()
@@ -233,10 +238,21 @@ class MenuEngine:
         return render_risk(dto, revision)
 
     async def activity(self, user_id: int, page: int = 0, revision: int = 0) -> MenuView:
-        dto = ActivityPage(page=page)
+        # Keep cursor values only, never account DTOs. Every read rechecks ownership.
+        cursors = self._activity_cursors.get(user_id)
+        if page <= 0 or cursors is None or page >= len(cursors) or page >= 100:
+            page, cursors = 0, [None]
+        dto = ActivityFeedPage()
         if self.application is not None:
-            dto = await self.application.activity(user_id, page=max(0, page))
-        return render_activity(dto, revision)
+            dto = await self.application.activity_feed(user_id, cursor=cursors[page], limit=5)
+        cursors = cursors[: page + 1]
+        if dto.next_cursor is not None and page < 99:
+            cursors.append(dto.next_cursor)
+        self._activity_cursors[user_id] = cursors
+        self._activity_cursors.move_to_end(user_id)
+        while len(self._activity_cursors) > 128:
+            self._activity_cursors.popitem(last=False)
+        return render_activity(dto, revision, page=page, miniapp_public_url=self.miniapp_public_url)
 
     async def notifications(self, user_id: int, revision: int = 0) -> MenuView:
         dto = NotificationSettingsDTO()
@@ -668,33 +684,40 @@ def render_risk(dto: RiskDTO, revision: int = 0) -> MenuView:
     return MenuView(Screen.RISK, text, builder.as_markup(), revision)
 
 
-def render_activity(dto: ActivityPage, revision: int = 0) -> MenuView:
+def render_activity(
+    dto: ActivityFeedPage,
+    revision: int = 0,
+    *,
+    page: int = 0,
+    miniapp_public_url: str | None = None,
+) -> MenuView:
     builder = _builder()
     lines = ["Активность", ""]
+    if dto.pending:
+        lines.append("Операции уточняются; результат пока не подтверждён.")
+        for item in dto.pending[:3]:
+            state = "Проверяем результат" if item.state == "UNKNOWN" else "Выполняется"
+            lines.append(f"{item.symbol or 'Инструмент уточняется'} · {state}")
+        lines.append("")
     if not dto.items:
-        lines.append("Пока нет безопасных событий.")
-    else:
-        for item in dto.items[:10]:
-            if item.status.value == "completed":
-                status_text = "Выполнено"
-            elif item.status.value == "pending":
-                if item.pending_age is not None:
-                    status_text = f"Выполняется ({item.pending_age} сек)"
-                else:
-                    status_text = "Выполняется"
-            else:
-                status_text = "Ошибка"
-            lines.append(f"{_when(item.occurred_at)} · {item.title} — {status_text}")
-            if item.remediation:
-                lines.append(f"  ↳ {item.remediation}")
-    if dto.has_previous:
-        builder.button(
-            text="◀", callback_data=_cb(MenuAction.PAGE, revision, page=max(0, dto.page - 1))
-        )
-    if dto.has_next:
-        builder.button(text="▶", callback_data=_cb(MenuAction.PAGE, revision, page=dto.page + 1))
-    if dto.has_previous or dto.has_next:
-        builder.adjust(2)
+        lines.append("Подтверждённых событий пока нет.")
+    linked: set[str] = set()
+    for item in dto.items:
+        lines.append(f"{_when(item.occurred_at)}\n{item.text}\n")
+        if item.trade_ref and item.trade_ref not in linked:
+            markup = trade_keyboard(item.trade_ref, "open_trade", miniapp_public_url)
+            if markup is not None:
+                button = markup.inline_keyboard[0][0]
+                builder.button(
+                    text=f"Сделка · {item.facts.get('symbol') or len(linked) + 1}",
+                    web_app=button.web_app,
+                )
+                linked.add(item.trade_ref)
+    if page > 0:
+        builder.button(text="◀", callback_data=_cb(MenuAction.PAGE, revision, page=page - 1))
+    if dto.next_cursor is not None and page < 99:
+        builder.button(text="▶", callback_data=_cb(MenuAction.PAGE, revision, page=page + 1))
+    builder.button(text="Обновить", callback_data=_cb(MenuAction.PAGE, revision, page=0))
     builder.button(text="‹ Назад", callback_data=_cb(MenuAction.BACK, revision))
     builder.button(text="⌂ На главную", callback_data=_cb(MenuAction.HOME, revision))
     builder.adjust(2)

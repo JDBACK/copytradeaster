@@ -67,6 +67,7 @@ def create_dispatcher(
         application,
         MenuSessionStore(),
         admin_ids=frozenset(settings.telegram_admin_ids),
+        miniapp_public_url=settings.miniapp_public_url if settings.miniapp_enabled else None,
     )
     # Dispatcher normally installs FSM first; move it behind an update-level
     # callback acknowledgement so a second callback cannot wait on

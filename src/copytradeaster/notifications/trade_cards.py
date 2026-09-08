@@ -27,12 +27,15 @@ def _num(value: Any) -> str | None:
         dec = Decimal(text)
     except (InvalidOperation, ValueError):
         return text
+    if not dec.is_finite():
+        return None
     if dec == dec.to_integral_value():
         grouped = f"{int(dec):,}".replace(",", " ")
     else:
         raw = format(dec, "f")
         head, _, tail = raw.partition(".")
-        grouped = f"{int(head):,}".replace(",", " ") + "." + tail
+        sign = "-" if dec < 0 else ""
+        grouped = sign + f"{abs(int(head)):,}".replace(",", " ") + "." + tail
         grouped = grouped.rstrip("0").rstrip(".")
     return grouped.replace(".", ",")
 

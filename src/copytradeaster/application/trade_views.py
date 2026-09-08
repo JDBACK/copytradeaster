@@ -10,7 +10,7 @@ absent until full attribution, and money travels as canonical strings.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -261,7 +261,16 @@ async def resolve_owned_ref(
         raise ValueError("trade reference is invalid")
     resolution = await episodes.get_resolution(scope, ref)
     if resolution is not None and resolution.kind == "split":
-        return resolution
+        targets = []
+        for target in dict.fromkeys(resolution.targets):
+            if target == ref:
+                continue
+            if (
+                await episodes.get(scope, target) is not None
+                or await episodes.get_resolution(scope, target) is not None
+            ):
+                targets.append(target)
+        return replace(resolution, targets=tuple(targets))
     stored = await episodes.get(scope, ref)
     if stored is None:
         return None

@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from copytradeaster.history.models import TradeResolutionDTO
 
 from copytradeaster.onboarding.errors import OnboardingErrorCode
 
@@ -1022,7 +1025,7 @@ class ApplicationProtocol(Protocol):
         symbol: str | None = None,
     ) -> TradeListPage: ...
 
-    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO: ...
+    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO | TradeResolutionDTO: ...
 
     async def trade_events(
         self,

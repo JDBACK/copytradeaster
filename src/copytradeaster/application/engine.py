@@ -106,7 +106,9 @@ def _build_telegram(settings: Settings, application: ApplicationProtocol) -> Tel
     return TelegramRuntime.build(settings, application)
 
 
-def _build_worker(bot: Any, db: Database, settings: Settings) -> TelegramOutboxWorker:
+def _build_worker(
+    bot: Any, db: Database, settings: Settings, *, user_events_only: bool = False
+) -> TelegramOutboxWorker:
     # The worker deliberately has a stricter bound than the Telegram handler
     # task pool.  A config value of 16 must not accidentally create 16 SQLite
     # outbox workers or 16 concurrent sends.
@@ -117,6 +119,8 @@ def _build_worker(bot: Any, db: Database, settings: Settings) -> TelegramOutboxW
         concurrency=concurrency,
         poll_interval=float(settings.telegram_outbox_poll_interval_s),
         webapp_base_url=settings.miniapp_public_url or None,
+        trade_links_enabled=settings.miniapp_enabled,
+        user_events_only=user_events_only,
     )
 
 
@@ -206,10 +210,11 @@ async def recover_notification_outbox(
     Console-only mode still advances the floor but never creates an outbox or
     worker.
 
-    With ``enable_user_event_delivery`` (S1 default off) the user-event leg
+    With ``enable_user_event_delivery`` (production S3 enabled) the user-event leg
     uses the durable per-scope cursor instead of the legacy timestamp sweep
     and records a separate rollout floor on first enable, so accumulated
-    backfill never blasts. Legacy command recovery is identical either way.
+    backfill never blasts. The S3 router suppresses legacy command delivery;
+    the disabled compatibility seam retains command recovery.
     """
 
     settings = SettingsRepo(db)
@@ -298,9 +303,10 @@ class Stage2Process:
         self._telegram_factory = telegram_factory
         self._worker_factory = worker_factory
         self._history_factory = history_factory
-        # S1 default off: the durable user-event consumer has no boot hook or
-        # recurring drain until S3; history collection never depends on it.
+        # The low-level seam can disable delivery independently of collection.
+        # Production build_stage2_process enables the S3 durable consumer.
         self._enable_user_event_delivery = bool(enable_user_event_delivery)
+        self._delivery_task: asyncio.Task[None] | None = None
         self.history_worker: HistoryWorker | None = None
         self._clock = clock
         self.app: App | None = None
@@ -340,6 +346,7 @@ class Stage2Process:
                 notifier: Notifier = NotificationRouter(
                     self.db,
                     admin_ids=self.settings.telegram_admin_ids,
+                    user_events_only=self._enable_user_event_delivery,
                 )
                 self.notifier = notifier
                 await recover_notification_outbox(
@@ -377,6 +384,10 @@ class Stage2Process:
             await self.app.start()
             self.history_worker = self._history_factory(self.app)
             await self.history_worker.start()
+            if self._enable_user_event_delivery:
+                self._delivery_task = asyncio.create_task(
+                    self._deliver_user_events(), name="user-event-delivery"
+                )
 
             if self.settings.miniapp_enabled:
                 from copytradeaster.miniapp.server import MiniAppServer
@@ -385,7 +396,15 @@ class Stage2Process:
                 await self.miniapp.start()
 
             if self.settings.telegram_notifications_enabled:
-                self.worker = self._worker_factory(self.telegram.bot, self.db, self.settings)
+                if self._worker_factory is _build_worker:
+                    self.worker = _build_worker(
+                        self.telegram.bot,
+                        self.db,
+                        self.settings,
+                        user_events_only=self._enable_user_event_delivery,
+                    )
+                else:
+                    self.worker = self._worker_factory(self.telegram.bot, self.db, self.settings)
                 await self.worker.start()
                 self._worker_started = True
             self._started = True
@@ -395,6 +414,17 @@ class Stage2Process:
                 # Preserve the startup failure; callers can invoke the
                 # explicit shutdown seam separately to inspect teardown.
             raise
+
+    async def _deliver_user_events(self) -> None:
+        """Recurring durable read/outbox drain; never invokes trading endpoints."""
+        router = self.notifier if isinstance(self.notifier, NotificationRouter) else None
+        while True:
+            try:
+                await _recover_user_events_durable(self.db, router, now=self._clock())
+            except Exception:
+                # Cursor and outbox share a transaction; next sweep retries safely.
+                logger.exception("user event delivery sweep failed")
+            await asyncio.sleep(2)
 
     async def run(self) -> None:
         """Run Telegram polling until stop, failure, cancellation, or Ctrl+C."""
@@ -436,6 +466,12 @@ class Stage2Process:
                     errors.append(exc)
                 finally:
                     self._transport_shutdown = True
+
+            if self._delivery_task is not None:
+                self._delivery_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._delivery_task
+                self._delivery_task = None
 
             worker = self.worker
             if worker is not None and not self._worker_stopped:
@@ -507,7 +543,7 @@ def build_stage2_process(
     telegram_factory: TelegramFactory = _build_telegram,
     worker_factory: WorkerFactory = _build_worker,
     clock: Clock = _utc_now,
-    enable_user_event_delivery: bool = False,
+    enable_user_event_delivery: bool = True,
 ) -> Stage2Process:
     """Build the production Stage 2 process with explicit test seams."""
     return Stage2Process(

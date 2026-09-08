@@ -1,8 +1,8 @@
 /** Bounded history DTOs owned by one connected session. No persistence. */
 import { api, ApiError, type AuthContext } from './api'
 import type { MiniAppResources } from './resources'
-import type { ActivityFeedPage, ActivityFilter, TradeDetailDTO, TradeEventsPage, TradeListPage, TradePeriod } from './types'
-export interface HistoryValues { trades: TradeListPage; feed: ActivityFeedPage; detail: TradeDetailDTO; events: TradeEventsPage }
+import type { ActivityFeedPage, ActivityFilter, TradeResponseDTO, TradeEventsPage, TradeListPage, TradePeriod } from './types'
+export interface HistoryValues { trades: TradeListPage; feed: ActivityFeedPage; detail: TradeResponseDTO; events: TradeEventsPage }
 export type HistoryQuery =
   | { kind: 'trades'; period: TradePeriod; symbol?: string; limit?: number }
   | { kind: 'feed'; filter: ActivityFilter }
@@ -152,7 +152,7 @@ export class HistoryResources {
         if (this.disposed || generation !== entry.generation || revision !== entry.revision || (error instanceof ApiError && error.code === 'aborted')) return
         const code = error instanceof ApiError ? error.code : 'network_error'
         entry.failedMode = mode
-        this.publish(entry, { error: code, changed: code === 'history_page_changed' })
+        this.publish(entry, { error: code, changed: code === 'history_page_changed', ...(code === 'trade_unavailable' ? { data: null } : {}) })
       } finally {
         if (generation === entry.generation) {
           entry.flight = null

@@ -1,0 +1,110 @@
+# S3 — передача реализации на проверку
+
+Дата: 2026-09-08. Реализация поверх `b83c708`.
+**IMPLEMENTED / NOT ACCEPTED; G3 OPEN.** Тесты, browser/device и signed live
+в этом проходе по просьбе владельца не запускались. Не начинать с нового
+рефакторинга: сначала проверить внесённый функциональный объём.
+
+## Что реализовано
+
+S3.1: Home overview и переходы вместо первой позиции/TrustRail.
+S3.2: Open/Closed previews, полные списки, фильтры, bounded session history,
+независимые fills/events cursors, retry и explicit revision refresh; snapshot
+fallback без trade_ref; detail money/stale/partial/loading; fills группируются
+по доказанному order_id/role без финансовых вычислений в JS. Split возвращает
+owned `TradeResolutionDTO` через существующий `/trade`, экран предлагает
+выбрать target, а не открывает случайный эпизод. Alias/merge сохраняются.
+
+S3.3: Mini App и Telegram menu читают `activity_feed`, используют один
+`format_user_event`. Меню хранит только cursor цепочки (до 128 пользователей,
+100 страниц по 5 событий), перечитывая ownership каждым запросом. Pending
+отдельно от подтверждённых фактов. В меню и push есть owned Web App link.
+Production `build_stage2_process` включает durable user-event delivery:
+rollout floor на первом enable, boot recovery + recurring sweep раз в 2 с,
+атомарные outbox/cursor commits. Shutdown отменяет sweep перед drain outbox.
+История собирается независимо от уведомлений; muted rows продвигают cursor
+без enqueue. Проверка recipient перед отправкой сохранена.
+
+`execution.confirmed` в S3 остаётся console/diagnostic acknowledgement:
+router не доставляет его пользователю, а worker помечает ранее накопленные
+недоставленные строки этого типа `FAILED/superseded_by_user_events`.
+Они входят в исторический счётчик «Не доставлено ранее», не означают сбой
+текущей связи. Новый user-event scan не имеет старого capped recovery path.
+
+S3.4: существующие Settings, risk preview, flat/exposed/unknown resume selector,
+nullable permissions, Help/Security/Success, local calendar сохранены;
+денежные факты не вычисляются на frontend. Исправлен знак отрицательных
+значений меньше единицы в общем Python presenter.
+
+S3.5: этот guide и актуальные карты подготовлены. Приёмка ниже НЕ выполнена.
+
+## Совместимость и границы
+
+- Low-level `Stage2Process(..., enable_user_event_delivery=False)` и явный
+  factory override False сохраняют legacy command delivery, без user-event
+  cursor/drain. Production factory default теперь True. Это seam для
+  совместимости; обычный `run-bot` использует S3.
+- Старый `/activity` временно оставлен для уже открытых pre-S3 WebView как
+  adapter к user events. Никакого command→position mapper больше нет.
+  Numbered pages ограничены 0..50; внутри запроса используются feed cursors.
+  Новый Mini App и меню используют cursor напрямую. Удалить adapter, old DTO
+  и frontend `api.activity` после вывода pre-S3 WebView из эксплуатации.
+- Канонический URL: настроенный HTTPS host + `/miniapp/?trade=<opaque-ref>`.
+  Уже настроенный `/miniapp/` не дублируется. Frontend также читает прежний
+  `trade_ref`; start_param остаётся только navigation intent. Произвольный
+  event host не используется; worker добавляет Web App keyboard только в
+  private recipient chat. Main Mini App/startapp rollout здесь не включался.
+- Trade detail теперь возвращает union detail | split resolution. Old error
+  `trade_split` остаётся для запроса events по невыбранному split ref.
+  Missing/foreign ref возвращаются одинаково; кеш detail очищается при
+  `trade_unavailable`.
+- N6 harness требует доработки следующим тестовым проходом: его код здесь
+  намеренно не менялся. Нет нового доказательства SL fill, STOP cleanup,
+  performance или Telegram device acceptance.
+
+## Следующий проход: по одному блоку
+
+1. Сначала адаптировать obsolete fixtures/assertions, затем один offline gate.
+   Изменены контракты `MenuEngine.activity`/`render_activity` (ActivityFeedPage),
+   удалены `ActivityKindFilter`, runtime `read_activity`, command Activity mapper
+   и `NotificationRouter.recover_user_events`. Старые usages есть в
+   `tests/unit/application/test_adapters.py`,
+   `tests/integration/test_stage2_adapters.py`,
+   `tests/unit/telegram/test_renderers.py`,
+   `tests/unit/notifications/test_notifications.py`,
+   `tests/unit/application/test_history_acceptance.py`,
+   `tests/testnet/test_history_acceptance_live.py`,
+   `tests/testnet/test_builder_resume_live.py`.
+   Не восстанавливать удалённую трактовку ради старых assertions.
+2. Проверить N5 через production factory и low-level False: >1000 событий,
+   два boot, crash до/после atomic commit, muted/re-enable без backlog,
+   отсутствие command/user duplicate, остановка recurring task до DB close,
+   сбой sweep с последующим retry. Реальную отправку в Telegram здесь не делать.
+3. HTTP/UI: owned split/alias/merge/foreign/missing, переход через gate/recovery,
+   старый и новый query; menu/push/feed одинаковые тексты и знаки малых PnL.
+   Pagination fills/events независимо, группировка fills на границе страницы,
+   retry сохраняет страницы, revision требует refresh, Back сохраняет фильтр
+   и scroll. Проверить open→closed на том же ref и stale/partial/empty.
+4. Один общий offline gate: backend `pytest -q -m "not testnet"`, frontend
+   `pnpm lint && pnpm test && pnpm build`, ruff check/format, doc links.
+   Счётчики записывать только в ENGINE_TEST_STATUS.
+5. Browser: итоговый production bundle, 320/360/390/430; новые active/paused
+   Home screenshots с commit/viewport; все новые списки/details/feed и ошибки.
+   По §19.7: cold root budget, warm >=30 samples, delayed API, длинная история,
+   RiskRuler, 50 navigation cycles и cache/listener/memory bounds.
+6. UTC/Europe/Moscow/America/New_York: полночь, год, DST; local day совпадает
+   с подписью времени. Telegram WebView: owned links, native Back, haptics,
+   короткий viewport, keyboard, iOS/Android gestures. Нужен owner evidence.
+7. N6 перед signed live: в `tests/testnet/test_history_acceptance_live.py`
+   отменять STOP по фактическому `execution_commands.client_order_id` из
+   результата PLACE_STOP, не по исходному `stop_coid`. Query/order-list должны
+   доказать отсутствие именно этого STOP, одного CONFIRMED после -2011 мало.
+   Дополнить scheduled captures, фактический SL fill, restart/open/partial/full
+   lifecycle и HMAC HTTP; cleanup подтверждает flat + no open orders.
+8. Только после этого заполнить §15/§19.7 evidence и verdict G3. Старые зелёные
+   прогоны — baseline, не результат проверки нынешних изменений.
+
+## Статические проверки реализации
+
+TypeScript compilation проходит; изменённые Python-файлы прошли ruff и
+форматирование. Это не замена runtime/offline/browser/live проверки.

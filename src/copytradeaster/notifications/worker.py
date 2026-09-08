@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from aiogram.exceptions import (
@@ -38,8 +38,7 @@ def trade_keyboard(
     """Episode deep-link button for a structured outbox row.
 
     Returns None unless the action is known, the ref is proven and the
-    WebApp base URL is configured. The button stays dormant (None) until
-    S3 activates the trade route; until then delivery is text-only.
+    WebApp base URL is configured. The host comes only from configuration.
     """
     if action != "open_trade" or action not in NOTIFICATION_ACTIONS:
         return None
@@ -47,7 +46,13 @@ def trade_keyboard(
     base = (base_url or "").rstrip("/")
     if not ref or not base:
         return None
-    url = f"{base}/miniapp/?trade_ref={quote(ref)}"
+    parsed = urlsplit(base)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/miniapp"):
+        path += "/miniapp"
+    url = urlunsplit((parsed.scheme, parsed.netloc, path + "/", f"trade={quote(ref, safe='')}", ""))
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=OPEN_TRADE_BUTTON_TEXT, web_app=WebAppInfo(url=url))]
@@ -78,6 +83,7 @@ class TelegramOutboxWorker:
         drain_timeout: float = 5.0,
         webapp_base_url: str | None = None,
         trade_links_enabled: bool = False,
+        user_events_only: bool = False,
         maintenance_interval: float = 3600.0,
     ) -> None:
         if bot is None and sender is None:
@@ -103,6 +109,7 @@ class TelegramOutboxWorker:
         # S3 capability, not URL presence: the episode deep-link button needs
         # an accepted owned route. Payload keeps its structured action/ref
         # while delivery stays text-only until then.
+        self._user_events_only = user_events_only
         self._trade_links_enabled = bool(trade_links_enabled)
         self._outbox = outbox
         self._users = users
@@ -272,6 +279,9 @@ class TelegramOutboxWorker:
 
     async def _deliver(self, row: Any, *, worker_id: str | None = None) -> None:
         worker_id = worker_id or self._worker_id
+        if self._user_events_only and row["kind"] == "execution.confirmed":
+            await self._outbox.fail(row["id"], "superseded_by_user_events", worker_id)
+            return
         user_id = int(row["telegram_user_id"])
         active = await self._users.notification_recipients(telegram_user_ids=[user_id])
         if not active:
@@ -283,7 +293,7 @@ class TelegramOutboxWorker:
         action = row["action"] if "action" in keys else None
         markup = (
             trade_keyboard(trade_ref, action, self._webapp_base_url)
-            if self._trade_links_enabled
+            if self._trade_links_enabled and chat_id == user_id
             else None
         )
         async with self._chat_lock(chat_id):

@@ -370,3 +370,13 @@ export interface ActivityFeedPage {
   pending: { symbol: string | null; operation: string; state: string; age_seconds: number }[]
 }
 export type TradePeriod = '7d' | '30d' | 'all'
+
+/** Account-owned lineage; no successor is selected silently. */
+export interface TradeResolutionDTO {
+  ref: string
+  kind: 'split'
+  targets: string[]
+  reason: string
+  revision: number
+}
+export type TradeResponseDTO = TradeDetailDTO | TradeResolutionDTO

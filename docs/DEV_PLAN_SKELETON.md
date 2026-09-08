@@ -425,7 +425,7 @@ snap-stop A/B) **отложена на потом — устройства не�
   S2.1–S2.6 CLOSED 2026-09-07. Frontend 27/316, measured production-bundle
   evidence и corrective blocker audits — `MINIAPP_S2_PROGRESS_2026-09.md`.
 - [x] G2: Скорость принята на нынешних экранах 2026-09-07; разрешён старт S3.
-- [ ] S3: IN PROGRESS — Home, Open/Closed/detail, Activity/бот, Settings; S3.1–S3.5. TODO и промежуточные итоги: [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
+- [ ] S3: IMPLEMENTED / NOT ACCEPTED — S3.0–S3.4 реализованы; S3.5 guides готовы, тесты/browser/device/N6 live отложены владельцем. Проверка: [S3 handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md). TODO и промежуточные итоги: [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
 - [ ] G3: Итоговая сквозная, визуальная и performance-приёмка; кампания завершена.
 
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**

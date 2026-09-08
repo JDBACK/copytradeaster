@@ -129,7 +129,8 @@ export function setBackButton(visible: boolean, onClick?: () => void): void {
 
 /** Navigation intent only; every detail read still requires server ownership. */
 export function launchTradeRef(): string | null {
-  const query = new URLSearchParams(window.location.search).get('trade')
+  const params = new URLSearchParams(window.location.search)
+  const query = params.get('trade') ?? params.get('trade_ref')
   const start = new URLSearchParams(initData()).get('start_param')
   const ref = query ?? start
   if (ref === null) return null

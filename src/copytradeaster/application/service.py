@@ -255,14 +255,6 @@ class Stage2RuntimeAdapter(Protocol):
 
     async def refresh_snapshot(self, account_id: str) -> Any: ...
 
-    async def read_activity(
-        self,
-        account_id: str,
-        limit: int,
-        offset: int,
-        kind_filter: ActivityKindFilter | None = None,
-    ) -> Sequence[Any]: ...
-
     async def pause_account(self, account_id: str) -> None:
         """Drain admitted work after the application persisted account pause."""
 
@@ -381,68 +373,6 @@ def _safe_code(value: Any, fallback: str = "unknown", limit: int = 64) -> str:
     return text or fallback
 
 
-_TRADE_KINDS = frozenset(
-    {
-        "MARKET_OPEN",
-        "MARKET_CLOSE",
-        "PLACE_STOP",
-        "PLACE_TP",
-        "CANCEL_ORDER",
-    }
-)
-_SYSTEM_KINDS = frozenset({"SET_LEVERAGE"})
-# Deterministic ordering keeps the generated SQL and its bound parameters
-# stable between the two code paths that build the same predicate.
-_TRADE_KINDS_ORDERED: tuple[str, ...] = tuple(sorted(_TRADE_KINDS))
-
-
-@dataclass(frozen=True, slots=True)
-class ActivityKindFilter:
-    """Category predicate pushed down into the activity SQL.
-
-    The predicate must be applied **before** ``ORDER BY/LIMIT/OFFSET``.
-    Filtering in Python after the database already truncated the journal to
-    ``page_size + 1`` rows hides every matching row that sits further down the
-    journal and makes ``has_next`` report ``False`` for a page that is merely
-    empty because its slice contained no matching category.  Page N also has
-    to offset the *filtered* set, otherwise rows are skipped.
-
-    ``system`` is expressed as the exact complement of the trade allow-list so
-    an unrecognised journal kind keeps landing in the system bucket exactly as
-    ``_safe_activity_category`` classifies it, instead of silently vanishing
-    from both filters.
-    """
-
-    included: tuple[str, ...] = ()
-    excluded: tuple[str, ...] = ()
-
-    def clause(self) -> tuple[str, tuple[str, ...]]:
-        """Return a ``(sql_fragment, bound_params)`` pair for the WHERE clause."""
-        if self.included:
-            placeholders = ", ".join("?" for _ in self.included)
-            return f" AND kind IN ({placeholders})", self.included
-        if self.excluded:
-            placeholders = ", ".join("?" for _ in self.excluded)
-            return f" AND kind NOT IN ({placeholders})", self.excluded
-        return "", ()
-
-
-def _activity_kind_filter(activity_filter: ActivityFilter) -> ActivityKindFilter:
-    if activity_filter is ActivityFilter.TRADE:
-        return ActivityKindFilter(included=_TRADE_KINDS_ORDERED)
-    if activity_filter is ActivityFilter.SYSTEM:
-        return ActivityKindFilter(excluded=_TRADE_KINDS_ORDERED)
-    return ActivityKindFilter()
-
-
-def _safe_activity_category(kind: str) -> ActivityCategory:
-    if kind in _TRADE_KINDS:
-        return ActivityCategory.TRADE
-    if kind in _SYSTEM_KINDS:
-        return ActivityCategory.SYSTEM
-    return ActivityCategory.SYSTEM
-
-
 def _parse_activity_payload(payload: Any) -> dict[str, Any]:
     if isinstance(payload, Mapping):
         return {str(key): value for key, value in payload.items()}
@@ -465,76 +395,6 @@ def _safe_activity_symbol(payload: Mapping[str, Any]) -> str | None:
     if not text or len(text) > 24 or not all(ch.isalnum() or ch in "-_/" for ch in text):
         return None
     return text
-
-
-def _safe_activity_leverage(payload: Mapping[str, Any]) -> int | None:
-    raw = payload.get("leverage")
-    try:
-        value = int(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if value <= 0 or value > 1000:
-        return None
-    return value
-
-
-def _safe_activity_title(kind: str, payload: Mapping[str, Any], symbol: str | None) -> str:
-    if kind == "MARKET_OPEN":
-        if symbol:
-            return f"Открыта позиция {symbol}"
-        return "Открыта позиция"
-    if kind == "MARKET_CLOSE":
-        if symbol:
-            return f"Закрыта позиция {symbol}"
-        return "Закрыта позиция"
-    if kind == "PLACE_STOP":
-        if symbol:
-            return f"Поставлен защитный Stop · {symbol}"
-        return "Поставлен защитный Stop"
-    if kind == "PLACE_TP":
-        if symbol:
-            return f"Поставлен Take Profit · {symbol}"
-        return "Поставлен Take Profit"
-    if kind == "CANCEL_ORDER":
-        if symbol:
-            return f"Отменён ордер · {symbol}"
-        return "Отменён ордер"
-    if kind == "SET_LEVERAGE":
-        leverage = _safe_activity_leverage(payload)
-        if leverage is not None and symbol:
-            return f"Плечо подготовлено: {leverage}× · {symbol}"
-        if leverage is not None:
-            return f"Плечо подготовлено: {leverage}×"
-        if symbol:
-            return f"Плечо обновлено · {symbol}"
-        return "Плечо обновлено"
-    return "Действие выполнено"
-
-
-def _safe_activity_status(
-    raw_status: Any,
-    occurred_at: datetime | None,
-    now: datetime,
-) -> tuple[ActivityStatus, int | None, str | None]:
-    status = _safe_code(raw_status, "UNKNOWN").upper()
-    if status in {"PENDING", "SENDING", "SUBMITTED"}:
-        age: int | None = None
-        if occurred_at is not None:
-            try:
-                age = max(int((now - occurred_at).total_seconds()), 0)
-            except (TypeError, ValueError, OverflowError):
-                age = None
-        return ActivityStatus.PENDING, age, None
-    if status == "CONFIRMED":
-        return ActivityStatus.COMPLETED, None, None
-    if status in {"UNKNOWN", "FAILED"}:
-        remediation = (
-            "Проверьте фактические позиции и при необходимости нажмите «Обновить»."
-            if status == "UNKNOWN"
-            else "Действие не выполнено. Повторите позже или обновите страницу."
-        )
-        return ActivityStatus.FAILED, None, remediation
-    return ActivityStatus.FAILED, None, "Действие в неизвестном состоянии."
 
 
 def _coerce_activity_filter(value: Any) -> ActivityFilter:
@@ -1411,59 +1271,6 @@ class UserApplicationService:
             reconcile_value = 15
         return float(max(reconcile_value * 2, 30))
 
-    async def _activity_rows(
-        self, account_id: str, offset: int, kind_filter: ActivityKindFilter
-    ) -> list[Any]:
-        limit = self._activity_page_size + 1
-        reader = getattr(self._runtime, "read_activity", None)
-        if callable(reader):
-            result = await _maybe_await(reader(account_id, limit, offset, kind_filter=kind_filter))
-            return list(result or ())
-        db = getattr(self._runtime, "db", None)
-        fetchall = getattr(db, "fetchall", None)
-        if fetchall is None:
-            raise ServiceUnavailableError("activity read is unavailable")
-        clause, params = kind_filter.clause()
-        return list(
-            await fetchall(
-                "SELECT command_key, kind, status, payload, created_at, updated_at "
-                "FROM execution_commands WHERE account_id=?"
-                f"{clause} "
-                "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
-                (account_id, *params, limit, offset),
-            )
-        )
-
-    @staticmethod
-    def _map_activity_item(row: Any, now: datetime) -> ActivityItem:
-        """Map a raw ``execution_commands`` row into the safe Activity DTO.
-
-        The mapping is deliberately the only place that knows about journal
-        payload internals.  No ``command_key``, ``account_id``,
-        ``client_order_id``, raw Aster code, payload JSON, address, nonce, or
-        internal exception text ever leaves this helper.
-        """
-        kind = _safe_code(_row_value(row, "kind"), "command")
-        raw_status = _row_value(row, "status")
-        payload = _row_value(row, "payload")
-        parsed_payload = _parse_activity_payload(payload)
-        symbol = _safe_activity_symbol(parsed_payload)
-        occurred_at = _as_datetime(_row_value(row, "updated_at")) or _as_datetime(
-            _row_value(row, "created_at")
-        )
-        category = _safe_activity_category(kind)
-        title = _safe_activity_title(kind, parsed_payload, symbol)
-        status, pending_age, remediation = _safe_activity_status(raw_status, occurred_at, now)
-        return ActivityItem(
-            category=category,
-            title=title,
-            status=status,
-            symbol=symbol,
-            occurred_at=occurred_at,
-            pending_age=pending_age,
-            remediation=remediation,
-        )
-
     @staticmethod
     def _position_count(snapshot: Any) -> int | None:
         positions = _row_value(snapshot, "positions", _MISSING)
@@ -1799,8 +1606,9 @@ class UserApplicationService:
                     parsed_list.append(summary)
 
             assets = await self._quantity_assets(account_id, [item.symbol for item in parsed_list])
-            parsed_list = [replace(item, quantity_asset=assets.get(item.symbol))
-                           for item in parsed_list]
+            parsed_list = [
+                replace(item, quantity_asset=assets.get(item.symbol)) for item in parsed_list
+            ]
             parsed_list.sort(key=lambda item: (item.symbol, item.side))
 
             return PositionPageDTO(
@@ -2842,33 +2650,44 @@ class UserApplicationService:
         page: int = 0,
         filter: ActivityFilter | str = ActivityFilter.ALL,
     ) -> ActivityPage:
-        try:
-            _, _, _ = await self._owned_account(user_id, allow_disabled=True)
-            if isinstance(page, bool) or not isinstance(page, int) or page < 0:
-                raise ValidationError("activity page is invalid")
-            activity_filter = _coerce_activity_filter(filter)
-            context = await self._context(user_id)
-            # The category predicate is applied inside the SQL query, so the
-            # LIMIT/OFFSET window and has_next describe the *filtered* set.
-            rows = await self._activity_rows(
-                str(context.account_id),
-                page * self._activity_page_size,
-                _activity_kind_filter(activity_filter),
+        """Temporary old-WebView adapter over user events, never commands.
+
+        Remove with the legacy HTTP route once pre-S3 WebViews are retired.
+        Numbered pages replay the pinned cursor within this bounded request;
+        current clients use activity_feed and retain its cursor directly.
+        """
+        if isinstance(page, bool) or not isinstance(page, int) or not 0 <= page <= 50:
+            raise ValidationError("activity page is invalid")
+        activity_filter = _coerce_activity_filter(filter)
+        cursor = None
+        feed = await self.activity_feed(user_id, filter=activity_filter, limit=10)
+        for _ in range(page):
+            cursor = feed.next_cursor
+            if cursor is None:
+                return ActivityPage(page=page, has_previous=page > 0, filter=activity_filter)
+            feed = await self.activity_feed(
+                user_id, filter=activity_filter, cursor=cursor, limit=10
             )
-            now = self._now()
-            items = [self._map_activity_item(row, now) for row in rows]
-            has_next = len(items) > self._activity_page_size
-            return ActivityPage(
-                items=tuple(items[: self._activity_page_size]),
-                page=page,
-                has_previous=page > 0,
-                has_next=has_next,
-                filter=activity_filter,
-            )
-        except _SAFE_ERRORS:
-            raise
-        except Exception:
-            raise ServiceUnavailableError("activity is unavailable") from None
+        return ActivityPage(
+            items=tuple(
+                ActivityItem(
+                    category=(
+                        ActivityCategory.TRADE
+                        if item.kind in feed_kinds(ActivityFilter.TRADE)
+                        else ActivityCategory.SYSTEM
+                    ),
+                    title=item.text,
+                    status=ActivityStatus.COMPLETED,
+                    symbol=_safe_activity_symbol(item.facts),
+                    occurred_at=item.occurred_at,
+                )
+                for item in feed.items
+            ),
+            page=page,
+            has_previous=page > 0,
+            has_next=feed.next_cursor is not None,
+            filter=activity_filter,
+        )
 
     # --- S1.4 history contracts (plan §10.8 B7, §11) --------------------------
 
@@ -2985,7 +2804,7 @@ class UserApplicationService:
         except Exception:
             raise ServiceUnavailableError("trades are unavailable") from None
 
-    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO:
+    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO | TradeResolutionDTO:
         """One owned episode by opaque ref; foreign and missing read alike."""
         try:
             context, _, _ = await self._owned_account(user_id, allow_disabled=True)
@@ -3001,7 +2820,7 @@ class UserApplicationService:
             if owned is None:
                 raise TradeUnavailableError("trade is unavailable")
             if isinstance(owned, TradeResolutionDTO):
-                raise TradeSplitError("trade split into several episodes")
+                return owned
             stored = owned.stored
             assets = await self._quantity_assets(account_id, [stored.episode.symbol])
             now = self._now()
