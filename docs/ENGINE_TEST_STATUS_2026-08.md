@@ -12,6 +12,37 @@
 
 ## Текущее состояние
 
+- **S3 cache bounds (2026-09-08):** history regressions — **9 passed**;
+  TypeScript и oxlint PASS. Проверены три inactive filters, mounted Back target
+  и whole-slice eviction после release. Полный suite после этого не повторён.
+
+- **S3 history/shell gate (2026-09-08):** полный Vitest — **325 passed,
+  28 files**; oxlint clean. Trades regression доказывает dedup, сохранение
+  cursor при TTL probe и explicit restart; shell render keys переведены на
+  React state, scroll/Back bookkeeping сохранён. G3 OPEN.
+
+- **S3 TTL pages (2026-09-08):** history resource regressions — **6 passed**,
+  TypeScript PASS. TTL probe сохраняет накопленные detail events и cursor;
+  изменённая первая страница требует explicit refresh. Общий rerun впереди.
+
+- **S3 revision gate (2026-09-08):** history resource regressions — **5 passed**,
+  TypeScript PASS. Проверен запрет автоматической замены отвергнутой ревизии
+  до explicit refresh. Полный suite после этой правки ещё не повторён.
+
+- **S3 history retry (2026-09-08):** `historyResources.test.ts` — **4 passed**,
+  TypeScript PASS. Добавлен regression сохранения events pages и независимого
+  fills cursor при retry. Полный suite после этой правки пока не повторён.
+
+- **S3 shell corrective (2026-09-08):** полный frontend Vitest — **321 passed,
+  28 files**; shell — **43 passed**. TypeScript PASS. Это offline evidence,
+  не закрытие S3/G3: история/details/delivery и browser/live acceptance впереди.
+
+- **S3 shell migration (2026-09-08):** targeted
+  `appShellKeepAlive.test.tsx` — **29 passed / 14 failed** после миграции
+  mocks на activityFeed и новых названий навигации. TypeScript PASS.
+  Полный suite после этой правки ещё не запускался. Оставшиеся сценарии:
+  Home overview вместо preview, stale/retry, pagination и UI markers.
+
 - **S3 Home/Settings/display follow-up (2026-09-08):** полный frontend Vitest
   **292 passed / 29 failed, 28 files**; единственный красный файл —
   `appShellKeepAlive.test.tsx`. Home/format/Settings и Settings navigation /

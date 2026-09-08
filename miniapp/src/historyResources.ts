@@ -10,6 +10,8 @@ export type HistoryQuery =
   | { kind: 'events'; tradeRef: string }
 export interface HistorySnapshot<T> { data: T | null; loading: boolean; error: string | null; receivedAt: number; changed: boolean }
 interface Entry {
+  firstPage?: string
+  failedMode?: LoadMode
   query: HistoryQuery
   snapshot: HistorySnapshot<HistoryValues[keyof HistoryValues]>
   listeners: Set<() => void>
@@ -23,6 +25,7 @@ interface Entry {
   flight: Promise<void> | null
 }
 export const historyKey = (query: HistoryQuery) => JSON.stringify(query)
+type LoadMode = 'ensure' | 'refresh' | 'more' | 'fills' | 'events'
 export class HistoryResources {
   private entries = new Map<string, Entry>()
   private disposed = false
@@ -68,9 +71,16 @@ export class HistoryResources {
     entry.snapshot = { ...entry.snapshot, ...patch }
     entry.listeners.forEach(listener => listener())
   }
-  async load(query: HistoryQuery, mode: 'ensure' | 'refresh' | 'more' | 'fills' | 'events' = 'ensure'): Promise<void> {
+  retry(query: HistoryQuery): Promise<void> {
+    const entry = this.entry(query)
+    return this.load(query, entry.snapshot.changed ? 'refresh' : entry.failedMode ?? 'refresh')
+  }
+  async load(query: HistoryQuery, mode: LoadMode = 'ensure'): Promise<void> {
     if (this.disposed) return
     const entry = this.entry(query)
+    // A rejected revision cannot be extended or silently replaced by a TTL
+    // read. Keep the displayed slice until the user explicitly restarts it.
+    if (entry.snapshot.changed && mode !== 'refresh') return
     if (entry.flight) {
       if (entry.flightRevision !== entry.revision) entry.followUp = true
       return entry.flight
@@ -88,13 +98,20 @@ export class HistoryResources {
     const run = async () => {
       try {
         let data: HistoryValues[keyof HistoryValues]
+        let firstPage: string | undefined
         const options = { signal: controller.signal }
         if (query.kind === 'trades') {
           const old = previous as TradeListPage | null
           const cursor = mode === 'more' ? old?.next_cursor : null
           if (mode === 'more' && !cursor) return
           const page = await api.trades(this.auth, { period: query.period, symbol: query.symbol || undefined, limit: query.limit ?? 20, cursor }, options)
+          if (mode === 'ensure' && old) {
+            if (entry.firstPage !== JSON.stringify(page.items)) throw new ApiError(409, 'history_page_changed', 'History changed')
+            data = old
+          } else {
           data = cursor && old ? { ...page, items: merge(old.items, page.items, 'trade_ref') } : page
+          }
+          if ((!cursor && mode !== 'ensure') || !old) firstPage = JSON.stringify(page.items)
         } else if (query.kind === 'feed') {
           const old = previous as ActivityFeedPage | null
           const cursor = mode === 'more' ? old?.next_cursor : null
@@ -112,17 +129,29 @@ export class HistoryResources {
           const moreEvents = mode === 'events' && old?.next_events_cursor
           if ((mode === 'fills' && !moreFills) || (mode === 'events' && !moreEvents)) return
           const page = await api.tradeEvents(this.auth, query.tradeRef, { fills_cursor: moreFills || null, events_cursor: moreEvents || null }, options)
+          const signature = JSON.stringify([page.fills, page.events])
+          if (mode === 'ensure' && old) {
+            if (entry.firstPage !== signature) throw new ApiError(409, 'history_page_changed', 'History changed')
+            data = old
+          } else {
           data = old && (moreFills || moreEvents) ? {
             ...old,
             ...(moreFills ? { fills: merge(old.fills, page.fills, item => `${item.trade_id}:${item.role}`), next_fills_cursor: page.next_fills_cursor } : {}),
             ...(moreEvents ? { events: merge(old.events, page.events, 'event_ref'), next_events_cursor: page.next_events_cursor } : {}),
           } : page
+          }
+          if ((!moreFills && !moreEvents && mode !== 'ensure') || !old) firstPage = signature
         }
-        if (!this.disposed && generation === entry.generation && revision === entry.revision) this.publish(entry, { data, receivedAt: Date.now(), changed: false })
+        if (!this.disposed && generation === entry.generation && revision === entry.revision) {
+          entry.failedMode = undefined
+          if (firstPage !== undefined) entry.firstPage = firstPage
+          this.publish(entry, { data, receivedAt: Date.now(), changed: false })
+        }
       } catch (error) {
         if (this.owner.handleInvalidSessionError(error)) return
         if (this.disposed || generation !== entry.generation || revision !== entry.revision || (error instanceof ApiError && error.code === 'aborted')) return
         const code = error instanceof ApiError ? error.code : 'network_error'
+        entry.failedMode = mode
         this.publish(entry, { error: code, changed: code === 'history_page_changed' })
       } finally {
         if (generation === entry.generation) {

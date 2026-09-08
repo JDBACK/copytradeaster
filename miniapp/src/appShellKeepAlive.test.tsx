@@ -26,6 +26,7 @@ import type {
   AccountBuilderDTO,
   ActivityItemDTO,
   ActivityPageDTO,
+  ActivityFeedPage,
   DashboardDTO,
   NotificationSettingsDTO,
   PositionPageDTO,
@@ -66,6 +67,12 @@ function dashboard(overrides: Partial<DashboardDTO> = {}): DashboardDTO {
     notification_enabled: true,
     is_admin: false,
     snapshot_captured_at: null,
+    overview: {
+      as_of: '2026-09-08T00:00:00Z', freshness: 'fresh',
+      open_count: overrides.open_positions ?? 2, unrealized_pnl_usdt: '0',
+      available_usdt: '100', protected_count: overrides.open_positions ?? 2,
+      risk_coverage: 'complete',
+    },
     ...overrides,
   }
 }
@@ -111,14 +118,16 @@ function activityItem(overrides: Partial<ActivityItemDTO> = {}): ActivityItemDTO
   }
 }
 
-function activityPage(overrides: Partial<ActivityPageDTO> = {}): ActivityPageDTO {
+function activityPage(overrides: Partial<ActivityPageDTO> = {}): ActivityFeedPage {
   return {
-    items: [activityItem()],
-    page: 0,
-    has_previous: false,
-    has_next: false,
-    filter: 'all',
-    ...overrides,
+    items: (overrides.items ?? [activityItem()]).map(item => ({
+      event_ref: item.title, text: item.title,
+      kind: item.category === 'system' ? 'SYSTEM_STATUS' : 'OPENED',
+      trade_ref: null,
+      occurred_at: item.occurred_at ?? '2026-09-02T12:41:00+00:00', facts: {},
+    })),
+    next_cursor: overrides.has_next ? 'next-page' : null,
+    high_water: 10, latest_seq: 10, pending: [],
   }
 }
 
@@ -177,13 +186,13 @@ describe('AppShell keep-alive', () => {
   it('startup budget is session-free shell: one shared dashboard + positions + activity', async () => {
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
-    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
+    const activitySpy = vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage())
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
 
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     // Shell warmup settles: settings and activity prefetched while hidden.
     await screen.findByText('Настройки копирования')
-    await screen.findByText('Показаны только данные без секретов')
+    await screen.findByText('Обновить события')
     // S2 resource sharing: Settings joins Home's dashboard and Positions joins
     // Home's preview resource instead of starting duplicate reads.
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
@@ -192,10 +201,10 @@ describe('AppShell keep-alive', () => {
 
     // Full second round over all four tabs: zero new requests, no skeletons.
     for (const [tab, marker] of [
-      ['Позиции', 'Открытые позиции · 1'],
-      ['Активность', 'Показаны только данные без секретов'],
+      ['Позиции', 'Открытые 1'],
+      ['Активность', 'Обновить события'],
       ['Настройки', 'Настройки копирования'],
-      ['Главная', 'Риск на стоп'],
+      ['Главная', 'PnL открытых позиций'],
     ] as const) {
       fireEvent.click(tabButton(tab))
       const markerEl = await screen.findByText(marker)
@@ -215,7 +224,7 @@ describe('AppShell keep-alive', () => {
     const itemB = activityItem({ title: 'Сделка B открыта' })
     const itemC = activityItem({ title: 'Сделка C закрыта' })
     const activitySpy = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockResolvedValueOnce(activityPage({ items: [itemA], filter: 'all', has_next: false }))
       .mockResolvedValueOnce(activityPage({ items: [itemB], filter: 'trade', has_next: true }))
       .mockResolvedValueOnce(
@@ -233,9 +242,8 @@ describe('AppShell keep-alive', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }))
     await screen.findByText('Сделка C закрыта')
-    expect(document.querySelector('[data-activity-page]')?.getAttribute('data-activity-page')).toBe(
-      '1',
-    )
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull()
+    expect(activitySpy.mock.calls[2]?.[2]).toBe('next-page')
 
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
@@ -244,9 +252,8 @@ describe('AppShell keep-alive', () => {
     await screen.findByText('Сделка B открыта')
     // State survived: appended page, filter selection, no page-0 refetch.
     expect(screen.getByText('Сделка C закрыта')).toBeDefined()
-    expect(document.querySelector('[data-activity-page]')?.getAttribute('data-activity-page')).toBe(
-      '1',
-    )
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull()
+    expect(activitySpy.mock.calls[2]?.[2]).toBe('next-page')
     expect(screen.getByRole('tab', { name: 'Сделки' }).getAttribute('aria-selected')).toBe('true')
     expect(activitySpy).toHaveBeenCalledTimes(3)
   })
@@ -256,16 +263,16 @@ describe('AppShell keep-alive', () => {
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
 
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     const scroller = document.querySelector('.shell-content') as HTMLElement | null
     expect(scroller).not.toBeNull()
     scroller!.scrollTop = 142
 
     fireEvent.click(tabButton('Позиции'))
-    await screen.findByText('Открытые позиции · 1')
+    await screen.findByText('Открытые 1')
 
     fireEvent.click(tabButton('Главная'))
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     expect(scroller!.scrollTop).toBe(142)
   })
 
@@ -294,7 +301,7 @@ describe('AppShell keep-alive', () => {
     await screen.findByText('Настройки копирования')
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     const saveButton = await screen.findByRole('button', { name: /сохранить/i })
     expect(isHidden(saveButton)).toBe(false)
     const settingsHeading = screen.getByRole('heading', { name: 'Настройки', hidden: true })
@@ -320,7 +327,7 @@ describe('AppShell keep-alive', () => {
     expect(scroller).not.toBeNull()
     scroller!.scrollTop = 200
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     // Scrolling the nested screen must not leak into the tab slot.
     scroller!.scrollTop = 50
@@ -344,12 +351,12 @@ describe('AppShell keep-alive', () => {
     expect(scroller).not.toBeNull()
     scroller!.scrollTop = 200
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     scroller!.scrollTop = 50
 
     fireEvent.click(tabButton('Позиции'))
-    await screen.findByText('Открытые позиции · 1')
+    await screen.findByText('Открытые 1')
 
     fireEvent.click(tabButton('Настройки'))
     const restoredHeading = await screen.findByRole('heading', { name: 'Настройки' })
@@ -360,7 +367,7 @@ describe('AppShell keep-alive', () => {
   it('StrictMode reaches ready with one shared dashboard, positions and activity read', async () => {
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
-    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
+    const activitySpy = vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage())
 
     render(
       <StrictMode>
@@ -369,7 +376,7 @@ describe('AppShell keep-alive', () => {
     )
 
     await screen.findByText('Настройки копирования')
-    await screen.findByText('Показаны только данные без секретов')
+    await screen.findByText('Обновить события')
     expect(screen.queryByLabelText('Загрузка состояния')).toBeNull()
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
     expect(positionsSpy).toHaveBeenCalledTimes(1)
@@ -380,7 +387,7 @@ describe('AppShell keep-alive', () => {
     const back = installBackButton()
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     const riskSpy = vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
     vi.spyOn(api, 'notifications').mockResolvedValue({
       enabled: true,
@@ -393,13 +400,13 @@ describe('AppShell keep-alive', () => {
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     expect(riskSpy).toHaveBeenCalledTimes(1)
     back.press()
     await screen.findByRole('heading', { name: 'Настройки' })
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     expect(riskSpy).toHaveBeenCalledTimes(1)
   })
@@ -408,14 +415,14 @@ describe('AppShell keep-alive', () => {
     const back = installBackButton()
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
     const setter = vi.spyOn(api, 'setRiskPercent')
 
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
 
@@ -443,14 +450,14 @@ describe('AppShell keep-alive', () => {
     const saveGate = deferred<RiskDTO>()
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
     const setter = vi.spyOn(api, 'setRiskPercent').mockReturnValue(saveGate.promise)
 
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
     fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
@@ -462,7 +469,7 @@ describe('AppShell keep-alive', () => {
     await screen.findByRole('heading', { name: 'Настройки' })
     expect(screen.queryByText('Отменить изменения?')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     const savingButton = await screen.findByRole('button', { name: /сохранение/i })
     expect(savingButton).toBeDisabled()
     fireEvent.click(savingButton)
@@ -478,7 +485,7 @@ describe('AppShell keep-alive', () => {
     const saveGate = deferred<NotificationSettingsDTO>()
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'notifications').mockResolvedValue({
       enabled: true,
       last_delivery_at: null,
@@ -516,7 +523,7 @@ describe('AppShell keep-alive', () => {
     const back = installBackButton()
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'accountBuilder').mockResolvedValue(accountBuilderDto())
     vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
       token: 'disconnect-token',
@@ -528,14 +535,14 @@ describe('AppShell keep-alive', () => {
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    fireEvent.click(screen.getByRole('button', { name: /аккаунт и builder/i }))
+    fireEvent.click(screen.getByRole('button', { name: /подключение aster/i }))
     await screen.findByText('Builder подтверждён')
     fireEvent.click(screen.getByRole('button', { name: 'Отключить аккаунт' }))
     await screen.findByText('Отключить аккаунт?')
 
     back.press()
     expect(screen.queryByText('Отключить аккаунт?')).toBeNull()
-    expect(screen.getByRole('heading', { name: 'Аккаунт и Builder' })).toBeDefined()
+    expect(screen.getByRole('heading', { name: 'Подключение Aster' })).toBeDefined()
 
     back.press()
     await screen.findByRole('heading', { name: 'Настройки' })
@@ -544,7 +551,7 @@ describe('AppShell keep-alive', () => {
   it('deactivates a Home confirmation Sheet when its keep-alive root is hidden', async () => {
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard({ copy_state: 'paused' }))
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
       token: 'resume-token',
       action: 'resume',
@@ -575,7 +582,7 @@ describe('AppShell keep-alive', () => {
     const resources = new MiniAppResources(AUTH, 'lifecycle-50')
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    const activitySpy = vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     const riskSpy = vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
     const notificationsSpy = vi.spyOn(api, 'notifications').mockResolvedValue({
       enabled: true,
@@ -593,7 +600,7 @@ describe('AppShell keep-alive', () => {
     await act(async () => {})
     await act(async () => {})
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     back.press()
     await screen.findByRole('heading', { name: 'Настройки' })
@@ -611,7 +618,7 @@ describe('AppShell keep-alive', () => {
     const calls = baselineCalls()
 
     for (let i = 0; i < 50; i += 1) {
-      fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+      fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
       expect(screen.getByRole('button', { name: /сохранить/i })).toBeDefined()
       back.press()
       expect(screen.getByRole('heading', { name: 'Настройки' })).toBeDefined()
@@ -790,11 +797,11 @@ describe('HomeScreen loading lifecycle', () => {
     const home = render(
       <HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} active={true} />,
     )
-    expect(screen.getByText(/система: данные требуют проверки/i)).toBeDefined()
+    expect(screen.getByText(/данные требуют проверки/i)).toBeDefined()
     home.unmount()
 
     render(<PositionsScreen auth={AUTH} resources={resources} active={true} warm={true} />)
-    expect(screen.getByText(/данные устарели/i)).toBeDefined()
+    expect(screen.getByText(/снимок позиций устарел/i)).toBeDefined()
   })
 
   it('reconciles an ambiguous resume timeout from authoritative Dashboard without replaying resume', async () => {
@@ -898,18 +905,18 @@ describe('HomeScreen loading lifecycle', () => {
     dashboardGate.resolve(dashboard())
 
     // Dashboard UI is already useful while the preview is still pending.
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     expect(screen.queryByLabelText('Загрузка состояния')).toBeNull()
-    expect(screen.getByLabelText('Загрузка позиций')).toBeDefined()
-    expect(screen.queryByText('Активная позиция')).toBeNull()
+    expect(screen.queryByLabelText('Загрузка позиций')).toBeNull()
+    expect(positionsSpy).not.toHaveBeenCalled()
 
     positionsGate.resolve(positionPage())
-    await screen.findByText('Активная позиция')
+    expect(screen.queryByText('Активная позиция')).toBeNull()
     expect(screen.queryByLabelText('Загрузка позиций')).toBeNull()
     // The partial-ready flip must not spawn its own background refresh loop.
     await act(async () => {})
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
-    expect(positionsSpy).toHaveBeenCalledTimes(1)
+    expect(positionsSpy).not.toHaveBeenCalled()
   })
   it('warm activation refetches only when the snapshot aged out', async () => {
     const loadedAt = Date.now()
@@ -922,12 +929,12 @@ describe('HomeScreen loading lifecycle', () => {
     const { rerender } = render(
       <HomeScreen auth={AUTH} onNotConnected={noop} active={false} />,
     )
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     // Fresh data: reactivation is free.
     rerender(<HomeScreen auth={AUTH} onNotConnected={noop} active={true} />)
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     // Aged data: exactly one background refresh, then quiet again.
@@ -968,11 +975,11 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     })
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     const positionsSpy = vi.spyOn(api, 'positions').mockResolvedValue(positionPage())
-    const activitySpy = vi.spyOn(api, 'activity').mockResolvedValue(activityPage())
+    const activitySpy = vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage())
     render(<App />)
 
     await screen.findByText('Настройки копирования')
-    await screen.findByText('Показаны только данные без секретов')
+    await screen.findByText('Обновить события')
     expect(sessionSpy).toHaveBeenCalledTimes(1)
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
     expect(positionsSpy).toHaveBeenCalledTimes(1)
@@ -999,7 +1006,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
       .spyOn(api, 'dashboard')
       .mockRejectedValue(new ApiError(401, 'invalid_session', 'expired'))
     const positionsSpy = vi.spyOn(api, 'positions')
-    const activitySpy = vi.spyOn(api, 'activity')
+    const activitySpy = vi.spyOn(api, 'activityFeed')
 
     render(<App />)
     await screen.findByRole('heading', { name: 'Откройте из бота' })
@@ -1020,7 +1027,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     })
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard({ copy_state: 'active' }))
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     const pauseSpy = vi
       .spyOn(api, 'pause')
       .mockRejectedValue(new ApiError(401, 'invalid_session', 'expired'))
@@ -1037,7 +1044,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockReturnValue(dashboardGate.promise)
     const positionsSpy = vi.spyOn(api, 'positions').mockReturnValue(positionsGate.promise)
     const activitySpy = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockResolvedValue(activityPage({ items: [], has_next: false }))
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
 
@@ -1048,7 +1055,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     expect(activitySpy).toHaveBeenCalledTimes(0)
 
     dashboardGate.resolve(dashboard())
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     positionsGate.resolve(positionPage({ positions: [], count: 0 }))
     await screen.findByText('Настройки копирования')
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
@@ -1063,7 +1070,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
       .spyOn(api, 'positions')
       .mockResolvedValueOnce(positionPage({ positions: [], count: 0 }))
       .mockResolvedValueOnce(positionPage({ positions: [position({ symbol: 'ETHUSDT' })], count: 1 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
 
     // Home still loading, user taps Positions: cold path is immediate and can
@@ -1077,10 +1084,10 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     // A successful strong dashboard defines a newer server snapshot. The
     // already-settled weak positions DTO is therefore invalidated and the
     // active Positions consumer performs exactly one correctness follow-up.
-    await screen.findByText('Открытые позиции · 1')
+    await screen.findByText('Открытые 1')
     // Both the active Positions root and hidden Home preview consume the same
     // refreshed DTO; this is sharing, not an extra network read.
-    expect(screen.getAllByText('ETHUSDT')).toHaveLength(2)
+    expect(screen.getAllByText(/ETHUSDT/)).toHaveLength(1)
     expect(positionsSpy).toHaveBeenCalledTimes(2)
     expect(positionsSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
 
@@ -1115,10 +1122,10 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
   it('activity keeps its 60 s floor: 35 s is free, 65 s refetches once', async () => {
     const t0 = Date.now()
     const activitySpy = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockResolvedValue(activityPage({ items: [], has_next: false }))
     const { rerender } = render(<ActivityScreen auth={AUTH} />)
-    await screen.findByText('Безопасный журнал действий')
+    await screen.findByText('Обновить события')
     expect(activitySpy).toHaveBeenCalledTimes(1)
 
     const bounce = async (ageMs: number) => {
@@ -1126,7 +1133,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
       const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + ageMs)
       rerender(<ActivityScreen auth={AUTH} active={true} />)
       nowSpy.mockRestore()
-      await screen.findByText('Безопасный журнал действий')
+      await screen.findByText('Обновить события')
     }
     await bounce(35_000)
     expect(activitySpy).toHaveBeenCalledTimes(1)
@@ -1140,11 +1147,11 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
     const activitySpy = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockResolvedValue(activityPage({ items: [], has_next: false }))
 
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
-    await screen.findByText('Показаны только данные без секретов')
+    await screen.findByText('Обновить события')
     expect(activitySpy).toHaveBeenCalledTimes(1)
 
     // Activity is still a hidden keep-alive root. Foreground must not make it
@@ -1170,13 +1177,14 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
   it('revalidation past TTL never resets appended pagination', async () => {
     const t0 = Date.now()
     const activitySpy = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockResolvedValueOnce(
         activityPage({ items: [activityItem()], has_next: true }),
       )
       .mockResolvedValueOnce(
         activityPage({ items: [activityItem({ title: 'Сделка B открыта' })], page: 1, has_next: false }),
       )
+      .mockResolvedValue({ ...activityPage(), latest_seq: 11 })
     const { rerender } = render(<ActivityScreen auth={AUTH} />)
     await screen.findByText('Открыта позиция BTCUSDT')
 
@@ -1188,9 +1196,10 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     rerender(<ActivityScreen auth={AUTH} active={true} />)
     nowSpy.mockRestore()
     await screen.findByText('Сделка B открыта')
-    // The paginated timeline is preserved verbatim: no page-0 refresh fired.
+    // A freshness probe runs, but never replaces the pinned paginated slice.
     expect(screen.getByText('Открыта позиция BTCUSDT')).toBeDefined()
-    expect(activitySpy).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText('Есть новые события')).toBeDefined()
+    expect(activitySpy).toHaveBeenCalledTimes(3)
   })
 
   it('activation never fires while the first fetch is still in flight', async () => {
@@ -1248,7 +1257,7 @@ describe('Corrective: mutation-driven invalidation', () => {
       .mockResolvedValueOnce(dashboard({ risk_percent: '0.01' }))
       .mockReturnValue(bgGate.promise)
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'risk').mockResolvedValue(riskDto())
     const setter = vi
       .spyOn(api, 'setRiskPercent')
@@ -1258,9 +1267,9 @@ describe('Corrective: mutation-driven invalidation', () => {
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
-    expect(screen.getByRole('button', { name: /риск на stop.*1%/i })).toBeDefined()
+    expect(screen.getByRole('button', { name: /риск на сделку.*1%/i })).toBeDefined()
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
     fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
@@ -1276,10 +1285,10 @@ describe('Corrective: mutation-driven invalidation', () => {
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
     expect(dashboardSpy).toHaveBeenCalledTimes(2)
     expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
-    expect(screen.getByRole('button', { name: /риск на stop.*1%/i })).toBeDefined()
+    expect(screen.getByRole('button', { name: /риск на сделку.*1%/i })).toBeDefined()
 
     bgGate.resolve(dashboard({ risk_percent: '0.02' }))
-    await screen.findByRole('button', { name: /риск на stop.*2%/i })
+    await screen.findByRole('button', { name: /риск на сделку.*2%/i })
     // Settles quiet: invalidation fires once, never loops.
     await act(async () => {})
     await act(async () => {})
@@ -1294,7 +1303,7 @@ describe('Corrective: mutation-driven invalidation', () => {
       .mockResolvedValueOnce(dashboard())
       .mockReturnValue(bgGate.promise)
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
-    vi.spyOn(api, 'activity').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'notifications').mockResolvedValue(notificationsDto())
     const saver = vi
       .spyOn(api, 'setNotifications')
@@ -1327,7 +1336,7 @@ describe('Corrective: mutation-driven invalidation', () => {
       .spyOn(api, 'dashboard')
       .mockResolvedValue(dashboard({ copy_state: 'active' }))
     const activitySpy = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockResolvedValue(activityPage({ items: [], has_next: false }))
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
     const pauser = vi
@@ -1345,11 +1354,11 @@ describe('Corrective: mutation-driven invalidation', () => {
     await screen.findByText('Настройки копирования')
     await act(async () => {})
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(screen.getByText('На паузе')).toBeDefined()
+    expect(screen.getByText('Новые входы на паузе')).toBeDefined()
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     fireEvent.click(tabButton('Активность'))
-    await screen.findByText('Показаны только данные без секретов')
+    await screen.findByText('Обновить события')
     await act(async () => {})
     expect(activitySpy).toHaveBeenCalledTimes(2)
   })
@@ -1365,7 +1374,7 @@ describe('Corrective: single-flight background revalidation', () => {
     vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
 
     const { rerender } = render(<HomeScreen auth={AUTH} onNotConnected={noop} active={true} />)
-    await screen.findByText('Риск на стоп')
+    await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     const t0 = Date.now()
@@ -1436,7 +1445,7 @@ describe('Corrective: nested screens open at the top', () => {
     expect(scroller).not.toBeNull()
     scroller!.scrollTop = 300
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     expect(scroller!.scrollTop).toBe(0)
 
@@ -1458,13 +1467,13 @@ describe('Corrective: nested screens open at the top', () => {
     await screen.findByText('Настройки копирования')
     const scroller = document.querySelector('.shell-content') as HTMLElement
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     scroller.scrollTop = 180
     back.press()
     await screen.findByRole('heading', { name: 'Настройки' })
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     await screen.findByRole('button', { name: /сохранить/i })
     expect(scroller.scrollTop).toBe(0)
   })
@@ -1478,7 +1487,7 @@ describe('Corrective: nested screens open at the top', () => {
 
     fireEvent.click(tabButton('Настройки'))
     await screen.findByText('Настройки копирования')
-    const opener = screen.getByRole('button', { name: /риск на stop/i })
+    const opener = screen.getByRole('button', { name: /риск на сделку/i })
     opener.focus()
     expect(opener).toHaveFocus()
 

@@ -28,12 +28,19 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   if (!trade || !detail.data) return <div className="screen"><h1 className="h1">Детали сделки</h1>{detail.error ? <><ErrorBox {...describeError(detail.error)} /><button type="button" className="btn btn-secondary" onClick={() => void detail.refresh()}>Повторить</button><button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'closed', period: 'all' })}>Мои позиции</button></> : <div className="skeleton" style={{ minHeight: 300 }} />}</div>
   const data = detail.data
   const live = positions.snapshot.data?.positions.find(p => p.trade_ref === trade.trade_ref)
+  const liveStale = !!positions.snapshot.data && (positions.snapshot.data.is_stale || positions.snapshot.stale || !!positions.snapshot.error)
   const net = trade.result_state === 'net_complete' && trade.net_pnl_usdt !== null
   const pnl = formatPnl(trade.state === 'open' ? live?.unrealized_profit : net ? trade.net_pnl_usdt : trade.realized_pnl_gross_usdt)
   return <div className="screen">
     <h1 className="h1">{trade.symbol} · {trade.side ?? 'Направление уточняется'}</h1>
     <p className="lede">{trade.state === 'open' ? 'Открыта' : 'Закрыта'} · {{ copy: 'Копирование', external: 'Внешние операции', mixed: 'Смешанные операции', unknown: 'Источник уточняется' }[trade.source]}</p>
     {detail.error && <ErrorBox {...describeError(detail.error)} />}
+    {trade.state === 'open' && <>
+      {positions.snapshot.error && <ErrorBox {...describeError(positions.snapshot.error)} />}
+      {liveStale && <p className="position-warning" role="status">Снимок позиции устарел. PnL и статус защиты требуют обновления.</p>}
+      <p className="freshness">Снимок позиции: {formatDateTime(positions.snapshot.data?.snapshot_captured_at)}</p>
+      <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Обновить позицию</button>
+    </>}
     <section className="panel account-summary"><h2 className="summary-label">{trade.state === 'open' ? 'PnL сейчас' : net ? 'Итог сделки' : 'PnL до комиссий'}</h2><div className={`summary-pnl num pnl-${pnl.tone}`}>{pnl.text}</div>
       <div className="summary-row"><span>Всего на вход</span><strong className="num">{formatQuantity(data.entry_qty, trade.quantity_asset)}</strong></div><div className="summary-row"><span>Всего закрыто</span><strong className="num">{formatQuantity(data.exit_qty, trade.quantity_asset)}</strong></div><div className="summary-row"><span>Остаток</span><strong className="num">{formatQuantity(data.remaining_qty, trade.quantity_asset)}</strong></div>
       <div className="summary-row"><span>Средний вход всех входов</span><strong className="num">{formatPrice(data.average_entry)}</strong></div><div className="summary-row"><span>Средний выход</span><strong className="num">{formatPrice(data.average_exit)}</strong></div>
@@ -55,7 +62,7 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
     <h2 className="h2">Исполнения</h2>
     {events.data?.fills.map(fill => <details className="panel fill-details" key={`${fill.trade_id}:${fill.role}`}><summary>{formatDateTime(fill.executed_at)} · {fill.role === 'entry' ? 'Вход' : 'Выход'} {formatQuantity(fill.allocated_quantity, trade.quantity_asset)} по {formatPrice(fill.price)}</summary><p>Доля этого эпизода: {formatQuantity(fill.allocated_quantity, trade.quantity_asset)}</p><p>PnL доли до комиссий: {formatPnl(fill.allocated_realized_pnl).text}</p></details>)}
     {events.data?.next_fills_cursor && <button type="button" className="btn btn-secondary" disabled={events.loading} onClick={() => void events.fills()}>Ещё исполнения</button>}
-    {events.error && !events.changed && <button type="button" className="btn btn-secondary" onClick={() => void events.refresh()}>Повторить загрузку истории</button>}
+    {events.error && !events.changed && <button type="button" className="btn btn-secondary" onClick={() => void events.retry()}>Повторить загрузку истории</button>}
     <button type="button" className="btn btn-secondary" disabled={detail.loading} onClick={() => { void detail.refresh(); void events.refresh() }}>Обновить сделку</button>
   </div>
 }

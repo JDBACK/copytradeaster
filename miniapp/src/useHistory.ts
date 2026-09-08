@@ -8,5 +8,5 @@ export function useHistory<Q extends HistoryQuery>(resources: HistoryResources, 
   const get = useCallback(() => resources.get(query), [resources, query])
   const snapshot = useSyncExternalStore(subscribe, get, get)
   useEffect(() => { if (active) void resources.load(query) }, [resources, query, active, foregroundSignal])
-  return { ...snapshot, refresh: () => resources.load(query, 'refresh'), more: () => resources.load(query, 'more'), fills: () => resources.load(query, 'fills'), events: () => resources.load(query, 'events') }
+  return { ...snapshot, retry: () => resources.retry(query), refresh: () => resources.load(query, 'refresh'), more: () => resources.load(query, 'more'), fills: () => resources.load(query, 'fills'), events: () => resources.load(query, 'events') }
 }

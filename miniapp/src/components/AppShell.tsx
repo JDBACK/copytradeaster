@@ -82,6 +82,9 @@ export function AppShell({
     new Map<string, { element: HTMLElement | null; nestedFocusableIndex: number | null }>(),
   )
   const nestedEntryKeys = useRef<string[]>(launchRef ? ['launch-detail'] : [])
+  // Render keys must be part of the committed React snapshot. The ref is
+  // retained only for synchronous Back/scroll bookkeeping in event handlers.
+  const [renderEntryKeys, setRenderEntryKeys] = useState<string[]>(() => launchRef ? ['launch-detail'] : [])
   const nextNestedEntryId = useRef(0)
   const [riskDirty, setRiskDirty] = useState(false)
   const [leaveIntent, setLeaveIntent] = useState<
@@ -123,6 +126,7 @@ export function AppShell({
     const returnsToNested = nestedEntryKeys.current.length > 1
     if (currentKey) {
       nestedEntryKeys.current.pop()
+      setRenderEntryKeys([...nestedEntryKeys.current])
       nestedScrollTops.current.delete(currentKey)
       nestedFocusTargets.current.delete(currentKey)
     }
@@ -178,6 +182,7 @@ export function AppShell({
         nestedFocusTargets.current.delete(key)
       }
       nestedEntryKeys.current = []
+      setRenderEntryKeys([])
       setRoute((current) => selectTab(current, tab))
       setVisited((prev) => (prev.has(tab) ? prev : new Set([...prev, tab])))
       hapticImpact('light')
@@ -209,6 +214,7 @@ export function AppShell({
       const nextRoute = pushNested(route, screen)
       const nextKey = `${route.tab}:nested-${++nextNestedEntryId.current}`
       nestedEntryKeys.current.push(nextKey)
+      setRenderEntryKeys([...nestedEntryKeys.current])
       const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
       const currentNestedFocusables = route.nested.length > 0 ? nestedFocusableElements() : []
       nestedFocusTargets.current.set(
@@ -297,7 +303,7 @@ export function AppShell({
           />
         </div>
         {route.nested.map((screen, index) => (
-          <div key={nestedEntryKeys.current[index]} hidden={index !== route.nested.length - 1} data-nested-surface={index === route.nested.length - 1 ? '' : undefined}>
+          <div key={renderEntryKeys[index]} hidden={index !== route.nested.length - 1} data-nested-surface={index === route.nested.length - 1 ? '' : undefined}>
             <NestedRoute nested={screen} auth={auth} resources={resources} accountMasked={accountMasked}
               onNotConnected={onNotConnected} onOpen={openNested} active={index === route.nested.length - 1}
               onActivityInvalidated={() => { resources.history.invalidate(); setActivityInvalidation(value => value + 1) }}

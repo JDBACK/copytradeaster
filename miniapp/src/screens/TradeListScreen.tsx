@@ -23,7 +23,7 @@ export function ClosedTrades({ resources, onOpen, active = true, preview = false
       <form className="history-search" onSubmit={event => { event.preventDefault(); setSymbol(search.trim().toUpperCase()) }}><label>Инструмент<input value={search} onChange={event => setSearch(event.target.value)} placeholder="BTCUSDT" /></label><button type="submit" className="btn btn-secondary">Найти</button></form>
     </>}
     {history.data && <p className="freshness">{history.data.coverage_from ? `История доступна с ${formatDateTime(history.data.coverage_from)}` : 'Диапазон истории уточняется'} · {history.data.coverage_complete ? 'сверена' : 'может быть неполной'}</p>}
-    {history.error && <><ErrorBox {...describeError(history.error)} /><button type="button" className="btn btn-secondary" onClick={() => void (history.changed ? history.refresh() : history.data?.next_cursor ? history.more() : history.refresh())}>{history.changed ? 'История изменилась — обновить' : 'Повторить загрузку'}</button></>}
+    {history.error && <><ErrorBox {...describeError(history.error)} /><button type="button" className="btn btn-secondary" onClick={() => void history.retry()}>{history.changed ? 'История изменилась — обновить' : 'Повторить загрузку'}</button></>}
     {!history.data && !history.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка истории" />}
     {history.data?.items.map(trade => <TradeSummaryCard key={trade.trade_ref} trade={trade} onOpen={() => onOpen({ kind: 'trade-detail', tradeRef: trade.trade_ref })} />)}
     {history.data?.items.length === 0 && <p className="info-box">{history.data.coverage_from ? 'Закрытых сделок за этот период нет' : 'Загружаем историю. Доступный диапазон пока не подтверждён.'}</p>}

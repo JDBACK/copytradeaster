@@ -171,3 +171,82 @@ cached navigation и AccountBuilder behavior проходят после обн�
 ненулевые USDT показываются как порог со знаком. Добавлены regressions для
 малых цен, положительного/отрицательного PnL и malformed/missing amounts.
 TypeScript проходит. Следующий участок — оставшийся shell keep-alive suite.
+
+### 7. Shell fixtures: переход на feed (2026-09-08)
+
+После `06eba59` shell mocks переведены с legacy activity на activityFeed.
+Фикстуры возвращают event_ref/text/high_water/next_cursor, а pagination
+проверяет отправленный cursor и сохранение строк после Back вместо удалённого
+DOM page-counter. Названия Settings и Activity markers обновлены по S3 UI.
+Targeted результаты находятся в ENGINE_TEST_STATUS; TypeScript проходит.
+Оставшиеся падения ещё не классифицированы окончательно: Home preview
+expectations нужно заменить overview contract, а stale/retry/pagination
+сценарии проверить на реальные регрессии. G3 OPEN.
+
+### 8. Shell corrective: offline suite зелёный (2026-09-08)
+
+Home fixtures теперь содержат account overview; проверка отдельного Home
+доказывает отсутствие positions-preview reads. Проверки раннего входа в Positions
+сохраняют обязательный единственный follow-up после strong dashboard. Навигация,
+scroll/focus, mutation locks и pause publication проверяются на текущих UI
+markers. Activity TTL probe сохраняет обе накопленные страницы и показывает
+«Есть новые события», не подменяя их новой первой страницей. Positions error
+action явно называется «Повторить». Полный frontend suite и TypeScript проходят;
+счётчики — в ENGINE_TEST_STATUS. Продолжать S3.2 pagination/detail/cache edge
+cases и оставшийся AppShell ref warning, затем S3.3 N5/delivery и общая приёмка.
+
+### 9. Повтор неудавшейся страницы (2026-09-08)
+
+Исправлен сброс накопленных detail pages при retry: history owner запоминает
+режим неудавшегося read, и кнопка повторяет events/fills/more с прежним cursor.
+При `history_page_changed` retry выполняет явный refresh. Activity и ClosedTrades
+используют тот же retry вместо угадывания по наличию next_cursor. Regression
+проверяет сохранение предыдущих events и независимого fills cursor. Targeted
+проверка и TypeScript проходят; полный suite после этой правки ещё не повторён.
+
+### 10. Явный restart после смены ревизии (2026-09-08)
+
+После `history_page_changed` блокируются automatic ensure и дальнейшее more:
+старый срез остаётся видимым до явного refresh/retry пользователя. Проверено,
+что invalidation/повторная активация не поглощают этот статус, а explicit retry
+не передаёт старый cursor. Targeted regressions и TypeScript проходят.
+Обычная TTL-ревалидация накопленных trades/events без server revision error
+пока требует отдельной проверки: текущий код может заменить их первой страницей.
+
+### 11. TTL probe без потери страниц (2026-09-08)
+
+Trades/events сохраняют исходную первую страницу для сравнения. При ensure
+неизменная первая страница подтверждает срез без сброса накопленных элементов
+и курсоров; изменение фактов переводит его в explicit-refresh state. Сигнатура
+публикуется только вместе с принятым по generation/revision ответом. Regression
+покрывает events append → unchanged probe → changed probe; TypeScript проходит.
+Отдельное покрытие trades, browser scroll и остальные S3 требования остаются.
+
+### 12. Closed trades и render keys (2026-09-08)
+
+Добавлено отдельное покрытие closed-trade append/dedup/TTL/changed/restart.
+Показанный набор и continuation cursor сохраняются до explicit replacement.
+AppShell больше не читает ref при render: ключи mounted entries передаются
+через React state; синхронный ref остаётся для Back/scroll bookkeeping.
+Полный frontend suite проходит, oxlint clean; актуальные counters в
+ENGINE_TEST_STATUS. Browser performance, cache bounds, detail partial states
+и полный delivery path пока не приняты; G3 OPEN.
+
+### 13. Cache bounds и stale live detail (2026-09-08)
+
+Regressions подтверждают лимит трёх inactive filters, сохранение subscribed
+Back target и целого длинного списка до release. Уход освобождает oversized
+slice целиком, без некорректной пары truncated data/cursor. В TradeDetail
+добавлены live snapshot error, stale warning, snapshot time и явное strong
+обновление позиции: устаревшие PnL/protection больше не показываются без
+оговорки. TypeScript/oxlint проходят; визуальная приёмка этих состояний впереди.
+
+### 14. Порядок продолжения после лимита сессии (2026-09-08)
+
+Следующий проход ведётся implementation-first. Не запускать полный frontend
+suite после каждой мелкой правки. Сначала закончить функциональные блоки S3.2 и
+S3.3: detail partial/unknown states, полные trades/events/fills flows, Telegram
+menu/push presenter, N5 durable-only delivery и owned deep links. Затем одним
+проходом выполнить offline gate (frontend/backend/ruff/docs), после чего перейти
+к browser/device/live evidence S3.5/G3. Мелкие targeted checks допустимы только
+для нового риска и не заменяют завершение функционального объёма.
