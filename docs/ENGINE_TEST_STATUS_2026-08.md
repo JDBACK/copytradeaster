@@ -1650,3 +1650,11 @@ continuation/identity, потеря durable dirty range, events >200, default re
 также не доказывает publication latency рабочего scheduler.
 **S1/G1 OPEN / REQUEST CHANGES**; R4/R5/R7/R9 приняты в исходном scope,
 остальные findings требуют указанной доработки. Рабочая БД/биржа не затронуты.
+
+## S3 toggle delivery boundary — 2026-09-08
+
+После implementation commit `903d4f4` исправлен найденный чтением кода race
+mute/re-enable между sweep. Toggle/outbox cursor boundary транзакционный,
+recipient/ownership повторно проверяются при commit, cursor монотонный.
+Тестовые прогоны отложены владельцем; ruff check/format изменённых файлов
+проходят. Дополнительные сценарии внесены в S3 testing handoff; G3 OPEN.

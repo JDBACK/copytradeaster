@@ -108,3 +108,14 @@ S3.5: этот guide и актуальные карты подготовлены
 
 TypeScript compilation проходит; изменённые Python-файлы прошли ruff и
 форматирование. Это не замена runtime/offline/browser/live проверки.
+
+## Дополнение: toggle boundary после первого implementation commit
+
+Проверить событие, записанное между disable и enable при отсутствии sweep,
+а также sweep prepare → toggle → sweep commit. Toggle фиксирует max published
+seq в той же транзакции, что и настройку (только после rollout); commit
+повторно проверяет recipient и не вставляет строки ниже committed cursor.
+Cursor обновляется монотонно через MAX. При выключении PENDING outbox
+помечается FAILED/recipient_disabled. Уже начатый внешний send не отзывается.
+No-op enable=True не должен съедать ожидающие новые события. Новых тестов и
+прогонов для этого дополнения пока нет.

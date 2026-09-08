@@ -963,13 +963,49 @@ class TelegramUserRepo:
             return rowcount == 1
 
     async def set_notifications_enabled(self, telegram_user_id: int, enabled: bool) -> bool:
-        blocked_at = None if enabled else _now_iso()
-        rowcount, _ = await self.db.execute_write(
-            "UPDATE telegram_users SET notifications_enabled=?, updated_at=?, "
-            "blocked_at=? WHERE telegram_user_id=?",
-            (int(enabled), _now_iso(), blocked_at, int(telegram_user_id)),
-        )
-        return rowcount == 1
+        now = _now_iso()
+        now_ms = int(time.time() * 1000)
+        async with self.db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT account_id, notifications_enabled FROM telegram_users "
+                "WHERE telegram_user_id=?",
+                (int(telegram_user_id),),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                return False
+            if bool(row["notifications_enabled"]) != enabled:
+                # Cut the published history at the same commit as the toggle.
+                # A sweep admitted before this boundary cannot replay muted rows.
+                await _conn_execute(
+                    conn,
+                    "INSERT INTO user_event_delivery_state "
+                    "(account_id,environment,scanned_seq,updated_at) "
+                    "SELECT account_id,environment,MAX(seq),? FROM user_activity_events "
+                    "WHERE account_id=? AND EXISTS (SELECT 1 FROM app_state "
+                    "WHERE key='user_event_delivery_rollout_floor') "
+                    "GROUP BY account_id,environment "
+                    "ON CONFLICT(account_id,environment) DO UPDATE SET "
+                    "scanned_seq=MAX(user_event_delivery_state.scanned_seq,excluded.scanned_seq),"
+                    "updated_at=excluded.updated_at",
+                    (now_ms, row["account_id"]),
+                )
+                if not enabled:
+                    await _conn_execute(
+                        conn,
+                        "UPDATE notification_outbox SET status='FAILED', "
+                        "last_error='recipient_disabled',updated_at=? "
+                        "WHERE telegram_user_id=? AND status='PENDING'",
+                        (now, int(telegram_user_id)),
+                    )
+            rowcount, _ = await _conn_execute(
+                conn,
+                "UPDATE telegram_users SET notifications_enabled=?, updated_at=?, "
+                "blocked_at=? WHERE telegram_user_id=?",
+                (int(enabled), now, None if enabled else now, int(telegram_user_id)),
+            )
+            return rowcount == 1
 
     async def set_access_enabled(self, telegram_user_id: int, enabled: bool) -> bool:
         """Grant or revoke Bot UI access without changing trading or notifications."""

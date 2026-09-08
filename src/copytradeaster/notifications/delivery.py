@@ -192,7 +192,10 @@ async def recover_user_events_durable(
                     last_considered = stored.seq
                     continue
                 event, recipients = planned
-                due.extend(NotificationRouter.plan_outbox_rows(event, recipients))
+                due.extend(
+                    {**row, "user_event_seq": stored.seq}
+                    for row in NotificationRouter.plan_outbox_rows(event, recipients)
+                )
                 report.recovered += 1
                 last_considered = stored.seq
             if last_considered > scanned:
@@ -218,7 +221,26 @@ async def _commit_batch(
     """
     now_ms = int(time.time() * 1000)
     async with db.transaction() as conn:
+        cursor = await conn.execute(
+            "SELECT scanned_seq FROM user_event_delivery_state "
+            "WHERE account_id=? AND environment=?",
+            (scope.account_id, scope.environment),
+        )
+        state = await cursor.fetchone()
+        await cursor.close()
+        committed_seq = int(state["scanned_seq"]) if state is not None else 0
         for row in due_rows:
+            if int(row["user_event_seq"]) <= committed_seq:
+                continue  # A toggle or another committed sweep already consumed it.
+            cursor = await conn.execute(
+                "SELECT 1 FROM telegram_users WHERE telegram_user_id=? AND account_id=? "
+                "AND notifications_enabled=1 AND blocked_at IS NULL",
+                (row["telegram_user_id"], scope.account_id),
+            )
+            eligible = await cursor.fetchone()
+            await cursor.close()
+            if eligible is None:
+                continue
             # Pure value mapping shared with the live outbox path, so the row
             # shape stays identical by construction (see repositories).
             values = NotificationOutboxRepo._event_values(row)
@@ -228,7 +250,8 @@ async def _commit_batch(
             "INSERT INTO user_event_delivery_state(account_id, environment, scanned_seq,"
             " updated_at) VALUES (?, ?, ?, ?)"
             " ON CONFLICT(account_id, environment) DO UPDATE SET"
-            " scanned_seq=excluded.scanned_seq, updated_at=excluded.updated_at",
+            " scanned_seq=MAX(user_event_delivery_state.scanned_seq,excluded.scanned_seq),"
+            " updated_at=excluded.updated_at",
             (scope.account_id, scope.environment, int(last_seq), now_ms),
         )
         await cursor.close()
