@@ -18,6 +18,7 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
   const resources = useScreenResources(providedResources ?? scope ?? undefined, auth)
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [calendar, setCalendar] = useState(() => new Date())
+  const calendarDay = calendar.toDateString()
   const feed = useHistory(resources.history, { kind: 'feed', filter }, active || (warm && !resources.history.get({ kind: 'feed', filter }).data), foregroundSignal + invalidateSignal)
   useEffect(() => {
     if (!active) return
@@ -28,7 +29,7 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
     const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
     const timer = setTimeout(update, midnight.getTime() - now.getTime() + 50)
     return () => clearTimeout(timer)
-  }, [active, foregroundSignal, calendar.getDate()])
+  }, [active, foregroundSignal, calendarDay])
   const groups = useMemo(() => (['today', 'yesterday', 'earlier'] as const).map(bucket => ({ bucket, items: feed.data?.items.filter(item => dayBucket(item.occurred_at, calendar) === bucket) ?? [] })), [feed.data?.items, calendar])
   return <div className="screen">
     <Brand right={accountMasked ? <span className="wallet-chip num">{accountMasked}</span> : undefined} />

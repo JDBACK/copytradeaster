@@ -54,10 +54,10 @@ describe('activityStatusTone', () => {
 
 describe('dayBucket', () => {
   it('classifies today, yesterday and earlier', () => {
-    const now = new Date('2026-09-02T13:00:00+00:00')
-    expect(dayBucket('2026-09-02T09:00:00+00:00', now)).toBe('today')
-    expect(dayBucket('2026-09-01T22:00:00+00:00', now)).toBe('yesterday')
-    expect(dayBucket('2026-08-29T10:00:00+00:00', now)).toBe('earlier')
+    const now = new Date(2026, 8, 2, 13)
+    expect(dayBucket(new Date(2026, 8, 2, 9).toISOString(), now)).toBe('today')
+    expect(dayBucket(new Date(2026, 8, 1, 22).toISOString(), now)).toBe('yesterday')
+    expect(dayBucket(new Date(2026, 7, 29, 10).toISOString(), now)).toBe('earlier')
     expect(dayBucket(null, now)).toBe('earlier')
     expect(dayBucket('not-a-date', now)).toBe('earlier')
   })
@@ -108,7 +108,7 @@ describe('ActivityScreen render (read-only UI contract)', () => {
     )
     expect(html).toContain('Активность')
     expect(html).toContain('ASTER')
-    expect(html).toContain('Aster testnet')
+    expect(html).not.toContain('Aster testnet')
     expect(html).toContain('Загрузка журнала')
   })
 
@@ -123,11 +123,11 @@ describe('ActivityScreen render (read-only UI contract)', () => {
     expect(html).toContain('0x1111…1111')
   })
 
-  it('renders the testnet badge when no masked account is available', () => {
+  it('does not invent the environment when no masked account is available', () => {
     const html = renderToStaticMarkup(
       <ActivityScreen auth={{ initData: 'test' }} />,
     )
-    expect(html).toContain('Aster testnet')
+    expect(html).not.toContain('Aster testnet')
   })
   it('contains no trading controls or raw journal codes (strictly read-only)', () => {
     const html = renderToStaticMarkup(
@@ -159,9 +159,8 @@ describe('ActivityScreen render (read-only UI contract)', () => {
     const html = renderToStaticMarkup(
       <ActivityScreen auth={{ initData: 'test' }} />,
     )
-    // <button> elements are scoped to navigation (retry only) in the
-    // loading state; there are no order-placement controls in the activity
-    // surface by design.
-    expect(html.match(/<button/g)?.length ?? 0).toBe(0)
+    // Initial actions select feed filters; none submits a trading mutation.
+    expect(html.match(/role="tab"/g)?.length ?? 0).toBe(3)
+    expect(html.match(/<button/g)?.length ?? 0).toBe(3)
   })
 })

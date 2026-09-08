@@ -21,7 +21,7 @@ describe('home view model', () => {
     const view = homeViewModel(dashboard({ copy_state: 'active' }))
     expect(view.tone).toBe('active')
     expect(view.actionLabel).toBe('pause')
-    expect(view.title).toBe('Всё работает')
+    expect(view.title).toBe('Копирование включено')
   })
 
   it('paused: resume action and protection note', () => {

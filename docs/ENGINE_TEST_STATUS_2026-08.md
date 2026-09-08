@@ -12,6 +12,21 @@
 
 ## Текущее состояние
 
+- **S3 Home/Settings/display follow-up (2026-09-08):** полный frontend Vitest
+  **292 passed / 29 failed, 28 files**; единственный красный файл —
+  `appShellKeepAlive.test.tsx`. Home/format/Settings и Settings navigation /
+  AccountBuilder targeted проверки PASS, TypeScript PASS. G3 OPEN.
+
+- **S3 Activity follow-up (2026-09-08):** полный Vitest — **282 passed /
+  37 failed, 28 files**. Activity contract/auth/scope и history regressions:
+  **17 passed**; TypeScript PASS. Oxlint: одно оставшееся предупреждение
+  `AppShell` ref access during render. Возвращён Activity TTL 60 s.
+
+- **S3 continuation (2026-09-08):** history invalidation causal fence —
+  `historyResources.test.ts`: **2 passed**, TypeScript build check PASS.
+  Полный frontend suite после этого исправления пока не запускался; предыдущий
+  результат выше остаётся baseline, причины всех падений ещё требуют разбора.
+
 - **Mini App S2 / G2 — CLOSED (2026-09-07, `feature/frontend`, base
   `b10f01a`):** session-scoped shared resources, weak/strong singleflight,
   read/write/invalidation fencing, hard invalid-session scope reset, root

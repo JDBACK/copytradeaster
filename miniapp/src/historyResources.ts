@@ -16,6 +16,9 @@ interface Entry {
   pins: number
   used: number
   generation: number
+  revision: number
+  flightRevision?: number
+  followUp: boolean
   controller: AbortController | null
   flight: Promise<void> | null
 }
@@ -30,7 +33,7 @@ export class HistoryResources {
     const key = historyKey(query)
     let entry = this.entries.get(key)
     if (!entry) {
-      entry = { query, snapshot: { data: null, loading: false, error: null, receivedAt: 0, changed: false }, listeners: new Set(), pins: 0, used: Date.now(), generation: 0, controller: null, flight: null }
+      entry = { query, snapshot: { data: null, loading: false, error: null, receivedAt: 0, changed: false }, listeners: new Set(), pins: 0, used: Date.now(), generation: 0, revision: 0, followUp: false, controller: null, flight: null }
       this.entries.set(key, entry)
     }
     entry.used = Date.now()
@@ -68,11 +71,18 @@ export class HistoryResources {
   async load(query: HistoryQuery, mode: 'ensure' | 'refresh' | 'more' | 'fills' | 'events' = 'ensure'): Promise<void> {
     if (this.disposed) return
     const entry = this.entry(query)
-    if (entry.flight) return entry.flight
-    if (mode === 'ensure' && entry.snapshot.data && Date.now() - entry.snapshot.receivedAt < 30000) return
+    if (entry.flight) {
+      if (entry.flightRevision !== entry.revision) entry.followUp = true
+      return entry.flight
+    }
+    const ttl = query.kind === 'feed' ? 60000 : 30000
+    if (mode === 'ensure' && entry.snapshot.data && entry.snapshot.receivedAt > 0 && Date.now() - entry.snapshot.receivedAt < ttl) return
     const controller = new AbortController()
     entry.controller = controller
     const generation = ++entry.generation
+    const revision = entry.revision
+    entry.flightRevision = revision
+    entry.followUp = false
     const previous = entry.snapshot.data
     this.publish(entry, { loading: true, error: null })
     const run = async () => {
@@ -108,10 +118,10 @@ export class HistoryResources {
             ...(moreEvents ? { events: merge(old.events, page.events, 'event_ref'), next_events_cursor: page.next_events_cursor } : {}),
           } : page
         }
-        if (!this.disposed && generation === entry.generation) this.publish(entry, { data, receivedAt: Date.now(), changed: false })
+        if (!this.disposed && generation === entry.generation && revision === entry.revision) this.publish(entry, { data, receivedAt: Date.now(), changed: false })
       } catch (error) {
         if (this.owner.handleInvalidSessionError(error)) return
-        if (this.disposed || generation !== entry.generation || (error instanceof ApiError && error.code === 'aborted')) return
+        if (this.disposed || generation !== entry.generation || revision !== entry.revision || (error instanceof ApiError && error.code === 'aborted')) return
         const code = error instanceof ApiError ? error.code : 'network_error'
         this.publish(entry, { error: code, changed: code === 'history_page_changed' })
       } finally {
@@ -120,6 +130,9 @@ export class HistoryResources {
           entry.controller = null
           this.publish(entry, { loading: false })
           this.prune()
+          if (!this.disposed && revision !== entry.revision && entry.followUp) {
+            await this.load(query)
+          }
         }
       }
     }
@@ -127,7 +140,11 @@ export class HistoryResources {
     return entry.flight
   }
   invalidate(): void {
-    for (const entry of this.entries.values()) this.publish(entry, { receivedAt: 0 })
+    if (this.disposed) return
+    for (const entry of this.entries.values()) {
+      entry.revision++
+      this.publish(entry, { receivedAt: 0 })
+    }
   }
   dispose(): void {
     this.disposed = true

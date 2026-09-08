@@ -137,3 +137,37 @@ git diff --check
    harness и G3 evidence (device/Telegram WebView, BackButton/haptics,
    journal-coid cleanup, flat + no open orders). До этих шагов G3 остаётся
    **OPEN**.
+
+### 4. Возобновление: causal fence истории (2026-09-08)
+
+Проверка текущего `957bef5` показала, что предыдущая формулировка «падения
+из-за старых assertions» не доказывает отсутствие регрессий. В HistoryResources
+найдена реальная гонка: invalidation во время read поглощалась поздней
+публикацией `receivedAt`. Добавлена revision-граница: pre-invalidation data/error
+не публикуются; повторный запрос consumer объединяется в один follow-up после
+settle. Неактивный запрос без нового обращения остаётся stale и не запускает
+скрытый follow-up. Добавлены regressions в `historyResources.test.ts`, targeted
+проверка и TypeScript проходят. Полный suite ещё не перепроверен; G3 OPEN.
+
+### 5. Activity: контракты и TTL (2026-09-08)
+
+Auth/scope regression tests переведены на `activityFeed`: hard-session gate,
+abort прежнего scope и запрет поздней публикации проверяются через новый API.
+Static UI assertions учитывают фильтры и отсутствие выдуманной testnet-среды.
+Calendar fixture теперь задаёт локальные даты, а не ошибочно считает UTC-день
+локальным. В history owner восстановлен 60-секундный Activity TTL и добавлен
+regression для активаций на 35/65 секундах. Устранён complex-deps warning
+календарного effect. Полный suite повторён: актуальные числа в едином
+ENGINE_TEST_STATUS; оставшиеся падения относятся к Home/Settings/форматированию
+и shell lifecycle и ещё не закрыты.
+
+### 6. Home/Settings и финансовое отображение (2026-09-08)
+
+Home title и Settings assertions приведены к §8.1: «Копирование включено»,
+«Риск на сделку», «Подключение Aster», среда из session. Проверки prefetch,
+cached navigation и AccountBuilder behavior проходят после обновления названий
+строк, без ослабления проверок API ownership. Исправлен реальный display edge:
+пустые строки в цене/PnL/USDT показывают отсутствие факта, а не ноль; малые
+ненулевые USDT показываются как порог со знаком. Добавлены regressions для
+малых цен, положительного/отрицательного PnL и malformed/missing amounts.
+TypeScript проходит. Следующий участок — оставшийся shell keep-alive suite.

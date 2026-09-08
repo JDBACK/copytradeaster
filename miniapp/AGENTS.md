@@ -67,6 +67,10 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 |---|---|
 | `api.ts` | Typed POST client mirroring all 26 routes; initData headers (+ dev-only `X-Dev-User-Id`), 15s AbortController timeout covering headers + body, external-abort cleanup, safe `invalid_response`, `ApiError` |
 | `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks |
+| `historyResources.ts` / `historyResources.test.ts` | Session history cache and invalidation revision fence; regressions for late responses, coalesced follow-up and inactive reads |
+| `useHistory.ts` | External-store subscription for history list/feed/detail/events |
+| `screens/TradeListScreen.tsx` / `screens/TradeDetailScreen.tsx` | S3 history list and detail surfaces (WIP) |
+| `components/PositionSummaryCard.tsx` / `TradeSummaryCard.tsx` / `TradeEventRow.tsx` | S3 position, trade and event presentation |
 | `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL |
 | `resourceScopeContext.ts` | Connected-session owner context for direct screen-owned paths such as Activity so auth loss still hits the hard session boundary |
 | `settingsPrefetch.ts` | Settings-only bounded speculative queue: max two concurrent weak reads; click priority/join; no hidden signed refresh |

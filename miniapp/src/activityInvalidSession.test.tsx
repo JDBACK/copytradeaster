@@ -9,7 +9,7 @@ import { api, ApiError } from './api'
 import { ActivityScreen } from './screens/ActivityScreen'
 import { MiniAppResources } from './resources'
 import { ResourceScopeContext } from './resourceScopeContext'
-import type { ActivityPageDTO, DashboardDTO, PositionPageDTO } from './types'
+import type { ActivityFeedPage, DashboardDTO, PositionPageDTO } from './types'
 
 afterEach(() => {
   cleanup()
@@ -48,23 +48,22 @@ const positions: PositionPageDTO = {
   is_stale: false,
 }
 
-function activityPage(title: string): ActivityPageDTO {
+function activityPage(title: string): ActivityFeedPage {
   return {
     items: [
       {
-        category: 'system',
-        title,
-        status: 'completed',
-        symbol: null,
+        event_ref: title,
+        text: title,
+        kind: 'SYSTEM_STATUS',
+        trade_ref: null,
+        facts: {},
         occurred_at: '2026-09-07T12:01:00+00:00',
-        pending_age: null,
-        remediation: null,
       },
     ],
-    page: 0,
-    has_previous: false,
-    has_next: false,
-    filter: 'all',
+    next_cursor: null,
+    high_water: 1,
+    latest_seq: 1,
+    pending: [],
   }
 }
 
@@ -94,7 +93,7 @@ describe('Activity direct invalid-session boundary', () => {
     })
     vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard)
     vi.spyOn(api, 'positions').mockResolvedValue(positions)
-    const activity = vi.spyOn(api, 'activity').mockRejectedValue(error)
+    const activity = vi.spyOn(api, 'activityFeed').mockRejectedValue(error)
 
     render(<App />)
 
@@ -106,10 +105,10 @@ describe('Activity direct invalid-session boundary', () => {
   it('replaces Activity truth on resource-scope change and fences a late old success', async () => {
     const firstScope = new MiniAppResources({ initData: 'test' }, 'activity-scope-old')
     const secondScope = new MiniAppResources({ initData: 'test' }, 'activity-scope-new')
-    const oldGate = deferred<ActivityPageDTO>()
+    const oldGate = deferred<ActivityFeedPage>()
     const oldSignals: AbortSignal[] = []
     const activity = vi
-      .spyOn(api, 'activity')
+      .spyOn(api, 'activityFeed')
       .mockImplementationOnce((_auth, _filter, _page, options) => {
         if (options?.signal) oldSignals.push(options.signal)
         return oldGate.promise

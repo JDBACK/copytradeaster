@@ -40,8 +40,25 @@ describe('russian formatting', () => {
     expect(formatPrice(null)).toBe('—')
 
     expect(formatPnl('124.8')).toEqual({ text: '+124,80 USDT', tone: 'positive' })
-    expect(formatPnl('-18.2')).toEqual({ text: '-18,20 USDT', tone: 'negative' })
+    expect(formatPnl('-18.2')).toEqual({ text: '−18,20 USDT', tone: 'negative' })
     expect(formatPnl('0')).toEqual({ text: '0,00 USDT', tone: 'neutral' })
     expect(formatPnl(null)).toEqual({ text: '—', tone: 'neutral' })
+  })
+
+  it('preserves small amounts and prices instead of showing a false zero', () => {
+    expect(formatPrice('0.000000123')).toBe('0,000000123')
+    expect(formatPnl('0.001')).toEqual({ text: '+< 0,01 USDT', tone: 'positive' })
+    expect(formatPnl('-0.001')).toEqual({ text: '−< 0,01 USDT', tone: 'negative' })
+    expect(formatUsdt('0.001')).toBe('< 0,01 USDT')
+    expect(formatUsdt('-0.001')).toBe('−< 0,01 USDT')
+    expect(formatPnl('-0')).toEqual({ text: '0,00 USDT', tone: 'neutral' })
+  })
+
+  it('does not convert missing or malformed financial facts to zero', () => {
+    for (const value of ['', '  ', 'NaN', 'Infinity', 'unknown']) {
+      expect(formatPrice(value)).toBe('—')
+      expect(formatUsdt(value)).toBe('—')
+      expect(formatPnl(value)).toEqual({ text: '—', tone: 'neutral' })
+    }
   })
 })

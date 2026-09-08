@@ -260,7 +260,7 @@ describe('Settings G2 navigation performance', () => {
     await waitFor(() => expect(risk).toHaveBeenCalledTimes(1))
     expect(accountBuilder).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: /Аккаунт и Builder/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Подключение Aster/ }))
     await waitFor(() => expect(accountBuilder).toHaveBeenCalledTimes(1))
     expect(accountBuilder).toHaveBeenLastCalledWith(AUTH, false, expect.any(Object))
     expect(screen.getByLabelText('Загрузка аккаунта')).toBeInTheDocument()
@@ -289,7 +289,7 @@ describe('Settings G2 navigation performance', () => {
     render(<SettingsHarness resources={resources} />)
     await screen.findByText('Настройки копирования')
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     expect(screen.getByText('Риск на Stop', { selector: 'h1' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Загрузка настроек риска')).toBeNull()
     expect(risk).toHaveBeenCalledTimes(1)
@@ -301,7 +301,7 @@ describe('Settings G2 navigation performance', () => {
     expect(notifications).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: 'Test back' }))
 
-    fireEvent.click(screen.getByRole('button', { name: /риск на stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /риск на сделку/i }))
     expect(screen.queryByLabelText('Загрузка настроек риска')).toBeNull()
     expect(risk).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: 'Test back' }))

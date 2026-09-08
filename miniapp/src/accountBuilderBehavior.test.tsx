@@ -675,7 +675,7 @@ describe('AccountBuilderScreen behavior', () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole('button', { name: /Аккаунт и Builder/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Подключение Aster/ }))
     expect(onOpen).toHaveBeenCalledWith({ kind: 'account-builder' })
   })
 

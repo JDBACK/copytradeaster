@@ -18,9 +18,10 @@ export function formatPercent(value: string | number | null | undefined): string
 }
 
 export function formatUsdt(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return '—'
+  if (value == null || (typeof value === 'string' && !value.trim())) return '—'
   const num = typeof value === 'string' ? Number(value) : value
   if (!Number.isFinite(num)) return '—'
+  if (num !== 0 && Math.abs(num) < 0.01) return `${num < 0 ? '−' : ''}< 0,01 USDT`
   return `${num.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} USDT`
 }
 
@@ -41,7 +42,7 @@ const pnlFormat = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, max
 const fullDateFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
 
 export function formatPrice(value: string | number | null | undefined): string {
-  if (value == null) return '—'
+  if (value == null || (typeof value === 'string' && !value.trim())) return '—'
   const num = Number(value)
   if (!Number.isFinite(num)) return '—'
   if (num !== 0 && Math.abs(num) < 1e-20) return `${num < 0 ? '−' : ''}< 0,00000000000000000001`
@@ -53,7 +54,7 @@ export function formatQuantity(value: string | number | null | undefined, asset?
 }
 
 export function formatPnl(value: string | number | null | undefined): { text: string; tone: 'positive' | 'negative' | 'neutral' } {
-  if (value == null || !Number.isFinite(Number(value))) return { text: '—', tone: 'neutral' }
+  if (value == null || (typeof value === 'string' && !value.trim()) || !Number.isFinite(Number(value))) return { text: '—', tone: 'neutral' }
   const num = Number(value)
   const prefix = num > 0 ? '+' : num < 0 ? '−' : ''
   const amount = num !== 0 && Math.abs(num) < 0.01 ? '< 0,01' : pnlFormat.format(Math.abs(num))
