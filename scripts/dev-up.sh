@@ -3,11 +3,16 @@
 # quick tunnel -> CT_MINIAPP_PUBLIC_URL -> production process (Telegram bot +
 # Mini App transport + trading core) on Aster Testnet.
 #
+# The plain path is deliberately reuse-first: when the bot needs a restart but
+# the current tunnel is still alive, keep that tunnel and its hostname. A
+# Telegram menu button may cache the previous hostname for minutes; rotating a
+# healthy tunnel here would create a deterministic Error 1033 window.
+#
 # Usage:
-#   scripts/dev-up.sh          # reuse the live stack when healthy, else restart
+#   scripts/dev-up.sh          # reuse stack/tunnel when possible, else restart
 #   scripts/dev-up.sh --rotate # force a fresh tunnel URL (invalidates the old
 #                              # one: the Telegram menu button needs minutes to
-#                              # propagate, so prefer plain runs)
+#                              # propagate; use only when the current tunnel died)
 #   scripts/dev-up.sh stop     # stop the bot and the tunnel
 #
 # Rotation is expensive: a quick-tunnel hostname dies with its process, and a
@@ -22,16 +27,24 @@ PORT=8080
 TUNNEL_LOG="data/logs/cloudflared-tunnel.log"
 BOT_LOG="data/logs/run-bot-console.log"
 PID_FILE="data/run-bot.pid"
+TUNNEL_PID_FILE="data/cloudflared.pid"
 
 mkdir -p data/logs
 
 stop_instance() {
+  local keep_tunnel="${1:-0}"
   if [ -f "$PID_FILE" ]; then
     kill "$(cat "$PID_FILE")" 2>/dev/null || true
     rm -f "$PID_FILE"
   fi
   pkill -f "copytradeaster run-bot" 2>/dev/null || true
-  pkill -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" 2>/dev/null || true
+  if [ "$keep_tunnel" != "1" ]; then
+    if [ -f "$TUNNEL_PID_FILE" ]; then
+      kill "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null || true
+      rm -f "$TUNNEL_PID_FILE"
+    fi
+    pkill -f "[c]loudflared tunnel --url http://127.0.0.1:${PORT}" 2>/dev/null || true
+  fi
   sleep 1
 }
 
@@ -68,6 +81,19 @@ current_public_url() {
   grep -E '^CT_MINIAPP_PUBLIC_URL=' .env 2>/dev/null | cut -d= -f2- || true
 }
 
+tunnel_process_alive() {
+  local pid command
+  if [ -f "$TUNNEL_PID_FILE" ]; then
+    pid="$(cat "$TUNNEL_PID_FILE")"
+    if kill -0 "$pid" 2>/dev/null; then
+      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      printf '%s' "$command" | grep -Fq "cloudflared tunnel --url http://127.0.0.1:${PORT}" && return 0
+    fi
+  fi
+  # The bracket in [c]loudflared prevents pgrep from matching its own command.
+  pgrep -f "[c]loudflared tunnel --url http://127.0.0.1:${PORT}" >/dev/null 2>&1
+}
+
 wait_button() {
   # Converge the Telegram menu button onto $1 (base URL, no trailing path).
   # setChatMenuButton applies with minutes of propagation lag: a MISMATCH
@@ -91,20 +117,43 @@ wait_button() {
   return 1
 }
 
+wait_public() {
+  # A transient edge 502 must never trigger tunnel rotation: Telegram may
+  # still have the current hostname cached. Keep the process and hostname,
+  # and give the existing connector up to 90 seconds to recover.
+  local url="$1"
+  for _ in $(seq 1 18); do
+    if edge_check "${url}/miniapp/"; then
+      return 0
+    fi
+    if ! tunnel_process_alive; then
+      return 1
+    fi
+    sleep 5
+  done
+  return 1
+}
+
 stack_alive() {
-  # Live serving path, regardless of button state: bot + tunnel processes,
-  # local bundle answering, public edge serving the current .env URL.
+  # Process serving path, regardless of transient edge state: bot + tunnel
+  # processes and the local bundle answering. The caller checks the public
+  # edge separately so a short 502 cannot rotate away a still-live hostname.
   local url
   url="$(current_public_url)"
   [ -n "$url" ] || return 1
   [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null || return 1
-  pgrep -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" >/dev/null 2>&1 || return 1
+  tunnel_process_alive || return 1
   curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/miniapp/" >/dev/null 2>&1 || return 1
-  edge_check "${url}/miniapp/" >/dev/null 2>&1 || return 1
 }
 
 if [ "$MODE" = "reuse" ] && stack_alive; then
-  echo "==> Stack alive on $(current_public_url)/miniapp/ — reusing (no restart, no URL rotation)"
+  echo "==> Stack processes alive on $(current_public_url)/miniapp/ — reusing (no URL rotation)"
+  echo "==> Checking the existing public edge (no tunnel rotation on transient 502)"
+  if ! wait_public "$(current_public_url)"; then
+    echo "ERROR: existing tunnel is not serving the Mini App after ~90s." >&2
+    echo "  Tunnel and bot were left running; retry without --rotate." >&2
+    exit 1
+  fi
   if wait_button "$(current_public_url)"; then
     echo "READY — live stack already converged (nothing restarted)."
     echo "  Telegram:  open the bot chat -> menu button ASTER COPY"
@@ -116,8 +165,19 @@ if [ "$MODE" = "reuse" ] && stack_alive; then
   exit 1
 fi
 
-echo "==> Stopping previous instance (if any)"
-stop_instance
+CURRENT_URL="$(current_public_url)"
+KEEP_TUNNEL=0
+if [ "$MODE" = "reuse" ] && [ -n "$CURRENT_URL" ] && tunnel_process_alive; then
+  KEEP_TUNNEL=1
+fi
+
+if [ "$KEEP_TUNNEL" = "1" ]; then
+  echo "==> Restarting bot while keeping live tunnel ${CURRENT_URL}"
+  stop_instance 1
+else
+  echo "==> Stopping previous instance (if any)"
+  stop_instance
+fi
 
 echo "==> Checking Mini App bundle freshness"
 if [ ! -f miniapp/dist/index.html ] || [ -n "$(find miniapp/src miniapp/index.html miniapp/vite.config.ts \
@@ -128,29 +188,42 @@ else
   echo "    bundle is fresh (skip build)"
 fi
 
-echo "==> Starting cloudflared quick tunnel (port ${PORT})"
-nohup cloudflared tunnel --url "http://127.0.0.1:${PORT}" > "$TUNNEL_LOG" 2>&1 &
-TUNNEL_URL=""
-for _ in $(seq 1 30); do
-  TUNNEL_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" | head -1 || true)"
-  [ -n "$TUNNEL_URL" ] && break
-  sleep 1
-done
-if [ -z "$TUNNEL_URL" ]; then
-  echo "ERROR: tunnel URL not received — tail of ${TUNNEL_LOG}:" >&2
-  tail -20 "$TUNNEL_LOG" >&2
-  exit 1
-fi
-echo "    public URL: ${TUNNEL_URL}"
+if [ "$KEEP_TUNNEL" = "1" ]; then
+  TUNNEL_URL="$CURRENT_URL"
+  echo "==> Reusing existing cloudflared tunnel ${TUNNEL_URL}"
+else
+  echo "==> Starting cloudflared quick tunnel (port ${PORT})"
+  # Never parse a hostname from an earlier quick-tunnel generation. The
+  # hostname in the first log line may already be dead while a new connector
+  # is starting, which would publish a guaranteed Error 1033 URL to Telegram.
+  : > "$TUNNEL_LOG"
+  .venv/bin/python scripts/detach_process.py \
+    --pid-file "$TUNNEL_PID_FILE" \
+    --log-file "$TUNNEL_LOG" \
+    -- cloudflared tunnel --url "http://127.0.0.1:${PORT}"
+  TUNNEL_URL=""
+  for _ in $(seq 1 30); do
+    TUNNEL_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" | tail -1 || true)"
+    [ -n "$TUNNEL_URL" ] && break
+    sleep 1
+  done
+  if [ -z "$TUNNEL_URL" ]; then
+    echo "ERROR: tunnel URL not received — tail of ${TUNNEL_LOG}:" >&2
+    tail -20 "$TUNNEL_LOG" >&2
+    exit 1
+  fi
+  echo "    public URL: ${TUNNEL_URL}"
 
-echo "==> Writing CT_MINIAPP_PUBLIC_URL to .env"
-sed -i '' "s|^CT_MINIAPP_PUBLIC_URL=.*|CT_MINIAPP_PUBLIC_URL=${TUNNEL_URL}|" .env
-grep -q "^CT_MINIAPP_PUBLIC_URL=${TUNNEL_URL}$" .env || { echo "ERROR: failed to update .env" >&2; exit 1; }
+  echo "==> Writing CT_MINIAPP_PUBLIC_URL to .env"
+  sed -i '' "s|^CT_MINIAPP_PUBLIC_URL=.*|CT_MINIAPP_PUBLIC_URL=${TUNNEL_URL}|" .env
+  grep -q "^CT_MINIAPP_PUBLIC_URL=${TUNNEL_URL}$" .env || { echo "ERROR: failed to update .env" >&2; exit 1; }
+fi
 
 echo "==> Starting run-bot (Telegram bot + Mini App + trading core)"
-nohup .venv/bin/python -m copytradeaster run-bot > "$BOT_LOG" 2>&1 &
-BOT_PID=$!
-echo "$BOT_PID" > "$PID_FILE"
+BOT_PID="$(.venv/bin/python scripts/detach_process.py \
+  --pid-file "$PID_FILE" \
+  --log-file "$BOT_LOG" \
+  -- .venv/bin/python -m copytradeaster run-bot)"
 
 echo "==> Waiting for health (miniapp on :${PORT} + bot process alive)"
 for _ in $(seq 1 90); do
@@ -176,7 +249,7 @@ for _ in $(seq 1 18); do
     PUBLIC_OK=1
     break
   fi
-  if ! pgrep -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" >/dev/null 2>&1; then
+  if ! tunnel_process_alive; then
     echo "ERROR: cloudflared died while waiting - tail of ${TUNNEL_LOG}:" >&2
     tail -20 "$TUNNEL_LOG" >&2
     exit 1
