@@ -56,8 +56,8 @@
 
 | Файл | Кампания |
 |---|---|
-| `MINIAPP_S3_PROGRESS_2026-09.md` | S3.0–S3.4 реализованы; browser §§19–20 и viewport §23 проверены, Telegram Desktop §§21–22 проверен; G3 OPEN по оставшимся performance/device/history блокам |
-| `MINIAPP_S3_TESTING_HANDOFF_2026-09.md` | Передача итогового S3 на offline/browser/device/N6 live проверку: контракты, rollout, сценарии и ограничения |
+| `MINIAPP_S3_PROGRESS_2026-09.md` | **S3/G3 CLOSED в согласованном scope:** реализация, Chromium §19.7, Telegram Desktop, iPhone Mirroring, history/error matrix и signed N6 evidence |
+| `MINIAPP_S3_TESTING_HANDOFF_2026-09.md` | Выполненная передача S3 на проверку; в конце зафиксирован CLOSED verdict и фактический scope |
 | `REFACTOR_STAGE1_REPORT.md` | Базовый рефакторинг Stage 1 + инвентаризация первого ревью (2026-08-22) |
 | `FINAL_STAGE1_FOLLOWUP_REPORT_2026-08.md` | Follow-up по второму ревью + первый hybrid gate 30×100 (2026-08-22/23) |
 | `FINAL_STAGE1_FOLLOWUP_JOURNAL_2026-08.md` | Хронология разработки того follow-up (журнал к отчёту выше) |
@@ -83,15 +83,15 @@
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Исходный implementation plan follower Mini App: восемь подчастей P2.0–P2.7, конкретные файлы, Testnet acceptance gates и anti-overengineering boundaries (2026-09-01). Статус внутри — `PLAN READY / IMPLEMENTATION NOT STARTED`; факт исполнения — строкой ниже |
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
-| `docs/reports/acceptance-s3/` | Browser-проход S3 (2026-09-09, частичный): 17 скриншотов production bundle на стенде `tg-8264892202`, 390×844, HEAD `09bd528`; факты — `MINIAPP_S3_PROGRESS_2026-09.md` §§19–20; G3 OPEN |
-| `MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` | Центральная карта UI-приёмки Mini App: Telegram WebView, Chromium/CDP, frontend-тесты, скриншоты и текущий список G3 OPEN |
+| `docs/reports/acceptance-s3/` | S3 browser evidence: 20 скриншотов production bundle, включая Home, history alias/split/partial, nested screens и risk states; итог — S3 progress §§19–26 |
+| `MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` | Центральная карта принятой UI-кампании: Chromium/CDP, Telegram Desktop, iPhone Mirroring, frontend tests и screenshots; G3 CLOSED в согласованном scope |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 | `MINIAPP_S2_REVIEW_HANDOFF_2026-09.md` | Handoff независимому reviewer по закрытому S2/G2: три архитектурных слоя, инварианты §19/§20, критические race/lifecycle точки и команды gate (2026-09-07) |
 | `MINIAPP_S2_TESTING_HANDOFF_2026-09.md` | Handoff тестировщику S2/G2: browser/manual матрица cold/warm, Settings prefetch, mutation unknown/recovery, Back/Sheet/scroll/focus, 50-cycle memory и граница G3 (2026-09-07) |
-| [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md) | План по текущему коду и acceptance-p27. **§14: S1 Backend → G1 → S2 Скорость → G2 → S3 Интерфейс/функциональность → G3.** G1 CLOSED и G2 CLOSED 2026-09-07; S3/G3 открыты. Backend B1–B10, §19 — скорость F0–F6 и сравнение keep-alive с альтернативами, §20 — итог review. Фактический журнал: MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md; S2 evidence: MINIAPP_S2_PROGRESS_2026-09.md |
-| `MINIAPP_RISK_RULER_2026-09.md` | Шкала риска — первый vertical slice UX-плана (S2.5 lifecycle + S3.4 motion по §21): baseline, изменения, jsdom/node evidence, handoff-чеклист. Браузерная приёмка 15/15 PASS + независимая перепроверка (вердикт: принять) — браузерная часть CLOSED; устройство-часть (Telegram haptics/BackButton/WebKit, snap-stop A/B) отложена на потом → S3.5/G3 (2026-09-06) |
+| [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md) | Исходный план последовательности S1/G1 → S2/G2 → S3/G3; все три gate закрыты к 2026-09-09. Backend B1–B10, §19 — скорость F0–F6, §20 — review. Фактические итоги: MINIAPP_FUNCTIONAL_PROGRESS, MINIAPP_S2_PROGRESS и MINIAPP_S3_PROGRESS |
+| `MINIAPP_RISK_RULER_2026-09.md` | Шкала риска — vertical slice S2.5 lifecycle + S3.4 motion: browser 15/15 PASS и независимая перепроверка; итоговый touch/keyboard/WebKit проход выполнен на iPhone Mirroring в S3 §26 |
 | [MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md) | Исторический независимый verdict `REQUEST CHANGES` (`f77a3fd`, повторный проход `9a0dd98`): источник N1–N6 и baseline reproductions. Обязательные для G1 N1–N3 затем закрыты corrective-пакетом; текущий статус брать из ENGINE_TEST_STATUS / журнала шага 30 |
-| [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md) | Выполненный corrective handoff масштаба 10–30: N1–N3, T1–T6 и §6 закрыты на tested `84cabfb`; G1 самостоятельно CLOSED 2026-09-07. N4–N6 остаются с указанными в handoff сроками; evidence — MINIAPP_FUNCTIONAL_PROGRESS, шаг 30 |
+| [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md) | Выполненный corrective handoff масштаба 10–30: N1–N3, T1–T6 и §6 закрыты на tested `84cabfb`; G1 CLOSED 2026-09-07. Отложенные там N4–N6 позднее закрыты в S3/G3 |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 

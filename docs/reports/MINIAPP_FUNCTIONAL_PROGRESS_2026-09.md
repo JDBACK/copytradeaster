@@ -1,26 +1,30 @@
 # Реализация функционального Mini App — 2026-09-06
 
 Источник требований: [план](MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md), §14.
-Кампания IN PROGRESS. G1 и G2 закрыты; G3 открыт. Реализация небольшими проверяемыми шагами.
+Кампания **CLOSED 2026-09-09**: G1, G2 и G3 приняты; исторические шаги ниже
+сохраняют статус на момент записи.
 
 Актуальная фактическая UI-приёмка Mini App в Telegram WebView и Chromium/CDP,
-включая frontend-тесты, screenshots и точный список оставшегося G3, собрана в
+включая frontend-тесты, screenshots и финальный scope G3, собрана в
 [центральном UI acceptance index](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
 
 ## Рабочий todo
 
-- [ ] S1.1: typed Aster reads, signed read evidence, учётная политика и units.
-- [ ] S1.2: schema/repository, observations, bounded sync, retention и замер роста.
-- [ ] S1.3: episodes, partial/flip, cashflows, stable refs, user events.
-- [ ] S1.4: application/HTTP contracts, ownership, aggregate, settings/scope/freshness.
-- [ ] S1.5: общий presenter, durable structured notifications.
-- [x] G1 corrective acceptance: обязательные N1–N3, T1–T6 и §6 offline gate; live follow-ups N6/SL остаются до rollout/G3.
+- [x] S1.1: typed Aster reads, signed read evidence, учётная политика и units.
+- [x] S1.2: schema/repository, observations, bounded sync, retention и замер роста.
+- [x] S1.3: episodes, partial/flip, cashflows, stable refs, user events.
+- [x] S1.4: application/HTTP contracts, ownership, aggregate, settings/scope/freshness.
+- [x] S1.5: общий presenter, durable structured notifications.
+- [x] G1 corrective acceptance: N1–N3, T1–T6 и §6 offline gate; N4–N6
+  закрыты в последующей S3/G3-кампании.
 - [x] S2/G2: baseline, session resources, transport/lifecycle, nested settings cache,
   measured performance acceptance; закрыто 2026-09-07, отдельный журнал —
   `MINIAPP_S2_PROGRESS_2026-09.md`.
-- [ ] S3: Home summary, Open/Closed/detail, activity/deep links, settings/copy, G3.
-- [ ] После основы: независимый review выполненной шкалы и исправление найденных дефектов.
-- [ ] Финал: Telegram smoke шкалы и новых flows, screenshots, performance acceptance.
+- [x] S3/G3: Home, Open/Closed/detail, activity/deep links, settings/copy,
+  Chromium, Telegram Desktop, iPhone Mirroring и signed testnet; CLOSED в
+  согласованном scope.
+- [x] После основы: независимый review шкалы и исправление найденных дефектов.
+- [x] Финал: Telegram smoke, screenshots и performance acceptance.
 
 ## Шаг 1 — read adapter
 
@@ -992,3 +996,14 @@ Settings/Home flows; Chromium/Computer — S3 browser pass с ошибочным
 Список frontend `*.test.ts(x)`, хронология добавления тестов, последний
 автоматический gate, артефакты и G3 OPEN собраны в
 [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+
+## Финальный verdict S3/G3 (2026-09-09)
+
+После предыдущей промежуточной сводки выполнены свежий §19.7 performance trace,
+controlled error/history matrix, Telegram Desktop и iPhone Mirroring проходы,
+а также signed testnet N6 с реальным `STOP_MARKET` fill и чистым cleanup.
+Android по решению владельца исключён из scope и verdict.
+
+**S3/G3 CLOSED в согласованном scope.** Текущая карта evidence —
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md),
+детали — [MINIAPP_S3_PROGRESS_2026-09.md](MINIAPP_S3_PROGRESS_2026-09.md) §§19–26.

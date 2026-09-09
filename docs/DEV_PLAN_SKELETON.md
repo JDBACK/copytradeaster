@@ -409,30 +409,29 @@ snap-stop A/B) **отложена на потом — устройства не�
   scheduled bootstrap берёт реальный continuous coverage, open episode сохраняет
   один `public_ref` между публикациями/restart, late replay переживает restart
   через durable dirty revision. C4 leg-keyed protection + writers принят в пределах R4.
-- [ ] S1.4 acceptance: C2 allocation-fills принят; events pagination после
-  200 записей требует N4. C5 money proof и C7 snapshot-feed приняты (R5/R9).
-- [ ] S1.5 acceptance: C6 durable consumer написан, но default composition
-  остаётся на старом recovery (N5/R6). Gate кнопок принят (R7).
-- [ ] S1.6 broader live follow-up: storage forecast C8 полезен; worker queue/publication
-  latency отдельно не измерена. C9 live PASS сохранён; N6 ещё требует journal-coid
-  для отмены STOP, а фактический SL fill + STOP cleanup остаются до rollout/G3.
+- [x] S1.4 acceptance: C2 allocation-fills, N4 events pagination >200,
+  C5 money proof и C7 snapshot-feed приняты.
+- [x] S1.5 acceptance: C6 durable consumer включён в production composition;
+  N5 закрыт двумя boot >1000 событий, atomic cursor/outbox и toggle-boundary.
+- [x] S1.6 broader live follow-up: N6 harness использует фактический journal coid;
+  signed testnet подтвердил отдельный `STOP_MARKET` fill, STOP cleanup,
+  flat-позиции и `open_orders=[]`.
 - [x] G1: **CLOSED 2026-09-07**, corrective tested commit `84cabfb`.
   N1–N3 + T1–T6 и §6 offline gate закрыты; отдельный повторный общий review не
-  требуется. N4 — до S3 details, N5 — до event delivery, N6 — до повторного live
-  harness. SL fill/STOP live evidence — до production rollout, совместить с G3.
+  требуется. Отложенные на тот момент N4, N5 и N6 позднее закрыты в S3/G3:
+  pagination, production delivery и signed SL/STOP evidence приняты.
   100-account benchmark не является этим gate; целевой масштаб corrective — 10–30.
 - [x] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings;
   S2.1–S2.6 CLOSED 2026-09-07. Measured production-bundle evidence и
   corrective blocker audits — `MINIAPP_S2_PROGRESS_2026-09.md`.
 - [x] G2: Скорость принята на нынешних экранах 2026-09-07; разрешён старт S3.
-- [ ] S3: IMPLEMENTED / PARTIAL ACCEPTANCE — S3.0–S3.4 реализованы; Chromium,
-  Telegram Desktop WebView и iPhone Mirroring фактически прошли UI-сценарии
-  (S3 §§19–26), frontend/backend gates зелёные. Viewport `320/360/430`, свежий
-  §19.7 trace, blocked/throttled matrix и split/alias/partial history закрыты;
-  G3 остаётся OPEN только до Android WebView evidence. Полная карта: [Mini App
-  UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md); план
-  проверки: [S3 handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md).
-- [ ] G3: Итоговая сквозная, визуальная и performance-приёмка; кампания завершена.
+- [x] S3: **CLOSED 2026-09-09 в согласованном scope** — S3.0–S3.5 реализованы
+  и приняты в Chromium, Telegram Desktop WebView и iPhone Mirroring;
+  frontend/backend/offline/signed gates зелёные. Android по решению владельца
+  исключён из scope и verdict. Полная карта: [Mini App UI acceptance
+  index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+- [x] G3: Итоговая сквозная, визуальная, performance и signed testnet-приёмка
+  завершена 2026-09-09 в согласованном scope.
 
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка

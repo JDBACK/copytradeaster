@@ -1,14 +1,20 @@
 # Статус работ — copytradeaster (этапы 1–3)
 
-Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
-`main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
+Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Итоговая S3/G3
+кампания зафиксирована в `feature/frontend`; ветка Stage 3 части 2
+`codex/stage-3-mini-app-part2` смержена ранее.
 
-> **TL;DR (2026-09-09):** S1/G1 — **CLOSED по [FIX_HANDOFF §6](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md)** на corrective `84cabfb`; S2/G2 — **CLOSED** на current `feature/frontend` WIP от base `b10f01a`, evidence — [MINIAPP_S2_PROGRESS](reports/MINIAPP_S2_PROGRESS_2026-09.md) и [MINIAPP_FUNCTIONAL_PROGRESS, шаг 31](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md#шаг-31). S3 UI получил фактические Chromium и Telegram Desktop WebView evidence; viewport `320/360/430` закрыт, G3 остаётся OPEN по свежему §19.7 trace и mobile device coverage. Полная карта — [MINIAPP_UI_ACCEPTANCE_INDEX](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
-> Предыдущий `REQUEST CHANGES` на `9a0dd98` остаётся историческим evidence причин corrective, но больше не блокирует G1. N4 отложен до S3 details, N5 — до event-delivery rollout, N6 — до следующего signed live harness. Записанный live PASS (26.56s) сохранён; новый corrective live не запускался, поэтому фактический SL fill и STOP cleanup по journal-coid остаются до production rollout/G3.
+> **TL;DR (2026-09-09):** S1/G1 — **CLOSED**; S2/G2 — **ACCEPTED**;
+> S3/G3 — **CLOSED в согласованном scope**: Chromium, Telegram Desktop WebView
+> и iPhone Mirroring. Android по решению владельца исключён из scope и verdict.
+> Offline/backend/frontend, §19.7 performance, error/history matrix и signed
+> testnet N6 зелёные. Полная карта — [MINIAPP_UI_ACCEPTANCE_INDEX](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+> Предыдущий `REQUEST CHANGES` на `9a0dd98` и промежуточные OPEN/WIP записи ниже
+> сохранены как история кампании. N4, N5 и N6 закрыты итоговой S3-проверкой.
 > Offline **1439 passed / 2 skipped / 45 deselected** (точно на `84cabfb`, 2026-09-07), миграции **0..58**, ruff check/format clean, doc links clean (49 файлов).
 > S2 frontend current WIP: **27 test files / 316 passed**, oxlint 0/0, TypeScript + Vite production build PASS; main JS **336.56 kB / 96.46 kB gzip**; recorded G2 browser evidence: cold 4 POST, warm root p95 1.0 ms/160, nested p95 1.9 ms/120, 300 ms RTT p95 6.0 ms/160, все warm 0 reads; browser DOM/listeners bounded, long tasks/errors 0. Финальные corrective после этого browser trace затронули transport validation/cancellation/error edges, поэтому latency/DOM числа ниже остаются reference evidence того G2 прогона, а не заявлением о новом CDP rerun.
 > **S3 WIP snapshot (2026-09-07):** backend history/event slice — **59 targeted tests passed**; `tsc -b && vite build` — PASS; oxlint — PASS с 2 предупреждениями; полный frontend Vitest после перехода на новые Home/Positions/Activity/history contracts — **272 passed / 44 failed (27 files)**. Это промежуточный срез, G3 остаётся OPEN; детали и TODO — [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
-> **S3 verification pass (2026-09-09):** obsolete fixtures переведены на контракты S3 (feed/menu/user-event delivery), offline gate — **1449 passed / 2 skipped / 45 deselected**, frontend — **28 files / 349 passed**, oxlint clean, production build PASS, ruff check/format и doc links clean. N5 закрыт тестами (production factory True/False, два boot >1000 событий, crash до/после atomic commit, toggle-границы, остановка recurring task до DB close, retry sweep, command/user duplicates). N6 закрыт: harness исправлен (cancel по фактическому journal coid, query/order-list отсутствие, cleanup flat + `open_orders=[]`, scheduled captures, durable-boundary проверка capture-окна) и **signed live на testnet PASSED** — реальный `STOP_MARKET` fill доказан как отдельное exchange-исполнение (тик-прижатый ратчет; immediate-trigger отвергается −2021), teardown-утечка aiosqlite закрыта. Свежий S3 §19.7 trace — **PASS** (cold `4` read POST, `160` warm root samples p95 `5,3 ms`, delayed `300 ms` p95 `4,4 ms`, `200` nested samples, long tasks/errors `0`); blocked/throttled matrix `11/11` и alias/split/partial history — **PASS**. Mini App UI дополнительно проверен в Chromium, Telegram Desktop WebView и iPhone Mirroring; Android WebView отсутствует, поэтому G3 остаётся OPEN только до Android evidence. Факты собраны в [UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md), S3 §§19–26.
+> **S3 verification pass (2026-09-09):** obsolete fixtures переведены на контракты S3 (feed/menu/user-event delivery), offline gate — **1449 passed / 2 skipped / 45 deselected**, frontend — **28 files / 349 passed**, oxlint clean, production build PASS, ruff check/format и doc links clean. N5 закрыт тестами (production factory True/False, два boot >1000 событий, crash до/после atomic commit, toggle-границы, остановка recurring task до DB close, retry sweep, command/user duplicates). N6 закрыт: harness исправлен (cancel по фактическому journal coid, query/order-list отсутствие, cleanup flat + `open_orders=[]`, scheduled captures, durable-boundary проверка capture-окна) и **signed live на testnet PASSED** — реальный `STOP_MARKET` fill доказан как отдельное exchange-исполнение (тик-прижатый ратчет; immediate-trigger отвергается −2021), teardown-утечка aiosqlite закрыта. Свежий S3 §19.7 trace — **PASS** (cold `4` read POST, `160` warm root samples p95 `5,3 ms`, delayed `300 ms` p95 `4,4 ms`, `200` nested samples, long tasks/errors `0`); blocked/throttled matrix `11/11` и alias/split/partial history — **PASS**. Mini App UI дополнительно проверен в Chromium, Telegram Desktop WebView и iPhone Mirroring. Android по решению владельца исключён из согласованного scope; **G3 CLOSED**. Факты собраны в [UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md), S3 §§19–26.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -34,7 +40,7 @@
   отдельные UI-сценарии; свежий S3 §19.7 trace, error matrix и history cases
   закрыты в §§24–26. Подробная матрица и точные границы перечислены в [UI
   acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md). Android
-  WebView отсутствует, поэтому G3 остаётся OPEN только до Android evidence.
+  исключён владельцем из согласованного scope; G3 **CLOSED**.
   Детали реализации и журнала — [S3 progress](reports/MINIAPP_S3_PROGRESS_2026-09.md).
 
 - **S3 implementation handoff (2026-09-08):** menu/feed/push migration,
