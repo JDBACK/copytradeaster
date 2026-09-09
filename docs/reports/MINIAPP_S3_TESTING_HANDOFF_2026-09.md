@@ -132,3 +132,21 @@ detail, Activity, Settings + 6 вложенных, native Back, RiskRuler save
 `docs/reports/acceptance-s3/`. Не закрыто: 320/360/430, состояния ошибок,
 §19.7 бюджеты, closed list/detail на непустой истории, §6 owner device
 evidence, offline/signed гейты. **G3 OPEN.**
+
+## Дополнение: Telegram WebView-проход 2026-09-09
+
+После §19 выполнен отдельный live-проход в уже открытом Telegram Desktop
+WebView. Подтверждены непустые `Закрытые` и owned detail на `BTCUSDT · LONG`
+(`+2,25 USDT`, вход/выход `0,037 BTC`, остаток `0`), события открытия/закрытия,
+два раскрываемых fills (вход и выход), Activity `Все`/`Сделки`, переход
+`Открыть сделку`, native Back, Settings и шесть вложенных экранов, а также
+Home flat и pause → Resume Sheet → active. Визуальные факты и финальная
+сверка БД записаны в §21 `MINIAPP_S3_PROGRESS_2026-09.md`.
+
+Финальное состояние после прохода: `risk_percent=0.02`,
+`allow_new_entries=1`, `notifications_enabled=0`, `170` episodes, `487` fills,
+`0` незавершённых execution commands. Уведомления не переключались.
+
+Открытыми для G3 остаются mobile iOS/Android evidence (haptics, keyboard,
+WebKit gestures), viewports `320/360/430`, полный §19.7 CDP trace и
+split/alias/partial-specific history. **G3 OPEN.**
