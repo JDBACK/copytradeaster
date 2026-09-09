@@ -122,7 +122,7 @@ wait_public() {
   # still have the current hostname cached. Keep the process and hostname,
   # and give the existing connector up to 90 seconds to recover.
   local url="$1"
-  for _ in $(seq 1 18); do
+  for _ in $(seq 1 24); do
     if edge_check "${url}/miniapp/"; then
       return 0
     fi
@@ -242,9 +242,9 @@ if ! curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/miniapp/" >/dev/null 2>&1;
   tail -40 "$BOT_LOG" >&2
   exit 1
 fi
-echo "==> Waiting for public tunnel URL (edge warm-up can take a minute)"
+echo "==> Waiting for public tunnel URL (edge warm-up can take up to two minutes)"
 PUBLIC_OK=""
-for _ in $(seq 1 18); do
+for _ in $(seq 1 24); do
   if edge_check "${TUNNEL_URL}/miniapp/"; then
     PUBLIC_OK=1
     break
@@ -257,18 +257,12 @@ for _ in $(seq 1 18); do
   sleep 5
 done
 if [ -z "$PUBLIC_OK" ]; then
-  if grep -q "Registered tunnel connection" "$TUNNEL_LOG" 2>/dev/null; then
-    echo "WARNING: tunnel is registered but the edge is not serving it yet — edge"
-    echo "  warm-up, not a stale button. Continuing to the button check; retry the"
-    echo "  phone in a minute. Do NOT rerun (a rerun rotates the tunnel URL)."
-  else
-    echo "ERROR: public tunnel URL is not serving the Mini App after ~90s." >&2
-    echo "Instance LEFT RUNNING (local Mini App may already work):" >&2
-    echo "  Local:  http://127.0.0.1:${PORT}/miniapp/" >&2
-    echo "  Public: ${TUNNEL_URL}/miniapp/ (retry manually, rerun script if needed)" >&2
-    tail -20 "$TUNNEL_LOG" >&2
-    exit 1
-  fi
+  echo "ERROR: public tunnel URL is not serving the Mini App after ~120s." >&2
+  echo "Instance LEFT RUNNING; READY is withheld until the public edge answers." >&2
+  echo "  Local:  http://127.0.0.1:${PORT}/miniapp/" >&2
+  echo "  Public: ${TUNNEL_URL}/miniapp/ (retry plain scripts/dev-up.sh; do not rotate)" >&2
+  tail -20 "$TUNNEL_LOG" >&2
+  exit 1
 fi
 echo "==> Waiting for the menu button to converge (Telegram propagates URL changes for minutes)"
 if ! wait_button "${TUNNEL_URL}"; then
