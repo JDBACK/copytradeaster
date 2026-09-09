@@ -464,3 +464,49 @@ RiskEngine не учитывается — зафиксировано как н�
    менялись); live N6 закрыт ранее (§18), повторный signed-прогон не требовался.
 
 G3 — **OPEN** до закрытия пунктов 1–6.
+
+### 20. Live-проход 2026-09-09: copy open→close + состояния ошибок (Computer/Chrome)
+
+Стенд перезапускать не пришлось: preview `tg-8264892202` на `:8085` жив,
+Chrome был на пустой вкладке — открыт `/miniapp/` через Computer. HEAD
+`e9b3f3a`, testnet, dev-сессия `900000001`.
+
+**Живой copy-цикл (testnet).** Master `open BTCUSDT 0.002 LONG, stop 1%`
+(`@~78715.13`, stop `77927.98`) → projector `trade_id=223`, сначала
+`ENTRY_SKIPPED NO_STOP` до прихода стопа, затем планы всем follower:
+`tg-8264892202` → `MARKET_OPEN 0.037 + PLACE_STOP`; `execution.confirmed`
+open + stop. Positions refresh: **1 open, 0.037 BTC LONG, 200×**,
+entry `78671.5`, stop `77927.98` подтверждён, PnL `+1.61 USDT`. Home
+и Positions подтверждены визуально в Chrome (Computer): Home `+1,61 USDT`,
+`Открытые 1`, `Стоп подтверждён 1 из 1`; карточка `BTCUSDT · LONG`,
+`0,037 BTC · 200×`, `Вход/Марк/Стоп подтверждён`.
+Master `close BTCUSDT` (скрипт сначала снял ордера) → follower
+`CANCEL_ORDER + MARKET_CLOSE 0.037` confirmed; positions refresh **0, flat**.
+Риск `2%`, уведомления `ON`, копирование `active` — восстановлены/сохранены.
+
+**Граница проекции.** После цикла `trades.items=[]`,
+`coverage_complete=false`, `follower_episodes=0`, `follower_fills=0`.
+`HistoryCapture` в preview-engine не запланирован — проекция пуста не из-за
+UI. Непустой closed detail через этот стенд невозможен без капчера;
+HTTP-уровень истории закрыт signed N6 (§18). Фиксируется как граница стенда,
+а не UI-дефект.
+
+**Состояния ошибок в Chrome (Computer, live):**
+
+- Открытые 0 после close: stale snapshot
+  `Снимок позиций устарел. Статус защиты требует обновления.`
+  + `Обновить данные`.
+- Закрытые: честное `Диапазон истории уточняется · может быть неполной`,
+  `Последняя сверка: 9 сентября 2026 г. в 05:24 GMT+3`,
+  `Загружаем историю. Доступный диапазон пока не подтверждён.`
+  + `Обновить историю`.
+- Unknown ref (`/miniapp/?trade=deadbeef…`): fail-closed
+  `Сделка недоступна. Откройте список своих позиций. Ссылка могла устареть
+  или относиться к другому аккаунту.` + `Повторить` / `Мои позиции`.
+- Финал Home flat: `0,00 USDT`, `Открытые 0`, `0 из 0`,
+  `Доступно 1 472,75 USDT`, риск `2%`, `Копирование включено`.
+
+**Осталось до G3.** Viewports 320/360/430; полные CDP-бюджеты §19.7 (cold ≤4,
+≥30 warm samples p95 ≤100 ms, delayed API 300 ms, 50 циклов, memory/long-task);
+непустой closed detail (нужна проекция с капчером); §6 device (owner evidence).
+G3 — **OPEN**.
