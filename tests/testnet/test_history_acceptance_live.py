@@ -16,7 +16,8 @@ production sync/capture path, then proof on live data:
    the recovery notification share one trade_ref with identical facts —
    verified over authenticated HTTP (HMAC initData, throwaway token);
 5. SL lifecycle: a distant STOP is placed and cancelled through the
-   journal; the protection observation folds into history;
+   journal; a second real STOP_MARKET fill is proven as its own exchange
+   execution (tick-hugging trigger) and folds into history;
 6. Controlled UNKNOWN: a post-send transport timeout forces the
    query-before-retry path; exactly one exchange order exists per key and
    the command ends CONFIRMED;
@@ -192,6 +193,12 @@ class _RecordingClient:
         return order
 
 
+# Databases the test opens by itself (e.g. after the simulated restart); the
+# live fixture closes every one of them so aiosqlite worker threads cannot
+# outlive the interpreter and hang pytest at shutdown.
+_EXTRA_DATABASES: list[Database] = []
+
+
 @pytest.fixture
 async def live(tmp_path: Path):
     settings = Settings()
@@ -225,6 +232,9 @@ async def live(tmp_path: Path):
         finally:
             await http.aclose()
     finally:
+        for extra in _EXTRA_DATABASES:
+            await extra.close()
+        _EXTRA_DATABASES.clear()
         await history_db.close()
         await creds_db.close()
 
@@ -333,7 +343,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
             await asyncio.sleep(3.0)
 
     async def place_stop(executor_obj, commands_obj, qty: D, stop_price: str, coid: str):
-        """Place a close STOP through the journal; return (result, wire coid)."""
+        """Place a close STOP through the journal; return (status, wire coid or None)."""
         results = await executor_obj.submit(
             ExecutionPlan(
                 account_id=ACCOUNT,
@@ -362,10 +372,12 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
             client=recorder,
         )
         (result,) = results
-        assert result.status == "CONFIRMED", f"{coid} stop did not confirm: {result}"
+        if result.status != "CONFIRMED":
+            # -2021 race: the mark crossed the trigger between read and send.
+            return result.status, None
         row = await commands_obj.get(result.command_key)
         assert row is not None
-        return result, str(row["client_order_id"])
+        return result.status, str(row["client_order_id"])
 
     async def submit(kind: ActionKind, side: Side, qty: D, coid: str):
         # NOTE: the journal key covers (account, operation, kind, revision,
@@ -405,7 +417,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
         await submit(ActionKind.MARKET_OPEN, Side.BUY, QTY, f"{tag}-open-b")
         await _wait_qty(client, QTY * 2)
         (increased,) = await capture_until(lambda episode: episode.remaining_qty == QTY * 2)
-        assert increased.public_ref == opened.public_ref
+        assert increased.episode.public_ref == opened.episode.public_ref
         # Distant STOP through the journal: placed, observed, cancelled —
         # the position never changes, the lifecycle math stays intact.
         stop_results = await executor.submit(
@@ -487,7 +499,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
         await submit(ActionKind.MARKET_CLOSE, Side.SELL, QTY, f"{tag}-reduce")
         await _wait_qty(client, QTY)
         (reduced,) = await capture_until(lambda episode: episode.remaining_qty == QTY)
-        assert reduced.public_ref == opened.public_ref
+        assert reduced.episode.public_ref == opened.episode.public_ref
         # Controlled UNKNOWN: the order really reaches the exchange, then
         # the transport "loses" the response. The executor must resolve by
         # querying before any retry — exactly one order per key exists.
@@ -495,7 +507,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
         await submit(ActionKind.MARKET_CLOSE, Side.SELL, QTY, f"{tag}-close")
         await _wait_flat(client)
         (closed_step,) = await capture_until(lambda episode: episode.closed_at is not None)
-        assert closed_step.public_ref == opened.public_ref
+        assert closed_step.episode.public_ref == opened.episode.public_ref
     finally:
         # N6 cleanup: cancel every protective order this harness created
         # (the account is exclusive), flatten per leg, then prove both.
@@ -554,7 +566,13 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
     stored, published = await capture.capture_and_publish(
         scope, SYMBOL, window, snapshots=client, synchronizer=synchronizer, notify_eligible=True
     )
-    assert published.start == t0 and published.end >= window.end - 300_000
+    # N6: the scheduled captures above already published the lifecycle, so
+    # this final capture continues from the durable boundary (or replays from
+    # the accepted origin after a late change) — the fallback t0 only anchors
+    # the very first acceptance. What must hold: the span stays at/after the
+    # requested floor, is well-formed, and coverage reaches the live edge.
+    assert t0 <= published.start <= published.end, published
+    assert published.end >= window.end - 300_000, published
 
     stored_fills = await history_db.fetchall(
         _FILLS_SINCE,
@@ -576,6 +594,7 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
     await history_db.close()
     history_db2 = Database(history_path)
     await history_db2.connect()
+    _EXTRA_DATABASES.append(history_db2)
     try:
         history2 = HistoryRepository(history_db2)
         episodes2 = EpisodeRepository(history_db2)
@@ -761,36 +780,22 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
         assert open_results[0].status == "CONFIRMED"
         await _wait_qty(client, QTY)
         stop_order_id: int | None = None
-        # Tighten the trigger until the mark reaches it: a distant stop never
-        # proves the SL path, and testnet marks are not movable on demand.
-        for attempt, buffer in enumerate((D("0.001"), D("0.0003"), D("0.0001"))):
+
+        # Tick-hugging ratchet. The testnet mark updates in bursts (~1-2 min)
+        # and the trigger engine evaluates with a lag, so the stop must sit
+        # strictly below the live mark (an immediately triggerable stop is
+        # rejected with -2021) and must survive a whole evaluation cycle
+        # before any re-place. Re-place only when the mark drifts away
+        # upward; never cancel a stop whose mark already crossed the trigger.
+        async def mark_now() -> D | None:
             positions = await client.position_risk(ACCOUNT, SYMBOL)
-            mark = next(
+            return next(
                 (D(str(p.mark_price)) for p in positions if D(str(p.position_amt)) != 0),
                 None,
             )
-            assert mark is not None and mark > 0
-            raw = mark * (D("1") - buffer)
-            stop_price = (raw / filters.tick_size).to_integral_value(
-                rounding=ROUND_DOWN
-            ) * filters.tick_size
-            coid = f"{tag}-sl-stop-{attempt}"
-            _, exchange_coid = await place_stop(
-                sl_executor, sl_commands, QTY, format(stop_price, "f"), coid
-            )
-            order = await client.query_order(ACCOUNT, SYMBOL, orig_client_order_id=exchange_coid)
-            if order is None:
-                continue  # rejected (e.g. would immediately trigger): tighten next
-            order_id = int(order.order_id)
-            deadline = time.monotonic() + 45.0
-            while time.monotonic() < deadline:
-                fresh = await client.query_order(ACCOUNT, SYMBOL, order_id=order_id)
-                if fresh is not None and str(fresh.status) in {"FILLED", "PARTIALLY_FILLED"}:
-                    stop_order_id = order_id
-                    break
-                await asyncio.sleep(2.0)
-            if stop_order_id is not None:
-                break
+
+        async def cancel_stop(order_id: int, exchange_coid: str, attempt: int) -> bool:
+            """Cancel the unfilled stop; True when it filled instead (race)."""
             cancel_results = await sl_executor.submit(
                 ExecutionPlan(
                     account_id=ACCOUNT,
@@ -809,7 +814,62 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
                 ),
                 client=recorder,
             )
-            assert cancel_results[0].status == "CONFIRMED"
+            if cancel_results[0].status == "CONFIRMED":
+                return False
+            fresh = await client.query_order(ACCOUNT, SYMBOL, order_id=order_id)
+            if fresh is not None and str(fresh.status) in {"FILLED", "PARTIALLY_FILLED"}:
+                return True
+            assert cancel_results[0].status == "CONFIRMED", cancel_results[0]
+            return False
+
+        overall_deadline = time.monotonic() + 600.0
+        attempt = 0
+        while stop_order_id is None and time.monotonic() < overall_deadline:
+            mark = await mark_now()
+            assert mark is not None and mark > 0
+            stop_price = (mark / filters.tick_size).to_integral_value(
+                rounding=ROUND_DOWN
+            ) * filters.tick_size
+            if stop_price >= mark:
+                stop_price -= filters.tick_size
+            coid = f"{tag}-sl-stop-{attempt}"
+            status, exchange_coid = await place_stop(
+                sl_executor, sl_commands, QTY, format(stop_price, "f"), coid
+            )
+            if exchange_coid is None:
+                # The mark crossed the trigger between read and send (-2021):
+                # re-read and re-place against the fresh mark.
+                assert status == "FAILED", status
+                attempt += 1
+                await asyncio.sleep(1.0)
+                continue
+            order = await client.query_order(ACCOUNT, SYMBOL, orig_client_order_id=exchange_coid)
+            assert order is not None
+            order_id = int(order.order_id)
+            print(f"SL attempt {attempt}: stop {stop_price} order {order_id} (mark {mark})")
+            deadline = time.monotonic() + 75.0
+            while time.monotonic() < deadline:
+                fresh = await client.query_order(ACCOUNT, SYMBOL, order_id=order_id)
+                if fresh is not None and str(fresh.status) in {"FILLED", "PARTIALLY_FILLED"}:
+                    stop_order_id = order_id
+                    break
+                live_mark = await mark_now()
+                if live_mark is not None and live_mark - stop_price > filters.tick_size * 2:
+                    break  # drifted upward: re-place closer to the new mark
+                await asyncio.sleep(2.0)
+            if stop_order_id is not None:
+                break
+            # Grace cycle: the trigger engine may evaluate the jumped mark late.
+            await asyncio.sleep(5.0)
+            fresh = await client.query_order(ACCOUNT, SYMBOL, order_id=order_id)
+            if fresh is not None and str(fresh.status) in {"FILLED", "PARTIALLY_FILLED"}:
+                stop_order_id = order_id
+                break
+            if await cancel_stop(order_id, exchange_coid, attempt):
+                stop_order_id = order_id
+                break
+            attempt += 1
+        print(f"SL fill: order {stop_order_id} after {attempt} re-place(s)")
         assert stop_order_id is not None, "no SL fill evidence on the dedicated account"
         await _wait_flat(client)
         sl_trades = await client.user_trades(

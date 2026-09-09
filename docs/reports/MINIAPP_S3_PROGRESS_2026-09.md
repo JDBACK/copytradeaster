@@ -333,7 +333,7 @@ presenter-копия «PnL до комиссий» (совпадает с fronte
   `FAILED/superseded_by_user_events`, `command:cmd-1` не появляется,
   user-event ровно один.
 
-**N6 live-harness (handoff §7, только код).**
+**N6 live-harness (handoff §7) — закрыт живым прогоном.**
 `tests/testnet/test_history_acceptance_live.py`: CANCEL STOP теперь целится в
 фактический `execution_commands.client_order_id` (`ct<key>`) из строки
 PLACE_STOP, не в исходный plan-label; до отмены доказано наличие ордера
@@ -341,17 +341,42 @@ PLACE_STOP, не в исходный plan-label; до отмены доказа�
 CANCELED/None и отсутствие order_id в списке (одного CONFIRMED после −2011
 недостаточно); cleanup отменяет protective-ордера и подтверждает flat +
 `open_orders()==[]`; добавлены scheduled captures между шагами open →
-increase → reduce → close с проверкой одного `public_ref`; отдельный сценарий
-реального SL fill (триггер подтягивается к mark по tickSize, FILLED по
-query_order, fill в `user_trades` и в импортированных fills, закрытый эпизод).
+increase → reduce → close с проверкой одного `public_ref` и durable-boundary
+окна публикации (scheduled captures публикуют окна до финального capture,
+поэтому `published.start` = `latest.cutoff_ms + 1`, а не `t0`); сценарий
+реального SL fill — тик-прижатый ратчет: стоп ставится на
+`floor(mark/tickSize)*tickSize` (immediate-trigger отвергается −2021), окно
+75 с, перестановка только при дрейфе mark вверх >2 тиков, grace-цикл 5 с
+перед отменой, отмена терпима к гонке с исполнением, бюджет блока 600 с.
 
-**Offline gate (handoff §4).** backend **1448 passed / 2 skipped / 45
-deselected**; frontend **28 files / 327 passed**; oxlint clean; `tsc -b && vite
-build` PASS; `ruff check` / `ruff format --check` clean (включая автоформат
-`test_history_acceptance_live.py` и ранее отклонявшегося
-`test_trade_events_c2.py`); doc links OK (54 файла).
+**Живой signed прогон N6 (testnet, 2026-09-09).** Три пробы измерили механику
+mark на testnet: обновляется пачками раз в ~1–2 мин шагами 26–88 USDT, между
+обновлениями статичен до 8 знаков; immediate-trigger STOP отвергается `-2021
+"Order would immediately trigger"`. Прогон №4 — `1 passed in 85.56s`, SL сел с
+первой попытки (`stop 78869.50` при mark `78869.53878384`); прогон №5 —
+`1 passed in 185.61s`, две перестановки до фила. Покрыто живым прогоном:
+open → increase → protective STOP place+cancel (доказательство по `ct<key>`)
+→ reduce → контролируемый UNKNOWN close (query-before-retry, ровно один
+ордер) → restart-персистентность → HTTP surfaces (trades/trade/events/feed)
+→ durable recovery → foreign isolation → реальный SL fill (FILLED, fill в
+`user_trades` и импортированных fills, эпизод закрыт). Попутно найдена и
+закрыта утечка: БД, открытая после симуляции рестарта (`history_db2`), не
+закрывалась никем — aiosqlite-поток не умирал, и pytest висел в
+`Py_FinalizeEx` после PASSED; фикстура теперь закрывает `_EXTRA_DATABASES`
+(идемпотентно, в том числе на падении), прогон №5 вышел чисто (`EXIT=0`,
+процессов не осталось).
+
+**Offline gate (handoff §4).** backend **1449 passed / 2 skipped / 45
+deselected**; frontend **28 files / 349 passed** (в §15 добавлены 18
+TZ/DST-кейсов, «подпись времени = локальный день» и 3 resume-confirm
+Sheet-кейса; в presenter — кейс знака малого отрицательного PnL); oxlint
+clean; `tsc -b && vite build` PASS; `ruff check` / `ruff format --check`
+clean (включая автоформат `test_history_acceptance_live.py` и ранее
+отклонявшегося `test_trade_events_c2.py`); doc links OK (54 файла).
 
 **Осталось до G3.** Browser-матрица (production bundle, 320/360/390/430,
-cold/warm budgets, delayed API, 50 циклов), timezone/DST, Telegram WebView
-(owned links, native Back, haptics, WebKit) — нужен owner evidence; signed
-live прогон N6 + SL — нужен выделенный testnet-аккаунт. G3 остаётся **OPEN**.
+cold/warm budgets, delayed API, 50 циклов), Telegram WebView (owned links,
+native Back, haptics, WebKit) — нужен owner evidence. Timezone/DST закрыт
+offline-матрицей (§15: 18 кейсов + локальный день подписи); signed live N6
+выполнен на testnet (`1 passed`, реальный SL fill, чистый выход). G3
+остаётся **OPEN**.
