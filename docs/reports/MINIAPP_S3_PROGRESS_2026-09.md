@@ -391,7 +391,10 @@ offline-матрицей (§15: 18 кейсов + локальный день п
 --confirm-engine-preview --port 8085`: копия прод-БД (backup API), testnet,
 unsigned dev-session (900000001). Production bundle `miniapp/dist` собран с
 `VITE_DEV_USER_ID=900000001` (inline env; `.env.production.local` не создавался
-— известная ловушка dev-режима в проде). HEAD `09bd528`. Browser: Chromium 152
+— известная ловушка dev-режима в проде). После прохода `dist/` пересобран
+чистым (`pnpm build` без env) — для §6/реального бота dev-режим в бандле
+отсутствует; при возобновлении browser-прохода стенд требует повторной сборки
+с `VITE_DEV_USER_ID=900000001`. HEAD `09bd528`. Browser: Chromium 152
 (browseuse/CDP), viewport 390×844, DPR 3; визуальная проверка скриншотов
 (зрение) по каждому экрану.
 
