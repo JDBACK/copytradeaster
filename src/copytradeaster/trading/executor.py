@@ -24,6 +24,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, NamedTuple
 
+from copytradeaster.aster.models import OrderDTO
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
 from copytradeaster.domain.models import (
     ActionKind,
@@ -50,6 +51,13 @@ BOOT_QUERY_ATTEMPTS = 3
 BOOT_QUERY_BACKOFF_S = 0.05
 RECOVERY_QUERY_ATTEMPTS = 3
 RECOVERY_QUERY_BACKOFF_S = 0.25
+# Runtime reconciliation can fan out the same follower several times while a
+# master event is settling (post-fill safety pass, protective convergence,
+# etc.).  Boot resolution is authoritative but need not repeat the identical
+# SQLite/exchange scan on every pass.  A still-in-flight command remains a
+# hard blocker for a new MARKET_OPEN and is resolved again by the command's
+# own recovery path before any retry.
+RUNTIME_RESOLUTION_INTERVAL_S = 1.0
 
 # Stage 3 Part 2 corrective: only these kinds may DIRECT-retry after an
 # authoritative Builder rejection. ENTRY must always fail closed.
@@ -60,6 +68,24 @@ RISK_REDUCTION_KINDS = frozenset(
 CONDITIONAL_TYPES = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
 MARKET_KINDS = frozenset({ActionKind.MARKET_OPEN, ActionKind.MARKET_CLOSE})
 NO_FILL_TERMINAL_STATUSES = frozenset({"CANCELED", "EXPIRED", "REJECTED"})
+
+OrderObserver = Callable[[str, str, str, OrderDTO], Awaitable[None]]
+
+
+async def _observe_order(
+    observer: OrderObserver | None,
+    account_id: str,
+    key: str,
+    kind: str,
+    order: OrderDTO,
+) -> None:
+    if observer is None:
+        return
+    try:
+        await observer(account_id, key, kind, order)
+    except Exception:
+        # Read-model failure must not turn a confirmed trade into a retry.
+        log.warning("history observation failed account_id=%s command_key=%s", account_id, key)
 
 
 def _safe_error_category(exc: BaseException) -> str:
@@ -430,6 +456,7 @@ class Executor:
         on_confirmed: Callable[..., Awaitable[None]] | None = None,
         attribution_provider: Any | None = None,
         builder_invalidator: Callable[[str], Awaitable[None]] | None = None,
+        order_observer: OrderObserver | None = None,
     ) -> None:
         self._clients = clients
         self._commands = commands
@@ -439,7 +466,9 @@ class Executor:
         self._on_confirmed = on_confirmed
         self._attribution_provider = attribution_provider
         self._builder_invalidator = builder_invalidator
+        self._order_observer = order_observer
         self._mutation_owners: dict[str, asyncio.Task] = {}
+        self._last_runtime_resolution: dict[str, float] = {}
         self._confirmed_callback_accepts_key = self._callback_accepts_command_key(on_confirmed)
 
     @staticmethod
@@ -500,6 +529,32 @@ class Executor:
         """
         async with self._mutation_guard(plan.account_id):
             return await self._submit_locked(plan, client=client)
+
+    async def resolve_in_flight(
+        self,
+        account_id: str,
+        *,
+        client: AsterClient,
+    ) -> BootResolutionReport:
+        """Resolve one follower's unsettled journal rows with all observers wired.
+
+        Coordinator calls this while it owns the follower and mutation locks.
+        Keeping the observer inside Executor prevents runtime reconciliation
+        from bypassing the same history boundary used by boot recovery.
+        """
+        now = asyncio.get_running_loop().time()
+        last = self._last_runtime_resolution.get(account_id)
+        if last is not None and now - last < RUNTIME_RESOLUTION_INTERVAL_S:
+            return BootResolutionReport()
+        report = await resolve_boot_unknowns(
+            lambda _account_id: client,
+            self._commands,
+            self._links,
+            only_account=account_id,
+            order_observer=self._order_observer,
+        )
+        self._last_runtime_resolution[account_id] = now
+        return report
 
     async def submit_under_mutation_lock(
         self, plan: ExecutionPlan, *, client: AsterClient | None = None
@@ -812,7 +867,7 @@ class Executor:
         symbol = action.payload["symbol"]
         coid = action.payload["origClientOrderId"]
         try:
-            await self._client_for(plan, client).cancel_order(
+            order = await self._client_for(plan, client).cancel_order(
                 plan.account_id, symbol, orig_client_order_id=coid
             )
         except AsterError as exc:
@@ -822,6 +877,7 @@ class Executor:
                 await self._notify_confirmed(plan.account_id, action, key)
                 return CommandResult(key, "CONFIRMED", safe_error)
             return await self._fail(plan, key, exc)
+        await _observe_order(self._order_observer, plan.account_id, key, action.kind.value, order)
         await self._commands.set_status(key, "CONFIRMED")
         await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
@@ -858,8 +914,8 @@ class Executor:
 
         if action.kind == ActionKind.MARKET_OPEN:
             # A changed target/revision is not permission to bypass an older outcome.
-            for pending in await self._commands.in_flight():
-                if pending["account_id"] != plan.account_id or pending["command_key"] == key:
+            for pending in await self._commands.in_flight(plan.account_id):
+                if pending["command_key"] == key:
                     continue
                 payload = json.loads(str(pending["payload"]))
                 if payload.get("symbol") == action.symbol or pending["kind"] in {
@@ -897,7 +953,6 @@ class Executor:
                 reason = f"pre-position-unavailable:{_safe_error_category(exc)}"
                 failed = await self._degrade(plan, key, reason)
                 return failed, False
-            await self._commands.set_recovery_context(key, recovery_context.to_json())
         else:
             recovery_context = None
 
@@ -908,7 +963,13 @@ class Executor:
 
         while True:
             await self._commands.set_status(
-                key, "SENDING", bump_attempts=True, client_order_id=coid
+                key,
+                "SENDING",
+                bump_attempts=True,
+                client_order_id=coid,
+                recovery_context=(
+                    recovery_context.to_json() if recovery_context is not None else None
+                ),
             )
             order = None
             try:
@@ -967,6 +1028,14 @@ class Executor:
                     coid,
                     recovery_context,
                 )
+                if resolution.order is not None:
+                    await _observe_order(
+                        self._order_observer,
+                        plan.account_id,
+                        key,
+                        action.kind.value,
+                        resolution.order,
+                    )
                 if resolution.outcome == ResolutionOutcome.FOUND:
                     resolved = await self._complete_resolved_order(
                         plan, action, key, coid, resolution, prefix="resolved-unknown"
@@ -1073,6 +1142,14 @@ class Executor:
             str(coid),
             context,
         )
+        if resolution.order is not None:
+            await _observe_order(
+                self._order_observer,
+                plan.account_id,
+                key,
+                action.kind.value,
+                resolution.order,
+            )
         if resolution.outcome == ResolutionOutcome.PROVEN_NOT_EXECUTED:
             await self._commands.set_status(
                 key,
@@ -1099,6 +1176,7 @@ class Executor:
         *,
         client: AsterClient | None = None,
     ) -> CommandResult:
+        await _observe_order(self._order_observer, plan.account_id, key, action.kind.value, order)
         conditional = action.kind in (ActionKind.PLACE_STOP, ActionKind.PLACE_TP)
         if not conditional:
             resolution = _resolution_from_order(order, "result", market=True)
@@ -1193,6 +1271,7 @@ async def resolve_boot_unknowns(
     links: OrderLinkRepo | None = None,
     *,
     only_account: str | None = None,
+    order_observer: OrderObserver | None = None,
 ) -> BootResolutionReport:
     """Boot-time resolution of every in-flight command: UNKNOWN / SENDING / SUBMITTED.
 
@@ -1243,6 +1322,14 @@ async def resolve_boot_unknowns(
             str(coid),
             context,
         )
+        if resolution.order is not None:
+            await _observe_order(
+                order_observer,
+                account_id,
+                key,
+                str(row["kind"]),
+                resolution.order,
+            )
         if resolution.outcome == ResolutionOutcome.FOUND:
             await commands.set_status(
                 key,

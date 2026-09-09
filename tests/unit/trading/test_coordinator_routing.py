@@ -709,6 +709,35 @@ async def test_structured_skip_event_has_explicit_account_and_safe_text(env):
     assert all("[" not in event.text and "]" not in event.text for event in events)
 
 
+async def test_entry_skipped_hook_receives_stable_attempt_and_survives_failure(env):
+    coordinator, followers, _db, _legacy_notifications = env
+    calls: list[tuple] = []
+
+    async def hook(account_id, symbol, reason, attempt_id, pos_side):
+        calls.append((account_id, symbol, reason, attempt_id, pos_side))
+
+    coordinator.set_entry_skipped_hook(hook)
+    state = master_state(stop=None)
+    state.event_time = 101
+    await coordinator.on_master_delta(delta_of(state))
+    assert calls, "actionable skips must reach the durable feed hook"
+    first = list(calls)
+    assert all(call[1] == "BTCUSDT" and call[4] == "BOTH" for call in calls)
+    assert {call[0] for call in calls} <= {f.account_id for f in followers}
+    # Same master episode re-observed: attempt identity is stable.
+    state.event_time = 202
+    await coordinator.on_master_delta(delta_of(state))
+    assert [call[3] for call in calls] == [call[3] for call in first] * 2
+
+    async def failing(*args):
+        raise RuntimeError("feed down")
+
+    coordinator.set_entry_skipped_hook(failing)
+    state.event_time = 303
+    await coordinator.on_master_delta(delta_of(state))
+    assert all(len(fr.client.placed) == 0 for fr in followers)
+
+
 async def test_actionable_skip_notifies_again_for_a_new_master_episode(env):
     coordinator, followers, db, _legacy_notifications = env
     events: list[NotificationEvent] = []

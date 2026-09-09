@@ -16,6 +16,8 @@ from copytradeaster.domain.models import (
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo, SettingsRepo
 from copytradeaster.trading.executor import (
+    RUNTIME_RESOLUTION_INTERVAL_S,
+    BootResolutionReport,
     Executor,
     MarketRecoveryContext,
     command_key_of,
@@ -196,6 +198,27 @@ async def test_happy_path_market_confirmed(env):
     assert link_rows is not None
 
 
+async def test_market_recovery_context_is_committed_with_sending_before_exchange_call(env):
+    executor, client, commands, _links, _settings = env
+    observed: list[tuple[str, str | None]] = []
+
+    async def inspect_journal_before_send(account_id, req):
+        row = await commands.by_client_order_id(account_id, req.new_client_order_id)
+        assert row is not None
+        observed.append((str(row["status"]), row["recovery_context"]))
+        return SimpleOrder(coid=req.new_client_order_id, status="FILLED")
+
+    client.place_order = inspect_journal_before_send  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(open_action()))
+
+    assert results[0].status == "CONFIRMED"
+    assert observed[0][0] == "SENDING"
+    context = MarketRecoveryContext.from_json(observed[0][1])
+    assert context is not None
+    assert context.pre_position_amt == 0
+    assert context.expected_delta == Decimal("0.05")
+
+
 async def test_confirmed_callback_receives_durable_command_key(env):
     _executor, client, commands, links, settings = env
     seen: list[tuple[str, str, str]] = []
@@ -215,6 +238,25 @@ async def test_confirmed_callback_receives_durable_command_key(env):
 
     assert result[0].status == "CONFIRMED"
     assert seen == [("copyc1", "MARKET_OPEN", result[0].command_key)]
+
+
+async def test_runtime_resolution_is_bounded_per_account(env, monkeypatch):
+    executor, _client, _commands, _links, _settings = env
+    calls = 0
+
+    async def fake_resolve(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return BootResolutionReport()
+
+    monkeypatch.setattr("copytradeaster.trading.executor.resolve_boot_unknowns", fake_resolve)
+    await executor.resolve_in_flight("copyc1", client=_client)
+    await executor.resolve_in_flight("copyc1", client=_client)
+    assert calls == 1
+
+    executor._last_runtime_resolution["copyc1"] -= RUNTIME_RESOLUTION_INTERVAL_S
+    await executor.resolve_in_flight("copyc1", client=_client)
+    assert calls == 2
 
 
 async def test_confirmed_callback_failure_does_not_change_confirmed_result(env):
@@ -269,7 +311,11 @@ async def test_503_unknown_query_finds_order_confirmed(env):
 
 
 async def test_market_accepted_response_lost_history_found_never_resends(env):
+    from unittest.mock import AsyncMock
+
     executor, client, commands, _links, _settings = env
+    observer = AsyncMock()
+    executor._order_observer = observer
 
     async def accepted_but_response_lost(account_id, req):
         del account_id
@@ -287,6 +333,10 @@ async def test_market_accepted_response_lost_history_found_never_resends(env):
     assert client.place_calls == 1
     row = await commands.get(results[0].command_key)
     assert row["client_order_id"] == "ct" + results[0].command_key
+    observer.assert_awaited_once()
+    observed = observer.await_args.args
+    assert observed[:3] == ("copyc1", results[0].command_key, "MARKET_OPEN")
+    assert observed[3].status == "FILLED"
 
 
 async def test_market_response_lost_unavailable_recovery_never_resends(env):
@@ -858,3 +908,78 @@ async def test_boot_unreadable_leverage_stays_fail_closed(env):
     assert report.unresolved_query_error == 1
     assert len(await commands.in_flight()) == 1
     assert client.leverage_calls == []
+
+
+async def test_history_observer_receives_order_and_durable_identity(env):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, _, _ = env
+    observer = AsyncMock()
+    executor._order_observer = observer
+    result = (await executor.submit(plan_of(open_action())))[0]
+    args = observer.await_args.args
+    assert args[:3] == ("copyc1", result.command_key, "MARKET_OPEN")
+    assert args[3].status == "FILLED"
+    assert (await commands.get(result.command_key))["status"] == "CONFIRMED"
+
+
+async def test_history_observer_failure_cannot_resend_trade(env):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, _, _ = env
+    executor._order_observer = AsyncMock(side_effect=RuntimeError("storage unavailable"))
+    plan = plan_of(open_action())
+    assert (await executor.submit(plan))[0].status == "CONFIRMED"
+    assert (await executor.submit(plan))[0].status == "CONFIRMED"
+    assert len(client.placed) == 1
+
+
+async def test_boot_history_observer_receives_recovered_order(env):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, links, _ = env
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    coid = "ct" + key
+    await commands.insert(
+        key, "copyc1", None, action.kind.value, json.dumps(action.payload), 1, coid
+    )
+    await commands.set_status(key, "UNKNOWN")
+    order = SimpleOrder(coid, "FILLED")
+    client.query_results[coid] = order
+    observer = AsyncMock()
+    report = await resolve_boot_unknowns(lambda _: client, commands, links, order_observer=observer)
+    assert report.confirmed == 1
+    observer.assert_awaited_once_with("copyc1", key, "MARKET_OPEN", order)
+
+
+@pytest.mark.parametrize("status", ["SUBMITTED", "UNKNOWN"])
+async def test_history_observer_on_query_recovery(env, status):
+    from unittest.mock import AsyncMock
+
+    executor, client, commands, links, _ = env
+    observer = AsyncMock()
+    executor._order_observer = observer
+    action = open_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    coid = "ct" + key
+    order = SimpleOrder(coid, "FILLED")
+    client.query_results[coid] = order
+    if status == "SUBMITTED":
+        await commands.insert(
+            key, "copyc1", None, action.kind.value, json.dumps(action.payload), 1, coid
+        )
+        await commands.set_status(key, "SUBMITTED")
+        result = (await executor.submit(plan))[0]
+    else:
+
+        async def lost_response(account_id, req):
+            raise AsterError(-1000, "unknown outcome", http_status=503)
+
+        client.place_order = lost_response
+        result = (await executor.submit(plan))[0]
+    assert result.status == "CONFIRMED"
+    observer.assert_awaited_once_with("copyc1", key, "MARKET_OPEN", order)
+    assert len(client.placed) == 0

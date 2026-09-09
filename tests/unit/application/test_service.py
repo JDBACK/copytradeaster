@@ -41,11 +41,12 @@ from copytradeaster.domain.models import RiskPolicy
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
 from copytradeaster.onboarding.models import DirectOnboardingResult
 from copytradeaster.storage.database import Database
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
     AgentValidation,
     AgentValidationRepo,
-    CommandRepo,
     NotificationOutboxRepo,
     SettingsRepo,
     TelegramUserRepo,
@@ -401,17 +402,21 @@ async def test_access_request_is_durable_and_env_admin_approval_opens_menu_acces
 
 async def test_dashboard_status_risk_activity_and_notifications_are_safe(environment):
     db, runtime, _, _, service = environment
-    commands = CommandRepo(db)
-    await commands.insert(
-        "command-1",
-        "tg-7",
-        None,
-        "MARKET_OPEN",
-        '{"private_key":"never-display"}',
-        1,
-        "client-1",
+    await EventRepository(db).record(
+        HistoryScope("tg-7", "testnet"),
+        kind="POSITION_OPENED",
+        occurred_at=1_700_000_000_000,
+        recorded_at=1_700_000_000_000,
+        facts={
+            "symbol": "BTCUSDT",
+            "side": "LONG",
+            "entry_qty": "0.016",
+            "entry_price": "62400",
+        },
+        dedup_key="evt:dashboard:opened",
+        trade_ref="ref-1",
+        notify_eligible=False,
     )
-    await commands.set_status("command-1", "CONFIRMED", last_error="secret-error")
     await NotificationOutboxRepo(db).enqueue(
         "event-1",
         7,
@@ -452,11 +457,12 @@ async def test_dashboard_status_risk_activity_and_notifications_are_safe(environ
     assert not hasattr(risk, "max_leverage")
     assert not hasattr(risk, "max_entry_deviation_pct")
     activity = await service.activity(7)
-    assert activity.items[0].title == "Открыта позиция"
+    assert activity.items[0].title.splitlines()[0] == "Открыта BTCUSDT · LONG"
     assert activity.items[0].category.value == "trade"
     assert activity.items[0].status.value == "completed"
     assert activity.items[0].remediation is None
     assert activity.filter.value == "all"
+    assert "never-display" not in activity.items[0].title
 
     notifications = await service.notification_settings(7)
     assert notifications.pending == 1
@@ -1751,31 +1757,34 @@ async def test_system_state_handles_stale_bad_heartbeat_and_unknown_runtime(envi
 
 
 async def test_activity_paging_validation_and_notification_toggle(environment):
-    db, _, _, _, service = environment
-    commands = CommandRepo(db)
+    db, _, _, clock, service = environment
+    events = EventRepository(db)
+    scope = HistoryScope("tg-7", "testnet")
+    base_ms = int(clock().timestamp() * 1000) - 600_000
     for index in range(11):
-        await commands.insert(
-            f"page-{index}",
-            "tg-7",
-            None,
-            "KIND!" if index == 10 else "MARKET_OPEN",
-            "{}",
-            1,
-            f"ct-{index}",
+        await events.record(
+            scope,
+            kind="POSITION_OPENED",
+            occurred_at=base_ms + index,
+            recorded_at=base_ms + index,
+            facts={"symbol": "BTCUSDT", "side": "LONG", "entry_qty": "0.1"},
+            dedup_key=f"evt:page:{index}",
+            trade_ref="ref-1",
+            notify_eligible=False,
         )
     first = await service.activity(7)
     second = await service.activity(7, page=1)
     assert first.has_next is True
     assert second.has_previous is True
     assert second.page == 1
-    # The last inserted command (page-10) is `KIND!`; after the safe-code
-    # filter it surfaces as a system event with the generic safe title.
-    # The freshly inserted commands stay in the default PENDING journal
-    # state, so the status surface is the unified "pending" view-model.
-    assert first.items[0].category.value == "system"
-    assert first.items[0].title == "Действие выполнено"
-    assert first.items[0].status.value == "pending"
-    assert first.items[0].symbol is None
+    assert len(first.items) == 10
+    assert len(second.items) == 1
+    # The adapter reads confirmed user events: titles come from the shared
+    # presenter and the status surface is always the completed fact.
+    assert first.items[0].category.value == "trade"
+    assert first.items[0].title.splitlines()[0] == "Открыта BTCUSDT · LONG"
+    assert first.items[0].status.value == "completed"
+    assert first.items[0].symbol == "BTCUSDT"
     with pytest.raises(ValidationError):
         await service.activity(7, page=-1)
     with pytest.raises(ValidationError):
@@ -1791,128 +1800,91 @@ async def test_activity_paging_validation_and_notification_toggle(environment):
 
 
 async def test_activity_safe_mapping_filters_and_sorts(environment):
-    """The activity view-model never leaks journal internals to the UI.
+    """The activity view-model never leaks journal/event internals to the UI.
 
-    We populate a representative mix of journal rows: trade kinds (open /
-    close / stop / tp / cancel), the system SET_LEVERAGE row, a
-    PENDING/SENDING/SUBMITTED in-flight entry, a FAILED entry, and an
-    UNKNOWN entry.  The test then asserts:
+    The legacy adapter now reads the user-event feed: trade kinds map to the
+    trade category, system kinds to system, titles come from the shared
+    presenter, and ordering is ``occurred_at DESC`` (newest first).  The test
+    then asserts:
 
     * all forbidden fields stay out of the DTO;
     * categories split cleanly into trade / system;
     * filtering by ``ActivityFilter`` returns exactly the expected subset;
-    * pagination + sort remain stable (latest ``updated_at`` first,
-      ``command_key`` tiebreak);
-    * the pending entry carries a bounded ``pending_age`` and no remediation;
-    * failed / unknown entries carry typed remediation copy.
+    * ordering is newest first;
+    * every confirmed event is a completed fact with no remediation copy.
     """
-    import json
-
     from copytradeaster.application.models import ActivityCategory
 
-    db, runtime, _, clock, service = environment
-    commands = CommandRepo(db)
-    now = clock()
-    # Stagger updated_at so the ordering assertion is unambiguous.
-    base = now - timedelta(minutes=30)
-    rows = [
-        {
-            "command_key": "k-trade-open",
-            "kind": "MARKET_OPEN",
-            "status": "CONFIRMED",
-            "payload": {"symbol": "BTCUSDT", "side": "BUY"},
-            "updated_at": (base + timedelta(minutes=2)).isoformat(),
-        },
-        {
-            "command_key": "k-trade-stop",
-            "kind": "PLACE_STOP",
-            "status": "CONFIRMED",
-            "payload": {"symbol": "BTCUSDT", "type": "STOP_MARKET"},
-            "updated_at": (base + timedelta(minutes=3)).isoformat(),
-        },
-        {
-            "command_key": "k-trade-close",
-            "kind": "MARKET_CLOSE",
-            "status": "CONFIRMED",
-            "payload": {"symbol": "ETHUSDT", "side": "SELL"},
-            "updated_at": (base + timedelta(minutes=4)).isoformat(),
-        },
-        {
-            "command_key": "k-sys-leverage",
-            "kind": "SET_LEVERAGE",
-            "status": "CONFIRMED",
-            "payload": {"symbol": "BTCUSDT", "leverage": "200"},
-            "updated_at": (base + timedelta(minutes=5)).isoformat(),
-        },
-        {
-            "command_key": "k-trade-cancel",
-            "kind": "CANCEL_ORDER",
-            "status": "CONFIRMED",
-            "payload": {"symbol": "BTCUSDT"},
-            "updated_at": (base + timedelta(minutes=6)).isoformat(),
-        },
-        {
-            "command_key": "k-trade-pending",
-            "kind": "MARKET_OPEN",
-            "status": "SUBMITTED",
-            "payload": {"symbol": "SOLUSDT", "side": "BUY"},
-            # 42 seconds in-flight when the service reads the row.
-            "updated_at": (now - timedelta(seconds=42)).isoformat(),
-        },
-        {
-            "command_key": "k-trade-failed",
-            "kind": "MARKET_OPEN",
-            "status": "FAILED",
-            "last_error": "exchange error -1003 boom",
-            "payload": {"symbol": "BTCUSDT", "side": "BUY"},
-            "updated_at": (base + timedelta(minutes=7)).isoformat(),
-        },
-        {
-            "command_key": "k-trade-unknown",
-            "kind": "MARKET_CLOSE",
-            "status": "UNKNOWN",
-            "payload": {"symbol": "ETHUSDT", "side": "SELL"},
-            "updated_at": (base + timedelta(minutes=8)).isoformat(),
-        },
-    ]
-    for row in rows:
-        payload_json = json.dumps(row["payload"], sort_keys=True)
-        await commands.insert(
-            row["command_key"],
-            "tg-7",
+    db, _, _, clock, service = environment
+    events = EventRepository(db)
+    scope = HistoryScope("tg-7", "testnet")
+    now_ms = int(clock().timestamp() * 1000)
+    base = now_ms - 1_800_000
+    specs: list[tuple[str, str, dict[str, str], str | None]] = [
+        (
+            "trade-open",
+            "POSITION_OPENED",
+            {"symbol": "BTCUSDT", "side": "LONG", "entry_qty": "0.016", "entry_price": "62400"},
+            "ref-open",
+        ),
+        (
+            "trade-stop",
+            "PROTECTION_SET",
+            {"symbol": "BTCUSDT", "slot": "stop", "new_price": "61500"},
+            "ref-open",
+        ),
+        (
+            "trade-close",
+            "POSITION_CLOSED",
+            {
+                "symbol": "ETHUSDT",
+                "side": "SHORT",
+                "entry_price": "2600",
+                "exit_price": "2550",
+                "realized_gross": "5.5",
+            },
+            "ref-close",
+        ),
+        (
+            "sys-risk",
+            "RISK_CHANGED",
+            {"risk_percent": "0.02", "previous_percent": "0.01"},
             None,
-            row["kind"],
-            payload_json,
-            1,
-            f"ct-{row['command_key']}",
+        ),
+        ("sys-pause", "COPY_PAUSED", {"symbol": "BTCUSDT"}, None),
+        (
+            "sys-skip",
+            "ENTRY_SKIPPED",
+            {"symbol": "SOLUSDT", "reason": "ENTRY_DEVIATION"},
+            None,
+        ),
+    ]
+    for position, (name, kind, facts, ref) in enumerate(specs):
+        await events.record(
+            scope,
+            kind=kind,
+            occurred_at=base + position * 60_000,
+            recorded_at=base + position * 60_000,
+            facts=facts,
+            dedup_key=f"evt:safe:{name}",
+            trade_ref=ref,
+            notify_eligible=False,
         )
-        if row["status"] != "PENDING":
-            await db.execute_write(
-                "UPDATE execution_commands SET status=?, updated_at=?, "
-                "last_error=? WHERE command_key=?",
-                (row["status"], row["updated_at"], row.get("last_error"), row["command_key"]),
-            )
 
     # --- default (all) -------------------------------------------------------
     all_page = await service.activity(7)
     assert all_page.filter.value == "all"
     assert all_page.page == 0
     assert all_page.has_next is False
-    titles = [item.title for item in all_page.items]
-    # Newest first by ``updated_at`` (then ``command_key`` tiebreak).  The
-    # pending row is the most recent (now − 42s), the unknown row is the
-    # second newest (base + 8m), and so on.  Both open rows fall into
-    # ascending order, with ``k-trade-open`` sorting after ``k-trade-failed``
-    # because they share the same kind and the tiebreak is the command_key.
+    titles = [item.title.splitlines()[0] for item in all_page.items]
+    # Newest first by ``occurred_at``: the entry skip is newest, the open oldest.
     assert titles == [
-        "Открыта позиция SOLUSDT",
-        "Закрыта позиция ETHUSDT",
-        "Открыта позиция BTCUSDT",
-        "Отменён ордер · BTCUSDT",
-        "Плечо подготовлено: 200× · BTCUSDT",
-        "Закрыта позиция ETHUSDT",
-        "Поставлен защитный Stop · BTCUSDT",
-        "Открыта позиция BTCUSDT",
+        "Вход SOLUSDT пропущен: ENTRY_DEVIATION",
+        "Копирование приостановлено. Открытые позиции и защита продолжают работать.",
+        "Риск на сделку изменён: 1,0% → 2,0%",
+        "Закрыта ETHUSDT · SHORT",
+        "Стоп BTCUSDT установлен: 61 500",
+        "Открыта BTCUSDT · LONG",
     ]
 
     # --- filter trade --------------------------------------------------------
@@ -1925,59 +1897,28 @@ async def test_activity_safe_mapping_filters_and_sorts(environment):
     # --- filter system -------------------------------------------------------
     system_page = await service.activity(7, filter="system")
     assert {item.category for item in system_page.items} == {ActivityCategory.SYSTEM}
-    assert all(item.title.startswith("Плечо") for item in system_page.items)
 
     # --- filter=str variants -------------------------------------------------
     by_string = await service.activity(7, filter="trade")
     assert [item.title for item in by_string.items] == [item.title for item in trade_page.items]
 
-    # --- pending entry -------------------------------------------------------
-    pending = next(item for item in all_page.items if item.status.value == "pending")
-    assert pending.symbol == "SOLUSDT"
-    assert pending.pending_age is not None and 40 <= pending.pending_age <= 60
-    assert pending.remediation is None
-
-    # --- failed entry: remediation present, safe text only ------------------
-    failed = next(
-        item
-        for item in all_page.items
-        if item.status.value == "failed"
-        and item.title == "Открыта позиция BTCUSDT"
-        and item.remediation is not None
-        and "Повторите" in item.remediation
-    )
-    assert "-1003" not in failed.remediation  # raw exchange code is filtered
-    assert "boom" not in failed.remediation  # raw exception text is filtered
-
-    # --- unknown entry: distinct remediation copy ----------------------------
-    unknown = next(
-        item
-        for item in all_page.items
-        if item.status.value == "failed" and item.title == "Закрыта позиция ETHUSDT"
-    )
-    assert "Проверьте" in unknown.remediation
-    assert "Повторите" not in unknown.remediation
+    # --- confirmed events only: no pending/failed remediation copy -----------
+    for item in all_page.items:
+        assert item.status.value == "completed"
+        assert item.remediation is None
 
     # --- forbidden fields never appear on the DTO ----------------------------
     for item in all_page.items:
         for forbidden in (
-            "command_key",
-            "k-trade-open",
-            "k-trade-stop",
-            "k-trade-close",
-            "k-sys-leverage",
-            "k-trade-pending",
-            "k-trade-failed",
-            "k-trade-unknown",
-            "k-trade-cancel",
+            "ref-open",
+            "ref-close",
+            "evt:safe:",
+            "dedup_key",
             "tg-7",
             "0x1111111111111111111111111111111111111111",
             "0x2222222222222222222222222222222222222222",
-            "ct-k-trade-open",
             "client_order_id",
             "nonce",
-            "-1003",
-            "boom",
         ):
             assert forbidden not in (item.title or "")
 
@@ -1994,24 +1935,23 @@ def _as_iso_datetime(value: str | datetime) -> datetime:
 
 
 async def test_activity_pagination_boundary(environment):
-    """Pagination is stable: pages slice the same SELECT in order."""
+    """Pagination is stable: pages slice the same feed cursor in order."""
     from copytradeaster.application.models import ActivityCategory
 
-    db, _, _, _, service = environment
-    commands = CommandRepo(db)
+    db, _, _, clock, service = environment
+    events = EventRepository(db)
+    scope = HistoryScope("tg-7", "testnet")
+    base_ms = int(clock().timestamp() * 1000) - 3_600_000
     for index in range(25):
-        await commands.insert(
-            f"pg-{index:02d}",
-            "tg-7",
-            None,
-            "MARKET_OPEN",
-            '{"symbol":"BTCUSDT"}',
-            1,
-            f"ct-pg-{index:02d}",
-        )
-        await db.execute_write(
-            "UPDATE execution_commands SET status='CONFIRMED' WHERE command_key=?",
-            (f"pg-{index:02d}",),
+        await events.record(
+            scope,
+            kind="POSITION_OPENED",
+            occurred_at=base_ms + index,
+            recorded_at=base_ms + index,
+            facts={"symbol": "BTCUSDT", "side": "LONG", "entry_qty": "0.1"},
+            dedup_key=f"evt:pg:{index:02d}",
+            trade_ref="ref-1",
+            notify_eligible=False,
         )
 
     page0 = await service.activity(7)
@@ -2040,55 +1980,55 @@ async def test_activity_pagination_boundary(environment):
             assert item.category is ActivityCategory.TRADE
             assert item.status.value == "completed"
             assert item.symbol == "BTCUSDT"
-            assert item.title == "Открыта позиция BTCUSDT"
+            assert item.title.splitlines()[0] == "Открыта BTCUSDT · LONG"
             seen_symbols.append(item.symbol)
     assert seen_symbols == ["BTCUSDT"] * 25
 
 
 async def test_activity_category_filter_paginates_the_filtered_set(environment):
-    """The trade/system filter must run in SQL, before LIMIT/OFFSET.
+    """The trade/system filter must run in SQL, before LIMIT.
 
-    Regression for a P1 pagination bug: the category predicate used to be
-    applied in Python *after* the database had already truncated the journal
-    to ``page_size + 1`` rows.  Consequences were:
+    Regression for a P1 pagination bug, kept for the feed read path: the
+    kind predicate is applied by the repository SQL *before* the LIMIT
+    window.  If it were applied in Python after truncation:
 
     * a ``system`` page could come back **empty** with ``has_next=False``
-      although matching rows existed further down the journal;
-    * page N offset the **general** journal, so rows were silently skipped.
+      although matching rows existed further down the feed;
+    * page N would offset the **general** feed, so rows were silently skipped.
 
-    The journal here is laid out so every system row sits outside the first
-    11 general rows: 14 trade rows (newest) followed by 14 system rows
-    (older), each with a unique strictly-ordered ``updated_at``.
+    The feed here is laid out so every system row sits outside the first
+    11 general rows: 14 system rows (older) followed by 14 trade rows
+    (newest), each with a unique strictly-ordered ``occurred_at``.
     """
     from copytradeaster.application.models import ActivityCategory
 
     db, _, _, clock, service = environment
-    commands = CommandRepo(db)
-    base = clock() - timedelta(hours=2)
+    events = EventRepository(db)
+    scope = HistoryScope("tg-7", "testnet")
+    base_ms = int(clock().timestamp() * 1000) - 7_200_000
 
     # Oldest -> newest: system rows first, then trade rows on top.
-    specs: list[tuple[str, str]] = [(f"sys-{i:02d}", "SET_LEVERAGE") for i in range(14)]
-    specs += [(f"trd-{i:02d}", "MARKET_OPEN") for i in range(14)]
+    specs: list[tuple[str, str]] = [(f"sys-{i:02d}", "ENTRY_SKIPPED") for i in range(14)]
+    specs += [(f"trd-{i:02d}", "POSITION_OPENED") for i in range(14)]
 
-    for position, (command_key, kind) in enumerate(specs):
-        import json
-
-        payload: dict[str, object] = {"symbol": "BTCUSDT"}
-        if kind == "SET_LEVERAGE":
-            # Distinct leverage values keep every system title unique.
-            payload["leverage"] = str(10 + position)
-        await commands.insert(
-            command_key,
-            "tg-7",
-            None,
-            kind,
-            json.dumps(payload, sort_keys=True),
-            1,
-            f"ct-{command_key}",
-        )
-        await db.execute_write(
-            "UPDATE execution_commands SET status='CONFIRMED', updated_at=? WHERE command_key=?",
-            ((base + timedelta(minutes=position)).isoformat(), command_key),
+    for position, (name, kind) in enumerate(specs):
+        facts: dict[str, str] = {"symbol": "BTCUSDT"}
+        trade_ref: str | None = "ref-1"
+        if kind == "ENTRY_SKIPPED":
+            # Distinct reasons keep every system title unique.
+            facts["reason"] = f"ENTRY_DEVIATION_{position:02d}"
+            trade_ref = None
+        else:
+            facts.update({"side": "LONG", "entry_qty": "0.1"})
+        await events.record(
+            scope,
+            kind=kind,
+            occurred_at=base_ms + position * 60_000,
+            recorded_at=base_ms + position * 60_000,
+            facts=facts,
+            dedup_key=f"evt:cat:{name}",
+            trade_ref=trade_ref,
+            notify_eligible=False,
         )
 
     def identity(item: object) -> tuple[str, object]:
@@ -2150,8 +2090,8 @@ async def test_activity_category_filter_paginates_the_filtered_set(environment):
     # --- category purity ----------------------------------------------------
     assert {i.category for i in trade_items} == {ActivityCategory.TRADE}
     assert {i.category for i in system_items} == {ActivityCategory.SYSTEM}
-    assert all(i.title == "Открыта позиция BTCUSDT" for i in trade_items)
-    assert all(i.title.startswith("Плечо подготовлено") for i in system_items)
+    assert all(i.title.splitlines()[0] == "Открыта BTCUSDT · LONG" for i in trade_items)
+    assert all(i.title.startswith("Вход BTCUSDT пропущен") for i in system_items)
 
     # --- ordering holds across page boundaries ------------------------------
     for items in (all_items, trade_items, system_items):
@@ -2763,3 +2703,31 @@ async def test_risk_p24_policy_round_trip_and_audit(environment, caplog):
     ]
     assert len(success) == 1
     assert "changed_fields=risk_percent" in success[0]
+
+
+async def test_pause_records_system_event_in_feed(environment):
+    _, _, _, _, service = environment
+    await service.pause(7)
+    feed = await service.activity_feed(7)
+    assert "COPY_PAUSED" in [item.kind for item in feed.items]
+
+
+async def test_resume_records_system_event_in_feed(environment):
+    _, _, _, _, service = environment
+    await service.pause(7)
+    confirmation = await service.begin_confirmation(7, ConfirmationAction.RESUME)
+    await service.resume(7, confirmation=confirmation)
+    kinds = [item.kind for item in (await service.activity_feed(7)).items]
+    assert "COPY_PAUSED" in kinds and "COPY_RESUMED" in kinds
+
+
+async def test_update_risk_records_percent_change_in_feed(environment):
+    from copytradeaster.application.models import RiskUpdateInput
+
+    _, _, _, _, service = environment
+    await service.update_risk(7, RiskUpdateInput(risk_percent=Decimal("0.02")))
+    (item,) = [
+        item for item in (await service.activity_feed(7)).items if item.kind == "RISK_CHANGED"
+    ]
+    assert item.facts["risk_percent"] == "0.02"
+    assert item.facts["previous_percent"] == "0.01"

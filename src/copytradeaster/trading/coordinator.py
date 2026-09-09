@@ -251,8 +251,12 @@ class Coordinator:
         self._generation_admission_open = True
         self._active_generations = 0
         self._notification_keys_seen: set[str] = set()
-        # Control-plane for follower leverage (candidate catalog + confirmed
-        # per-account state). None keeps the legacy test seam where the target
+        # Optional durable ENTRY_SKIPPED feed hook (wired by the application
+        # composition root, which owns both the trading core and the
+        # application service). Narrow like ``on_notify``: the core never
+        # imports the service layer. A failing hook is logged and never
+        # fails the trading loop.
+        self._entry_skipped_hook: Callable[[str, str, str, str, str], Awaitable[None]] | None = None
         # leverage resolves from the client/policy without a control plane.
         self._leverage = leverage
         if operator_max_leverage is not None and operator_max_leverage <= 0:
@@ -271,6 +275,13 @@ class Coordinator:
         # closes, reductions and protection convergence continue.
         self._entry_admission = entry_admission or (lambda: True)
         self._notification_key_order: deque[str] = deque()
+
+    def set_entry_skipped_hook(
+        self,
+        hook: Callable[[str, str, str, str, str], Awaitable[None]] | None,
+    ) -> None:
+        """Wire the durable ENTRY_SKIPPED feed writer (composition root only)."""
+        self._entry_skipped_hook = hook
 
     @staticmethod
     def _callback_accepts_event(callback: Callable[..., Awaitable[None]] | None) -> bool:
@@ -530,11 +541,7 @@ class Coordinator:
         # a post-fill recompute could snapshot the same position concurrently
         # with a master-delta recompute and issue contradictory closes.
         async with fr.lock, self._executor.mutation_context(fr.account_id):
-            from copytradeaster.trading.executor import resolve_boot_unknowns
-
-            await resolve_boot_unknowns(
-                lambda _: fr.client, self.commands, self._links, only_account=fr.account_id
-            )
+            await self._executor.resolve_in_flight(fr.account_id, client=fr.client)
             if use_latest_master:
                 # Post-fill is a safety net, not an independent source of
                 # intent. Select the cache only after every lock wait that can
@@ -601,6 +608,18 @@ class Coordinator:
                 kind="copy.skip",
                 severity=NotificationSeverity.INFO,
             )
+            hook = self._entry_skipped_hook
+            if hook is not None:
+                try:
+                    await hook(
+                        fr.account_id,
+                        skip.symbol,
+                        skip.reason.value,
+                        episode,
+                        skip.pos_side.value,
+                    )
+                except Exception:
+                    log.exception("entry skipped hook failed (account_id=%s)", fr.account_id)
         plan = build_plan(
             actual,
             TargetState(account_id=fr.account_id, targets=targets),

@@ -4,7 +4,9 @@
 
 ## Platform
 
-Private Telegram bot (current); Telegram Mini App (current, Stage 3 Part 2 CLOSED 2026-09-04: 4-tab follower AppShell поверх того же application layer).
+Private Telegram bot (current); Telegram Mini App (current, Stage 3 S1–S3
+CLOSED 2026-09-09: 4-tab follower AppShell, история сделок и activity feed
+поверх того же application layer).
 
 ## Users
 
@@ -55,6 +57,9 @@ reconciliation восстанавливают правильное состоя�
 - follower controls: только процент денежного риска на защитном Stop;
 - notifications, per-account pause/resume, status и собственный account
   lifecycle (подключение, замена, отключение);
+- account-owned история: список сделок, detail с fills/events и activity feed;
+  наружу выдаются только opaque trade refs и безопасные агрегаты, без exchange
+  identifiers, credentials и чужих account данных;
 - leverage выбирается автоматически для каждого symbol по signed Aster V3
   `leverageBracket` и устанавливается в максимальное положительное
   `initialLeverage`, которое вернул exchange; master leverage и legacy policy

@@ -1183,6 +1183,19 @@ button.settings-row {
   scrollbar-width: none;
   -ms-overflow-style: none;
   cursor: grab;
+  /* Soft edge fade in the canvas colour: the strip feels continuous beyond
+   * the visible window.  Purely decorative — engines without mask support
+   * keep plain edges, and the focused (always centered) tick's focus ring
+   * is never clipped. */
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 20px, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 20px, #000 calc(100% - 20px), transparent);
+}
+
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  .risk-ruler {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
 }
 
 .risk-ruler::-webkit-scrollbar {
@@ -1191,6 +1204,15 @@ button.settings-row {
 
 .risk-ruler.dragging {
   cursor: grabbing;
+}
+
+/* Snap off while the strip is driven directly (mouse drag) or by the
+ * settle animator: mandatory snap would fight the pointer mid-drag and
+ * stalls programmatic multi-step travel in WebKit.  Snap returns the
+ * moment the gesture/animation ends. */
+.risk-ruler.dragging,
+.risk-ruler.animating {
+  scroll-snap-type: none;
 }
 
 .risk-tick-btn {
@@ -1214,22 +1236,25 @@ button.settings-row {
 
 .risk-tick-mark {
   width: 3px;
-  height: 16px;
+  /* Constant geometry: every mark occupies the full height box and the
+   * fish-eye scales it with transform — selection never relayouts the
+   * strip (the old height 16→26 transition did). */
+  height: 26px;
   border-radius: 2px;
   background: var(--border);
-  /* Fish-eye driven per-frame via --off (0 center → 1 edge); transform only,
-   * no transition — transitions would trail behind the finger. */
-  transform: scaleY(calc(1 - var(--off, 0) * 0.6));
-  transition:
-    height 0.18s ease-out,
-    background-color 0.18s ease-out;
+  transform-origin: center;
+  /* Fish-eye driven per-frame via --off (0 center → 1 edge); transform and
+   * opacity only, no transition — transitions would trail behind the finger. */
+  transform: scaleY(calc(1 - var(--off, 0) * 0.5));
+  opacity: calc(1 - var(--off, 0) * 0.35);
+  transition: background-color 0.12s ease-out;
 }
 
 .risk-tick-label {
   font-size: 12px;
   font-weight: 600;
   opacity: calc(1 - var(--off, 0) * 0.65);
-  transition: color 0.18s ease-out;
+  transition: color 0.12s ease-out;
 }
 
 .risk-tick-btn.active {
@@ -1237,12 +1262,11 @@ button.settings-row {
 }
 
 .risk-tick-btn.active .risk-tick-mark {
-  height: 26px;
   background: var(--champagne);
 }
 
 .risk-tick-btn.active .risk-tick-label {
-  font-weight: 700;
+  opacity: 1;
 }
 
 @media (hover: hover) {
@@ -1253,10 +1277,15 @@ button.settings-row {
 
 @media (prefers-reduced-motion: reduce) {
   .risk-tick-mark {
+    /* Flat static ruler: a single constant height, colour carries state. */
+    height: 18px;
     transform: none;
+    opacity: 1;
+    transition: none;
   }
   .risk-tick-label {
     opacity: 1;
+    transition: none;
   }
 }
 
@@ -1393,3 +1422,34 @@ button.settings-row {
 .risk-ruler[aria-disabled='true'] {
   overflow-x: hidden;
 }
+/* S3 account overview: existing Aster surfaces and compact rows. */
+.summary-status, .summary-row { display: flex; align-items: center; gap: 10px; width: 100%; color: var(--text); background: transparent; border: 0; font: inherit; text-align: left; min-height: 44px; }
+.summary-status { padding: 10px 0; }
+.summary-chevron { margin-left: auto; color: var(--text-muted); }
+.account-summary { padding: 20px 16px 8px; }
+.summary-label { font-size: 15px; font-weight: 500; margin: 0 0 8px; color: var(--text-muted); }
+.summary-pnl { display: block; max-width: 100%; overflow-wrap: anywhere; background: transparent; border: 0; font: inherit; font-size: clamp(26px, 8vw, 36px); font-weight: 650; text-align: left; padding: 0; min-height: 48px; }
+.summary-row { justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--border); font-size: 14px; }
+.summary-row strong { text-align: right; font-weight: 550; }
+.summary-row > span { color: var(--text-muted); }
+button.summary-row, button.summary-pnl, .summary-status { cursor: pointer; }
+button.summary-row:hover, .summary-status:hover { color: var(--champagne); }
+.summary-card { display: flex; flex-direction: column; gap: 10px; width: 100%; text-align: left; font: inherit; font-size: 13px; color: var(--text); cursor: pointer; }
+.summary-card:hover { border-color: var(--champagne); }
+.trade-card-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; width: 100%; }
+.trade-card-top > * { min-width: 0; overflow-wrap: anywhere; }
+.trade-card-top > :last-child { text-align: right; }
+.history-stack { display: flex; flex-direction: column; gap: 12px; }
+.history-stack[hidden] { display: none; }
+.history-segments { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--surface); }
+.history-segments button { flex: 1; min-height: 44px; border: 0; border-radius: 8px; padding: 8px; background: transparent; color: var(--text-muted); font: inherit; font-size: 13px; cursor: pointer; }
+.history-segments button[aria-selected="true"], .history-segments button[aria-pressed="true"] { background: var(--surface-2); color: var(--champagne); }
+.history-search { display: flex; gap: 8px; align-items: end; font-size: 14px; }
+.history-search label { flex: 1; min-width: 0; }
+.history-search input { display: block; width: 100%; min-width: 0; min-height: 44px; margin-top: 6px; padding: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 8px; font: inherit; }
+.trade-event { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 14px; overflow-wrap: anywhere; }
+.trade-event p { margin: 5px 0; }
+.trade-event .btn { min-height: 44px; padding-left: 0; justify-content: flex-start; }
+.fill-details { padding: 12px; font-size: 14px; }
+.fill-details summary { min-height: 44px; cursor: pointer; }
+.money-issues { padding-left: 20px; color: var(--text-muted); font-size: 14px; }

@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { api, ApiError } from './api'
+import { MiniAppResources } from './resources'
 import { NestedRoute } from './components/AppShell'
 import { SystemStatusScreen, SystemStatusView } from './screens/SystemStatusScreen'
 import { TRANSPORT_STALE_WARNING } from './systemStatus'
@@ -100,7 +101,7 @@ describe('SystemStatusScreen behavior', () => {
     render(<SystemStatusScreen auth={AUTH} />)
 
     await screen.findByText('Всё работает')
-    expect(loader).toHaveBeenCalledWith(AUTH, true)
+    expect(loader).toHaveBeenCalledWith(AUTH, true, expect.any(Object))
     for (const label of [
       'Система',
       'Копирование',
@@ -211,6 +212,28 @@ describe('SystemStatusScreen behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
     await screen.findByText('Всё работает')
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
+  })
+
+  it('an aged cached strong status turns amber while its required strong refresh hangs', async () => {
+    const t0 = 1_800_000_000_000
+    const now = vi.spyOn(Date, 'now').mockReturnValue(t0)
+    const resources = new MiniAppResources(AUTH, 'status-aged')
+    resources.publishConfirmed('status', dto())
+    now.mockReturnValue(t0 + 30_001)
+    const gate = deferred<StatusDTO>()
+    const loader = vi.spyOn(api, 'status').mockReturnValue(gate.promise)
+
+    render(<SystemStatusScreen auth={AUTH} resources={resources} />)
+    await screen.findByText(TRANSPORT_STALE_WARNING)
+    expect(screen.queryByText('Всё работает')).toBeNull()
+    expect(screen.getByText('Данные устарели')).toBeDefined()
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, true])
+
+    gate.resolve(dto({ positions_count: 4 }))
+    await screen.findByText('Всё работает')
+    expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
+    now.mockRestore()
   })
 
   it('a late request never overwrites a newer refresh result', async () => {

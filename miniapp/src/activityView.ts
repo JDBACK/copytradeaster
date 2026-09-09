@@ -19,14 +19,13 @@ export function dayBucket(iso: string | null | undefined, now: Date): ActivityDa
   if (!iso) return 'earlier'
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return 'earlier'
-  // Always bucket in UTC so the same instant groups identically across
-  // timezones — important because the journal timestamps are UTC ISO.
-  const todayKey = `${now.getUTCFullYear()}-${now.getUTCMonth()}-${now.getUTCDate()}`
-  const dayKey = `${date.getUTCFullYear()}-${date.getUTCMonth()}-${date.getUTCDate()}`
+  // Use the same local calendar as the displayed row time, including DST.
+  const todayKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`
+  const dayKey = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
   if (dayKey === todayKey) return 'today'
   const yesterday = new Date(now)
-  yesterday.setUTCDate(now.getUTCDate() - 1)
-  const yesterdayKey = `${yesterday.getUTCFullYear()}-${yesterday.getUTCMonth()}-${yesterday.getUTCDate()}`
+  yesterday.setDate(now.getDate() - 1)
+  const yesterdayKey = `${yesterday.getFullYear()}-${yesterday.getMonth()}-${yesterday.getDate()}`
   if (dayKey === yesterdayKey) return 'yesterday'
   return 'earlier'
 }

@@ -73,16 +73,15 @@ describe('SettingsView render (эталон 06-settings)', () => {
 
   it('renders all capability rows with sections in the reference order', () => {
     const html = renderToStaticMarkup(
-      <SettingsView dashboard={makeDashboard()} accountMasked="0x3c45…F975" onOpen={onOpen} />,
+      <SettingsView dashboard={makeDashboard()} accountMasked="0x3c45…F975" onOpen={onOpen} environment="testnet" />,
     )
     expect(html).toContain('Настройки')
-    expect(html).toContain('Копирование')
     expect(html).toContain('Настройки копирования')
-    expect(html).toContain('Риск на Stop')
+    expect(html).toContain('Риск на сделку')
     expect(html).toContain('Уведомления')
-    expect(html).toContain('Статус Aster')
+    expect(html).toContain('Статус подключения')
     expect(html).toContain('Подключение и безопасность')
-    expect(html).toContain('Аккаунт и Builder')
+    expect(html).toContain('Подключение Aster')
     expect(html).toContain('Безопасность')
     expect(html).toContain('Поддержка')
     expect(html).toContain('Помощь')
@@ -149,16 +148,19 @@ describe('SettingsView render (эталон 06-settings)', () => {
       <SettingsView dashboard={makeDashboard()} accountMasked={null} onOpen={onOpen} />,
     )
     expect(html).toContain('Среда')
-    expect(html).toContain('Aster testnet')
+    expect(html).toContain('Не определена')
+    expect(html).not.toContain('Aster testnet')
     // The three buttons are exactly Уведомления/Безопасность/Помощь (see the
     // chevron test), so «Среда» cannot be a navigation affordance.
   })
 
-  it('exposes accessible names for the summary state and rows', () => {
+  it('keeps copying summary on Home and exposes settings row labels', () => {
     const html = renderToStaticMarkup(
       <SettingsView dashboard={makeDashboard()} accountMasked={null} onOpen={onOpen} />,
     )
-    expect(html).toContain('aria-label="Копирование: Включено"')
+    expect(html).not.toContain('aria-label="Копирование: Включено"')
+    expect(html).toContain('Риск на сделку')
+    expect(html).toContain('Уведомления в Telegram')
   })
 
   it('leaks no internal identifiers into the markup', () => {

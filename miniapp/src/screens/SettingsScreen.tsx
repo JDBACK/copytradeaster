@@ -6,13 +6,12 @@
  * Values come from the authoritative DashboardDTO — nothing is hardcoded
  * and stale/degraded never reads «Всё работает». */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
-import { api, ApiError, type AuthContext } from '../api'
+import { useCallback, useEffect, useMemo } from 'react'
+import { HOME_REVALIDATE_MS } from '../revalidate'
+import type { AuthContext } from '../api'
 import { formatPercent } from '../format'
 import type { NestedScreen } from '../navigation'
 import {
-  copySummary,
   notificationsValue,
   systemStatusValue,
   type SettingsTone,
@@ -21,6 +20,9 @@ import { hapticImpact } from '../telegram'
 import type { DashboardDTO } from '../types'
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
+import { MiniAppResources } from '../resources'
+import { createSettingsPrefetch, type SettingsPrefetchKey } from '../settingsPrefetch'
+import { useResource, useScreenResources } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -34,70 +36,66 @@ export function SettingsScreen({
   onNotConnected,
   active = true,
   warm = true,
-  invalidateSignal,
+  resources: providedResources,
+  foregroundSignal,
+  environment,
+  invalidateSignal: _invalidateSignal,
 }: {
   auth: AuthContext
+  environment?: string | null
   accountMasked?: string | null
   onOpen: (screen: NestedScreen) => void
   onNotConnected: () => void
   active?: boolean
   /** Gate for the first fetch: shell warmup or the user's first tap. */
   warm?: boolean
-  /** Shell-owned mutation counter; see useWarmRevalidation. */
+  resources?: MiniAppResources
+  foregroundSignal?: number
+  /** @deprecated S2 resources own invalidation; kept for standalone legacy tests. */
   invalidateSignal?: number
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
-
-  const seq = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
-  const startedRef = useRef(false)
-
-  const { markFresh } = useWarmRevalidation({
+  void _invalidateSignal
+  const resources = useScreenResources(providedResources, auth)
+  const resource = useResource({
+    resources,
+    key: 'dashboard',
+    enabled: warm,
     active,
     ttlMs: HOME_REVALIDATE_MS,
-    busy: load.kind === 'loading',
-    invalidateSignal,
-    onRefresh: (reason: WarmReason) => refresh(reason === 'retry' ? 'foreground' : 'background'),
+    strength: 'weak',
+    foregroundSignal,
   })
-
-  const refresh = useCallback(
-    async (mode: 'foreground' | 'background') => {
-      const my = ++seq.current
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      try {
-        const dashboard = await api.dashboard(auth, false, { signal: controller.signal })
-        if (seq.current !== my) return
-        if (dashboard.copy_state === 'empty') {
-          // The shell is only rendered for connected accounts; an empty
-          // dashboard means the session desynced — route back to onboarding.
-          onNotConnected()
-          return
-        }
-        markFresh()
-        setLoad({ kind: 'ready', dashboard })
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'aborted') return
-        if (seq.current !== my) return
-        // Background refresh never wipes ready UI; the next activation
-        // past TTL retries automatically.
-        if (mode === 'foreground') {
-          setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-        }
-      }
-    },
-    [auth, onNotConnected, markFresh],
-  )
+  const prefetch = useMemo(() => createSettingsPrefetch(resources), [resources])
+  const dashboard = resource.snapshot.data
+  const transportStale =
+    dashboard !== null &&
+    (resource.snapshot.stale || resource.snapshot.error !== null || resource.snapshot.inflight)
+  const load: LoadState = dashboard
+    ? { kind: 'ready', dashboard }
+    : resource.snapshot.error
+      ? { kind: 'error', code: resource.snapshot.error }
+      : { kind: 'loading' }
 
   useEffect(() => {
-    if (!warm || startedRef.current) return
-    startedRef.current = true
-    // Initial fetch only: refresh() awaits before its first setState.
-    // oxlint-disable-next-line react/set-state-in-effect
-    void refresh('foreground')
-    return () => abortRef.current?.abort()
-  }, [warm, refresh])
+    if (dashboard?.copy_state === 'empty') onNotConnected()
+  }, [dashboard, onNotConnected])
+
+  useEffect(() => {
+    // Hidden warm Settings may consume Dashboard, but nested speculative reads
+    // begin only after the user actually enters the visible Settings root.
+    if (active && dashboard) prefetch.start()
+    else prefetch.stop()
+    return () => prefetch.stop()
+  }, [active, dashboard, prefetch])
+
+  const openNested = useCallback(
+    (screen: NestedScreen) => {
+      const key = settingsResourceKey(screen)
+      if (key) prefetch.prioritize(key)
+      onOpen(screen)
+    },
+    [onOpen, prefetch],
+  )
 
   if (load.kind === 'loading') {
     return (
@@ -138,7 +136,11 @@ export function SettingsScreen({
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
         <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh('foreground')}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void resource.refresh('weak').catch(() => {})}
+          >
             Повторить
           </button>
         </div>
@@ -147,8 +149,29 @@ export function SettingsScreen({
   }
 
   return (
-    <SettingsView dashboard={load.dashboard} accountMasked={accountMasked} onOpen={onOpen} />
+    <SettingsView
+      dashboard={load.dashboard}
+      accountMasked={accountMasked}
+      onOpen={openNested}
+      transportStale={transportStale}
+      environment={environment}
+    />
   )
+}
+
+function settingsResourceKey(screen: NestedScreen): SettingsPrefetchKey | null {
+  switch (screen.kind) {
+    case 'risk':
+      return 'risk'
+    case 'notifications':
+      return 'notifications'
+    case 'system-status':
+      return 'status'
+    case 'account-builder':
+      return 'accountBuilder'
+    default:
+      return null
+  }
 }
 
 /** Presentational settings list over an authoritative dashboard snapshot. */
@@ -156,13 +179,19 @@ export function SettingsView({
   dashboard,
   accountMasked,
   onOpen,
+  transportStale = false,
+  environment,
 }: {
   dashboard: DashboardDTO
   accountMasked?: string | null
   onOpen: (screen: NestedScreen) => void
+  transportStale?: boolean
+  environment?: string | null
 }) {
-  const copy = copySummary(dashboard.copy_state)
-  const status = systemStatusValue(dashboard.system_state, dashboard.snapshot_captured_at)
+  const status = systemStatusValue(
+    transportStale ? 'stale' : dashboard.system_state,
+    dashboard.snapshot_captured_at,
+  )
   const notif = notificationsValue(dashboard.notification_enabled)
   const account = dashboard.account_masked ?? accountMasked ?? null
 
@@ -190,45 +219,24 @@ export function SettingsView({
         Настройки
       </h1>
 
-      <section className="panel settings-summary" aria-label={`Копирование: ${copy.label}`}>
-        <div className="settings-summary-icon" aria-hidden>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-            <circle
-              cx="12"
-              cy="12"
-              r="8"
-              stroke={toneColor(copy.tone)}
-              strokeWidth="1.8"
-              opacity="0.55"
-            />
-            <circle cx="12" cy="12" r="3" fill={toneColor(copy.tone)} />
-          </svg>
-        </div>
-        <div className="settings-summary-body">
-          <div className="settings-summary-title">Копирование</div>
-          <div className={`settings-summary-state tone-${copy.tone}`}>{copy.label}</div>
-        </div>
-        <span className={`dot ${copy.tone === 'muted' ? '' : copy.tone}`} aria-hidden />
-      </section>
-
       <SettingsSection label="Настройки копирования" />
       <div className="settings-list">
         <SettingsRow
           icon={<RiskIcon />}
-          label="Риск на Stop"
-          value={formatPercent(dashboard.risk_percent)}
+          label="Риск на сделку"
+          value={`${formatPercent(dashboard.risk_percent)} · по стопу`}
           onClick={() => open({ kind: 'risk' })}
         />
         <SettingsRow
           icon={<BellIcon />}
-          label="Уведомления"
+          label="Уведомления в Telegram"
           value={notif.label}
           valueTone={notif.tone}
           onClick={() => open({ kind: 'notifications' })}
         />
         <SettingsRow
           icon={<PulseIcon />}
-          label="Статус Aster"
+          label="Статус подключения"
           value={status.label}
           valueTone={status.tone}
           onClick={() => open({ kind: 'system-status' })}
@@ -239,7 +247,7 @@ export function SettingsView({
       <div className="settings-list">
         <SettingsRow
           icon={<UserIcon />}
-          label="Аккаунт и Builder"
+          label="Подключение Aster"
           value={account ?? 'Подключено'}
           valueTone="muted"
           onClick={() => open({ kind: 'account-builder' })}
@@ -260,20 +268,10 @@ export function SettingsView({
           value="Как работает копирование"
           onClick={() => open({ kind: 'help' })}
         />
-        <SettingsRow icon={<GlobeIcon />} label="Среда" value="Aster testnet" valueTone="muted" />
+        <SettingsRow icon={<GlobeIcon />} label="Среда" value={environment ? `Aster ${environment}` : 'Не определена'} valueTone="muted" />
       </div>
 
-      <div className="info-box settings-safe-note">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-          <path
-            d="M12 3.5 19 6v5.2c0 4.6-2.9 7.6-7 9.3-4.1-1.7-7-4.7-7-9.3V6l7-2.5Z"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinejoin="round"
-          />
-        </svg>
-        <span>Секреты и ключи не хранятся в мини-апе</span>
-      </div>
+
     </div>
   )
 }
@@ -341,19 +339,6 @@ function Chevron() {
       />
     </svg>
   )
-}
-
-function toneColor(tone: SettingsTone): string {
-  switch (tone) {
-    case 'success':
-      return 'var(--success)'
-    case 'warning':
-      return 'var(--warning)'
-    case 'danger':
-      return 'var(--danger)'
-    default:
-      return 'var(--text-muted)'
-  }
 }
 
 const ICON_STROKE = {

@@ -11,9 +11,10 @@
 import '@testing-library/jest-dom/vitest'
 import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RiskScreen } from './screens/RiskScreen'
 import { api, ApiError } from './api'
+import { MiniAppResources } from './resources'
 import type { RiskDTO } from './types'
 
 // jsdom gaps the production code never meets in Telegram WebView.
@@ -94,6 +95,25 @@ describe('RiskScreen behavior (tap → dirty → save)', () => {
     expect(screen.getByRole('button', { name: /сохранить 2,0%/i })).toBeEnabled()
   })
 
+  it('routes a direct mutation 401 through the session resource hard boundary', async () => {
+    const onInvalidSession = vi.fn()
+    const resources = new MiniAppResources(AUTH, 'risk-invalid-session', onInvalidSession)
+    resources.publishConfirmed('risk', dto())
+    vi.spyOn(api, 'setRiskPercent').mockRejectedValue(
+      new ApiError(401, 'unauthorized', 'expired session'),
+    )
+
+    render(<RiskScreen auth={AUTH} resources={resources} />)
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+    fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
+
+    await act(async () => {})
+    expect(onInvalidSession).toHaveBeenCalledTimes(1)
+    expect(resources.getSnapshot('risk').data).toBeNull()
+    expect(resources.mutationLocked('risk')).toBe(false)
+    expect(screen.queryByText(/настройка не изменилась/i)).toBeNull()
+  })
+
   it('freezes the ruler while the save POST is in flight', async () => {
     await renderReady(dto())
     fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
@@ -166,5 +186,69 @@ describe('RiskScreen behavior (tap → dirty → save)', () => {
     expect(setter).toHaveBeenCalledTimes(1)
     expect(setter).toHaveBeenCalledWith(AUTH, '0.01')
     expect(screen.queryByText(/больше недоступно/i)).toBeNull()
+  })
+
+  it('preserves a dirty draft across an external policy update and blocks an invalid selection', async () => {
+    const resources = new MiniAppResources(AUTH, 'risk-policy-conflict')
+    resources.publishConfirmed('risk', dto())
+    render(<RiskScreen auth={AUTH} resources={resources} />)
+    await screen.findByRole('button', { name: /сохранить/i })
+
+    fireEvent.click(screen.getByRole('radio', { name: '3,0%' }))
+    expect(screen.getByText(/после 3,0%/i)).toBeDefined()
+
+    await act(async () => {
+      resources.publishConfirmed(
+        'risk',
+        dto({ max: '0.02', presets: ['0.01', '0.02'] }),
+      )
+    })
+
+    // Server truth changed, but the user's unsaved draft is never silently
+    // rewritten. It becomes an explicit conflict and cannot be submitted.
+    expect(screen.getByText(/параметры риска изменились на сервере/i)).toBeDefined()
+    expect(screen.getByText(/после 3,0%/i)).toBeDefined()
+    expect(screen.getByRole('button', { name: /сохранить 3,0%/i })).toBeDisabled()
+  })
+
+  it('retains double-unknown Risk across remount until authoritative recovery without replay', async () => {
+    const resources = new MiniAppResources(AUTH, 'risk-double-unknown')
+    const onSaved = vi.fn()
+    resources.publishConfirmed('risk', dto())
+    const setter = vi
+      .spyOn(api, 'setRiskPercent')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+    const reader = vi
+      .spyOn(api, 'risk')
+      .mockRejectedValueOnce(new ApiError(0, 'network_error', 'verify lost'))
+      .mockResolvedValueOnce(dto())
+
+    const first = render(<RiskScreen auth={AUTH} resources={resources} onSaved={onSaved} />)
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+    fireEvent.click(screen.getByRole('button', { name: /сохранить 2,0%/i }))
+    await waitFor(() => expect(resources.mutationState('risk')).toBe('unknown'))
+    expect(setter).toHaveBeenCalledTimes(1)
+    first.unmount()
+
+    render(<RiskScreen auth={AUTH} resources={resources} onSaved={onSaved} />)
+    expect(screen.getByRole('button', { name: /сохранение/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить данные' }))
+    await waitFor(() => expect(reader).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(resources.mutationState('risk')).toBeNull())
+    expect(setter).toHaveBeenCalledTimes(1)
+    expect(onSaved).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /сохранить/i })).toBeDisabled()
+  })
+
+  it('keeps cached Risk visibly stale and blocks save until transport truth is refreshed', async () => {
+    const resources = new MiniAppResources(AUTH, 'risk-stale-honesty')
+    resources.publishConfirmed('risk', dto())
+    resources.invalidate(['risk'])
+    vi.spyOn(api, 'risk').mockReturnValue(new Promise<RiskDTO>(() => {}))
+
+    render(<RiskScreen auth={AUTH} resources={resources} />)
+    expect(screen.getByText(/данные требуют проверки перед сохранением/i)).toBeDefined()
+    fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
+    expect(screen.getByRole('button', { name: /сохранить 2,0%/i })).toBeDisabled()
   })
 })

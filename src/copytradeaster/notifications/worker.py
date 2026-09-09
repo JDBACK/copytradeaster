@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from aiogram.exceptions import (
@@ -19,13 +20,44 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from copytradeaster.logging_utils import get_logger
-from copytradeaster.notifications.models import clip_plain_text
+from copytradeaster.notifications.models import NOTIFICATION_ACTIONS, clip_plain_text
 from copytradeaster.storage.repositories import NotificationOutboxRepo, TelegramUserRepo
 
 log = get_logger(__name__)
 BotSender = Callable[[int, str], Awaitable[Any]]
+
+OPEN_TRADE_BUTTON_TEXT = "Открыть сделку"
+
+
+def trade_keyboard(
+    trade_ref: Any | None, action: Any | None, base_url: str | None
+) -> InlineKeyboardMarkup | None:
+    """Episode deep-link button for a structured outbox row.
+
+    Returns None unless the action is known, the ref is proven and the
+    WebApp base URL is configured. The host comes only from configuration.
+    """
+    if action != "open_trade" or action not in NOTIFICATION_ACTIONS:
+        return None
+    ref = str(trade_ref or "")
+    base = (base_url or "").rstrip("/")
+    if not ref or not base:
+        return None
+    parsed = urlsplit(base)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/miniapp"):
+        path += "/miniapp"
+    url = urlunsplit((parsed.scheme, parsed.netloc, path + "/", f"trade={quote(ref, safe='')}", ""))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=OPEN_TRADE_BUTTON_TEXT, web_app=WebAppInfo(url=url))]
+        ]
+    )
 
 
 class TelegramOutboxWorker:
@@ -49,6 +81,10 @@ class TelegramOutboxWorker:
         retry_max: float = 60.0,
         retry_jitter: float = 0.25,
         drain_timeout: float = 5.0,
+        webapp_base_url: str | None = None,
+        trade_links_enabled: bool = False,
+        user_events_only: bool = False,
+        maintenance_interval: float = 3600.0,
     ) -> None:
         if bot is None and sender is None:
             raise ValueError("bot or sender is required")
@@ -60,6 +96,8 @@ class TelegramOutboxWorker:
             raise ValueError("pacing and retry delays cannot be negative")
         if drain_timeout <= 0:
             raise ValueError("drain_timeout must be positive")
+        if maintenance_interval <= 0:
+            raise ValueError("maintenance_interval must be positive")
         if outbox is None or users is None:
             if db is None:
                 raise ValueError("db is required when repositories are not supplied")
@@ -67,6 +105,12 @@ class TelegramOutboxWorker:
             users = users or TelegramUserRepo(db)
         self._bot = bot
         self._sender = sender
+        self._webapp_base_url = (webapp_base_url or "").rstrip("/") or None
+        # S3 capability, not URL presence: the episode deep-link button needs
+        # an accepted owned route. Payload keeps its structured action/ref
+        # while delivery stays text-only until then.
+        self._user_events_only = user_events_only
+        self._trade_links_enabled = bool(trade_links_enabled)
         self._outbox = outbox
         self._users = users
         self._worker_id = worker_id or f"telegram-{uuid.uuid4().hex}"
@@ -79,9 +123,11 @@ class TelegramOutboxWorker:
         self._retry_max = retry_max
         self._retry_jitter = retry_jitter
         self._drain_timeout = drain_timeout
+        self._maintenance_interval = maintenance_interval
         self._stop_event = asyncio.Event()
         self._lifecycle_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
+        self._delivery_tasks = 0
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._last_chat_send: dict[int, float] = {}
         self._started = False
@@ -91,6 +137,7 @@ class TelegramOutboxWorker:
             if self._started:
                 return
             await self._outbox.recover_expired()
+            await self._prune_retention()
             self._stop_event.clear()
             self._tasks = [
                 asyncio.create_task(
@@ -99,7 +146,36 @@ class TelegramOutboxWorker:
                 )
                 for index in range(self._concurrency)
             ]
+            self._delivery_tasks = len(self._tasks)
+            self._tasks.append(
+                asyncio.create_task(self._maintenance_loop(), name=f"{self._worker_id}-maint")
+            )
             self._started = True
+
+    async def _maintenance_loop(self) -> None:
+        """Hourly bounded terminal cleanup; a long-lived process must not
+        rely on boot-only pruning to keep the outbox in-flight-only."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._stop_event.wait()),
+                    timeout=self._maintenance_interval,
+                )
+            except TimeoutError:
+                await self._prune_retention()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - maintenance must not kill delivery
+                log.exception("outbox maintenance tick failed")
+
+    async def _prune_retention(self) -> None:
+        """Bounded terminal cleanup (boot + hourly tick); never fails startup."""
+        try:
+            now = datetime.now(UTC)
+            await self._outbox.prune_terminal(before=now - timedelta(days=7), statuses=("SENT",))
+            await self._outbox.prune_terminal(before=now - timedelta(days=30), statuses=("FAILED",))
+        except Exception:  # noqa: BLE001 - retention must not block delivery
+            log.exception("terminal outbox prune failed")
 
     async def run(self) -> None:
         await self.start()
@@ -167,7 +243,7 @@ class TelegramOutboxWorker:
 
     async def status(self) -> dict[str, int]:
         counts = await self._outbox.counts()
-        counts["WORKER_TASKS"] = len(self._tasks)
+        counts["WORKER_TASKS"] = self._delivery_tasks if self._started else 0
         counts["STARTED"] = int(self._started)
         return counts
 
@@ -203,17 +279,27 @@ class TelegramOutboxWorker:
 
     async def _deliver(self, row: Any, *, worker_id: str | None = None) -> None:
         worker_id = worker_id or self._worker_id
+        if self._user_events_only and row["kind"] == "execution.confirmed":
+            await self._outbox.fail(row["id"], "superseded_by_user_events", worker_id)
+            return
         user_id = int(row["telegram_user_id"])
         active = await self._users.notification_recipients(telegram_user_ids=[user_id])
         if not active:
             await self._outbox.fail(row["id"], "recipient_disabled", worker_id)
             return
-
         chat_id = int(row["chat_id"])
+        keys = set(row.keys()) if hasattr(row, "keys") else set()
+        trade_ref = row["trade_ref"] if "trade_ref" in keys else None
+        action = row["action"] if "action" in keys else None
+        markup = (
+            trade_keyboard(trade_ref, action, self._webapp_base_url)
+            if self._trade_links_enabled and chat_id == user_id
+            else None
+        )
         async with self._chat_lock(chat_id):
             await self._pace(chat_id)
             try:
-                await self._send(chat_id, clip_plain_text(str(row["text"])))
+                await self._send(chat_id, clip_plain_text(str(row["text"])), markup)
             except TelegramRetryAfter as exc:
                 delay = max(1, int(exc.retry_after))
                 await self._outbox.retry(
@@ -246,13 +332,24 @@ class TelegramOutboxWorker:
             finally:
                 self._last_chat_send[chat_id] = time.monotonic()
 
-    async def _send(self, chat_id: int, text: str) -> Any:
+    async def _send(
+        self, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None
+    ) -> Any:
         if self._sender is not None:
+            # Custom senders stay text-only; the keyboard is a Bot API
+            # transport-boundary concern assembled for the real bot below.
             return await self._sender(chat_id, text)
+        if reply_markup is None:
+            return await self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=None,
+            )
         return await self._bot.send_message(
             chat_id=chat_id,
             text=text,
             parse_mode=None,
+            reply_markup=reply_markup,
         )
 
     async def _pace(self, chat_id: int) -> None:

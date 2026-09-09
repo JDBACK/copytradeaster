@@ -354,6 +354,85 @@ production application/aiohttp path. Fake/fixtures допустимы для ч�
 formatters, navigation, DOM/layout и security regression, но не заменяют live
 биржевое доказательство.
 
+#### Функциональное наполнение Mini App — реализация начата (2026-09-06)
+
+Новая кампания после закрытого Part 2. Источник решений — текущий код,
+`miniapp/AGENTS.md` и acceptance-p27. Сохраняются дизайн и четыре вкладки;
+история/результат относятся к собственному аккаунту фолловера.
+По уточнению владельца backend входит в обязательный объём: сохраняемая
+история исполнений и результата, её API, Mini App и бот принимаются сквозным
+сценарием. Актуально **три stage этой кампании: S1 Backend → G1 → S2 Скорость
+→ G2 → S3 Интерфейс и функциональность → G3**. Это не перенумерация исторических
+Stage 1–3 проекта. Единственный исполняемый порядок — §14 плана; B/F/H
+обозначают подробные пакеты и прежние ссылки, не дополнительные stage.
+Это порядок зависимостей и gates, а не требование делать каждый PR строго
+последовательно: изолированный vertical slice на существующем API можно начать
+раньше. Шкала риска — рекомендуемый первый slice; её готовность не закрывает G1/G2.
+G1 включает принятие backend-истории по §10.9, retention/capacity, API/settings
+и подготовку outbox. G2 — скорость нынешних экранов. G3 — новый UI, единая
+Activity/бот, local-calendar tests, flat resume, новые снимки и итоговая скорость.
+Шкала риска (§21): в S2 исправить mouse capture/wheel/cancel/save lifecycle;
+в S3 — прерываемое доведение, плавный highlight и selection haptics с живой
+приёмкой touch/мыши/trackpad. Геометрия Aster-шкалы и risk policy сохраняются.
+Подробности, зависимости, файлы и критерии:
+[MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
+Кампания находится в реализации: историческое повторное ревью C1–C9 на
+`9a0dd98` дало REQUEST CHANGES, после чего corrective N1–N3/T1–T6 закрыт на
+`84cabfb` и **G1 принят 2026-09-07**. S2.1–S2.6 затем выполнены на ветке
+`feature/frontend` и **G2 принят 2026-09-07**; текущая детальная evidence —
+[MINIAPP_S2_PROGRESS_2026-09.md](reports/MINIAPP_S2_PROGRESS_2026-09.md).
+Исходные находки N1–N6: [MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md),
+corrective scope 10–30: [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md).
+N4–N6 сохраняют отдельные сроки; закрытие G2 их не переопределяет. Следующий
+этап кампании — S3/G3.
+Прежние acceptance-статусы вне S1 не переоткрываются. Изолированный первый slice —
+шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
+2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
+[MINIAPP_RISK_RULER_2026-09.md](reports/MINIAPP_RISK_RULER_2026-09.md));
+устройство-зависимая часть (Telegram haptics, BackButton, WebKit,
+snap-stop A/B) **отложена на потом — устройства недоступны**, возврат
+в S3.5/G3 при их появлении.
+
+- [x] Аудит текущих экранов/снимков и data paths; подробный UX/архитектурный план.
+- [x] Slice «шкала риска» (§21: S2.5 lifecycle + S3.4 motion) — браузерная часть (2026-09-06); не закрывает G1/G2; устройства отложены → S3.5/G3.
+- [x] S1.1 foundation: typed fills/income reads, signed testnet evidence, asset
+  units, bounded windows и знак комиссии; policy/fullness gate остаётся открытым.
+- [x] S1.2 foundation: append-only SQLite facts, observations, coverage/checkpoints,
+  worker, repair, overlap/compaction и preliminary 100-account benchmark.
+- [x] S1.3 core: pure episodes (partial/flip/HEDGE), signed-cost accounting,
+  stable owned refs/aliases, reconciliation, atomic publication seam, serial
+  capture, immutable user events, pure derivation, атомарная публикация вместе
+  с событиями, worker-активация capture (durable checkpoints, settled-gate,
+  dirty hints, runtime wiring), order-link источники copy, protection-события
+  SET/CHANGED/UNCONFIRMED, batch shared-fill split с сохранением суммы.
+- [x] S1.3 integration acceptance: corrective N1–N3 закрыт на `84cabfb` —
+  scheduled bootstrap берёт реальный continuous coverage, open episode сохраняет
+  один `public_ref` между публикациями/restart, late replay переживает restart
+  через durable dirty revision. C4 leg-keyed protection + writers принят в пределах R4.
+- [x] S1.4 acceptance: C2 allocation-fills, N4 events pagination >200,
+  C5 money proof и C7 snapshot-feed приняты.
+- [x] S1.5 acceptance: C6 durable consumer включён в production composition;
+  N5 закрыт двумя boot >1000 событий, atomic cursor/outbox и toggle-boundary.
+- [x] S1.6 broader live follow-up: N6 harness использует фактический journal coid;
+  signed testnet подтвердил отдельный `STOP_MARKET` fill, STOP cleanup,
+  flat-позиции и `open_orders=[]`.
+- [x] G1: **CLOSED 2026-09-07**, corrective tested commit `84cabfb`.
+  N1–N3 + T1–T6 и §6 offline gate закрыты; отдельный повторный общий review не
+  требуется. Отложенные на тот момент N4, N5 и N6 позднее закрыты в S3/G3:
+  pagination, production delivery и signed SL/STOP evidence приняты.
+  100-account benchmark не является этим gate; целевой масштаб corrective — 10–30.
+- [x] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings;
+  S2.1–S2.6 CLOSED 2026-09-07. Measured production-bundle evidence и
+  corrective blocker audits — `MINIAPP_S2_PROGRESS_2026-09.md`.
+- [x] G2: Скорость принята на нынешних экранах 2026-09-07; разрешён старт S3.
+- [x] S3: **CLOSED 2026-09-09 в согласованном scope** — S3.0–S3.5 реализованы
+  и приняты в Chromium, Telegram Desktop WebView и iPhone Mirroring;
+  frontend/backend/offline/signed gates зелёные. Android по решению владельца
+  исключён из scope и verdict. Полная карта: [Mini App UI acceptance
+  index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+- [x] G3: Итоговая сквозная, визуальная, performance и signed testnet-приёмка
+  завершена 2026-09-09 в согласованном scope.
+
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
 Реализовано всё перечисленное выше; детали и журнал полной проверки движка
 (12 сценариев: long/short/тейк/стоп/переносы/мультипозиции/казусы/лимитный вход,
@@ -580,8 +659,9 @@ Owner decisions: uv migration ПОСЛЕ F (frozen toolchain during gates);
 main/copyc1 BTCUSDT allOrders saturated 1000/1000 — negative-proof legs на
 copyc3, fail-closed by design.
 
-Текущая ветка
-`codex/live-copy-tests-hardening`; fake-only acceptance не закрывает package.
+Исходная hardening-квалификация была на
+`codex/live-copy-tests-hardening`; текущая повторная работа ведётся в
+`codex/integrate-hardening-frontend`. Fake-only acceptance не закрывает package.
 
 
 ## Corrective после независимого ревью, 2026-09-05
@@ -596,3 +676,20 @@ copyc3, fail-closed by design.
 Текущий verdict: **NO-GO для mainnet до повторной квалификации**.
 Исполнителю остаются прогоны и исправления по фактам:
 [ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md).
+
+## 8. Mini App Functional S1–S3 — CLOSED 2026-09-09
+
+История сделок, пользовательская лента событий, карточки сделок, detail-screen,
+уведомления и resource-based frontend реализованы и приняты в согласованном
+scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исключён
+из acceptance scope решением владельца. Реализация и evidence:
+
+- [MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md);
+- [MINIAPP_S3_PROGRESS_2026-09.md](reports/MINIAPP_S3_PROGRESS_2026-09.md);
+- [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+
+Повторная квалификация объединённого hardening + frontend дерева выполнена
+фактическими offline, shadow, frontend и targeted signed-testnet прогонами.
+Интеграционный verdict и полный список оставшихся live-harness assumptions
+зафиксированы append-only в `ENGINE_TEST_STATUS_2026-08.md`; до закрытия этих
+отклонений общий pre-mainnet verdict остаётся **NO-GO**.

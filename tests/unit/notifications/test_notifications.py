@@ -488,3 +488,197 @@ async def test_router_enqueue_does_not_call_bot_sender(db):
     # The router has no Bot dependency at all; enqueue is complete while the
     # eventual sender remains untouched.
     assert (await router.backlog())["PENDING"] == 1
+
+
+def test_trade_keyboard_needs_proven_ref_known_action_and_base_url():
+    from copytradeaster.notifications.worker import trade_keyboard
+
+    assert trade_keyboard(None, None, None) is None
+    assert trade_keyboard("ref-1", None, "https://example.com") is None
+    assert trade_keyboard("ref-1", "bogus", "https://example.com") is None
+    assert trade_keyboard("", "open_trade", "https://example.com") is None
+    assert trade_keyboard("ref-1", "open_trade", None) is None
+    markup = trade_keyboard("ref-1", "open_trade", "https://example.com/")
+    assert markup is not None
+    (button,) = markup.inline_keyboard[0]
+    assert button.text == "Открыть сделку"
+    assert button.web_app is not None and "ref-1" in button.web_app.url
+
+
+async def test_worker_attaches_button_only_for_structured_rows(db):
+    # Web App buttons are attached only in a private recipient chat: chat_id
+    # equals the user's own Telegram ID.
+    await setup_account_owner(db, chat_id=1)
+    from copytradeaster.storage.repositories import NotificationOutboxRepo
+
+    seen: list[dict] = []
+
+    class MarkupBot:
+        async def send_message(self, *, chat_id, text, parse_mode=None, reply_markup=None):
+            seen.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+            return {"chat_id": chat_id}
+
+    outbox = NotificationOutboxRepo(db)
+    await outbox.enqueue(
+        "evt-structured",
+        1,
+        1,
+        "user.POSITION_CLOSED",
+        "INFO",
+        "Закрыта BTCUSDT",
+        account_id="a1",
+        trade_ref="ref-1",
+        action="open_trade",
+    )
+    await outbox.enqueue(
+        "evt-legacy", 1, 1, "execution.confirmed", "INFO", "legacy text", account_id="a1"
+    )
+    from copytradeaster.notifications.worker import TelegramOutboxWorker
+
+    worker = TelegramOutboxWorker(
+        bot=MarkupBot(),
+        db=db,
+        per_chat_interval=0,
+        webapp_base_url="https://example.com",
+        trade_links_enabled=True,
+    )
+    assert await worker.process_once()
+    assert await worker.process_once()
+    by_key = {call["text"]: call for call in seen}
+    assert by_key["Закрыта BTCUSDT"]["reply_markup"] is not None
+    assert by_key["legacy text"]["reply_markup"] is None
+
+
+async def test_prune_terminal_removes_only_old_terminal_rows(db):
+    from datetime import timedelta
+
+    from copytradeaster.storage.repositories import NotificationOutboxRepo
+
+    await setup_account_owner(db)
+    outbox = NotificationOutboxRepo(db)
+    await outbox.enqueue("old-sent", 1, 101, "k", "INFO", "old", account_id="a1")
+    await outbox.enqueue("new-sent", 1, 101, "k", "INFO", "new", account_id="a1")
+    await outbox.enqueue("pending", 1, 101, "k", "INFO", "wait", account_id="a1")
+    old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    await db.execute_write(
+        "UPDATE notification_outbox SET status='SENT' WHERE event_key='old-sent'"
+    )
+    await db.execute_write(
+        "UPDATE notification_outbox SET status='SENT', updated_at=? WHERE event_key='old-sent'",
+        (old,),
+    )
+    await db.execute_write(
+        "UPDATE notification_outbox SET status='SENT' WHERE event_key='new-sent'"
+    )
+
+    removed = await outbox.prune_terminal(before=datetime.now(UTC) - timedelta(days=7))
+    assert removed == 1
+    remaining = {
+        row["event_key"] for row in await db.fetchall("SELECT event_key FROM notification_outbox")
+    }
+    assert remaining == {"new-sent", "pending"}
+    with pytest.raises(ValueError):
+        await outbox.prune_terminal(before=datetime.now(UTC), statuses=("PENDING",))
+    with pytest.raises(ValueError):
+        await outbox.prune_terminal(before=datetime.now(UTC), limit=0)
+
+
+async def test_prune_terminal_applies_failed_thirty_day_floor(db):
+    from datetime import timedelta
+
+    from copytradeaster.storage.repositories import NotificationOutboxRepo
+
+    await setup_account_owner(db)
+    outbox = NotificationOutboxRepo(db)
+    now = datetime.now(UTC)
+    for key, status, age_days in (
+        ("failed-young", "FAILED", 10),
+        ("failed-old", "FAILED", 40),
+        ("sent-old", "SENT", 8),
+    ):
+        await outbox.enqueue(key, 1, 101, "k", "INFO", key, account_id="a1")
+        await db.execute_write(
+            "UPDATE notification_outbox SET status=?, updated_at=? WHERE event_key=?",
+            (status, (now - timedelta(days=age_days)).isoformat(), key),
+        )
+    removed = await outbox.prune_terminal(before=now - timedelta(days=30), statuses=("FAILED",))
+    assert removed == 1
+    remaining = {
+        row["event_key"] for row in await db.fetchall("SELECT event_key FROM notification_outbox")
+    }
+    assert remaining == {"failed-young", "sent-old"}
+    removed = await outbox.prune_terminal(before=now - timedelta(days=7), statuses=("SENT",))
+    assert removed == 1
+    remaining = {
+        row["event_key"] for row in await db.fetchall("SELECT event_key FROM notification_outbox")
+    }
+    assert remaining == {"failed-young"}
+
+
+async def test_worker_start_prunes_old_terminal_rows(db):
+    from datetime import timedelta
+
+    from copytradeaster.notifications.worker import TelegramOutboxWorker
+    from copytradeaster.storage.repositories import NotificationOutboxRepo
+
+    await setup_account_owner(db)
+    outbox = NotificationOutboxRepo(db)
+    await outbox.enqueue("stale-sent", 1, 101, "k", "INFO", "stale", account_id="a1")
+    old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    await db.execute_write(
+        "UPDATE notification_outbox SET status='SENT' WHERE event_key='stale-sent'"
+    )
+    await db.execute_write(
+        "UPDATE notification_outbox SET status='SENT', updated_at=? WHERE event_key='stale-sent'",
+        (old,),
+    )
+    worker = TelegramOutboxWorker(bot=FakeBot(), db=db, per_chat_interval=0, concurrency=1)
+    await worker.start()
+    try:
+        assert (
+            await db.fetchone(
+                "SELECT 1 AS one FROM notification_outbox WHERE event_key='stale-sent'"
+            )
+            is None
+        )
+    finally:
+        await worker.stop()
+
+
+async def test_worker_maintenance_tick_prunes_without_restart(db):
+    await setup_account_owner(db)
+    worker = TelegramOutboxWorker(
+        bot=FakeBot(),
+        db=db,
+        per_chat_interval=0,
+        concurrency=1,
+        poll_interval=3600,
+        maintenance_interval=0.02,
+    )
+    await worker.start()
+    try:
+        # Boot prune already ran: a row enqueued afterwards can only be
+        # removed by the periodic tick, never by a restart.
+        outbox = NotificationOutboxRepo(db)
+        await outbox.enqueue("tick-sent", 1, 101, "k", "INFO", "stale", account_id="a1")
+        old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        await db.execute_write(
+            "UPDATE notification_outbox SET status='SENT', updated_at=? "
+            "WHERE event_key='tick-sent'",
+            (old,),
+        )
+        for _ in range(100):
+            row = await db.fetchone(
+                "SELECT 1 AS one FROM notification_outbox WHERE event_key='tick-sent'"
+            )
+            if row is None:
+                break
+            await asyncio.sleep(0.02)
+        assert (
+            await db.fetchone(
+                "SELECT 1 AS one FROM notification_outbox WHERE event_key='tick-sent'"
+            )
+            is None
+        )
+    finally:
+        await worker.stop()

@@ -158,3 +158,44 @@ Backend не менялся — pytest не требовался; тронуты
 
 Telegram WebView iOS/Android: трейс переключений, safe-area, BackButton-жесты,
 свайп Risk-линейки. Десктопный Chromium этого не покрывает.
+
+## S2/G2 final measurement — shared resources (2026-09-07)
+
+После закрытия G1 старый Part 2A loader заменён S2 session-scoped resource owner.
+Текущий источник фактов и полный regression ledger:
+`MINIAPP_S2_PROGRESS_2026-09.md`. Ниже только performance delta к историческим
+замерам этого файла.
+
+Финальный frontend gate: **27 test files / 316 passed**, oxlint 0/0,
+TypeScript + Vite production build PASS. Main JS **336.56 kB raw / 96.46 kB
+gzip**, CSS **19.42 / 4.41 kB**.
+
+Engine preview `copyc1`, production bundle с preview-only dev-user define,
+Headless Chrome 152, 390×844, CDP:
+
+Таблица ниже — recorded G2 browser run до последних post-audit transport/
+cancellation corrective. Финальный current tree прошёл automated gate/build выше;
+новый CDP latency/DOM rerun после corrective в этом документе не заявляется.
+
+| Проверка | Финал S2 |
+|---|---:|
+| Cold startup | **4 POST**: session + dashboard + positions + activity |
+| First Settings tap→content | **10.9 ms**, nested prefetch peak **2** |
+| Warm roots | **160 samples, p95 1.0 ms**, 0 API reads |
+| Warm cached nested | **120 samples, p95 1.9 ms**, 0 API reads |
+| Warm roots при +300 ms latency | **160 samples, p95 6.0 ms**, 0 API reads |
+| 50 Settings→Risk→Back | DOM **319→319**, API delta 0 |
+| Chrome DOM counters после GC | docs/nodes/listeners **1/443/160 → 1/443/160** |
+| JS heap после GC | **+3.25% / ~84.2 KiB**, backing storage без роста |
+| Trace Activity + Risk | **0 long tasks >50 ms, 0 page errors** |
+
+Explicit signed `status(refresh=true)` на том же testnet application path не
+скрывается за tap metric: 5 reads **1.45–2.21 s**, median **2.05 s**,
+`age_seconds=0`, Aster `ok`, permissions valid. Поэтому S2 показывает cached
+content мгновенно, но stale/weak evidence не выдаёт за fresh green во время
+этой отдельной strong verification.
+
+Итог: историческая цель keep-alive сохранена, но startup budget улучшен с 6 до
+**4 POST**, а повторные nested Settings теперь также cached/RTT-independent.
+Browser G2 CLOSED; физический Telegram/WebKit/device gate остаётся S3.5/G3 по
+актуальному §19.7 функционального плана.

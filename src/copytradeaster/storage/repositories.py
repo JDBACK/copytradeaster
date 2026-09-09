@@ -566,6 +566,7 @@ class CommandRepo:
         last_error: str | None = None,
         bump_attempts: bool = False,
         client_order_id: str | None = None,
+        recovery_context: str | None = None,
     ) -> None:
         sets = ["status=?", "updated_at=?", "last_error=?"]
         params: list[Any] = [status, _now_iso(), last_error]
@@ -574,6 +575,9 @@ class CommandRepo:
         if client_order_id is not None:
             sets.append("client_order_id=?")
             params.append(client_order_id)
+        if recovery_context is not None:
+            sets.append("recovery_context=?")
+            params.append(recovery_context)
         params.append(command_key)
         await self.db.execute_write(
             f"UPDATE execution_commands SET {', '.join(sets)} WHERE command_key=?", tuple(params)
@@ -596,8 +600,40 @@ class CommandRepo:
             "SELECT * FROM execution_commands WHERE command_key=?", (command_key,)
         )
 
-    async def in_flight(self) -> list[Row]:
+    async def by_client_order_id(self, account_id: str, client_order_id: str) -> Row | None:
+        """Newest command that owns one exchange client order id, if any."""
+        if not account_id or not client_order_id:
+            raise ValueError("command lookup requires an account and order id")
+        return await self.db.fetchone(
+            "SELECT * FROM execution_commands WHERE account_id=? AND client_order_id=? "
+            "ORDER BY created_at DESC, command_key LIMIT 1",
+            (account_id, client_order_id),
+        )
+
+    async def in_flight_for(self, account_id: str, *, limit: int = 20) -> list[Row]:
+        """Unsettled commands of one account for the pending-operations block."""
+        if not account_id:
+            raise ValueError("pending operations require an account")
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("pending operations page must be bounded")
+        return await self.db.fetchall(
+            "SELECT command_key, kind, status, payload, created_at, updated_at"
+            " FROM execution_commands WHERE account_id=?"
+            " AND status IN ('PENDING','SENDING','SUBMITTED','UNKNOWN')"
+            " ORDER BY created_at, command_key LIMIT ?",
+            (account_id, limit),
+        )
+
+    async def in_flight(self, account_id: str | None = None) -> list[Row]:
         """Commands whose exchange outcome is not settled: UNKNOWN/SENDING/SUBMITTED."""
+        if account_id is not None:
+            if not account_id:
+                raise ValueError("in-flight lookup requires an account")
+            return await self.db.fetchall(
+                "SELECT * FROM execution_commands WHERE account_id=?"
+                " AND status IN ('UNKNOWN','SENDING','SUBMITTED') ORDER BY created_at",
+                (account_id,),
+            )
         return await self.db.fetchall(
             "SELECT * FROM execution_commands"
             " WHERE status IN ('UNKNOWN','SENDING','SUBMITTED') ORDER BY created_at"
@@ -951,13 +987,49 @@ class TelegramUserRepo:
             return rowcount == 1
 
     async def set_notifications_enabled(self, telegram_user_id: int, enabled: bool) -> bool:
-        blocked_at = None if enabled else _now_iso()
-        rowcount, _ = await self.db.execute_write(
-            "UPDATE telegram_users SET notifications_enabled=?, updated_at=?, "
-            "blocked_at=? WHERE telegram_user_id=?",
-            (int(enabled), _now_iso(), blocked_at, int(telegram_user_id)),
-        )
-        return rowcount == 1
+        now = _now_iso()
+        now_ms = int(time.time() * 1000)
+        async with self.db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT account_id, notifications_enabled FROM telegram_users "
+                "WHERE telegram_user_id=?",
+                (int(telegram_user_id),),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                return False
+            if bool(row["notifications_enabled"]) != enabled:
+                # Cut the published history at the same commit as the toggle.
+                # A sweep admitted before this boundary cannot replay muted rows.
+                await _conn_execute(
+                    conn,
+                    "INSERT INTO user_event_delivery_state "
+                    "(account_id,environment,scanned_seq,updated_at) "
+                    "SELECT account_id,environment,MAX(seq),? FROM user_activity_events "
+                    "WHERE account_id=? AND EXISTS (SELECT 1 FROM app_state "
+                    "WHERE key='user_event_delivery_rollout_floor') "
+                    "GROUP BY account_id,environment "
+                    "ON CONFLICT(account_id,environment) DO UPDATE SET "
+                    "scanned_seq=MAX(user_event_delivery_state.scanned_seq,excluded.scanned_seq),"
+                    "updated_at=excluded.updated_at",
+                    (now_ms, row["account_id"]),
+                )
+                if not enabled:
+                    await _conn_execute(
+                        conn,
+                        "UPDATE notification_outbox SET status='FAILED', "
+                        "last_error='recipient_disabled',updated_at=? "
+                        "WHERE telegram_user_id=? AND status='PENDING'",
+                        (now, int(telegram_user_id)),
+                    )
+            rowcount, _ = await _conn_execute(
+                conn,
+                "UPDATE telegram_users SET notifications_enabled=?, updated_at=?, "
+                "blocked_at=? WHERE telegram_user_id=?",
+                (int(enabled), now, None if enabled else now, int(telegram_user_id)),
+            )
+            return rowcount == 1
 
     async def set_access_enabled(self, telegram_user_id: int, enabled: bool) -> bool:
         """Grant or revoke Bot UI access without changing trading or notifications."""
@@ -1269,6 +1341,8 @@ class NotificationOutboxRepo:
             _as_iso(event.get("created_at")),
             _as_iso(event.get("updated_at")),
             None if event.get("sent_at") is None else _as_iso(event["sent_at"]),
+            None if event.get("trade_ref") is None else str(event["trade_ref"]),
+            None if event.get("action") is None else str(event["action"]),
         )
 
     async def enqueue(
@@ -1281,6 +1355,8 @@ class NotificationOutboxRepo:
         text: str,
         account_id: str | None = None,
         available_at: datetime | str | None = None,
+        trade_ref: str | None = None,
+        action: str | None = None,
     ) -> int:
         event = {
             "event_key": event_key,
@@ -1291,6 +1367,8 @@ class NotificationOutboxRepo:
             "severity": severity,
             "text": text,
             "available_at": available_at,
+            "trade_ref": trade_ref,
+            "action": action,
         }
         values = self._event_values(event)
         async with self.db.transaction() as conn:
@@ -1298,8 +1376,8 @@ class NotificationOutboxRepo:
                 conn,
                 "INSERT INTO notification_outbox(event_key, telegram_user_id, chat_id, account_id, "
                 "kind, severity, text, status, attempts, available_at, lease_until, claimed_by, "
-                "last_error, created_at, updated_at, sent_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "last_error, created_at, updated_at, sent_at, trade_ref, action) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(event_key, telegram_user_id) DO NOTHING",
                 values,
             )
@@ -1326,8 +1404,8 @@ class NotificationOutboxRepo:
                     "account_id, "
                     "kind, severity, text, status, attempts, available_at, lease_until, "
                     "claimed_by, "
-                    "last_error, created_at, updated_at, sent_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "last_error, created_at, updated_at, sent_at, trade_ref, action) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(event_key, telegram_user_id) DO NOTHING",
                     values,
                 )
@@ -1391,6 +1469,39 @@ class NotificationOutboxRepo:
                 "claimed_by=NULL, available_at=?, updated_at=? "
                 "WHERE status='SENDING' AND lease_until IS NOT NULL AND lease_until<=?",
                 (now_iso, now_iso, now_iso),
+            )
+            return rowcount
+
+    async def prune_terminal(
+        self,
+        *,
+        before: datetime | str,
+        statuses: tuple[str, ...] = ("SENT", "FAILED"),
+        limit: int = 1000,
+    ) -> int:
+        """Delete terminal outbox rows older than ``before``, bounded.
+
+        Retention rule (S1.6 decision): terminal delivery rows are
+        operational ballast, not user history — the facts live in
+        ``user_activity_events`` forever, the outbox only proves delivery.
+        PENDING/SENDING rows are never pruned here. ``before`` is required
+        so no call can silently wipe recent deliveries.
+        """
+        clean = tuple(s for s in statuses if s in ("SENT", "FAILED"))
+        if not clean:
+            raise ValueError("prune statuses must be SENT and/or FAILED")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("prune limit must be a positive integer")
+        before_iso = _as_iso(before)
+        placeholders = ",".join("?" * len(clean))
+        async with self.db.transaction() as conn:
+            rowcount, _ = await _conn_execute(
+                conn,
+                "DELETE FROM notification_outbox WHERE id IN ("
+                "SELECT id FROM notification_outbox "
+                f"WHERE status IN ({placeholders}) AND updated_at<? "
+                "ORDER BY id LIMIT ?) ",
+                (*clean, before_iso, limit),
             )
             return rowcount
 

@@ -47,7 +47,7 @@ Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` �
    - Uncommitted credentials in memory isolated via `EphemeralIdentityProvider` / `EphemeralKeyProvider`.
 4. **Concurrency & Storage**:
    - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, MiniApp.
-   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **34 migrations (indices 0..33)**.
+   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **60 migrations (indices 0..59)**.
    - Per-account `asyncio.Lock` serializes order/nonce/leverage pipelines; `FollowerRegistry` is copy-on-write (lock-free reads, CAS publish under mutation lock).
 
 ---
@@ -64,13 +64,14 @@ copytradeaster/
 │   ├── master/                # MasterProjector: WS -> normalized state deltas & copy_trades
 │   ├── risk/                  # RiskEngine: pure sizing math, 80% margin cap (MARGIN_SAFETY=0.8)
 │   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution
-│   ├── storage/               # SQLite Database, MIGRATIONS (0..33), async repositories
+│   ├── history/               # Durable fill import, trade episodes/events, reconciliation and replay
+│   ├── storage/               # SQLite Database, MIGRATIONS (0..59), async repositories
 │   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
 │   ├── notifications/         # NotificationRouter, SQLite outbox, TelegramOutboxWorker
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services
 │   ├── application/           # UserApplicationService, Stage2Process (engine.py), control.py
 │   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, FSM flows
-│   ├── miniapp/               # aiohttp server (HMAC initData auth, 21 POST /miniapp/api/*, static host)
+│   ├── miniapp/               # aiohttp server (HMAC initData auth, 26 POST /miniapp/api/*, static host)
 │   └── cli/                   # main.py CLI dispatcher (11 subcommands)
 ├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest); map: miniapp/AGENTS.md
 │   ├── src/screens/           # Home, Positions (PositionCard), Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard/Recovery, SessionGate, SuccessScreen, InfoScreens (Security/Help)
@@ -195,7 +196,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 |`src/copytradeaster/application/control.py`|Transport-neutral emergency flatten with flat-proof reports|
 |`src/copytradeaster/notifications/router.py`|Structured fan-out into console + SQLite outbox|
 |`src/copytradeaster/notifications/worker.py`|Bounded leased outbox delivery with retry/backoff|
-|`src/copytradeaster/miniapp/server.py`|aiohttp server hosting Mini App API (21 POST `/miniapp/api/*`) & static assets|
+|`src/copytradeaster/miniapp/server.py`|aiohttp server hosting Mini App API (26 POST `/miniapp/api/*`) & static assets|
 |`src/copytradeaster/cli/main.py`|CLI entry point and subcommands|
 |`miniapp/src/App.tsx`|Mini App routing, session gating, 4-tab AppShell, and runtime recovery|
 |`scripts/dev-up.sh`|One-command dev orchestrator: builds bundle, manages tunnel, runs bot|

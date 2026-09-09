@@ -11,15 +11,18 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 import httpx
+from pydantic import ValidationError
 
 from copytradeaster.aster.models import (
     AgentDTO,
     BalanceDTO,
     BuilderDTO,
     ExchangeInfo,
+    IncomeDTO,
     LeverageBracketResponse,
     OrderDTO,
     PositionDTO,
+    UserTradeDTO,
 )
 from copytradeaster.aster.ports import IdentityProvider, KeyProvider, NonceSource
 from copytradeaster.aster.rate_limits import RateLimits
@@ -477,6 +480,69 @@ class AsterClient:
             raise
         return OrderDTO.model_validate(body)
 
+    async def user_trades(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        from_id: int | None = None,
+        limit: int = 1000,
+    ) -> list[UserTradeDTO]:
+        """One page only. A full page never proves complete history."""
+        params = _history_params(start_time, end_time, limit)
+        if not symbol:
+            raise ValueError("history symbol required")
+        params["symbol"] = symbol
+        if from_id is not None:
+            if start_time is not None or end_time is not None:
+                raise ValueError("fromId cannot be combined with time bounds")
+            if type(from_id) is not int or from_id < 0:
+                raise ValueError("invalid fromId")
+            params["fromId"] = str(from_id)
+        body = await self._signed(account_id, "GET", "/fapi/v3/userTrades", params, weight=5)
+        try:
+            if not isinstance(body, list):
+                raise ValueError("expected list")
+            rows = [UserTradeDTO.model_validate(row) for row in body]
+            if any(row.symbol != symbol for row in rows):
+                raise ValueError("symbol mismatch")
+            return rows
+        except (ValidationError, ValueError):
+            raise AsterError(-1000, "invalid user trades response") from None
+
+    async def income_history(
+        self,
+        account_id: str,
+        *,
+        start_time: int,
+        end_time: int,
+        symbol: str | None = None,
+        income_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[IncomeDTO]:
+        """Bounded inclusive window; saturated windows require subdivision."""
+        params = _history_params(start_time, end_time, limit)
+        if symbol is not None:
+            params["symbol"] = symbol
+        if income_type is not None:
+            params["incomeType"] = income_type
+        body = await self._signed(account_id, "GET", "/fapi/v3/income", params, weight=30)
+        try:
+            if not isinstance(body, list):
+                raise ValueError("expected list")
+            rows = [IncomeDTO.model_validate(row) for row in body]
+            if any(
+                (symbol is not None and row.symbol != symbol)
+                or (income_type is not None and row.income_type != income_type)
+                for row in rows
+            ):
+                raise ValueError("history filter mismatch")
+            return rows
+        except (ValidationError, ValueError):
+            raise AsterError(-1000, "invalid income history response") from None
+
     # --- trading writes ----------------------------------------------------------
 
     async def place_order(self, account_id: str, req: PlaceOrderRequest) -> OrderDTO:
@@ -597,6 +663,20 @@ class AsterClient:
 
     async def close_listen_key(self, account_id: str) -> None:
         await self._signed(account_id, "DELETE", "/fapi/v3/listenKey", {}, weight=1)
+
+
+def _history_params(start: int | None, end: int | None, limit: int) -> dict[str, str]:
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError("history limit must be between 1 and 1000")
+    params = {"limit": str(limit)}
+    for name, value in (("startTime", start), ("endTime", end)):
+        if value is not None:
+            if type(value) is not int or value < 0:
+                raise ValueError("invalid history time")
+            params[name] = str(value)
+    if start is not None and end is not None and not 0 <= end - start <= 7 * 86400000:
+        raise ValueError("history window must be ordered and at most seven days")
+    return params
 
 
 def _safe_json(resp: httpx.Response) -> dict | list:

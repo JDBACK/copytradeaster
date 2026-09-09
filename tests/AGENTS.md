@@ -15,7 +15,7 @@ pytest -q -m "not testnet"                              # offline (unit + integr
 pytest -q -m "not testnet" --cov=src/copytradeaster     # + coverage (>= 87% by eye, no fail_under)
 CT_TESTNET=1 pytest tests/testnet/ -v                   # signed live (needs wallet.txt, leave flat behind)
 CT_LOAD=1 pytest tests/integration/test_shadow_scale.py # scale preflight 30x100 + 100x20 (load marker unused)
-cd miniapp && pnpm test                                 # frontend Vitest
+cd miniapp && pnpm test                                 # frontend Vitest; counters live in docs/ENGINE_TEST_STATUS_2026-08.md
 ```
 
 ## unit/trading + risk + domain + master — trading core
@@ -57,12 +57,38 @@ cd miniapp && pnpm test                                 # frontend Vitest
 | `storage/test_storage.py` | Repository roundtrips: accounts, policies, events, trades, commands, nonces, builder attempts |
 | `storage/test_wp1.py` | Migrations, casefold owners, policies, access requests, outbox lease/retry |
 | `storage/test_account_builder_identity.py` | Builder-snapshot primitives: set/clear/invalidation (P2.6) |
+| `storage/test_episode_allocations.py` | Allocation index (C2): HEDGE/flip shares sum to source, rebuild from payloads |
+| `storage/test_database_upgrade.py` | Fresh/ghost-v33/S1 upgrade convergence incl. C1–C3 tables |
+
+## unit/history — projection, capture, events (S1 remediation C1–C5)
+
+| File | What it pins |
+|---|---|
+| `history/test_capture.py` | Serial boundary capture: bracket proof, live-edge cutoff, partial (not refused), no-op republish |
+| `history/test_replay.py` | Stable identity (R2/C1): rolling windows keep one ref, late-fill origin rollback, alias/split corrections, silent rebuild |
+| `history/test_projector.py` | Pure quantity projection: seeds, flips, HEDGE legs, complete/partial quality |
+| `history/test_event_builder.py` | One event per semantic allocation; batch == sequential publication (R3/C3) |
+| `history/test_transition_events.py` | Publish-level transition events incl. legacy upgrade + silent correction (C3) |
+| `history/test_episode_events.py` | Atomic episode+event publication, first-wins dedup |
+| `history/test_episodes.py` | Episode repo: refs, revisions, no-op republish on covered ranges |
+| `history/test_protection.py` | Protection fold: leg-keyed SET/CHANGED/UNCONFIRMED, provenance (R4/C4) |
+| `history/test_protection_legs.py` | LONG/SHORT STOP independence, replace-then-cancel per leg, unknown-leg silence (C4) |
+| `history/test_storage.py` | Fill/coverage/commit semantics, ImportDelta, protection baseline queries |
+| `history/test_worker.py` | Split dirty sets, fills→capture chaining, stats, no-op fall-through |
+| `history/test_accounting.py` + `test_accounting_c5.py` | Pro-rata costs, (symbol,trade_id) keys, proof-driven net with named gaps (R5/C5) |
 
 ## unit/application + onboarding — use cases and entry gates
 
 | File | What it pins |
 |---|---|
 | `application/test_service.py` | Full `UserApplicationService` shell: auth, dashboard/status/risk/positions/activity, connect/replace, pause/resume/confirm/emergency, admin |
+| `application/test_history_contracts.py` | S1.4 read contracts: trades/detail/events/feed DTOs, ownership, cursors |
+| `application/test_history_acceptance.py` | S1.6 offline cross-surface: one ref, four surfaces, transition kinds (C3 semantics) |
+| `application/test_risk_preview_resume.py` | Risk preview steps + resume context incl. disabled/whitelist advisory |
+| `application/test_trade_views.py` | Shared presenters: neutral close, executed_qty None, money sections (C5) |
+| `application/test_trade_events_c2.py` | Allocation-bound fills, split cursors, history_page_changed (R1/C2) |
+| `application/test_trade_money_c5.py` | Proof-driven net/gaps over HTTP-equivalent service calls (R5/C5) |
+| `application/test_system_events_c4.py` | ENTRY_SKIPPED dedup, connectivity transitions, writer-failure tolerance (R4/C4) |
 | `application/test_status.py` | Read-only status: fresh/stale/blocked, snapshot lifecycle, blocked→degraded→stale→ready precedence |
 | `application/test_account_builder.py` | `AccountBuilderDTO` verdicts (verified/expiring/stale/blocked/NA), proof lifecycle, trust rail, reauthorize/pause ordering |
 | `application/test_adapters.py` | Stage2 runtime/store seams: snapshot cache, pause/reconcile admission, resume safety, recovery, replace atomicity, leverage-gated resume, emergency |
@@ -87,8 +113,12 @@ cd miniapp && pnpm test                                 # frontend Vitest
 | `miniapp/test_status_server.py` | Status route: auth gate, strict boolean-only body, exact safe DTO shape, secret-safe error mapping |
 | `miniapp/test_account_builder_server.py` | Account-builder + reauthorize: auth/forgery rejection, strict bodies, DTO denylist, prepare ignores client fields |
 | `miniapp/test_risk_server.py` | Risk route: backend-owned read (no leverage/deviation), string-only `risk_percent`, forged/malformed rejection, `ValidationError`→400 |
+| `miniapp/test_history_server.py` | History routes: cursor/limit validation, owned trade/events/feed shapes |
+| `miniapp/test_trade_events_c2_server.py` | Split fills/events cursors over HTTP, revision-change signal (C2) |
+| `miniapp/test_activity_feed_snapshot_c7.py` | Snapshot-bound feed: pin high_water, no interleave, banner, 400s (R9/C7) |
 | `notifications/test_formatter.py` | Pure formatter: open/close/stop/TP/leverage/cancel copy + price/volume formatting, skip reasons |
-| `notifications/test_notifications.py` | Router+worker on tmp SQLite: account/global/critical-admin routing, dedup, retry-after/network/403, truncation, pacing, lease recovery, burst bound |
+| `notifications/test_notifications.py` | Router+worker on tmp SQLite: account/global/critical-admin routing, dedup, retry-after/network/403, truncation, pacing, lease recovery, burst bound, hourly maintenance tick (C8) |
+| `notifications/test_user_event_delivery_c6.py` | Durable delivery cursor: crash replay, rollout floor, link gate (R6/R7/C6) |
 | `cli/test_cli_commands.py` | Light CLI on tmp DB: init-db/status/pause, close-plan math, idempotent import, telegram-user add/list/block/unblock |
 | `cli/test_run_bot.py` | `run-bot` wiring: parser + `_dispatch` via `build_stage2_process` |
 | `cli/test_cli_heavy_commands.py` | Heavy CLI over `respx`: reconcile reports, double-verified emergency flat, approve-builder success vs missing-main-key skip |
@@ -161,6 +191,7 @@ Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): l
 | `test_live_notifications_acceptance.py` | P2.3 notifications: toggle gate + real SENT delivery via Bot API on a DB copy |
 | `test_live_account_builder_acceptance.py` | P2.6 attestation (copyc1/copyc2) + disconnect + fresh onboarding |
 | `test_live_builder_reauthorize.py` | Same-signer reauth: 5d EXPIRING → re-auth → 30d VERIFIED, no orders |
+| `test_history_acceptance_live.py` | §10.9 history acceptance (copyc2/BTCUSDT): executor/journal lifecycle, distant STOP place+cancel, post-send-timeout query-before-retry, REAL file restart, authenticated HTTP on all surfaces. Requires an EXCLUSIVE window: skips unless flat, no open orders, and no fills in the last 5 minutes |
 | `support/builder_live.py` | Shared helpers: wallet.txt parsing, testnet guard, signed reads, state snapshot, flatten |
 
 ## Conventions

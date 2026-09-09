@@ -23,6 +23,7 @@ interface TelegramWebApp {
   HapticFeedback?: {
     impactOccurred(style: 'light' | 'medium' | 'heavy'): void
     notificationOccurred(type: 'error' | 'success' | 'warning'): void
+    selectionChanged(): void
   }
 }
 
@@ -62,6 +63,16 @@ export function setupTelegram(): void {
 export function hapticImpact(style: 'light' | 'medium' | 'heavy' = 'light'): void {
   try {
     webApp()?.HapticFeedback?.impactOccurred(style)
+  } catch {
+    /* haptics are best-effort */
+  }
+}
+
+/** Soft step-crossing feedback for continuous pickers (risk ruler).
+ *  Selection correctness never depends on haptics: Telegram may skip them. */
+export function hapticSelectionChanged(): void {
+  try {
+    webApp()?.HapticFeedback?.selectionChanged()
   } catch {
     /* haptics are best-effort */
   }
@@ -113,4 +124,15 @@ export function setBackButton(visible: boolean, onClick?: () => void): void {
   } catch {
     /* older clients without BackButton control */
   }
+}
+
+
+/** Navigation intent only; every detail read still requires server ownership. */
+export function launchTradeRef(): string | null {
+  const params = new URLSearchParams(window.location.search)
+  const query = params.get('trade') ?? params.get('trade_ref')
+  const start = new URLSearchParams(initData()).get('start_param')
+  const ref = query ?? start
+  if (ref === null) return null
+  return /^[A-Za-z0-9_-]{1,128}$/.test(ref) ? ref : 'unavailable-link'
 }

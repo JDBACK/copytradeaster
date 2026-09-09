@@ -10,9 +10,11 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
+import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { api, ApiError } from './api'
+import { MiniAppResources } from './resources'
 import * as wallet from './wallet'
 import { isAccountBuilderVerified, isBuilderVerified } from './accountBuilder'
 import { trustSummary } from './home'
@@ -21,7 +23,13 @@ import { SettingsView } from './screens/SettingsScreen'
 import { AccountBuilderScreen } from './screens/AccountBuilderScreen'
 import { TRANSPORT_STALE_WARNING } from './systemStatus'
 import { statusTrust } from './systemStatus'
-import type { AccountBuilderDTO, DashboardDTO, StatusDTO } from './types'
+import type {
+  AccountBuilderDTO,
+  BuilderPrepareDTO,
+  ConfirmationDTO,
+  DashboardDTO,
+  StatusDTO,
+} from './types'
 
 afterEach(() => {
   cleanup()
@@ -119,6 +127,41 @@ describe('AccountBuilderScreen behavior', () => {
     expect(screen.getByText('copytradeaster')).toBeDefined()
   })
 
+  it('cached verified evidence turns amber at the Agent expiry while the screen stays mounted', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = 1_800_000_000_000
+      vi.setSystemTime(now)
+      const resources = new MiniAppResources(AUTH, 'account-expiry')
+      resources.publishConfirmed(
+        'accountBuilder',
+        dto({ agent_expires_at_ms: now + 100 }),
+      )
+      const loader = vi.spyOn(api, 'accountBuilder')
+
+      render(
+        <AccountBuilderScreen
+          auth={AUTH}
+          resources={resources}
+          accountMasked="0xAAAA…BBBB"
+          onNotConnected={() => {}}
+        />,
+      )
+      expect(screen.getByText('Builder подтверждён')).toBeDefined()
+      expect(loader).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(101)
+      })
+      expect(screen.queryByText('Builder подтверждён')).toBeNull()
+      expect(screen.getByText('Данные устарели')).toBeDefined()
+      expect(screen.getByText(TRANSPORT_STALE_WARNING)).toBeDefined()
+      expect(loader).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('unavailable, blocked and direct states render honestly', async () => {
     const loader = vi.spyOn(api, 'accountBuilder')
     loader.mockResolvedValueOnce(dto({ state: 'unavailable', reason: 'snapshot_missing' }))
@@ -176,10 +219,10 @@ describe('AccountBuilderScreen behavior', () => {
     await screen.findByText('Builder подтверждён')
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
     expect(loader).toHaveBeenCalledTimes(3)
-    expect(loader).toHaveBeenLastCalledWith(AUTH, true)
+    expect(loader).toHaveBeenLastCalledWith(AUTH, true, expect.any(Object))
   })
 
-  it('late post-reauthorization refresh never overwrites a newer refresh', async () => {
+  it('post-reauthorization refresh is fenced and an explicit later refresh can advance it', async () => {
     const expiring = () =>
       dto({
         state: 'expiring',
@@ -221,16 +264,19 @@ describe('AccountBuilderScreen behavior', () => {
     await screen.findByText('Подписать в кошельке')
     fireEvent.click(screen.getByRole('button', { name: 'Подписать в кошельке' }))
 
-    // The post-submit refresh is in flight; a manual refresh issued
-    // meanwhile must win, and the late post-reauth response must be dropped.
+    // The post-submit authoritative refresh owns the mutation barrier. While
+    // it is unresolved the screen keeps the session-level write lock, so a
+    // second explicit check cannot race the post-write proof read.
     const refreshButton = screen.getByRole('button', { name: 'Перепроверить разрешения' })
-    await waitFor(() => expect(refreshButton).toBeEnabled())
-    fireEvent.click(refreshButton)
-    await screen.findByText('proof-new')
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(2))
+    expect(refreshButton).toBeDisabled()
 
     postGate.resolve(expiring())
+    await waitFor(() => expect(refreshButton).toBeEnabled())
+    expect(screen.getByText('proof-old')).toBeDefined()
+
+    fireEvent.click(refreshButton)
     await screen.findByText('proof-new')
-    expect(screen.queryByText('proof-old')).toBeNull()
     expect(loader).toHaveBeenCalledTimes(3)
   })
 
@@ -250,6 +296,340 @@ describe('AccountBuilderScreen behavior', () => {
 
     gate.resolve(dto())
     await screen.findByText('Builder подтверждён')
+  })
+
+  it('owner lock prevents duplicate reauthorize prepare across Back-style remount while pending', async () => {
+    const resources = new MiniAppResources(AUTH, 'reauth-remount')
+    resources.publishConfirmed(
+      'accountBuilder',
+      dto({ state: 'expiring', reason: 'agent_expiring', remediation: 'reauthorize' }),
+    )
+    const prepareGate = deferred<BuilderPrepareDTO>()
+    const prepare = vi.spyOn(api, 'reauthorizePrepare').mockReturnValue(prepareGate.promise)
+    vi.spyOn(wallet, 'createInjectedAdapter').mockReturnValue({
+      kind: 'injected',
+      connect: async () => '0xabc',
+      switchToRegistrationChain: async () => {},
+      signTypedData: async () => '0xsig',
+    })
+
+    const first = render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Переавторизовать' }))
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1))
+    expect(resources.mutationLocked('account-builder')).toBe(true)
+    first.unmount()
+
+    render(<AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />)
+    const reopened = screen.getByRole('button', { name: 'Переавторизовать' })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(prepare).toHaveBeenCalledTimes(1)
+
+    prepareGate.resolve({ pending_id: 'reauth-pending', eip712: { domain: {}, message: {}, types: {} } })
+    await waitFor(() => expect(resources.mutationLocked('account-builder')).toBe(false))
+  })
+
+  it('owner lock prevents duplicate disconnect begin across remount while pending', async () => {
+    const resources = new MiniAppResources(AUTH, 'disconnect-remount')
+    resources.publishConfirmed('accountBuilder', dto())
+    const beginGate = deferred<ConfirmationDTO>()
+    const begin = vi.spyOn(api, 'beginConfirmation').mockReturnValue(beginGate.promise)
+
+    const first = render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Отключить аккаунт' }))
+    await waitFor(() => expect(begin).toHaveBeenCalledTimes(1))
+    expect(resources.mutationLocked('account-builder')).toBe(true)
+    first.unmount()
+
+    render(<AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />)
+    const reopened = screen.getByRole('button', { name: 'Отключить аккаунт' })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(begin).toHaveBeenCalledTimes(1)
+
+    beginGate.resolve({ token: 'tok', action: 'disconnect', account_id: 'tg-7', expires_at: null })
+    await waitFor(() => expect(resources.mutationLocked('account-builder')).toBe(false))
+  })
+
+  it('keeps reauthorize submit locked across remount until an ambiguous timeout is reconciled', async () => {
+    const resources = new MiniAppResources(AUTH, 'reauth-ambiguous')
+    resources.publishConfirmed(
+      'accountBuilder',
+      dto({ state: 'expiring', reason: 'agent_expiring', remediation: 'reauthorize' }),
+    )
+    vi.spyOn(api, 'reauthorizePrepare').mockResolvedValue({
+      pending_id: 'reauth-ambiguous',
+      eip712: { domain: {}, message: {}, types: {} },
+    })
+    const submit = vi
+      .spyOn(api, 'reauthorizeSubmit')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+    const reconcile = deferred<AccountBuilderDTO>()
+    const accountBuilder = vi.spyOn(api, 'accountBuilder').mockReturnValue(reconcile.promise)
+    vi.spyOn(wallet, 'createInjectedAdapter').mockReturnValue({
+      kind: 'injected',
+      connect: async () => '0xabc',
+      switchToRegistrationChain: async () => {},
+      signTypedData: async () => '0xsig',
+    })
+
+    const first = render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Переавторизовать' }))
+    await screen.findByText('Подписать в кошельке')
+    fireEvent.click(screen.getByRole('button', { name: 'Подписать в кошельке' }))
+    await waitFor(() => expect(accountBuilder).toHaveBeenCalledTimes(1))
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(resources.mutationLocked('account-builder')).toBe(true)
+
+    first.unmount()
+    render(<AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />)
+    const reopened = screen.getByRole('button', { name: 'Переавторизовать' })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(submit).toHaveBeenCalledTimes(1)
+
+    reconcile.resolve(dto({ state: 'verified', reason: 'none', remediation: null }))
+    await screen.findByText('Builder подтверждён')
+    await waitFor(() => expect(resources.mutationLocked('account-builder')).toBe(false))
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+
+  it('ambiguous reauthorize submit fences a pre-mutation strong attestation before recovery', async () => {
+    const resources = new MiniAppResources(AUTH, 'reauth-causal-fence')
+    const expiring = dto({
+      state: 'expiring',
+      reason: 'agent_expiring',
+      remediation: 'reauthorize',
+    })
+    resources.publishConfirmed('accountBuilder', expiring)
+    const oldGate = deferred<AccountBuilderDTO>()
+    const currentGate = deferred<AccountBuilderDTO>()
+    const accountBuilder = vi
+      .spyOn(api, 'accountBuilder')
+      .mockReturnValueOnce(oldGate.promise)
+      .mockReturnValueOnce(currentGate.promise)
+    vi.spyOn(api, 'reauthorizePrepare').mockResolvedValue({
+      pending_id: 'reauth-causal-fence',
+      eip712: { domain: {}, message: {}, types: {} },
+    })
+    const submit = vi
+      .spyOn(api, 'reauthorizeSubmit')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+    vi.spyOn(wallet, 'createInjectedAdapter').mockReturnValue({
+      kind: 'injected',
+      connect: async () => '0xabc',
+      switchToRegistrationChain: async () => {},
+      signTypedData: async () => '0xsig',
+    })
+
+    // Owner-held explicit verification started before the reauthorization.
+    // Its eventual non-verified result cannot reconcile the later submit.
+    const oldRead = resources.refresh('accountBuilder', 'strong')
+    render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Переавторизовать' }))
+    await screen.findByText('Подписать в кошельке')
+    fireEvent.click(screen.getByRole('button', { name: 'Подписать в кошельке' }))
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1))
+
+    oldGate.resolve(expiring)
+    await oldRead
+    await waitFor(() => expect(accountBuilder).toHaveBeenCalledTimes(2))
+    expect(resources.mutationState('account-builder')).toBe('active')
+    expect(screen.getByRole('button', { name: /Подтверждаем|Переавторизовать/ })).toBeDisabled()
+
+    currentGate.resolve(dto({ state: 'verified', reason: 'none', remediation: null }))
+    await screen.findByText('Builder подтверждён')
+    await waitFor(() => expect(resources.mutationState('account-builder')).toBeNull())
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps reauthorize fail-closed across remount, then strong attestation recovery admits at most one fresh prepare', async () => {
+    const resources = new MiniAppResources(AUTH, 'reauth-double-unknown')
+    resources.publishConfirmed(
+      'accountBuilder',
+      dto({ state: 'expiring', reason: 'agent_expiring', remediation: 'reauthorize' }),
+    )
+    const prepare = vi.spyOn(api, 'reauthorizePrepare').mockResolvedValue({
+      pending_id: 'reauth-double-unknown',
+      eip712: { domain: {}, message: {}, types: {} },
+    })
+    const submit = vi
+      .spyOn(api, 'reauthorizeSubmit')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+    const accountBuilder = vi
+      .spyOn(api, 'accountBuilder')
+      .mockRejectedValueOnce(new ApiError(0, 'network_error', 'verify lost'))
+      .mockResolvedValueOnce(
+        dto({ state: 'expiring', reason: 'agent_expiring', remediation: 'reauthorize' }),
+      )
+    vi.spyOn(wallet, 'createInjectedAdapter').mockReturnValue({
+      kind: 'injected',
+      connect: async () => '0xabc',
+      switchToRegistrationChain: async () => {},
+      signTypedData: async () => '0xsig',
+    })
+
+    const first = render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Переавторизовать' }))
+    await screen.findByText('Подписать в кошельке')
+    fireEvent.click(screen.getByRole('button', { name: 'Подписать в кошельке' }))
+    await waitFor(() => expect(accountBuilder).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(resources.mutationLocked('account-builder')).toBe(true))
+    expect(submit).toHaveBeenCalledTimes(1)
+
+    first.unmount()
+    render(<AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />)
+    const reopened = screen.getByRole('button', { name: 'Переавторизовать' })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(resources.mutationLocked('account-builder')).toBe(true)
+    expect(resources.mutationState('account-builder')).toBe('unknown')
+
+    const check = screen.getByRole('button', { name: 'Перепроверить разрешения' })
+    expect(check).toBeEnabled()
+    fireEvent.click(check)
+    await waitFor(() => expect(resources.mutationState('account-builder')).toBeNull())
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect(accountBuilder).toHaveBeenCalledTimes(2)
+
+    const retry = screen.getByRole('button', { name: 'Переавторизовать' })
+    fireEvent.click(retry)
+    fireEvent.click(retry)
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2))
+    expect(prepare).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers an unknown disconnect after remount from session truth and routes committed disconnect once', async () => {
+    const resources = new MiniAppResources(AUTH, 'disconnect-double-unknown')
+    resources.publishConfirmed('accountBuilder', dto())
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'disconnect-double-unknown',
+      action: 'disconnect',
+      account_id: 'tg-7',
+      expires_at: null,
+    })
+    const confirm = vi
+      .spyOn(api, 'confirmConfirmation')
+      .mockRejectedValue(new ApiError(0, 'timeout_error', 'response lost'))
+    const session = vi
+      .spyOn(api, 'session')
+      .mockRejectedValueOnce(new ApiError(0, 'network_error', 'verify lost'))
+      .mockResolvedValueOnce({
+        user_id: 7,
+        access_state: 'approved',
+        environment: 'testnet',
+        connection_state: 'empty',
+        account_connected: false,
+      })
+    const onNotConnected = vi.fn()
+
+    const first = render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={onNotConnected} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Отключить аккаунт' }))
+    await screen.findByText('Отключить аккаунт?')
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить отключение' }))
+    await waitFor(() => expect(resources.mutationState('account-builder')).toBe('unknown'))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(session).toHaveBeenCalledTimes(1)
+
+    first.unmount()
+    render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={onNotConnected} />,
+    )
+    expect(screen.getByRole('button', { name: 'Отключить аккаунт' })).toBeDisabled()
+
+    // Explicit authoritative recovery reads session state, does not replay the
+    // destructive confirm, and routes the already-committed disconnect once.
+    fireEvent.click(screen.getByRole('button', { name: 'Перепроверить разрешения' }))
+    await waitFor(() => expect(onNotConnected).toHaveBeenCalledTimes(1))
+    expect(session).toHaveBeenCalledTimes(2)
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(resources.mutationState('account-builder')).toBeNull()
+  })
+
+  it('keeps disconnect confirm locked until ambiguous transport is reconciled from session state', async () => {
+    const resources = new MiniAppResources(AUTH, 'disconnect-ambiguous')
+    resources.publishConfirmed('accountBuilder', dto())
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'disconnect-ambiguous',
+      action: 'disconnect',
+      account_id: 'tg-7',
+      expires_at: null,
+    })
+    const confirm = vi
+      .spyOn(api, 'confirmConfirmation')
+      .mockRejectedValue(new ApiError(0, 'network_error', 'response lost'))
+    const session = deferred<{
+      user_id: number
+      access_state: 'approved'
+      environment: string
+      connection_state: 'empty'
+      account_connected: boolean
+    }>()
+    vi.spyOn(api, 'session').mockReturnValue(session.promise)
+    const onNotConnected = vi.fn()
+
+    const first = render(
+      <AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={onNotConnected} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Отключить аккаунт' }))
+    await screen.findByText('Отключить аккаунт?')
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить отключение' }))
+    await waitFor(() => expect(resources.mutationLocked('account-builder')).toBe(true))
+    expect(confirm).toHaveBeenCalledTimes(1)
+
+    first.unmount()
+    render(<AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={onNotConnected} />)
+    const reopened = screen.getByRole('button', { name: 'Отключить аккаунт' })
+    expect(reopened).toBeDisabled()
+    fireEvent.click(reopened)
+    expect(confirm).toHaveBeenCalledTimes(1)
+
+    session.resolve({
+      user_id: 7,
+      access_state: 'approved',
+      environment: 'testnet',
+      connection_state: 'empty',
+      account_connected: false,
+    })
+    await waitFor(() => expect(onNotConnected).toHaveBeenCalledTimes(1))
+    expect(confirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('direct disconnect-confirm 401 hard-disposes the shared scope exactly once', async () => {
+    const invalidSession = vi.fn()
+    const resources = new MiniAppResources(AUTH, 'disconnect-401', invalidSession)
+    resources.publishConfirmed('accountBuilder', dto())
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'disconnect-401',
+      action: 'disconnect',
+      account_id: 'tg-7',
+      expires_at: null,
+    })
+    const confirm = vi
+      .spyOn(api, 'confirmConfirmation')
+      .mockRejectedValue(new ApiError(401, 'invalid_session', 'expired'))
+
+    render(<AccountBuilderScreen auth={AUTH} resources={resources} onNotConnected={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Отключить аккаунт' }))
+    await screen.findByText('Отключить аккаунт?')
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить отключение' }))
+
+    await waitFor(() => expect(invalidSession).toHaveBeenCalledTimes(1))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(resources.getSnapshot('accountBuilder').data).toBeNull()
   })
 
   it('destructive disconnect requires confirmation and returns to onboarding', async () => {
@@ -295,7 +675,7 @@ describe('AccountBuilderScreen behavior', () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole('button', { name: /Аккаунт и Builder/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Подключение Aster/ }))
     expect(onOpen).toHaveBeenCalledWith({ kind: 'account-builder' })
   })
 

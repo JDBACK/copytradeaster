@@ -54,7 +54,7 @@ async def test_stage1_database_gets_only_append_only_wp1_migrations(tmp_path: Pa
         stage1_migration_count = next(
             version
             for version, statement in enumerate(MIGRATIONS)
-            if "CREATE TABLE telegram_users" in statement
+            if "TABLE telegram_users" in statement
         )
         assert stage1_migration_count > 0
         assert database.conn is not None

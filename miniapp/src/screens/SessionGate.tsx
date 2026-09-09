@@ -103,11 +103,12 @@ export function SessionGate({
   return (
     <div className="screen">
       <Brand right={<span className="badge-testnet">Aster testnet</span>} />
+      {pending && <button type="button" className="btn btn-secondary" onClick={onRetry}>Проверить статус заявки</button>}
       <h1 className="h1">{pending ? 'Заявка на проверке' : 'Доступ отклонён'}</h1>
       <p className="lede">
         {pending
           ? 'Заявка на доступ уже у администратора. Отправлять повторно не нужно — вернитесь в мини-ап после одобрения.'
-          : 'Заявка на доступ отклонена администратором. Причина — в чате с ботом.'}
+          : 'Заявка на доступ отклонена администратором.'}
       </p>
       <div className="info-box">
         Управление подключением и заявками доступно в боте.

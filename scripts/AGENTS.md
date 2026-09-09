@@ -6,6 +6,7 @@ DB does not isolate exchange accounts: `dev-up.sh` starts the configured bot,
 and `preview_miniapp_engine.py` boots a real testnet engine using copied
 credentials. `verify_menu_button.py` uses Telegram's API; `--fix` writes remote
 configuration. `check_doc_links.py` is an offline repository check.
+`benchmark_history.py` is an offline synthetic probe using temporary SQLite.
 Use existing task authorization for live operations; a docs/UI edit alone
 does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 
@@ -36,6 +37,7 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 | Script | Purpose | Run |
 |---|---|---|
 | `check_doc_links.py` | Verifies every relative `.md` link in root/test/scripts/miniapp `AGENTS.md`, `PRODUCT.md`, `README.md`, `docs/**/*.md` resolves to an existing file (`--strict` also checks `#fragment` anchors). Run before docs commits per `docs/AGENTS.md` conventions | `python scripts/check_doc_links.py [--strict]` |
+| `benchmark_history.py` | Offline synthetic capacity/commit probe over a temporary SQLite database; no Settings, credentials or network | `PYTHONPATH=src .venv/bin/python scripts/benchmark_history.py` |
 
 ## Conventions
 

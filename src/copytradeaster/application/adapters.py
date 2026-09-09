@@ -20,7 +20,6 @@ from copytradeaster.app import App
 from copytradeaster.application.control import EmergencyController, EmergencyReport
 from copytradeaster.application.models import ServiceUnavailableError
 from copytradeaster.application.service import (
-    ActivityKindFilter,
     OnboardingPort,
     Stage2AccountLifecycle,
     Stage2RuntimeAdapter,
@@ -739,26 +738,29 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         self._snapshot_cache[account_id] = (snapshot, captured_at)
         return (snapshot, captured_at)
 
-    async def read_activity(
-        self,
-        account_id: str,
-        limit: int,
-        offset: int,
-        kind_filter: ActivityKindFilter | None = None,
-    ) -> list[Any]:
-        if limit <= 0 or offset < 0:
-            raise ValueError("activity bounds are invalid")
-        # The category predicate belongs in the WHERE clause: applying it after
-        # LIMIT/OFFSET would truncate the general journal first and hide every
-        # matching row beyond that window.
-        clause, params = kind_filter.clause() if kind_filter is not None else ("", ())
-        return await self.db.fetchall(
-            "SELECT command_key, kind, status, payload, created_at, updated_at "
-            "FROM execution_commands WHERE account_id=?"
-            f"{clause} "
-            "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
-            (account_id, *params, int(limit), int(offset)),
-        )
+    async def symbol_assets(self, account_id: str, symbols: list[str]) -> dict[str, str | None]:
+        """Base-asset units from cached exchange metadata.
+
+        Display-only evidence: an unreadable instrument stays None instead
+        of failing the whole list. The client caches its own exchange info
+        with a TTL; per-call cost is one dict scan.
+        """
+        unique = list(dict.fromkeys(symbols))
+        if not unique:
+            return {}
+        runtime = self.app.follower_registry.get(account_id)
+        if runtime is None:
+            return dict.fromkeys(unique)
+        try:
+            info = await runtime.client.exchange_info()
+        except Exception:  # noqa: BLE001 - units degrade to null, never 503
+            return dict.fromkeys(unique)
+        assets = {
+            item.symbol: item.baseAsset
+            for item in info.symbols
+            if item.status == "TRADING" and item.contractType == "PERPETUAL"
+        }
+        return {symbol: assets.get(symbol) for symbol in unique}
 
     async def pause_account(self, account_id: str) -> None:
         await self.app.coordinator.close_generation_admission()
@@ -991,6 +993,19 @@ def build_stage2_composition(
         builder_onboarding=builder_onboarding,
         emergency_controller=emergency,
     )
+
+    async def _feed_entry_skip(
+        account_id: str, symbol: str, reason: str, attempt_id: str, pos_side: str
+    ) -> None:
+        await application._record_entry_skipped(
+            account_id,
+            symbol=symbol,
+            reason=reason,
+            attempt_id=attempt_id,
+            pos_side=pos_side,
+        )
+
+    app.coordinator.set_entry_skipped_hook(_feed_entry_skip)
     return Stage2Composition(
         runtime, onboarding, builder_onboarding, emergency_state, emergency, application
     )

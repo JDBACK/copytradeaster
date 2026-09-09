@@ -102,6 +102,10 @@ async def main(account_id: str, port: int) -> None:
             (owner["telegram_user_id"],),
         )
     await db.execute("DELETE FROM telegram_users WHERE account_id=?", (account_id,))
+    # A previous preview run may have left the dev user bound to another account
+    # in the source snapshot. The preview copy is disposable: rebind cleanly.
+    await db.execute("DELETE FROM notification_outbox WHERE telegram_user_id=?", (PREVIEW_USER_ID,))
+    await db.execute("DELETE FROM telegram_users WHERE telegram_user_id=?", (PREVIEW_USER_ID,))
     await TelegramUserRepo(db).upsert(
         PREVIEW_USER_ID, PREVIEW_USER_ID, role="USER", account_id=account_id
     )

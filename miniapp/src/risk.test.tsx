@@ -6,7 +6,8 @@
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { NestedRoute } from './components/AppShell'
-import { RiskScreen, RiskRuler } from './screens/RiskScreen'
+import { RiskRuler } from './components/RiskRuler'
+import { RiskScreen } from './screens/RiskScreen'
 import {
   RISK_DEMO_BALANCE_USDT,
   demoLossUsdt,

@@ -199,18 +199,18 @@ export function BuilderWizard({ auth, onConnected }: Props) {
             <Row
               label={
                 <>
-                  <Check ok={prepare.can_perp_trade ?? true} /> Perps-торговля
+                  <Check ok={prepare.can_perp_trade === true} /> Торговля фьючерсами
                 </>
               }
-            value={prepare.can_perp_trade ? 'Включена' : 'Выключена'}
+            value={prepare.can_perp_trade == null ? 'Не удалось проверить' : prepare.can_perp_trade ? 'Включена' : 'Выключена'}
             />
             <Row
               label={
                 <>
-                  <Check ok={!prepare.can_withdraw} /> Вывод средств
+                  <Check ok={prepare.can_withdraw === false} /> Вывод средств
                 </>
               }
-            value={prepare.can_withdraw ? 'Включён' : 'Запрещён'}
+            value={prepare.can_withdraw == null ? 'Не удалось проверить' : prepare.can_withdraw ? 'Включён' : 'Запрещён'}
             valueClass={prepare.can_withdraw ? 'tone-danger' : undefined}
             />
             <Row label="Кошелёк" value={prepare.user_masked ?? '—'} />
@@ -221,13 +221,13 @@ export function BuilderWizard({ auth, onConnected }: Props) {
             <div className="h2">Builder и комиссия</div>
             <Row label="Builder" value={prepare.builder_name || 'copytradeaster'} />
             <Row label="Адрес Builder" value={prepare.builder_masked ?? '—'} />
-            <Row label="Комиссия Builder" value={formatFeeRate(prepare.max_fee_rate ?? '0.0001')} />
+            <Row label="Комиссия Builder" value={prepare.max_fee_rate ? formatFeeRate(prepare.max_fee_rate) : 'Условия не получены'} />
             <Row label="Действует до" value={formatDateFromMs(prepare.agent_expires_at_ms ?? 0)} />
           </section>
 
           {state.step === 'review' && (
             <div className="btn-stack">
-              <button type="button" className="btn btn-primary" disabled={state.busy} onClick={sign}>
+              <button type="button" className="btn btn-primary" disabled={state.busy || !prepare.max_fee_rate || prepare.can_perp_trade !== true || prepare.can_withdraw !== false} onClick={sign}>
                 {busyMessage ?? 'Подписать авторизацию'}
               </button>
               <p className="lede" style={{ textAlign: 'center' }}>
@@ -280,7 +280,7 @@ function WalletStep({
         <Row label="Сеть подписи" value={`BNB Smart Chain (${REGISTRATION_CHAIN_ID})`} />
         <Row
           label="Комиссия Builder"
-          value={address ? 'В review ниже' : 'Покажем после подключения'}
+          value={address ? 'На следующем шаге' : 'Покажем после подключения'}
         />
       </section>
       {address && (

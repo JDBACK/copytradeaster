@@ -201,6 +201,17 @@ liq <= mark, SHORT — liq >= mark. Равенство опасно; shared HEDG
 `aster/shadow.py`; режим разрешён только явным opt-in на testnet и не является
 production execution path. Миграции — упорядоченный список в
 `storage/database.py` (`MIGRATIONS`), репозитории — `storage/repositories.py`.
+
+History projection использует отдельный durable revision contract. Импорт fills и
+изменение complete coverage в одной транзакции повышают `facts_revision` и держат
+самый ранний не опубликованный `dirty_from_ms`. Публикация episodes/events/boundary
+делает CAS по ожидаемой revision и версии boundary в той же SQLite-транзакции;
+dirty очищается только когда принятый cutoff покрывает текущий complete frontier.
+Open episode при continuation replay-ится от принятого origin, а уже выданный
+`public_ref` разрешается как identity, но никогда повторно не используется как
+новый anchor. Это сохраняет одну карточку/аллокации через incremental capture,
+restart и late backfill без отдельного accumulator-сервиса.
+
 Финальный hybrid gate: 30 slots (3 REAL + 27 SHADOW), 100 циклов, 12 302
 подтверждённые команды (пост-фикс rerun 20260823: 12 207/12 207);
 подробности в `docs/reports/HYBRID_LOAD_TEST_REPORT_2026-08.md`.
@@ -253,6 +264,12 @@ credentials появились.
 `NotificationRouter` быстро и идемпотентно пишет recipient-specific rows в
 SQLite outbox, а bounded `TelegramOutboxWorker` доставляет их независимо с
 lease/retry/backoff и изоляцией Telegram 403. Console sink сохраняется.
+S3 production factory включает durable user-event consumer: per-scope cursor
+и outbox commit атомарны, первый enable записывает rollout floor. Boot и
+периодический sweep используют один consumer; выключенные уведомления не
+останавливают историю. Mini App/menu/push используют `format_user_event`;
+command confirmations в S3 не доставляются как факты позиции. Keyboard строится
+из configured HTTPS Mini App URL и owned opaque trade ref, только private chat.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.
 
@@ -625,10 +642,11 @@ connect/migrate → bootstrap configured admins/recovery floor
 ```
 
 Shutdown идёт в обратной зависимости: закрыть admission/drain Telegram
-handlers → остановить и осушить outbox при живых Bot/DB → `App.stop()` → один
-раз закрыть Bot session. На старте процесс ставит notification recovery
-floor: исторические confirmations не рассылаются, восстанавливаются только
-недоставленные confirmed commands после этого floor.
+handlers → остановить user-event sweep → осушить outbox при живых Bot/DB
+→ остановить Mini App/history worker → `App.stop()` → закрыть Bot session.
+S3 production восстанавливает user events после отдельного rollout floor и
+запускает recurring sweep раз в 2 секунды. Explicit delivery=False seam
+сохраняет прежний command recovery без user-event scan/cursor advance.
 
 Операционный лог — отдельный локальный durable sink, не SQLite и не outbox:
 `setup_logging()` всегда поднимает console handler и bounded
@@ -679,7 +697,7 @@ notification_outbox
 - `copy_trades` — внутренние торговые эпизоды (с `direction = ±1` — сторона
   эпизода, миграция #13);
 - `order_links` — master ↔ follower order mapping;
-- `execution_commands` — durable execution journal/queue; additive migration #33
+- `execution_commands` — durable execution journal/queue; additive migration #59
   добавляет `recovery_context` с pre-mutation evidence для MARKET recovery.
 - `telegram_users` — private-chat allowlist и единственный owner account;
   admin — дополнительная capability immutable ID из env, а не взаимоисключающая
@@ -689,6 +707,13 @@ notification_outbox
   `PENDING` на Telegram user, idempotent decision и `decided_by` configured admin;
 - `agent_validations` — последняя безопасная signed Agent snapshot;
 - `notification_outbox` — recipient-specific delivery journal без secrets.
+- `follower_fills`, `follower_cash_flows`, `history_sync_state` — факты и
+  coverage импорта account-owned истории;
+- `follower_episode_*`, `history_scope_state`,
+  `history_projection_boundaries` — revisioned projection сделок, stable refs,
+  aliases/splits и durable replay boundaries;
+- `user_activity_events`, `user_event_delivery_state` — immutable
+  пользовательская лента и per-network delivery cursor.
 
 В реализации также есть `app_state` — персистентные runtime флаги (`ready`,
 `runtime_id`, `started_at`, `heartbeat_at`, `allow_new_entries`,
@@ -755,7 +780,14 @@ reconcile()
 
 - Этап 1 — backend/testnet: `domain aster master risk trading storage credentials cli`; master + testnet followers без Telegram.
 - Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; `marginType` этап не меняет.
-- Этап 3 — Aster Code / Builder: + `onboarding/builder`, `miniapp` (aiohttp-транспорт под `/miniapp/`: 21 POST `/miniapp/api/*` + собранный Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow SessionGate/BuilderWizard/Recovery/Success). Builder metadata передаётся в Aster requests вместе с ордерами; account-specific `builder + feeRate` — через `BuilderAttributionProvider` (journal payload от attribution не зависит). Транспортные хендлеры знают только application use cases и typed public codes.
+- Этап 3 — Aster Code / Builder: + `onboarding/builder`, `history`, `miniapp`
+  (aiohttp-транспорт под `/miniapp/`: 26 POST `/miniapp/api/*` + собранный
+  Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow
+  SessionGate/BuilderWizard/Recovery/Success и account-owned trade history).
+  Builder metadata передаётся в Aster requests вместе с ордерами;
+  account-specific `builder + feeRate` — через `BuilderAttributionProvider`
+  (journal payload от attribution не зависит). Транспортные хендлеры знают
+  только application use cases и typed public codes.
 
 Детали исполнения и acceptance — в `docs/reports/`: Stage 2 — `STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`; Stage 3 Part 1 — `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`; Part 2 — `STAGE3_PART2_PROGRESS_2026-09.md`.
 
@@ -818,9 +850,16 @@ copytradeaster/
 │       │   ├── leverage.py        # LeverageManager: RAM candidate catalog + confirmed state
 │       │   ├── builder_attribution.py # Builder fee attribution (DIRECT/VALID/UNAVAILABLE)
 │       │   └── registry.py        # FollowerRegistry: dynamic follower runtime
+│       ├── history/                # fill/cash import, projection, replay и reconciliation
+│       │   ├── worker.py          # bounded capture/sync loop
+│       │   ├── projector.py       # revisioned episodes/events publication
+│       │   └── reader.py          # account-owned read model
 │       ├── storage/                # SQLite: миграции + репозитории
 │       │   ├── database.py        # aiosqlite, WAL, write_lock, MIGRATIONS
-│       │   └── repositories.py    # CopyTradeRepo / SyncBasisRepo / CommandRepo ...
+│       │   ├── repositories.py    # CopyTradeRepo / SyncBasisRepo / CommandRepo ...
+│       │   ├── history.py         # fills/cash/sync/projection persistence
+│       │   ├── episodes.py        # stable episode identities and allocations
+│       │   └── events.py          # immutable user-event feed + delivery state
 │       │
 │       ├── credentials/
 │       │   ├── service.py         # SqliteCredentials (AESGCM-v1)

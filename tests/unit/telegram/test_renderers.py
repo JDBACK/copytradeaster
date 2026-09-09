@@ -6,10 +6,7 @@ from decimal import Decimal
 import pytest
 
 from copytradeaster.application.models import (
-    ActivityCategory,
-    ActivityItem,
-    ActivityPage,
-    ActivityStatus,
+    ActivityFeedPage,
     AdminDashboardDTO,
     AdminFollowerItem,
     AdminFollowerPage,
@@ -21,6 +18,7 @@ from copytradeaster.application.models import (
     CopyState,
     DashboardDTO,
     NotificationSettingsDTO,
+    PendingOperation,
     PermissionsState,
     PermissionSummary,
     RiskDTO,
@@ -29,6 +27,7 @@ from copytradeaster.application.models import (
     StatusRemediation,
     StatusState,
     SystemState,
+    TradeEventItem,
 )
 from copytradeaster.onboarding.errors import OnboardingErrorCode
 from copytradeaster.telegram.menu import (
@@ -246,30 +245,47 @@ def test_renderers_cover_degraded_activity_notifications_help_and_admin_resume()
     assert MenuAction.ADMIN in _actions(degraded)
 
     activity = render_activity(
-        ActivityPage(
+        ActivityFeedPage(
             items=(
-                ActivityItem(
+                TradeEventItem(
+                    event_ref="evt-1",
+                    kind="POSITION_CLOSED",
+                    trade_ref="ref-1",
                     occurred_at=datetime(2026, 8, 24, 9, 0, tzinfo=UTC),
-                    category=ActivityCategory.TRADE,
-                    title="Открыта позиция BTCUSDT",
-                    status=ActivityStatus.FAILED,
-                    symbol="BTCUSDT",
-                    remediation="Действие не выполнено. Повторите позже.",
+                    facts={"symbol": "BTCUSDT"},
+                    text="Закрыта BTCUSDT · LONG",
                 ),
             ),
-            page=2,
-            has_previous=True,
-            has_next=True,
+            next_cursor="v1:cursor",
+            high_water=7,
+            latest_seq=7,
+            pending=(
+                PendingOperation(
+                    symbol="BTCUSDT",
+                    operation="MARKET_OPEN",
+                    state="UNKNOWN",
+                    age_seconds=12,
+                ),
+            ),
         ),
         revision=2,
+        page=2,
+        miniapp_public_url="https://example.com",
     )
-    assert "Открыта позиция BTCUSDT" in activity.text
-    assert "Ошибка" in activity.text
-    assert "Действие не выполнено" in activity.text
+    assert "Закрыта BTCUSDT · LONG" in activity.text
+    assert "Проверяем результат" in activity.text
     assert MenuAction.PAGE in _actions(activity)
+    (link,) = [
+        button
+        for row in activity.markup.inline_keyboard
+        for button in row
+        if button.web_app is not None
+    ]
+    assert link.web_app is not None
+    assert "trade=ref-1" in link.web_app.url
 
-    empty_activity = render_activity(ActivityPage())
-    assert "Пока нет безопасных событий." in empty_activity.text
+    empty_activity = render_activity(ActivityFeedPage())
+    assert "Подтверждённых событий пока нет." in empty_activity.text
 
     notifications = render_notifications(
         NotificationSettingsDTO(enabled=False, pending=3, failed=1)

@@ -2,21 +2,22 @@
  * открытые позиции, freshness и одна primary action — pause/resume. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
+import { HOME_REVALIDATE_MS } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import { describeError } from '../errors'
-import { formatPercent } from '../format'
+import { formatPercent, formatPnl, formatUsdt } from '../format'
 import {
-  RESUME_CONFIRM_BODY,
+  resumeConfirmBody,
   RESUME_CONFIRM_TITLE,
   homeViewModel,
   snapshotLabel,
-  trustSummary,
 } from '../home'
 import { hapticImpact, hapticNotify } from '../telegram'
-import type { ConfirmationDTO, DashboardDTO, PositionSummaryDTO } from '../types'
+import type { ConfirmationDTO, DashboardDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
-import { PositionCard } from './PositionsScreen'
+import type { NestedScreen, RootTab } from '../navigation'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
 
 // Re-exported for existing importers (behavior tests); the value lives in
 // the shared warm-activation primitive and doubles as the 30 s client floor
@@ -28,8 +29,6 @@ type LoadState =
   | {
       kind: 'ready'
       dashboard: DashboardDTO
-      firstPosition: PositionSummaryDTO | null
-      positionsPending: boolean
     }
   | { kind: 'error'; code: string }
 
@@ -39,7 +38,10 @@ export function HomeScreen({
   active = true,
   onReady,
   onMutated,
-  invalidateSignal,
+  resources: providedResources,
+  foregroundSignal,
+  onOpen,
+  onTab,
 }: {
   auth: AuthContext
   onNotConnected: () => void
@@ -48,164 +50,214 @@ export function HomeScreen({
   onReady?: () => void
   /** Fired after a successful pause/resume so the shell can stale dependents. */
   onMutated?: () => void
-  /** Shell-owned mutation counter; see useWarmRevalidation. */
-  invalidateSignal?: number
+  resources?: MiniAppResources
+  foregroundSignal?: number
+  onOpen?: (screen: NestedScreen) => void
+  onTab?: (tab: RootTab) => void
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
   const [acting, setActing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pendingConfirmation, setPendingConfirmation] = useState<ConfirmationDTO | null>(null)
-  const seq = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
+  const actingRef = useRef(false)
   const readyNotifiedRef = useRef(false)
+  const resources = useScreenResources(providedResources, auth)
 
-  const { markFresh } = useWarmRevalidation({
+  const dashboardResource = useResource({
+    resources,
+    key: 'dashboard',
     active,
     ttlMs: HOME_REVALIDATE_MS,
-    busy: load.kind === 'loading' || (load.kind === 'ready' && load.positionsPending),
-    invalidateSignal,
-    onRefresh: (reason: WarmReason) => {
-      if (reason === 'retry') return fetchAll('foreground')
-      return fetchAll('background')
-    },
+    strength: 'strong',
+    foregroundSignal,
   })
+  const resourceDashboard = dashboardResource.snapshot.data
+  const transportStale =
+    resourceDashboard !== null &&
+    (dashboardResource.snapshot.stale || dashboardResource.snapshot.error !== null)
+  const ownerMutationState = resources.mutationState('pause-resume')
+  const ownerActing = ownerMutationState !== null
+  const ownerActive = ownerMutationState === 'active'
+  const ownerUnknownSince = resources.mutationUnknownSinceRevision('pause-resume')
+  const load: LoadState = resourceDashboard
+    ? {
+        kind: 'ready',
+        dashboard: resourceDashboard,
+      }
+    : dashboardResource.snapshot.error
+      ? { kind: 'error', code: dashboardResource.snapshot.error }
+      : { kind: 'loading' }
 
-  const fetchAll = useCallback(
-    async (mode: 'foreground' | 'background', isUserTriggered = false) => {
-      const my = ++seq.current
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      const signal = controller.signal
+  useEffect(() => {
+    if (ownerMutationState !== 'unknown' || ownerUnknownSince === null) return
+    const snapshot = dashboardResource.snapshot
+    if (
+      snapshot.revision > ownerUnknownSince &&
+      snapshot.data !== null &&
+      snapshot.error === null &&
+      !snapshot.stale &&
+      snapshot.strength === 'strong'
+    ) {
+      resources.resolveUnknownMutation('pause-resume')
+      // The authoritative late recovery closes the same mutation boundary as
+      // an immediate pause/resume response. Positions are already invalidated
+      // by accepted strong Dashboard publication; stale the remaining
+      // dependents and notify Activity through the shell-owned generation.
+      resources.invalidate(['status'])
+      onMutated?.()
+    }
+  }, [dashboardResource.snapshot, onMutated, ownerMutationState, ownerUnknownSince, resources])
+
+  const refresh = useCallback(
+    async (isUserTriggered = false) => {
       if (isUserTriggered) setActing(true)
+      setError(null)
       try {
-        const dashboard = await api.dashboard(auth, true, { signal })
-        if (seq.current !== my) return
-        if (dashboard.copy_state === 'empty') {
-          onNotConnected()
-          return
-        }
-        // Partial-ready: paint the dashboard before the cheap positions read,
-        // keeping the previous preview (if any) instead of flashing.
-        setLoad((prev) => ({
-          kind: 'ready',
-          dashboard,
-          firstPosition: prev.kind === 'ready' ? prev.firstPosition : null,
-          positionsPending: true,
-        }))
-        // Read positions cheaply from cached snapshot refreshed by dashboard.
-        // The dashboard refresh above must stay strictly before this read —
-        // never Promise.all: positions must see the refreshed snapshot.
-        const posPage = await api.positions(auth, false, { signal }).catch((err: unknown) => {
-          if (err instanceof ApiError && err.code === 'aborted') throw err
-          return null
-        })
-        if (seq.current !== my) return
-        markFresh()
-        setLoad({
-          kind: 'ready',
-          dashboard,
-          firstPosition: posPage && posPage.positions.length > 0 ? posPage.positions[0] : null,
-          positionsPending: false,
-        })
-        if (mode === 'foreground') setError(null)
+        await dashboardResource.refresh('strong')
       } catch (err) {
-        if (err instanceof ApiError && err.code === 'aborted') return
-        if (seq.current !== my) return
-        const code = err instanceof ApiError ? err.code : 'network_error'
-        if (mode === 'background') {
-          // Warm failure keeps the stale UI and only fills the error slot.
-          setError(code)
-        } else {
-          setLoad({ kind: 'error', code })
+        if (!(err instanceof ApiError && err.code === 'aborted')) {
+          setError(err instanceof ApiError ? err.code : 'network_error')
         }
       } finally {
         if (isUserTriggered) setActing(false)
       }
     },
-    [auth, onNotConnected, markFresh],
-  )
-
-  const refresh = useCallback(
-    (isUserTriggered = false) => fetchAll('foreground', isUserTriggered),
-    [fetchAll],
+    [dashboardResource],
   )
 
   useEffect(() => {
-    // Initial data fetch: fetchAll() only sets state after await (async), so
-    // this is the standard external-system sync, not a cascading render.
-    // oxlint-disable-next-line react/set-state-in-effect
-    void fetchAll('foreground')
-    return () => abortRef.current?.abort()
-  }, [fetchAll])
+    if (resourceDashboard?.copy_state === 'empty') onNotConnected()
+  }, [resourceDashboard, onNotConnected])
 
   useEffect(() => {
-    if (load.kind === 'ready' && !readyNotifiedRef.current) {
+    if (resourceDashboard && resourceDashboard.copy_state !== 'empty' && !readyNotifiedRef.current) {
       readyNotifiedRef.current = true
       onReady?.()
     }
-  }, [load, onReady])
+  }, [resourceDashboard, onReady])
+
+  useEffect(() => {
+    // A keep-alive root may become hidden without unmounting. Confirmation
+    // tokens are interaction state, not cached DTO data: do not leave a hidden
+    // Sheet holding body overflow/focus listeners, and do not resurrect an old
+    // confirmation when the user returns to Home.
+    if (!active && pendingConfirmation !== null) {
+      // oxlint-disable-next-line react/set-state-in-effect
+      setPendingConfirmation(null)
+    }
+  }, [active, pendingConfirmation])
 
   async function pause() {
+    if (actingRef.current) return
+    const release = resources.acquireMutation('pause-resume')
+    if (!release) return
+    actingRef.current = true
     setActing(true)
     setError(null)
     try {
-      const dashboard = await api.pause(auth)
+      const next = await api.pause(auth)
       hapticImpact('medium')
-      markFresh()
-      setLoad((prev) =>
-        prev.kind === 'ready'
-          ? { ...prev, dashboard }
-          : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
-      )
+      resources.publishConfirmed('dashboard', next)
+      resources.invalidate(['positions', 'status'])
       onMutated?.()
     } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
+      const code = err instanceof ApiError ? err.code : 'network_error'
+      if (code === 'network_error' || code === 'timeout_error') {
+        try {
+          // Mutation outcome is ambiguous. Fence every Dashboard read that
+          // began before the write boundary so refreshCurrent cannot accept a
+          // pre-mutation strong flight as authoritative reconciliation.
+          resources.invalidate(['dashboard'])
+          const current = await resources.refreshCurrent('dashboard', 'strong')
+          if (current.copy_state === 'paused') {
+            resources.invalidate(['positions', 'status'])
+            hapticNotify('success')
+            onMutated?.()
+            return
+          }
+        } catch (verifyErr) {
+          if (resources.handleInvalidSessionError(verifyErr)) return
+          // The write may have committed even though neither response reached
+          // us. Retain typed uncertainty across remount until a later strong
+          // Dashboard read proves current server state.
+          resources.markMutationUnknown('pause-resume', 'pause')
+        }
+      }
       hapticNotify('error')
-      setError(err instanceof ApiError ? err.code : 'network_error')
+      setError(code)
     } finally {
       setActing(false)
+      actingRef.current = false
+      release()
     }
   }
 
   async function handleStartResume() {
     if (load.kind !== 'ready') return
+    if (actingRef.current) return
     if (load.dashboard.system_state !== 'ready') {
       setError('stale_operation')
       return
     }
+    actingRef.current = true
     setActing(true)
     setError(null)
     try {
       const pending = await api.beginConfirmation(auth, 'resume')
       setPendingConfirmation(pending)
     } catch (err) {
+      if (resources.handleInvalidSessionError(err)) return
       hapticNotify('error')
       setError(err instanceof ApiError ? err.code : 'network_error')
     } finally {
       setActing(false)
+      actingRef.current = false
     }
   }
 
   async function handleConfirmResume(confirmation: ConfirmationDTO) {
+    if (actingRef.current) return
+    const release = resources.acquireMutation('pause-resume')
+    if (!release) return
+    actingRef.current = true
     setActing(true)
     setError(null)
     try {
-      const dashboard = await api.resume(auth, confirmation)
+      const next = await api.resume(auth, confirmation)
       hapticNotify('success')
       setPendingConfirmation(null)
-      markFresh()
-      setLoad((prev) =>
-        prev.kind === 'ready'
-          ? { ...prev, dashboard }
-          : { kind: 'ready', dashboard, firstPosition: null, positionsPending: false },
-      )
+      resources.publishConfirmed('dashboard', next)
+      resources.invalidate(['positions', 'status'])
       onMutated?.()
     } catch (err) {
-      hapticNotify('error')
-      setError(err instanceof ApiError ? err.code : 'network_error')
       setPendingConfirmation(null)
+      if (resources.handleInvalidSessionError(err)) return
+      const code = err instanceof ApiError ? err.code : 'network_error'
+      if (code === 'network_error' || code === 'timeout_error') {
+        try {
+          // A pre-confirmation strong Dashboard flight is not evidence of the
+          // resume outcome. Fence it before performing authoritative recovery.
+          resources.invalidate(['dashboard'])
+          const current = await resources.refreshCurrent('dashboard', 'strong')
+          if (current.copy_state === 'active') {
+            resources.invalidate(['positions', 'status'])
+            hapticNotify('success')
+            onMutated?.()
+            return
+          }
+        } catch (verifyErr) {
+          if (resources.handleInvalidSessionError(verifyErr)) return
+          // Confirmation tokens are single-use. Retain typed uncertainty until
+          // a later strong Dashboard read proves current state; never replay.
+          resources.markMutationUnknown('pause-resume', 'resume')
+        }
+      }
+      hapticNotify('error')
+      setError(code)
     } finally {
       setActing(false)
+      actingRef.current = false
+      release()
     }
   }
 
@@ -239,20 +291,16 @@ export function HomeScreen({
 
   const dashboard = load.dashboard
   const view = homeViewModel(dashboard)
-  const trust = trustSummary(dashboard)
-  const systemDot =
-    dashboard.system_state === 'ready'
-      ? 'success'
-      : dashboard.system_state === 'stale'
-        ? 'warning'
-        : 'danger'
+  const overview = dashboard.overview
+  const pnl = formatPnl(overview?.unrealized_pnl_usdt)
+  const stale = transportStale || overview?.freshness !== 'fresh'
 
   return (
     <div className="screen">
       <Brand
         right={
           dashboard.account_masked ? (
-            <span className="wallet-chip num">{dashboard.account_masked}</span>
+            <button type="button" className="wallet-chip num" onClick={() => onOpen?.({ kind: 'account-builder' })}>{dashboard.account_masked}</button>
           ) : (
             <span className="badge-testnet">Aster testnet</span>
           )
@@ -262,105 +310,37 @@ export function HomeScreen({
       {/* Error slot honesty: partial-ready paints over dashboard data without
           clearing a visible error, and a failed background revalidation only
           fills this slot — the stale ready UI underneath is never wiped. */}
-      {error && <ErrorBox {...describeError(error)} />}
+      {(error ?? dashboardResource.snapshot.error) && (
+        <ErrorBox {...describeError((error ?? dashboardResource.snapshot.error)!)} />
+      )}
 
-      <section className="panel rail trust-strip" aria-label="Статус подключения">
-        <ol style={{ display: 'contents', listStyle: 'none', padding: 0, margin: 0 }}>
-          {trust.map((item) => (
-            <li
-              key={item.key}
-              className={`rail-step${item.done ? ' done' : ''}`}
-              aria-label={`${item.label}: ${item.done ? 'проверено' : 'не проверено'}`}
-            >
-              <div className="rail-circle">
-                {item.done ? (
-                  <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden>
-                    <path
-                      d="M4 10.5 8.2 14.5 16 6"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : (
-                  <span className="trust-pending" aria-hidden />
-                )}
-              </div>
-              <div className="rail-label" aria-hidden="true">{item.label}</div>
-            </li>
-          ))}
-        </ol>
+      <button type="button" className="summary-status" onClick={() => onOpen?.({ kind: 'system-status' })}>
+        <span className={`dot ${stale ? 'warning' : view.tone === 'active' ? 'success' : 'warning'}`} aria-hidden />
+        <span>{transportStale ? 'Данные требуют проверки' : view.title}</span>
+        <span className="summary-chevron" aria-hidden>›</span>
+      </button>
+      <section className="panel account-summary" aria-label="Сводка аккаунта">
+        <h1 className="summary-label">PnL открытых позиций</h1>
+        <button type="button" className={`summary-pnl num pnl-${pnl.tone}`} onClick={() => onTab?.('positions')}>
+          {pnl.text}
+        </button>
+        <p className="freshness">По маркировочной цене · {stale ? 'данные требуют обновления' : 'обновлено'} {snapshotLabel(overview?.as_of)}</p>
+        <button type="button" className="summary-row" onClick={() => onTab?.('positions')}><span>Открытые позиции</span><strong className="num">{overview?.open_count ?? '—'}</strong></button>
+        <div className="summary-row"><span>Стоп подтверждён</span><strong>{stale ? 'Не обновлён' : `${overview?.protected_count ?? '—'} из ${overview?.open_count ?? '—'}`}</strong></div>
+        <div className="summary-row"><span>Доступно для торговли</span><strong className="num">{formatUsdt(overview?.available_usdt)}</strong></div>
+        <button type="button" className="summary-row" onClick={() => onOpen?.({ kind: 'risk' })}><span>Риск на сделку</span><strong className="num">{formatPercent(dashboard.risk_percent)}</strong></button>
       </section>
-
-      <section className="panel state-card">
-        <div className="state-icon" aria-hidden>
-          {view.tone === 'active' ? (
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M5 12.5 9.5 17 19 7"
-                stroke="var(--success)"
-                strokeWidth="2.4"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          ) : view.tone === 'paused' ? (
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-              <rect x="6" y="5" width="4" height="14" rx="1.5" fill="var(--warning)" />
-              <rect x="14" y="5" width="4" height="14" rx="1.5" fill="var(--warning)" />
-            </svg>
-          ) : (
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="9" stroke="var(--danger)" strokeWidth="2" />
-              <path d="M12 8v5M12 16h.01" stroke="var(--danger)" strokeWidth="2.2" strokeLinecap="round" />
-            </svg>
-          )}
-        </div>
-        <h1 className="h1" style={{ margin: 0 }}>
-          {view.title}
-        </h1>
-        <div
-          className={`status-text ${
-            view.tone === 'active' ? 'tone-success' : view.tone === 'paused' ? 'tone-warning' : 'tone-danger'
-          }`}
-        >
-          {view.subtitle}
-        </div>
-        <div className="freshness">
-          <span className={`dot ${systemDot}`} aria-hidden />
-          Система: {systemLabel(dashboard.system_state)} · Снимок:{' '}
-          {snapshotLabel(dashboard.snapshot_captured_at)}
-        </div>
-      </section>
-
-      <div className="metric-grid">
-        <div className="metric">
-          <div className="metric-label">Риск на стоп</div>
-          <div className="metric-value num">{formatPercent(dashboard.risk_percent)}</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Открытые позиции</div>
-          <div className="metric-value num">{dashboard.open_positions ?? '—'}</div>
-        </div>
-      </div>
-
-      {load.firstPosition ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div className="section-label" style={{ marginTop: 2 }}>
-            Активная позиция
-          </div>
-          <PositionCard position={load.firstPosition} />
-        </div>
-      ) : (
-        load.positionsPending && (
-          <div className="skeleton" style={{ minHeight: 96 }} aria-label="Загрузка позиций" />
-        )
+      {!overview && <p className="info-box">Получаем данные аккаунта</p>}
+      {overview?.open_count === 0 && overview.freshness === 'fresh' && <p className="info-box">Нет открытых позиций. {dashboard.copy_state === 'active' ? 'Копирование включено. Открытые позиции появятся здесь.' : 'Новые входы на паузе.'}</p>}
+      {overview?.open_count != null && overview.protected_count != null && overview.open_count > overview.protected_count && (
+        <button type="button" className="position-warning" onClick={() => onOpen?.({ kind: 'trade-list', state: 'open', period: 'all', attention: true })}>
+          У {overview.open_count - overview.protected_count} позиций стоп не подтверждён
+        </button>
       )}
 
       {view.actionLabel === 'pause' && (
         <div className="btn-stack">
-          <button type="button" className="btn btn-primary" disabled={acting} onClick={() => void pause()}>
+          <button type="button" className="btn btn-primary" disabled={acting || ownerActing} onClick={() => void pause()}>
             {acting ? (
               'Ставим на паузу…'
             ) : (
@@ -373,6 +353,16 @@ export function HomeScreen({
               </>
             )}
           </button>
+          {ownerMutationState === 'unknown' && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => void refresh(true)}
+              disabled={acting || ownerActive}
+            >
+              Обновить данные
+            </button>
+          )}
           <p className="footer-note">Пауза останавливает только новые входы — защита продолжит работать.</p>
         </div>
       )}
@@ -382,7 +372,7 @@ export function HomeScreen({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={acting || dashboard.system_state !== 'ready'}
+            disabled={acting || ownerActing || dashboard.system_state !== 'ready'}
             onClick={() => void handleStartResume()}
           >
             {acting ? (
@@ -400,7 +390,7 @@ export function HomeScreen({
             type="button"
             className="btn btn-secondary"
             onClick={() => void refresh(true)}
-            disabled={acting}
+            disabled={acting || ownerActive}
           >
             Обновить данные
           </button>
@@ -412,7 +402,7 @@ export function HomeScreen({
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={acting}
+            disabled={acting || ownerActive}
             onClick={() => void refresh(true)}
           >
             {acting ? 'Обновляем…' : 'Обновить данные'}
@@ -423,7 +413,7 @@ export function HomeScreen({
       {pendingConfirmation && (
         <Sheet
           title={RESUME_CONFIRM_TITLE}
-          body={RESUME_CONFIRM_BODY}
+          body={resumeConfirmBody(pendingConfirmation.resume_context)}
           onClose={() => {
             if (!acting) setPendingConfirmation(null)
           }}
@@ -431,7 +421,7 @@ export function HomeScreen({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={acting}
+            disabled={acting || ownerActing}
             onClick={() => void handleConfirmResume(pendingConfirmation)}
           >
             {acting ? 'Возобновляем…' : 'Подтвердить возобновление'}
@@ -440,7 +430,7 @@ export function HomeScreen({
             type="button"
             className="btn btn-secondary"
             onClick={() => setPendingConfirmation(null)}
-            disabled={acting}
+            disabled={acting || ownerActing}
           >
             Отмена
           </button>
@@ -448,19 +438,4 @@ export function HomeScreen({
       )}
     </div>
   )
-}
-
-function systemLabel(state: DashboardDTO['system_state']): string {
-  switch (state) {
-    case 'ready':
-      return 'готова'
-    case 'stale':
-      return 'данные устарели'
-    case 'degraded':
-      return 'деградация'
-    case 'blocked':
-      return 'заблокирована'
-    default:
-      return 'неизвестно'
-  }
 }

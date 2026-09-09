@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -25,9 +26,12 @@ from copytradeaster.application.engine import (
 from copytradeaster.config import Settings
 from copytradeaster.notifications.console import ConsoleNotifier
 from copytradeaster.storage.database import Database
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
     CommandRepo,
+    NotificationOutboxRepo,
     SettingsRepo,
     TelegramUserRepo,
 )
@@ -162,7 +166,37 @@ def build_process(
     }
     if clock is not None:
         kwargs["clock"] = lambda: clock
+    kwargs["history_factory"] = lambda app: AsyncMock()
     return Stage2Process(settings, **kwargs), built
+
+
+def build_production_process(
+    settings: Settings,
+    trace: list[str],
+    *,
+    clock: datetime | None = None,
+    enable_user_event_delivery: bool = True,
+    telegram_factory: Any = None,
+    worker_factory: Any = None,
+):
+    """Build through the production factory with offline factories only."""
+    app_factory, application_factory, default_telegram_factory, default_worker_factory, built = (
+        factories(trace)
+    )
+    kwargs: dict[str, Any] = {
+        "app_factory": app_factory,
+        "application_factory": application_factory,
+        "telegram_factory": telegram_factory or default_telegram_factory,
+        "worker_factory": worker_factory or default_worker_factory,
+        "enable_user_event_delivery": enable_user_event_delivery,
+    }
+    if clock is not None:
+        kwargs["clock"] = lambda: clock
+    process = build_stage2_process(settings, **kwargs)
+    # build_stage2_process has no history_factory seam; set it on the instance
+    # so the offline factories keep their AsyncMock history worker.
+    process._history_factory = lambda app: AsyncMock()
+    return process, built
 
 
 async def test_process_order_shared_bot_and_idempotent_close(tmp_path: Path) -> None:
@@ -477,3 +511,298 @@ def test_engine_factory_boundaries_and_utc_floor_parsing(tmp_path: Path, monkeyp
     process = build_stage2_process(settings, db=db)
     assert isinstance(process, Stage2Process)
     asyncio.run(db.close())
+
+
+async def test_history_worker_stops_before_app_closes_database(tmp_path: Path) -> None:
+    trace = []
+    process, _ = build_process(make_settings(tmp_path / "history.sqlite3"), trace)
+    history = AsyncMock()
+
+    async def start():
+        trace.append("history.start")
+
+    async def stop():
+        assert process.db.conn is not None
+        trace.append("history.stop")
+
+    history.start.side_effect = start
+    history.stop.side_effect = stop
+    process._history_factory = lambda app: history
+    await process.start()
+    await process.shutdown()
+    assert trace.index("app.start") < trace.index("history.start")
+    assert trace.index("history.stop") < trace.index("app.stop")
+    history.stop.assert_awaited_once()
+
+
+# --- N5: production factory, durable delivery across boots and shutdown ---
+
+_N5_CLOSED_FACTS = {
+    "symbol": "BTCUSDT",
+    "side": "LONG",
+    "entry_price": "62400",
+    "exit_price": "64100",
+    "realized_gross": "18.42",
+    "duration_ms": 8_280_000,
+}
+
+
+class _N5CaptureBot:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_message(
+        self, *, chat_id: int, text: str, parse_mode: Any = None, reply_markup: Any = None
+    ) -> dict[str, Any]:
+        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return {"ok": True}
+
+
+async def test_production_factory_enables_durable_delivery_and_low_level_seam_keeps_legacy(
+    tmp_path: Path,
+) -> None:
+    """N5: the production factory enables durable delivery; the explicit
+    low-level False keeps the legacy command path with no sweep task."""
+    production, _ = build_production_process(
+        make_settings(tmp_path / "n5-factory.sqlite3", admin_ids=[99]),
+        [],
+        clock=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    assert production._enable_user_event_delivery is True
+    await production.start()
+    assert production._delivery_task is not None
+    assert production.notifier is not None
+    assert production.notifier._user_events_only is True
+    await production.shutdown()
+
+    legacy, _ = build_production_process(
+        make_settings(tmp_path / "n5-legacy.sqlite3", admin_ids=[99]),
+        [],
+        clock=datetime(2030, 1, 1, tzinfo=UTC),
+        enable_user_event_delivery=False,
+    )
+    assert legacy._enable_user_event_delivery is False
+    await legacy.start()
+    assert legacy._delivery_task is None
+    assert legacy.notifier is not None
+    assert legacy.notifier._user_events_only is False
+    await legacy.shutdown()
+
+
+async def test_two_boots_sweep_over_1000_events_without_duplicates(tmp_path: Path) -> None:
+    """N5: two production boots deliver a >1000-event backlog exactly once."""
+    path = tmp_path / "n5-boots.sqlite3"
+    db = Database(path)
+    await db.connect()
+    await db.migrate()
+    await AccountRepo(db).upsert("a1", "follower", "a1", "0x" + "1" * 40)
+    await TelegramUserRepo(db).upsert(1, 1, account_id="a1")
+    await db.close()
+
+    # Boot 1: the production factory records the floors and sends nothing.
+    first, _ = build_production_process(
+        make_settings(path, admin_ids=[99]), [], clock=datetime(2030, 1, 1, tzinfo=UTC)
+    )
+    await first.start()
+    await first.shutdown()
+
+    db = Database(path)
+    await db.connect()
+    events = EventRepository(db)
+    scope = HistoryScope("a1", "testnet")
+    base_ms = int(datetime(2030, 1, 2, tzinfo=UTC).timestamp() * 1000)
+    for i in range(1001):
+        await events.record(
+            scope,
+            kind="POSITION_CLOSED",
+            occurred_at=base_ms + i,
+            recorded_at=base_ms + i,
+            facts=dict(_N5_CLOSED_FACTS),
+            dedup_key=f"n5:boot:{i}",
+            trade_ref=f"ref-{i}",
+            notify_eligible=True,
+        )
+    await db.close()
+
+    # Boot 2: the durable sweep drains the whole backlog once.
+    second, _ = build_production_process(
+        make_settings(path, admin_ids=[99]), [], clock=datetime(2030, 1, 3, tzinfo=UTC)
+    )
+    await second.start()
+    await second.shutdown()
+
+    db = Database(path)
+    await db.connect()
+    count = await db.fetchone("SELECT COUNT(*) AS n FROM notification_outbox")
+    assert count is not None and int(count["n"]) == 1001
+    dupes = await db.fetchall(
+        "SELECT event_key, COUNT(*) AS n FROM notification_outbox"
+        " GROUP BY event_key, telegram_user_id HAVING n > 1"
+    )
+    assert dupes == []
+    await db.close()
+
+    # Boot 3: a settled sweep replays to zero new rows.
+    third, _ = build_production_process(
+        make_settings(path, admin_ids=[99]), [], clock=datetime(2030, 1, 4, tzinfo=UTC)
+    )
+    await third.start()
+    await third.shutdown()
+    db = Database(path)
+    await db.connect()
+    count = await db.fetchone("SELECT COUNT(*) AS n FROM notification_outbox")
+    assert count is not None and int(count["n"]) == 1001
+    await db.close()
+
+
+async def test_delivery_task_is_cancelled_before_database_close(tmp_path: Path) -> None:
+    """N5: the recurring sweep task stops before the DB closes."""
+    process, _ = build_production_process(
+        make_settings(tmp_path / "n5-task.sqlite3"),
+        [],
+        clock=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    await process.start()
+    task = process._delivery_task
+    assert task is not None
+
+    alive_at_close: list[bool] = []
+    original_close = process.db.close
+
+    async def close_with_probe() -> None:
+        alive_at_close.append(process._delivery_task is not None)
+        await original_close()
+
+    process.db.close = close_with_probe  # type: ignore[method-assign]
+    await process.shutdown()
+
+    assert alive_at_close == [False]
+    assert task.done()
+
+
+async def test_delivery_sweep_failure_retries_without_killing_the_task(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """N5: one failed sweep logs and retries on the next cycle."""
+    import copytradeaster.application.engine as engine
+
+    process, _ = build_production_process(
+        make_settings(tmp_path / "n5-retry.sqlite3"),
+        [],
+        clock=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    attempts: list[int] = []
+    retried = asyncio.Event()
+
+    async def failing_then_ok(db, router, *, now, environment):
+        del db, router, now
+        assert environment == "testnet"
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise RuntimeError("sweep failed")
+        retried.set()
+        return 0
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(engine, "_recover_user_events_durable", failing_then_ok)
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    await process.start()
+    try:
+        await asyncio.wait_for(retried.wait(), timeout=5)
+    finally:
+        monkeypatch.setattr(asyncio, "sleep", real_sleep)
+        await process.shutdown()
+
+    assert len(attempts) >= 2
+    assert process._delivery_task is None
+
+
+async def test_durable_delivery_suppresses_legacy_command_duplicates(tmp_path: Path) -> None:
+    """N5: with durable delivery the user receives user events only; a
+    legacy execution.confirmed row is superseded, never sent, and the
+    confirmed command is not re-enqueued."""
+    path = tmp_path / "n5-duplicates.sqlite3"
+    db = Database(path)
+    await db.connect()
+    await db.migrate()
+    await AccountRepo(db).upsert("a1", "follower", "a1", "0x" + "1" * 40)
+    await TelegramUserRepo(db).upsert(1, 1, account_id="a1")
+    commands = CommandRepo(db)
+    await commands.insert("cmd-1", "a1", None, "MARKET_OPEN", "{}", 1, None)
+    old_iso = datetime(2029, 12, 31, tzinfo=UTC).isoformat()
+    await db.execute_write(
+        "UPDATE execution_commands SET status='CONFIRMED', created_at=?, updated_at=?"
+        " WHERE command_key='cmd-1'",
+        (old_iso, old_iso),
+    )
+    await NotificationOutboxRepo(db).enqueue(
+        "command:cmd-old", 1, 1, "execution.confirmed", "INFO", "legacy", account_id="a1"
+    )
+    await db.close()
+
+    first, _ = build_production_process(
+        make_settings(path, admin_ids=[99]), [], clock=datetime(2030, 1, 1, tzinfo=UTC)
+    )
+    await first.start()
+    await first.shutdown()
+
+    db = Database(path)
+    await db.connect()
+    base_ms = int(datetime(2030, 1, 2, tzinfo=UTC).timestamp() * 1000)
+    await EventRepository(db).record(
+        HistoryScope("a1", "testnet"),
+        kind="POSITION_CLOSED",
+        occurred_at=base_ms,
+        recorded_at=base_ms,
+        facts=dict(_N5_CLOSED_FACTS),
+        dedup_key="n5:dup:event",
+        trade_ref="ref-1",
+        notify_eligible=True,
+    )
+    await db.close()
+
+    bot = _N5CaptureBot()
+    trace: list[str] = []
+
+    def capture_telegram(settings: Settings, application: object) -> FakeTelegram:
+        del settings, application
+        telegram = FakeTelegram(trace)
+        telegram.bot = bot
+        return telegram
+
+    second, _ = build_production_process(
+        make_settings(path, admin_ids=[99]),
+        trace,
+        clock=datetime(2030, 1, 3, tzinfo=UTC),
+        telegram_factory=capture_telegram,
+        worker_factory=_build_worker,
+    )
+    await second.start()
+    try:
+        assert second.worker is not None
+        # Wait until the production worker retires the legacy row; the
+        # background loops may hold it briefly in SENDING.
+        for _ in range(20):
+            row = await second.db.fetchone(
+                "SELECT status FROM notification_outbox WHERE event_key='command:cmd-old'"
+            )
+            if row is not None and str(row["status"]) in {"SENT", "FAILED", "DEAD"}:
+                break
+            await asyncio.sleep(0.05)
+        rows = await second.db.fetchall(
+            "SELECT event_key, kind, status, last_error FROM notification_outbox ORDER BY id"
+        )
+    finally:
+        await second.shutdown()
+
+    by_key = {str(row["event_key"]): row for row in rows}
+    assert "command:cmd-1" not in by_key
+    assert by_key["command:cmd-old"]["status"] == "FAILED"
+    assert by_key["command:cmd-old"]["last_error"] == "superseded_by_user_events"
+    user_rows = [row for row in rows if str(row["kind"]) == "user.POSITION_CLOSED"]
+    assert len(user_rows) == 1
+    assert str(user_rows[0]["event_key"]).startswith("user-event:")

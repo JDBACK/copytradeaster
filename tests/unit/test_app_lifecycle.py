@@ -434,3 +434,56 @@ async def test_ingest_backlog_age_matches_master_freshness_boundary(monkeypatch)
 
     assert applied == [(at_boundary, 3)]
     assert marked == [(over_boundary, "ingest-backlog-stale")]
+
+
+def _observe_app(*, network_name: str = "TESTNET"):
+    from copytradeaster.aster.models import OrderDTO
+    from tests.unit.aster.test_trading_api import ORDER_RESPONSE
+
+    app = App.__new__(App)
+    app.cfg = SimpleNamespace(
+        dry_run=False,
+        network_profile=SimpleNamespace(name=network_name),
+    )
+    app.follower_registry = SimpleNamespace(
+        get=lambda account_id: SimpleNamespace(execution_mode="REAL")
+    )
+    observed = {}
+
+    async def observe_order(scope, order, *, kind, command_key, observed_at):
+        observed["scope"] = scope
+
+    app.history = SimpleNamespace(observe_order=observe_order)
+    app.history_mark_dirty = None
+    order = OrderDTO.model_validate({**ORDER_RESPONSE, "symbol": "BTCUSDT"})
+    params = {"account_id": "copy1", "command_key": "cmd-1", "kind": "MARKET_OPEN"}
+    return app, order, params, observed
+
+
+@pytest.mark.asyncio
+async def test_observe_history_order_marks_symbol_dirty():
+    app, order, params, observed = _observe_app()
+    hints = []
+    app.history_mark_dirty = lambda a, e, s: hints.append((a, e, s))
+    await app._observe_history_order(order=order, **params)
+    assert observed["scope"].account_id == "copy1"
+    assert hints == [("copy1", "testnet", "BTCUSDT")]
+
+
+@pytest.mark.asyncio
+async def test_observe_history_order_survives_broken_hint():
+    app, order, params, observed = _observe_app()
+
+    def broken(account_id, environment, symbol):
+        raise RuntimeError("hint sink down")
+
+    app.history_mark_dirty = broken
+    await app._observe_history_order(order=order, **params)
+    assert observed["scope"].account_id == "copy1"
+
+
+@pytest.mark.asyncio
+async def test_observe_history_order_uses_network_profile_scope():
+    app, order, params, observed = _observe_app(network_name="MAINNET")
+    await app._observe_history_order(order=order, **params)
+    assert observed["scope"].environment == "mainnet"

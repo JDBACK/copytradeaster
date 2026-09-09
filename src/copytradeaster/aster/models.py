@@ -23,6 +23,51 @@ class BalanceDTO(_Camel):
     max_withdraw_amount: Decimal
 
 
+class _HistoryDTO(_Camel):
+    """Exact history facts; unknown fields are intentionally not retained."""
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_float(cls, value: object) -> object:
+        if isinstance(value, float):
+            raise ValueError("history numbers must be exact")
+        return value
+
+
+class UserTradeDTO(_HistoryDTO):
+    trade_id: StrictInt = Field(alias="id", ge=0)
+    order_id: StrictInt = Field(ge=0)
+    symbol: str = Field(min_length=1)
+    side: Side
+    position_side: PosSide
+    qty: Decimal = Field(gt=0, allow_inf_nan=False)
+    price: Decimal = Field(gt=0, allow_inf_nan=False)
+    quote_qty: Decimal = Field(ge=0, allow_inf_nan=False)
+    realized_pnl: Decimal = Field(allow_inf_nan=False)
+    commission: Decimal = Field(allow_inf_nan=False)
+    commission_asset: str = Field(min_length=1)
+    time: StrictInt = Field(ge=0)
+
+
+class IncomeDTO(_HistoryDTO):
+    symbol: str
+    income_type: str = Field(min_length=1)
+    income: Decimal = Field(allow_inf_nan=False)
+    asset: str = Field(min_length=1)
+    time: StrictInt = Field(ge=0)
+    tran_id: str = Field(min_length=1)
+    trade_id: str
+
+    @field_validator("tran_id", "trade_id", mode="before")
+    @classmethod
+    def _exact_id(cls, value: object) -> object:
+        if type(value) is int and value >= 0:
+            return str(value)
+        if isinstance(value, str) and (not value or value.isascii() and value.isdigit()):
+            return value
+        raise ValueError("invalid history id")
+
+
 class AgentDTO(_Camel):
     """Aster V3 Agent permission record.
 
@@ -102,6 +147,7 @@ class LeverageBracketResponse(_Camel):
 
 
 class PositionDTO(BaseModel):
+    update_time: StrictInt | None = Field(default=None, alias="updateTime", ge=0)
     symbol: str
     position_amt: Decimal = Field(alias="positionAmt")
     entry_price: Decimal = Field(alias="entryPrice")
@@ -153,6 +199,9 @@ class SymbolFilterDTO(BaseModel):
 
 class SymbolInfoDTO(BaseModel):
     symbol: str
+    baseAsset: str | None = None
+    quoteAsset: str | None = None
+    marginAsset: str | None = None
     status: str
     contractType: str
     # live testnet returns a decimal string (e.g. "0.0200"); mainnet may return bool
@@ -195,11 +244,13 @@ __all__ = [
     "BalanceDTO",
     "BuilderDTO",
     "ExchangeInfo",
+    "IncomeDTO",
     "LeverageBracketDTO",
     "LeverageBracketResponse",
     "OrderDTO",
     "PositionDTO",
     "RateLimitDTO",
     "SymbolFilterDTO",
+    "UserTradeDTO",
     "SymbolInfoDTO",
 ]

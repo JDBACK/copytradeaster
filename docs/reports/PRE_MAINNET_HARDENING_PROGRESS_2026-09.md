@@ -871,3 +871,30 @@ JUnit `data/review-l1-postfill-race-junit.xml`; cleanup/flat audit внутри 
 
 Вердикт: оставшийся post-fill P1 закрыт и targeted live переквалифицирован.
 Mainnet — только отдельным решением owner'а.
+
+## 2026-09-09 — Integrated hardening + frontend requalification
+
+Ветка `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1`
+и `feature/frontend` `d6d5791`. Конфликты разрешены с сохранением трёхсостояния
+UNKNOWN resolver, history observer для runtime/boot recovery, network-profile
+scope и append-only migration lineage 0..59. Runtime resolution получил
+1-секундное ограничение повторного SQLite/exchange scan; unresolved in-flight
+строка по-прежнему блокирует новый вход и разрешается перед retry.
+
+Фактические gates: offline **1525 passed / 2 skipped / 87 deselected**,
+coverage **87%**; frontend **28/349**, oxlint/tsc/Vite PASS; shadow scale
+30×100 + 100×20 — **2 passed за 63.49s**; Ruff, format, compileall и strict
+doc-links чистые. Signed targeted: network 3/3, UNKNOWN 6/6, history lifecycle
+1/1, history read 1/1, corrective 6/6, master/risk/isolation 14/14, LIMIT
+2/3 + 1 honest skip. Независимый flat audit main/copyc1/copyc2/copyc3 дал
+zero non-zero positions и zero open orders.
+
+Интеграционный pre-mainnet verdict остаётся **NO-GO** до отдельного решения
+по live harness assumptions: hedge G2 дважды получил равные risk-sized ноги
+при требовании strict master-size asymmetry; два leverage-control теста ждут
+старые account-max/downshift предпосылки (фактический signed max 27); два
+one-way e2e теста получили insufficient-margin/округлённый zero; четыре Mini
+App live acceptance теста — PAUSED/stale-account setup. Это не приписывается
+history merge diff без дополнительного reproduction: offline и targeted
+history/UNKNOWN gates зелёные, а исходные hardening semantics sizing/leverage
+в интеграции не менялись.

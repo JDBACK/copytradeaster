@@ -29,13 +29,26 @@ from typing import Any, Protocol
 from copytradeaster.app import App
 from copytradeaster.application.models import ApplicationProtocol
 from copytradeaster.config import Settings
+from copytradeaster.history.composition import build_history_worker
+from copytradeaster.history.worker import HistoryWorker
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.notifications.console import ConsoleNotifier
+from copytradeaster.notifications.delivery import (
+    ensure_user_event_rollout_floor,
+    recover_user_events_durable,
+)
 from copytradeaster.notifications.protocol import Notifier
 from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.notifications.worker import TelegramOutboxWorker
 from copytradeaster.storage.database import Database
-from copytradeaster.storage.repositories import CommandRepo, SettingsRepo, TelegramUserRepo
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryScope
+from copytradeaster.storage.repositories import (
+    AccountRepo,
+    CommandRepo,
+    SettingsRepo,
+    TelegramUserRepo,
+)
 from copytradeaster.telegram.runtime import TelegramRuntime
 
 NOTIFICATION_RECOVERY_FLOOR_KEY = "stage2_notification_recovery_floor"
@@ -93,7 +106,9 @@ def _build_telegram(settings: Settings, application: ApplicationProtocol) -> Tel
     return TelegramRuntime.build(settings, application)
 
 
-def _build_worker(bot: Any, db: Database, settings: Settings) -> TelegramOutboxWorker:
+def _build_worker(
+    bot: Any, db: Database, settings: Settings, *, user_events_only: bool = False
+) -> TelegramOutboxWorker:
     # The worker deliberately has a stricter bound than the Telegram handler
     # task pool.  A config value of 16 must not accidentally create 16 SQLite
     # outbox workers or 16 concurrent sends.
@@ -103,6 +118,9 @@ def _build_worker(bot: Any, db: Database, settings: Settings) -> TelegramOutboxW
         db=db,
         concurrency=concurrency,
         poll_interval=float(settings.telegram_outbox_poll_interval_s),
+        webapp_base_url=settings.miniapp_public_url or None,
+        trade_links_enabled=settings.miniapp_enabled,
+        user_events_only=user_events_only,
     )
 
 
@@ -182,6 +200,8 @@ async def recover_notification_outbox(
     notifier: NotificationRouter | None,
     *,
     now: datetime,
+    enable_user_event_delivery: bool = False,
+    environment: str = "testnet",
 ) -> None:
     """Recover confirmed commands after a durable, non-retroactive floor.
 
@@ -190,6 +210,12 @@ async def recover_notification_outbox(
     the floor advances; a failed recovery therefore retries on the next boot.
     Console-only mode still advances the floor but never creates an outbox or
     worker.
+
+    With ``enable_user_event_delivery`` (production S3 enabled) the user-event leg
+    uses the durable per-scope cursor instead of the legacy timestamp sweep
+    and records a separate rollout floor on first enable, so accumulated
+    backfill never blasts. The S3 router suppresses legacy command delivery;
+    the disabled compatibility seam retains command recovery.
     """
 
     settings = SettingsRepo(db)
@@ -197,13 +223,59 @@ async def recover_notification_outbox(
     current_now = _as_utc(now)
     if current is None:
         await settings.set_flag(NOTIFICATION_RECOVERY_FLOOR_KEY, current_now.isoformat())
+        if enable_user_event_delivery:
+            await ensure_user_event_rollout_floor(db, now=current_now)
         return
 
     floor = _parse_floor(current)
     if notifier is not None:
         await notifier.recover_confirmed_commands(CommandRepo(db), since=floor)
+        if enable_user_event_delivery:
+            await _recover_user_events_durable(
+                db, notifier, now=current_now, environment=environment
+            )
+    elif enable_user_event_delivery:
+        # Console-only mode advances durable cursors without enqueueing, so
+        # a later enable never retroactively sends the muted backlog.
+        await _recover_user_events_durable(db, None, now=current_now, environment=environment)
     next_floor = max(floor, current_now)
     await settings.set_flag(NOTIFICATION_RECOVERY_FLOOR_KEY, next_floor.isoformat())
+
+
+async def _recover_user_events_durable(
+    db: Database,
+    notifier: NotificationRouter | None,
+    *,
+    now: datetime,
+    environment: str,
+) -> int:
+    """Sweep eligible user events behind the durable per-scope cursor.
+
+    The rollout floor is recorded on first enable; history collection is
+    unaffected because this only reads the already-published event log.
+    """
+    if environment not in {"testnet", "mainnet"}:
+        raise ValueError("user-event delivery requires an official network environment")
+    rows = await AccountRepo(db).get_all("follower")
+    scopes = [
+        HistoryScope(str(row["id"]), environment)
+        for row in rows
+        if str(row["execution_mode"] or "REAL") == "REAL"
+    ]
+    rollout_floor_ms = await ensure_user_event_rollout_floor(db, now=now)
+    report = await recover_user_events_durable(
+        db, notifier, EventRepository(db), scopes, rollout_floor_ms=rollout_floor_ms
+    )
+    logger.info(
+        "user event delivery sweep recovered=%s skipped_ineligible=%s "
+        "skipped_no_recipient=%s blocked=%s budget_exhausted=%s",
+        report.recovered,
+        report.skipped_ineligible,
+        report.skipped_no_recipient,
+        report.blocked_unrenderable,
+        report.budget_exhausted,
+    )
+    return report.recovered
 
 
 class Stage2Process:
@@ -227,6 +299,8 @@ class Stage2Process:
         telegram_factory: TelegramFactory = _build_telegram,
         worker_factory: WorkerFactory = _build_worker,
         clock: Clock = _utc_now,
+        history_factory: Callable[[App], HistoryWorker] = build_history_worker,
+        enable_user_event_delivery: bool = False,
     ) -> None:
         self.settings = settings
         self.db = db if db is not None else db_factory(settings.db_path)
@@ -234,6 +308,12 @@ class Stage2Process:
         self._application_factory = application_factory
         self._telegram_factory = telegram_factory
         self._worker_factory = worker_factory
+        self._history_factory = history_factory
+        # The low-level seam can disable delivery independently of collection.
+        # Production build_stage2_process enables the S3 durable consumer.
+        self._enable_user_event_delivery = bool(enable_user_event_delivery)
+        self._delivery_task: asyncio.Task[None] | None = None
+        self.history_worker: HistoryWorker | None = None
         self._clock = clock
         self.app: App | None = None
         self.application: ApplicationProtocol | None = None
@@ -272,18 +352,27 @@ class Stage2Process:
                 notifier: Notifier = NotificationRouter(
                     self.db,
                     admin_ids=self.settings.telegram_admin_ids,
+                    user_events_only=self._enable_user_event_delivery,
                 )
                 self.notifier = notifier
                 await recover_notification_outbox(
                     self.db,
                     notifier,
                     now=self._clock(),
+                    enable_user_event_delivery=self._enable_user_event_delivery,
+                    environment=self.settings.network_profile.name.lower(),
                 )
             else:
                 # Explicit console-only mode: no durable router and no worker.
                 notifier = ConsoleNotifier()
                 self.notifier = notifier
-                await recover_notification_outbox(self.db, None, now=self._clock())
+                await recover_notification_outbox(
+                    self.db,
+                    None,
+                    now=self._clock(),
+                    enable_user_event_delivery=self._enable_user_event_delivery,
+                    environment=self.settings.network_profile.name.lower(),
+                )
 
             self.app = self._app_factory(self.settings, self.db, notifier)
             self.application = self._application_factory(self.app)
@@ -301,6 +390,12 @@ class Stage2Process:
             # App owns the shared DB close after all workers have drained.  It
             # must be READY/started before Telegram can begin polling.
             await self.app.start()
+            self.history_worker = self._history_factory(self.app)
+            await self.history_worker.start()
+            if self._enable_user_event_delivery:
+                self._delivery_task = asyncio.create_task(
+                    self._deliver_user_events(), name="user-event-delivery"
+                )
 
             if self.settings.miniapp_enabled:
                 from copytradeaster.miniapp.server import MiniAppServer
@@ -309,7 +404,15 @@ class Stage2Process:
                 await self.miniapp.start()
 
             if self.settings.telegram_notifications_enabled:
-                self.worker = self._worker_factory(self.telegram.bot, self.db, self.settings)
+                if self._worker_factory is _build_worker:
+                    self.worker = _build_worker(
+                        self.telegram.bot,
+                        self.db,
+                        self.settings,
+                        user_events_only=self._enable_user_event_delivery,
+                    )
+                else:
+                    self.worker = self._worker_factory(self.telegram.bot, self.db, self.settings)
                 await self.worker.start()
                 self._worker_started = True
             self._started = True
@@ -319,6 +422,22 @@ class Stage2Process:
                 # Preserve the startup failure; callers can invoke the
                 # explicit shutdown seam separately to inspect teardown.
             raise
+
+    async def _deliver_user_events(self) -> None:
+        """Recurring durable read/outbox drain; never invokes trading endpoints."""
+        router = self.notifier if isinstance(self.notifier, NotificationRouter) else None
+        while True:
+            try:
+                await _recover_user_events_durable(
+                    self.db,
+                    router,
+                    now=self._clock(),
+                    environment=self.settings.network_profile.name.lower(),
+                )
+            except Exception:
+                # Cursor and outbox share a transaction; next sweep retries safely.
+                logger.exception("user event delivery sweep failed")
+            await asyncio.sleep(2)
 
     async def run(self) -> None:
         """Run Telegram polling until stop, failure, cancellation, or Ctrl+C."""
@@ -361,6 +480,12 @@ class Stage2Process:
                 finally:
                     self._transport_shutdown = True
 
+            if self._delivery_task is not None:
+                self._delivery_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._delivery_task
+                self._delivery_task = None
+
             worker = self.worker
             if worker is not None and not self._worker_stopped:
                 try:
@@ -378,6 +503,14 @@ class Stage2Process:
                     errors.append(exc)
                 finally:
                     self.miniapp = None
+
+            if self.history_worker is not None:
+                try:
+                    await self.history_worker.stop()
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    self.history_worker = None
 
             app = self.app
             if app is not None and not self._app_stopped:
@@ -423,6 +556,7 @@ def build_stage2_process(
     telegram_factory: TelegramFactory = _build_telegram,
     worker_factory: WorkerFactory = _build_worker,
     clock: Clock = _utc_now,
+    enable_user_event_delivery: bool = True,
 ) -> Stage2Process:
     """Build the production Stage 2 process with explicit test seams."""
     return Stage2Process(
@@ -434,6 +568,7 @@ def build_stage2_process(
         telegram_factory=telegram_factory,
         worker_factory=worker_factory,
         clock=clock,
+        enable_user_event_delivery=enable_user_event_delivery,
     )
 
 

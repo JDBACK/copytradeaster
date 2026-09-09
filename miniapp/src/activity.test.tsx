@@ -5,7 +5,7 @@
  * UI uses without depending on fixture data echoed back from a stub.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ActivityScreen } from './screens/ActivityScreen'
 import {
@@ -16,6 +16,8 @@ import {
   groupActivityByDay,
   isActivityStatus,
 } from './activityView'
+import type { ActivityDayBucket } from './activityView'
+import { formatTime } from './format'
 import type { ActivityItemDTO } from './types'
 
 function makeItem(overrides: Partial<ActivityItemDTO> = {}): ActivityItemDTO {
@@ -54,10 +56,10 @@ describe('activityStatusTone', () => {
 
 describe('dayBucket', () => {
   it('classifies today, yesterday and earlier', () => {
-    const now = new Date('2026-09-02T13:00:00+00:00')
-    expect(dayBucket('2026-09-02T09:00:00+00:00', now)).toBe('today')
-    expect(dayBucket('2026-09-01T22:00:00+00:00', now)).toBe('yesterday')
-    expect(dayBucket('2026-08-29T10:00:00+00:00', now)).toBe('earlier')
+    const now = new Date(2026, 8, 2, 13)
+    expect(dayBucket(new Date(2026, 8, 2, 9).toISOString(), now)).toBe('today')
+    expect(dayBucket(new Date(2026, 8, 1, 22).toISOString(), now)).toBe('yesterday')
+    expect(dayBucket(new Date(2026, 7, 29, 10).toISOString(), now)).toBe('earlier')
     expect(dayBucket(null, now)).toBe('earlier')
     expect(dayBucket('not-a-date', now)).toBe('earlier')
   })
@@ -108,7 +110,7 @@ describe('ActivityScreen render (read-only UI contract)', () => {
     )
     expect(html).toContain('Активность')
     expect(html).toContain('ASTER')
-    expect(html).toContain('Aster testnet')
+    expect(html).not.toContain('Aster testnet')
     expect(html).toContain('Загрузка журнала')
   })
 
@@ -123,11 +125,11 @@ describe('ActivityScreen render (read-only UI contract)', () => {
     expect(html).toContain('0x1111…1111')
   })
 
-  it('renders the testnet badge when no masked account is available', () => {
+  it('does not invent the environment when no masked account is available', () => {
     const html = renderToStaticMarkup(
       <ActivityScreen auth={{ initData: 'test' }} />,
     )
-    expect(html).toContain('Aster testnet')
+    expect(html).not.toContain('Aster testnet')
   })
   it('contains no trading controls or raw journal codes (strictly read-only)', () => {
     const html = renderToStaticMarkup(
@@ -159,9 +161,72 @@ describe('ActivityScreen render (read-only UI contract)', () => {
     const html = renderToStaticMarkup(
       <ActivityScreen auth={{ initData: 'test' }} />,
     )
-    // <button> elements are scoped to navigation (retry only) in the
-    // loading state; there are no order-placement controls in the activity
-    // surface by design.
-    expect(html.match(/<button/g)?.length ?? 0).toBe(0)
+    // Initial actions select feed filters; none submits a trading mutation.
+    expect(html.match(/role="tab"/g)?.length ?? 0).toBe(3)
+    expect(html.match(/<button/g)?.length ?? 0).toBe(3)
+  })
+})
+
+/** Fixed-zone matrix (UX plan §15, S3.4): the same instant may legally land in
+ * different local days. Each case pins process.env.TZ itself (Node re-reads TZ
+ * on every Date call), so the suite stays independent from the machine zone of
+ * the developer or CI — this is the documented way TZ is set for these tests. */
+describe('dayBucket fixed timezone matrix', () => {
+  const originalTz = process.env.TZ
+
+  afterEach(() => {
+    if (originalTz === undefined) delete process.env.TZ
+    else process.env.TZ = originalTz
+  })
+
+  type TzCase = {
+    tz: 'UTC' | 'Europe/Moscow' | 'America/New_York'
+    now: string
+    iso: string
+    bucket: ActivityDayBucket
+    why: string
+  }
+
+  const cases: TzCase[] = [
+    // One instant, three zones: 2026-09-01T22:30:00Z is Sep 1 in UTC/NY and
+    // already Sep 2 in Moscow.
+    { tz: 'UTC', now: '2026-09-02T13:00:00Z', iso: '2026-09-01T22:30:00Z', bucket: 'yesterday', why: 'UTC 22:30 Sep 1' },
+    { tz: 'Europe/Moscow', now: '2026-09-02T13:00:00Z', iso: '2026-09-01T22:30:00Z', bucket: 'today', why: 'MSK 01:30 Sep 2' },
+    { tz: 'America/New_York', now: '2026-09-02T13:00:00Z', iso: '2026-09-01T22:30:00Z', bucket: 'yesterday', why: 'EDT 18:30 Sep 1' },
+    // Midnight boundary per zone.
+    { tz: 'UTC', now: '2026-09-02T13:00:00Z', iso: '2026-09-01T23:59:59Z', bucket: 'yesterday', why: 'UTC 23:59:59' },
+    { tz: 'UTC', now: '2026-09-02T13:00:00Z', iso: '2026-09-02T00:00:00Z', bucket: 'today', why: 'UTC 00:00:00' },
+    { tz: 'Europe/Moscow', now: '2026-09-02T13:00:00Z', iso: '2026-09-01T20:59:59Z', bucket: 'yesterday', why: 'MSK 23:59:59' },
+    { tz: 'Europe/Moscow', now: '2026-09-02T13:00:00Z', iso: '2026-09-01T21:00:00Z', bucket: 'today', why: 'MSK 00:00:00' },
+    { tz: 'America/New_York', now: '2026-09-02T13:00:00Z', iso: '2026-09-02T03:59:59Z', bucket: 'yesterday', why: 'EDT 23:59:59' },
+    { tz: 'America/New_York', now: '2026-09-02T13:00:00Z', iso: '2026-09-02T04:00:00Z', bucket: 'today', why: 'EDT 00:00:00' },
+    // Month and year boundary: the local calendar day differs from the UTC day.
+    { tz: 'UTC', now: '2026-10-01T00:30:00Z', iso: '2026-09-30T23:30:00Z', bucket: 'yesterday', why: 'UTC month boundary' },
+    { tz: 'Europe/Moscow', now: '2026-10-01T12:00:00Z', iso: '2026-09-30T22:30:00Z', bucket: 'today', why: 'MSK 01:30 Oct 1' },
+    { tz: 'Europe/Moscow', now: '2026-01-01T12:00:00Z', iso: '2025-12-31T22:00:00Z', bucket: 'today', why: 'MSK 01:00 Jan 1' },
+    // DST in America/New_York: spring forward 2026-03-08 and fall back 2026-11-01.
+    { tz: 'America/New_York', now: '2026-03-09T12:00:00Z', iso: '2026-03-09T03:59:59Z', bucket: 'yesterday', why: 'EDT 23:59:59 Mar 8' },
+    { tz: 'America/New_York', now: '2026-03-09T12:00:00Z', iso: '2026-03-09T04:00:00Z', bucket: 'today', why: 'EDT 00:00:00 Mar 9' },
+    { tz: 'America/New_York', now: '2026-03-09T12:00:00Z', iso: '2026-03-08T04:59:59Z', bucket: 'earlier', why: 'EST 23:59:59 Mar 7' },
+    { tz: 'America/New_York', now: '2026-11-02T12:00:00Z', iso: '2026-11-02T04:59:59Z', bucket: 'yesterday', why: 'EST 23:59:59 Nov 1' },
+    { tz: 'America/New_York', now: '2026-11-02T12:00:00Z', iso: '2026-11-02T05:00:00Z', bucket: 'today', why: 'EST 00:00:00 Nov 2' },
+  ]
+
+  for (const c of cases) {
+    it(`${c.tz}: ${c.iso} at ${c.now} → ${c.bucket} (${c.why})`, () => {
+      process.env.TZ = c.tz
+      expect(dayBucket(c.iso, new Date(c.now))).toBe(c.bucket)
+    })
+  }
+
+  it('keeps the displayed row time on the same local calendar as the bucket', () => {
+    const now = new Date('2026-09-02T13:00:00Z')
+    const iso = '2026-09-01T22:30:00Z'
+    process.env.TZ = 'Europe/Moscow'
+    expect(dayBucket(iso, now)).toBe('today')
+    expect(formatTime(iso)).toBe('01:30')
+    process.env.TZ = 'UTC'
+    expect(dayBucket(iso, now)).toBe('yesterday')
+    expect(formatTime(iso)).toBe('22:30')
   })
 })

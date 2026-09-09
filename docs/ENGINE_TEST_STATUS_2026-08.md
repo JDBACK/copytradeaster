@@ -1,7 +1,29 @@
 # Статус работ — copytradeaster (этапы 1–3)
 
-Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Работа ведётся в
-`main`; ветка Stage 3 части 2 `codex/stage-3-mini-app-part2` смержена.
+Журнал ведётся с 2026-08-22. Формат: дата → факт → статус. Итоговая S3/G3
+кампания зафиксирована в `feature/frontend`; ветка Stage 3 части 2
+`codex/stage-3-mini-app-part2` смержена ранее.
+
+> **TL;DR (2026-09-09, integrated hardening + frontend tree):** локальная
+> интеграционная ветка `codex/integrate-hardening-frontend` собрана из
+> `codex/live-copy-tests-hardening` (`4c0d1a1`) и `feature/frontend`
+> (`d6d5791`). Конфликты разрешены с сохранением fail-closed UNKNOWN
+> resolver, history observer и append-only migration lineage **0..59**.
+> Offline backend: **1525 passed / 2 skipped / 87 deselected**, coverage
+> **87%**; Ruff/format/compileall/strict doc-links чистые. Shadow scale:
+> **2 passed** (30×100 и 100×20, 63.49s). Frontend: **28 files / 349 passed**,
+> oxlint, `tsc -b` и Vite build PASS (main JS 361.19 kB / 103.22 kB gzip).
+> Signed Testnet targeted: network **3/3**, UNKNOWN **6/6**, history lifecycle
+> **1/1**, history read **1/1**, corrective **6/6**, master/risk/isolation
+> **14/14** и LIMIT **2/3 + 1 honest skip**; независимый flat audit main +
+> copyc1/copyc2/copyc3 — zero positions / zero open orders. Полная live
+> acceptance пока **NO-GO**: существующий G2 hedge assertion (2 повторения),
+> два leverage-control assumptions и два one-way e2e assumptions не прошли на
+> текущем состоянии Aster Testnet; четыре Mini App live acceptance теста
+> также получили PAUSED/стale-account предпосылки. Эти failures находятся в
+> исторических live harness assumptions (production merge diff не меняет
+> sizing/leverage semantics), но до их отдельного решения mainnet запуск не
+> разрешается. Старые TL;DR ниже сохранены как исторические snapshots.
 
 > **TL;DR (2026-09-07, QUALIFIED + чистый load):** остаточный post-fill race
 > re-review `ac161b2` закрыт: master/TTL теперь выбираются после `fr.lock` +
@@ -126,6 +148,136 @@
   audit — flat/zero везде. Полный контракт —
   `reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
 
+> **TL;DR (2026-09-09):** S1/G1 — **CLOSED**; S2/G2 — **ACCEPTED**;
+> S3/G3 — **CLOSED в согласованном scope**: Chromium, Telegram Desktop WebView
+> и iPhone Mirroring. Android по решению владельца исключён из scope и verdict.
+> Offline/backend/frontend, §19.7 performance, error/history matrix и signed
+> testnet N6 зелёные. Полная карта — [MINIAPP_UI_ACCEPTANCE_INDEX](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+> Предыдущий `REQUEST CHANGES` на `9a0dd98` и промежуточные OPEN/WIP записи ниже
+> сохранены как история кампании. N4, N5 и N6 закрыты итоговой S3-проверкой.
+> Offline **1439 passed / 2 skipped / 45 deselected** (точно на `84cabfb`, 2026-09-07), миграции **0..58**, ruff check/format clean, doc links clean (49 файлов).
+> S2 frontend current WIP: **27 test files / 316 passed**, oxlint 0/0, TypeScript + Vite production build PASS; main JS **336.56 kB / 96.46 kB gzip**; recorded G2 browser evidence: cold 4 POST, warm root p95 1.0 ms/160, nested p95 1.9 ms/120, 300 ms RTT p95 6.0 ms/160, все warm 0 reads; browser DOM/listeners bounded, long tasks/errors 0. Финальные corrective после этого browser trace затронули transport validation/cancellation/error edges, поэтому latency/DOM числа ниже остаются reference evidence того G2 прогона, а не заявлением о новом CDP rerun.
+> **S3 WIP snapshot (2026-09-07):** backend history/event slice — **59 targeted tests passed**; `tsc -b && vite build` — PASS; oxlint — PASS с 2 предупреждениями; полный frontend Vitest после перехода на новые Home/Positions/Activity/history contracts — **272 passed / 44 failed (27 files)**. Это промежуточный срез, G3 остаётся OPEN; детали и TODO — [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
+> **S3 verification pass (2026-09-09):** obsolete fixtures переведены на контракты S3 (feed/menu/user-event delivery), offline gate — **1449 passed / 2 skipped / 45 deselected**, frontend — **28 files / 349 passed**, oxlint clean, production build PASS, ruff check/format и doc links clean. N5 закрыт тестами (production factory True/False, два boot >1000 событий, crash до/после atomic commit, toggle-границы, остановка recurring task до DB close, retry sweep, command/user duplicates). N6 закрыт: harness исправлен (cancel по фактическому journal coid, query/order-list отсутствие, cleanup flat + `open_orders=[]`, scheduled captures, durable-boundary проверка capture-окна) и **signed live на testnet PASSED** — реальный `STOP_MARKET` fill доказан как отдельное exchange-исполнение (тик-прижатый ратчет; immediate-trigger отвергается −2021), teardown-утечка aiosqlite закрыта. Свежий S3 §19.7 trace — **PASS** (cold `4` read POST, `160` warm root samples p95 `5,3 ms`, delayed `300 ms` p95 `4,4 ms`, `200` nested samples, long tasks/errors `0`); blocked/throttled matrix `11/11` и alias/split/partial history — **PASS**. Mini App UI дополнительно проверен в Chromium, Telegram Desktop WebView и iPhone Mirroring. Android по решению владельца исключён из согласованного scope; **G3 CLOSED**. Факты собраны в [UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md), S3 §§19–26.
+> Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
+
+## Текущее состояние
+
+- **S3 verification pass (2026-09-09):** миграция старых тестов на S3-контракты
+  выполнена, один общий offline gate зелёный: backend **1449 passed / 2 skipped
+  / 45 deselected**, frontend **28 files / 349 passed**, ruff check/format и
+  doc links (55 файлов) clean. Мигрированы `test_stage2_adapters`,
+  `test_adapters`, `test_service` (activity feed), `test_renderers`,
+  `test_notifications`, `test_history_acceptance` (+live), `test_builder_resume_live`;
+  presenter-копия и private-chat gate приведены к коду. N5 подтверждён новыми
+  тестами в `test_user_event_delivery_c6` (crash до/после atomic commit,
+  disable→event→enable, prepare→toggle→commit, no-op enable, disable→FAILED
+  outbox, монотонный курсор) и `test_engine` (factory True/False, два boot
+  >1000 событий без дублей, cancel delivery task до DB close, retry sweep,
+  legacy command suppression). N6 закрыт: harness исправлен (cancel по
+  `execution_commands.client_order_id`, query/order-list отсутствие, cleanup
+  flat + `open_orders=[]`, scheduled captures между шагами, durable-boundary
+  проверка окна публикации, тик-прижатый ратчет для реального SL fill) и
+  signed live на testnet **PASSED** (`1 passed`, чистый выход без виса;
+  утечка aiosqlite-потока в teardown закрыта реестром фикстуры).
+  Chromium, Telegram Desktop WebView и iPhone Mirroring фактически прошли
+  отдельные UI-сценарии; свежий S3 §19.7 trace, error matrix и history cases
+  закрыты в §§24–26. Подробная матрица и точные границы перечислены в [UI
+  acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md). Android
+  исключён владельцем из согласованного scope; G3 **CLOSED**.
+  Детали реализации и журнала — [S3 progress](reports/MINIAPP_S3_PROGRESS_2026-09.md).
+
+- **S3 implementation handoff (2026-09-08):** menu/feed/push migration,
+  production durable delivery и owned split/link/detail changes реализованы.
+  По просьбе владельца тестовые suites и browser/live не запускались.
+  TypeScript compilation и ruff по изменённым Python-файлам проходят.
+  Прежние counters ниже — baseline, не доказательство текущего diff.
+  Старые command Activity/recovery tests требуют миграции на новые контракты;
+  список и порядок — [S3 testing handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md).
+  N6 harness не изменялся; G3 OPEN.
+
+- **S3 cache bounds (2026-09-08):** history regressions — **9 passed**;
+  TypeScript и oxlint PASS. Проверены три inactive filters, mounted Back target
+  и whole-slice eviction после release. Полный suite после этого не повторён.
+
+- **S3 history/shell gate (2026-09-08):** полный Vitest — **325 passed,
+  28 files**; oxlint clean. Trades regression доказывает dedup, сохранение
+  cursor при TTL probe и explicit restart; shell render keys переведены на
+  React state, scroll/Back bookkeeping сохранён. G3 OPEN.
+
+- **S3 TTL pages (2026-09-08):** history resource regressions — **6 passed**,
+  TypeScript PASS. TTL probe сохраняет накопленные detail events и cursor;
+  изменённая первая страница требует explicit refresh. Общий rerun впереди.
+
+- **S3 revision gate (2026-09-08):** history resource regressions — **5 passed**,
+  TypeScript PASS. Проверен запрет автоматической замены отвергнутой ревизии
+  до explicit refresh. Полный suite после этой правки ещё не повторён.
+
+- **S3 history retry (2026-09-08):** `historyResources.test.ts` — **4 passed**,
+  TypeScript PASS. Добавлен regression сохранения events pages и независимого
+  fills cursor при retry. Полный suite после этой правки пока не повторён.
+
+- **S3 shell corrective (2026-09-08):** полный frontend Vitest — **321 passed,
+  28 files**; shell — **43 passed**. TypeScript PASS. Это offline evidence,
+  не закрытие S3/G3: история/details/delivery и browser/live acceptance впереди.
+
+- **S3 shell migration (2026-09-08):** targeted
+  `appShellKeepAlive.test.tsx` — **29 passed / 14 failed** после миграции
+  mocks на activityFeed и новых названий навигации. TypeScript PASS.
+  Полный suite после этой правки ещё не запускался. Оставшиеся сценарии:
+  Home overview вместо preview, stale/retry, pagination и UI markers.
+
+- **S3 Home/Settings/display follow-up (2026-09-08):** полный frontend Vitest
+  **292 passed / 29 failed, 28 files**; единственный красный файл —
+  `appShellKeepAlive.test.tsx`. Home/format/Settings и Settings navigation /
+  AccountBuilder targeted проверки PASS, TypeScript PASS. G3 OPEN.
+
+- **S3 Activity follow-up (2026-09-08):** полный Vitest — **282 passed /
+  37 failed, 28 files**. Activity contract/auth/scope и history regressions:
+  **17 passed**; TypeScript PASS. Oxlint: одно оставшееся предупреждение
+  `AppShell` ref access during render. Возвращён Activity TTL 60 s.
+
+- **S3 continuation (2026-09-08):** history invalidation causal fence —
+  `historyResources.test.ts`: **2 passed**, TypeScript build check PASS.
+  Полный frontend suite после этого исправления пока не запускался; предыдущий
+  результат выше остаётся baseline, причины всех падений ещё требуют разбора.
+
+- **Mini App S2 / G2 — CLOSED (2026-09-07, `feature/frontend`, base
+  `b10f01a`):** session-scoped shared resources, weak/strong singleflight,
+  read/write/invalidation fencing, hard invalid-session scope reset, root
+  keep-alive sharing, foreground/TTL, bounded Settings prefetch, nested cached
+  first paint, session mutation locks, unknown-outcome reconciliation,
+  nested scroll/focus + modal lifecycle. Frontend **27 files / 316 tests PASS**,
+  oxlint 0/0, build PASS. Production-bundle CDP: cold 4 reads; root p95 1.0 ms
+  (160), cached nested p95 1.9 ms (120), 300 ms RTT root p95 6.0 ms (160),
+  warm API delta 0; Settings prefetch peak 2; 50-cycle DOM/listener counters
+  unchanged, post-GC heap +3.25%, 0 long tasks/page errors. Explicit signed
+  `status(true)` 5 reads: 1.45–2.21 s, median 2.05 s, fresh age=0/valid
+  permissions. Поздние blocker-only аудиты дополнительно нашли causal-order race и
+  неполную retained-unknown симметрию: ambiguous pause/resume/AccountBuilder и
+  Risk/Notifications recovery теперь fence'ят pre-mutation read invalidation
+  barrier'ом, а double-unknown остаётся locked через Back/remount до более позднего
+  authoritative recovery без replay. Финальный post-fix независимый blocker-only
+  re-review: **NONE**; полный verdict хранится в
+  `MINIAPP_S2_PROGRESS_2026-09.md`. Device-only
+  Telegram/WebKit/haptics acceptance остаётся S3.5/G3.
+- **UX-кампания Mini App (план 2026-09), slice «шкала риска» — браузерная
+  часть CLOSED (2026-09-06):** первый vertical slice по
+  `MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md` §14/§21 (S2.5 input lifecycle +
+  S3.4 motion): control выделен в `components/RiskRuler.tsx` + pure
+  `riskRuler.ts`; wheel gating/deltaMode/границы, pointer-capture drag со
+  scoped suppression, прерываемое доведение 140–220 ms, scrollend+fallback
+  settle, save из ref-draft (надпись ≡ payload), constant-geometry
+  highlight, edge fade, reduced-motion, `hapticSelectionChanged`.
+  Gates: frontend Vitest **224 passed / 21 файл** (новые
+  `riskRuler.test.ts`, `riskRulerBehavior.test.tsx`), oxlint +
+  `tsc -b && vite build` clean; браузерная приёмка **15/15 PASS** +
+  независимая перепроверка (вердикт «принимать») —
+  `docs/reports/MINIAPP_RISK_RULER_2026-09.md`. Backend/торговля не
+  затронуты, offline/testnet counters без изменений. Устройство-зависимая
+  часть (Telegram haptics, BackButton, WebKit-инерция, snap-stop A/B)
+  **отложена на потом — доступа к устройствам нет**; возврат в S3.5/G3.
+  G1–G3 кампании не закрывает.
 - **Stage 3, часть 2 (P2.6 — Account + Builder attestation) — ACCEPTED /
   CLOSED (2026-09-03, ветка `codex/stage-3-mini-app-part2`):** nested control screen поверх
   `UserApplicationService.account_builder()` — persistent `identity_source`
@@ -1403,3 +1555,359 @@ Testnet files 15→23: `test_pre_mainnet_unknown_live.py` (A),
 
 ---
 > Это дно append-only журнала (начало — 2026-08-22). Текущее состояние — только TL;DR сверху файла; всё ниже него — снимки момента.
+
+## 2026-09-06 — функциональная кампания, S1.1 read adapter (IN PROGRESS)
+
+Добавлен `tests/unit/aster/test_history_api.py`: 19 checks на точные значения,
+большие IDs, weights/параметры signed boundary, отказ от некорректных окон,
+целостность страниц и безопасные ошибки. `PYTHONPATH=src .venv/bin/pytest -q
+ tests/unit/aster` — **89 passed**. Это targeted gate, прежние full-suite
+счётчики не пересчитаны. S1.1 live evidence и G1 ещё открыты.
+Первый запуск без PYTHONPATH импортировал другой editable checkout и не является
+проверкой этой ветки; приведённый результат получен с явным `PYTHONPATH=src`.
+
+
+## 2026-09-06 — history reader и signed read probe
+
+`PYTHONPATH=src .venv/bin/pytest -q -m 'not testnet'`: **1115 passed,
+2 skipped, 44 deselected**, 14.98 s. Targeted aster/history: **95 passed**.
+Новый `tests/unit/history/test_reader.py`: 6 сценариев split/budget/gap/bounds/error.
+`PYTHONPATH=src CT_TESTNET=1 .venv/bin/pytest -q -s tests/testnet/test_history_reads_live.py`:
+**1 passed**, 3.07 s; read-only copyc1, tmp nonce DB, ни одного trading write.
+Окно: 9 fills, 12 income, 8 matched commissions; commission sign противоположен
+income, 9 положительных commissions. fromId inclusive подтверждён; BTC/USDT/USDT
+из metadata подтверждены. Funding/Builder/full-history completeness не приняты.
+Полный testnet suite не перезапускался. Ruff changed files и doc links clean.
+
+
+## 2026-09-06 — S1.2 history storage и import step
+
+Append-only миграции history facts/observations/coverage; repository и bounded
+sync step. Новый `tests/unit/history/test_storage.py`: 8 сценариев idempotency,
+exact Decimal, scope isolation, conflict rollback, reconnect/pending resume,
+income identity, invalid coverage, observations и read failure.
+Full offline: **1123 passed / 2 skipped / 44 deselected**, 15.21 s.
+После замены per-row SQL на batch lookup/insert: targeted history **14 passed**.
+Ruff для изменённых файлов clean. S1.2 ещё открыт: worker lifecycle/hooks,
+retention/capacity и episodes/events не приняты.
+
+
+## 2026-09-06 — S1.2 executor observations
+
+Production App/Executor подключены к записи order observations, включая
+SUBMITTED/UNKNOWN query-before-retry и boot recovery. Пять новых checks в
+`test_executor_journal.py`: identity/data callback, observer failure/no resend,
+boot, SUBMITTED и UNKNOWN. Full offline: **1128 passed / 2 skipped /
+44 deselected**, 16.61 s (`PYTHONPATH=src:.`). Ruff changed files/doc links clean.
+Worker recovery пропущенных observations и runtime history sync ещё впереди;
+этот gate не доказывает полноту истории после сбоя записи.
+
+
+## 2026-09-06 — history background lifecycle
+
+Full offline после worker wiring: **1131 passed / 2 skipped / 44 deselected**,
+15.40 s. Затем добавлена lifecycle-проверка history.stop до закрытия БД;
+targeted application/history **31 passed**. Full total после этого добавления
+не пересчитывался. Worker tests: rotation/request bound, failure isolation/backoff,
+in-flight cancellation/idempotent start/stop. Ruff changed paths clean.
+G1 ещё открыт: latency/retention/repair и финансовая проекция не приняты.
+
+
+## 2026-09-06 — observation repair и coverage compaction
+
+Full offline **1135 passed / 2 skipped / 44 deselected**, 15.68 s.
+Targeted history **20 passed**. Новые проверки: восстановление observation из
+CONFIRMED journal, отсутствие ордера не меняет command status, retry cooldown,
+слияние overlapping coverage сохраняет настоящий gap. Миграция 40 хранит repair
+checkpoints; worker ремонтирует observation отдельным bounded job.
+Synthetic benchmark: 100 accounts, 100k fills + 100k cashflows + 50k observations:
+DB/backup 65,880,064 bytes, WAL до checkpoint 4,358,992 bytes; 1000-fill commit
+p50 5.49 ms, max 7.67 ms. Это текущая схема без будущих episodes/events и без
+параллельного trading workload; не окончательный G1 capacity/latency gate.
+
+
+## 2026-09-06 — S1.3 чистая follower episode projection
+
+Новый `tests/unit/history/test_projector.py`: 11 cases (increase/partial/close,
+flip attribution, HEDGE, unknown/known seed, dedup, contradictory facts, source).
+Targeted history **31 passed**; full offline **1146 passed / 2 skipped /
+44 deselected**, 15.97 s. Ruff changed files/doc links clean. Это математическое
+ядро; storage/snapshot proof/aliases/net/events ещё не подключены и G1 не закрыт.
+
+
+## 2026-09-06 — episode cash accounting core
+
+Новый `test_accounting.py`: 7 checks на signed commissions/rebates, dedup,
+missing costs, funding attribution, foreign asset, shared flip fee и separate
+Builder mechanism (синтетический тип, не exchange evidence). History targeted:
+**38 passed**; full offline: **1153 passed / 2 skipped / 44 deselected**, 16.11 s.
+Ruff changed files/doc links clean. Exact net включается только explicit proof;
+реальный Builder policy/flip allocation/persistence ещё не приняты.
+
+
+## 2026-09-06 — episode persistence / refs
+
+Миграции 41–44: refs/episodes/owned index/aliases. `test_episodes.py` — 5 checks
+restart/idempotency/revision CAS/ownership/alias merge. Shared history fixture
+вынесена в conftest. Full offline **1158 passed / 2 skipped / 44 deselected**,
+16.38 s; после canonical reserve-ref correction targeted **5 passed**.
+History total перед последней correction **43 passed**. API/worker projection
+wiring не включены; G1 открыт. Ruff changed files и doc links clean.
+
+
+## 2026-09-06 — projection publication / reconciliation
+
+Новый test_reconcile (4 cases), atomic batch rollback и durable-window integration
+в test_episodes (+2). Targeted history **49 passed**; full offline **1164 passed /
+2 skipped / 44 deselected**, 15.76 s. Ruff changed files/doc links clean.
+Runtime boundary snapshots/worker projection activation ещё не реализованы;
+эта приёмка доказывает storage→projector→reconciliation→atomic publish seam.
+
+
+## 2026-09-06 — snapshot boundary checks
+
+PositionDTO.updateTime сохранён как optional StrictInt; signed history probe:
+**1 passed**, 3.65 s, updateTime есть у обеих HEDGE-сторон и ненулевой.
+Новый test_snapshot: 6 cases на стабильность qty/entry/updateTime, bracketed
+cutoff, missing time, seed inference и dedup. Targeted history **55 passed**;
+full offline **1170 passed / 2 skipped / 44 deselected**, 15.94 s.
+Ruff/doc links clean. Полный signed suite не повторялся; runtime capture machine
+и long-lived incremental checkpoint ещё не реализованы.
+
+
+## 2026-09-06 — serial boundary capture seam
+
+Новый `history/capture.py`: `read_boundary` (один авторитетный `positionRisk`
+snapshot с clock-интервалом), `HistoryCapture` с per-key `asyncio.Lock`,
+`prove_unchanged` (margin 2000 ms), seeds обратным суммированием из доказанной
+ending-границы, стабильные placeholder refs (`seed:{window.start}:{leg}`),
+публикация через `HistoryProjection`; `capture_and_publish` выполняет сначала
+bounded import, затем доказывает live edge. Отложенная публикация —
+`HistoryReconciliationError` без потери durable fills, не повод для backoff.
+`App.episodes` и `build_history_capture` подключены. Новый
+`tests/unit/history/test_capture.py`: 12 checks. Targeted history
+**67 passed**; full offline **1182 passed / 2 skipped / 44 deselected**,
+17.56 s. Ruff changed files clean. Периодическая worker-активация, durable
+capture checkpoints, user events и shared-fill allocation остаются открытыми;
+G1 не закрыт.
+
+
+## 2026-09-06 — хранилище пользовательских событий S1.3
+
+Append-only миграции 45–47: `user_activity_events` (seq, UNIQUE event_ref,
+account/environment ownership, nullable trade_ref, 13 kinds из §7.1,
+occurred/recorded_at, canonical JSON facts, per-account dedup key, notify
+eligibility) + индексы feed/trade. Новый `storage/events.py`:
+idempotent `record` (повтор по dedup key возвращает первую запись, события
+неизменяемы), owned `get`/`list_owned`/`list_by_trade`, стабильный seq-курсор
+(поздний backfill не сдвигает страницы), facts только str/int/bool/null,
+bounded limit. Новый `tests/unit/history/test_events.py`: 10 checks. Targeted
+history **77 passed**; full offline **1192 passed / 2 skipped / 44 deselected**,
+17.98 s. Ruff changed files clean. Вывод событий из фактов, worker-активация
+capture и shared-fill allocation остаются открытыми; G1 не закрыт.
+
+
+## 2026-09-06 — вывод событий из переходов эпизодов S1.3
+
+Новый pure `history/event_builder.py`: `episode_events` сравнивает ранее
+опубликованные эпизоды со свежей проекцией — OPENED/INCREASED/REDUCED/CLOSED
+только за новые подтверждённые факты (цены строго из fills, недостающий fill
+абрагирует пачку; связь `unknown` не приписывается; placeholder молчит до
+первой entry-аллокации). Повторная проекция даёт ноль черновиков; dedup key
+стабилен под first-wins семантику репозитория; `notify_eligible` — политика
+caller. Новый `tests/unit/history/test_event_builder.py`: 11 checks. Targeted
+history **88 passed**; full offline **1203 passed / 2 skipped / 44 deselected**,
+19.10 s. Ruff changed files clean. Проводка в транзакцию публикации,
+protection/system-события, worker-активация и shared-fill allocation остаются
+открытыми; G1 не закрыт.
+
+
+## 2026-09-06 — атомарные события публикации S1.3
+
+Требование §10.6 «проекция и события — одной транзакцией»: `EventDraft`
+переехал в `storage/events.py` + `insert_many` на чужом соединении;
+`episodes.publish(..., events=)` пишет эпизоды и события атомарно (конфликт
+revision и невалидный черновик откатывают всё). `HistoryProjection`
+выводит черновики из diff со старой публикацией и требует `recorded_at`;
+`HistoryCapture`/`App.user_events`/`build_history_capture` проводят политику
+сквозно, `capture_and_publish` штампует временем after-снапшота. Без репо
+поведение прежнее. Новые `test_episode_events.py` (6) + 2 capture-теста +
+`recorded_at` в builder-тестах (12). Targeted history **97 passed**; full
+offline **1212 passed / 2 skipped / 44 deselected**, 17.45 s. Ruff clean.
+Остаются worker-активация, protection/system-события, shared-fill allocation;
+G1 не закрыт.
+
+## 2026-09-06 — worker-активация capture S1.3
+
+Периодическая публикация истории: миграция 48 `history_capture_state`
+(cap_start/cap_end per account/environment/symbol, secret-safe last_error);
+`HistoryRepository.capture_state/record_capture` — dumb put, политика выше.
+`prepare_window` строит стабильное окно из durable состояния без биржевых
+чтений (пропуски: нет покрытия / фронтир опубликован / фронтир свежий;
+старт пинится к checkpoint, спан > 7 дней клампится). `require_settled=True`
+отказывает окна поверх открытой позиции — steady-state только settled.
+`run_scheduled`: prepare → capture_and_publish → checkpoint; пропуск — False
+без чтений, deferral пишет ошибку-категорию и пробрасывается в worker-backoff;
+края моложе 5 мин eligible, backfill silent. `HistoryWorker`: capture-jobs в
+ротации отдельно от fills, `mark_dirty` приоритизирует symbol (best-effort),
+`App._observe_history_order` дергает hint через `history_mark_dirty`,
+`build_history_worker` отдаёт fills+capture jobs. Тесты: storage +1, capture
++10 (prepare/settled/run_scheduled), worker +5, App hook +2. Targeted history
+**113 passed**; full offline **1230 passed / 2 skipped / 44 deselected**,
+17.17 s. Ruff changed files clean. Остаются protection/system-события,
+shared-fill allocation; G1 не закрыт.
+
+## 2026-09-06 — order-link источники и protection-события S1.3
+
+`HistoryRepository.proven_order_sources`: order id — `copy` только при согласии
+observation + CONFIRMED entry/exit-команды + link с master trade id; проекция
+резолвит сама, частичная связь остаётся `unknown`. Новый `history/protection.py`:
+baseline и факты окна только из CONFIRMED-команд, цены из journal payload,
+чистая свёртка SET/CHANGED/UNCONFIRMED в транзакции публикации; замена — одно
+событие, непривязываемый cancel молчит, trade_ref пуст. `CommandRepo.
+by_client_order_id` для связи cancel→заменённый ордер. `account_episodes`:
+batch pro-rata split shared-fill комиссий с точным сохранением суммы;
+single-view без сиблингов keeps `shared_fill_commission`. System-события
+(риск/пауза/связность/пропуск) из журнала не выводятся — источник
+application-слой, S1.5. Тесты: accounting +3, storage +4, protection +9,
+capture +3. Targeted history **132 passed**; full offline **1249 passed /
+2 skipped / 44 deselected**, 19.52 s. Ruff всего репо clean. Остаются S1.4–S1.6;
+G1 не закрыт.
+
+## 2026-09-06 — S1.4 контракты истории (list/detail/feed)
+
+`EpisodeRepository.list_closed/list_open` (курсор `closed_at:ref`), `max_seq`,
+`in_flight_for`, `coverage_from`. DTO (`TradeListItem/Page`, `TradeDetailDTO`
+с `gross_only`, `ActivityFeedPage`, `AccountOverview` без суммарного
+risk_to_stop, `TradeUnavailableError`) и методы в `ApplicationProtocol`.
+Новый `application/trade_views.py`: чистые презентеры поверх доказанных
+фактов. Service: репозитории из `runtime.db`, `trades`/`trade`/`trade_events`/
+`activity_feed` с ownership, pending-блок без payload, аддитивный `overview`
+в DashboardDTO, refresh-snapshot singleflight. Адаптер `symbol_assets`
+(baseAsset, soft-null). HTTP: `trades`/`trade`/`trade/events`/`activity/feed`
+(стало 25 POST). Тесты: trade_views +9, service +12, HTTP +9. Full offline
+**1279 passed / 2 skipped / 44 deselected**, 18.33 s. Ruff всего репо clean.
+Остаются остаток S1.4 (risk preview, resume-контекст), S1.5–S1.6; G1 не закрыт.
+
+## 2026-09-06 — S1.4 остаток: risk preview и resume-контекст
+
+`RiskPreviewStep/DTO` + чистый `risk_budget_steps` (10 шагов 0,5–5%, точный
+`available × percent`); `service.risk_preview` поверх cached snapshot без
+side effects, пустые steps вместо нулевого примера при недоступном балансе;
+route `risk/preview` (стало 26 POST). `ResumeContextDTO` + аддитивное
+`Confirmation.resume_context` только для RESUME, факты cached-only, unknown
+вместо отказа begin. Замена hardcoded копии resume в UI — S3; TS-зеркала —
+с экранами. Тесты: service +8, презентер +5, HTTP +1. Full offline
+**1293 passed / 2 skipped / 44 deselected**, 19.96 s. Ruff + format clean.
+S1.4 закрыт по backend-объёму; остаются S1.5–S1.6; G1 не закрыт.
+
+## 2026-09-06 — S1.5 presenter, structured outbox, recovery из событий
+
+`notifications/trade_cards.py`: общий pure-презентер всех 13 видов событий
+по примерам §7 (нейтральное закрытие, итог «до комиссий», unknown опускается,
+unknown kind — ValueError). Миграции 49–50: outbox `trade_ref`/`action` без
+backfill; `NotificationEvent` closed-set action; router passthrough; worker
+`trade_keyboard` dormant без base URL + `webapp_base_url` из настроек.
+`recover_user_events` (eligible после floor, backfill молчит) поверх legacy
+на старте. Service пишет RISK_CHANGED/COPY_PAUSED/COPY_RESUMED поверх ленты
+best-effort. Push-активация и menu — S3. Тесты: презентер +7, recovery +3,
+keyboard +2, writers +3. Full offline **1308 passed / 2 skipped /
+44 deselected**, 19.18 s. Ruff + format clean. Остаются S1.6 и G1.
+
+## 2026-09-06 — S1.6 offline-приёмка, ремонт миграций, retention
+
+Cross-surface acceptance (§10.9.5/6) offline: один trade_ref и одинаковые
+факты на списке/деталях/ленте/recovery; рестарт-идемпотентность; изоляция
+§10.9.7 покрыта. Найден и отремонтирован блокер рестарта: mid-list вставка
+схемы (36c55d3) ломала апгрейд pre-S1 БД (ghost-v33 пропускал CREATE TABLE
+fills) — entry 34 стал table-ensure, индекс переехал в 51, S1-DDL закалена
+IF NOT EXISTS; копия prod-БД мигрируется, fresh/upgraded конвергируют;
+регрессия `test_database_upgrade.py`. Retention: facts без TTL, outbox
+`prune_terminal` (SENT 7d / FAILED 30d, bounded, на старте worker).
+Тесты: acceptance +2, upgrade +2, prune +2. Full offline **1316 passed /
+2 skipped / 45 deselected**, ~19 s. Ruff + format clean. Live §10.9-цикл
+написан (`test_history_acceptance_live.py`), не запущен — ждёт ревью; G1
+не закрыт.
+
+## 2026-09-06 — Шаг 22: пред-ревью аудит S1, 10 must-fix влиты
+
+Шесть ревьюеров: шаги 12–15 CONFORM; P0 — live-edge capture (stale cutoff
+делал bracket невыполнимым всегда; фикс: импорт до живого края,
+cutoff=min(frontier, after−margin), одно ожидание margin, checkpoint и
+eligibility по эффективному концу; инвариант плана не тронут); S1.4 —
+курсор round-trip, preview отключённым, whitelist в advisory,
+executed_qty None≠"0"; S1.5 — recovery листает всю ленту (гард курсора,
+регрессия 204+1; найден висяк на стабе без after_seq); protection —
+cancel-гейт требует CONFIRMED; acceptance — полный цикл + batching-правило;
+FAILED-retention 10d/40d; live-файл hardened offline (order_id-фильтр,
+single-count комиссий, foreign spot-check, notify_eligible=True).
+Отклонено с обоснованием: seq-сортировка ленты (§11.2 — правится план),
+fold верит CONFIRMED-команде, а не статусу наблюдения. Full offline
+**1322 passed / 2 skipped / 45 deselected**. Ruff + format clean. Live
+§10.9 (журнал, рестарт, SL/UNKNOWN, прогон) — только с ревью; G1 не закрыт.
+
+## 2026-09-06 — Шаг 23: независимое ревью S1, REQUEST CHANGES
+
+Scope `4f1a86a..f77a3fd`. Повторная проверка именно текущего checkout:
+`PYTHONPATH=src:. .venv/bin/pytest -q -m 'not testnet'` — **1322 passed /
+2 skipped / 45 deselected**, 18.76 s. `.venv/bin/ruff check .` и
+`.venv/bin/ruff format --check .` — clean. Coverage не перемерялось;
+frontend не менялся и повторно не запускался. Новых постоянных тестов нет.
+
+Дополнительные hermetic probes (реальные repositories/service/capture,
+временная SQLite; только notification emitter заменён recorder) подтвердили:
+лишний fill чужого эпизода в trade_events; повторный closed episode с тем же
+gross после сдвига start; потерю increase/partial и неверные промежуточные
+числа при batch events; смешение HEDGE protection; потерю 1001-го eligible
+event после продвижения recovery floor. Отдельно подтверждены отсутствующие
+costs/issues в DTO, активный markup при обычном URL и tuple-контракт list_closed,
+который нарушает live harness.
+
+**S1/G1 — REQUEST CHANGES.** Открыты R1–R9 и остаток capacity/retention /
+publication latency. Отчёт с файлами, воспроизведениями и критериями исправления:
+[MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
+Ранее записанные CONFORM и «дальше только live» — результаты прежнего прохода,
+не текущий verdict. Live не запускался; harness нужно исправить до signed
+прогона. Рабочая БД и биржа этим review не затрагивались. G2/G3 также открыты.
+
+## 2026-09-07 — C1–C9 исполнены; live нашёл делимый аккаунт + баг харнеса
+
+C1–C4 (границы/аллокации/transitions/protection+хук), C5–C7 (деньги/delivery/
+feed), C8 (worker budget, maintenance tick, бенчмарк 30 акков: publish p95
+552ms, прогноз 365d 1.56GB), C9 (харнес на Executor/journal, HTTP, рестарт).
+Offline **1428/2/45**, ruff/format clean, миграции 0..57.
+Live `CT_TESTNET=1` FAIL за 96s: (1) copyc2 торгует чужой бот (fills
+`ct+32hex` в нашем окне) — эксклюзивность из §23.10 не проверена, повтор
+только в эксклюзивном окне; (2) одинаковые payloads open-a/open-b делили
+journal key — open-b был тихим no-op (ядро право, харнес починен:
+per-step operation_id + journal-coid↔биржа после каждого submit).
+Аккаунт оставлен flat. G1 открыт.
+
+## 2026-09-07 — повторное ревью C1–C9: G1 OPEN
+
+На `9a0dd98` повторён полный offline gate:
+`PYTHONPATH=src:. .venv/bin/pytest -q -m 'not testnet'` — **1429 passed /
+2 skipped / 45 deselected**, 22.03 s. `ruff check .` и `ruff format --check .`
+чистые. Новых suite-тестов в рамках review не добавлено; миграции 0..57.
+
+Отдельные probes на временных SQLite подтвердили N1–N5 (scheduled bootstrap,
+continuation/identity, потеря durable dirty range, events >200, default recovery
+>1000). N6 установлен по коду harness/Executor: STOP cancel направлен на label,
+а не фактический journal-generated clientOrderId; CONFIRMED допускает `-2011`.
+Подробности и точный порядок исправлений:
+[MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md).
+
+Записанный live PASS 26.56 s сохранён как evidence конкретного запуска, без
+нового signed прогона в этом review. Он не проверяет scheduled continuation,
+реальный SL fill и успешность отмены нужного STOP. Прямой capture benchmark
+также не доказывает publication latency рабочего scheduler.
+**S1/G1 OPEN / REQUEST CHANGES**; R4/R5/R7/R9 приняты в исходном scope,
+остальные findings требуют указанной доработки. Рабочая БД/биржа не затронуты.
+
+## S3 toggle delivery boundary — 2026-09-08
+
+После implementation commit `903d4f4` исправлен найденный чтением кода race
+mute/re-enable между sweep. Toggle/outbox cursor boundary транзакционный,
+recipient/ownership повторно проверяются при commit, cursor монотонный.
+Тестовые прогоны отложены владельцем; ruff check/format изменённых файлов
+проходят. Дополнительные сценарии внесены в S3 testing handoff; G3 OPEN.

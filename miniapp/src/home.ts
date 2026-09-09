@@ -1,6 +1,6 @@
 /** Pure Home view-model (minimal part-1 scope over DashboardDTO). */
 
-import type { DashboardDTO } from './types'
+import type { DashboardDTO, ResumeContextDTO } from './types'
 import { isBuilderVerified } from './accountBuilder'
 import { formatTime } from './format'
 
@@ -18,7 +18,7 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
   switch (dashboard.copy_state) {
     case 'active':
       return {
-        title: 'Всё работает',
+        title: 'Копирование включено',
         subtitle: 'Копирование включено',
         tone: 'active',
         actionLabel: 'pause',
@@ -96,3 +96,12 @@ export const RESUME_CONFIRM_BODY =
 export const RESUME_CONFIRM_FLAT_BODY =
   'Новые входы снова станут доступны с текущими настройками риска. ' +
   'Закрытия и защитные действия продолжают работать.'
+
+
+export function resumeConfirmBody(context?: ResumeContextDTO | null): string {
+  if (context?.snapshot_freshness === 'fresh') {
+    if (context.master_in_position === false) return RESUME_CONFIRM_FLAT_BODY
+    if (context.master_in_position === true) return RESUME_CONFIRM_BODY
+  }
+  return 'После проверки актуального состояния система может открыть текущие позиции мастера по рыночной цене с расчётом риска и защитой. Новые входы снова станут доступны.'
+}

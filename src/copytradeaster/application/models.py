@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from copytradeaster.history.models import TradeResolutionDTO
 
 from copytradeaster.onboarding.errors import OnboardingErrorCode
 
@@ -60,6 +63,36 @@ class StaleOperationError(ApplicationError):
 
 class ConfirmationExpiredError(ApplicationError):
     public_code = "confirmation_expired"
+
+
+class TradeUnavailableError(ApplicationError):
+    """One opaque trade ref is missing, foreign, or outside the history scope.
+
+    The same error covers all three cases so existence never leaks across
+    accounts; the client shows one safe «unavailable» state with a way back.
+    """
+
+    public_code = "trade_unavailable"
+
+
+class HistoryPageChangedError(ApplicationError):
+    """The episode revision moved under an open fills page (C2, plan §23.3).
+
+    The client must restart paging from the first page instead of continuing
+    the stale cursor; retrying the same cursor can never succeed.
+    """
+
+    public_code = "history_page_changed"
+
+
+class TradeSplitError(ApplicationError):
+    """The requested ref split into several episodes (C2, plan §23.3).
+
+    No single child is picked silently; the client must ask the user which
+    surviving episode to open.
+    """
+
+    public_code = "trade_split"
 
 
 class ServiceUnavailableError(ApplicationError):
@@ -256,6 +289,9 @@ class DashboardDTO:
     # P2.6 shared Builder verdict: True only for a current authoritative
     # ``verified`` attestation from the same truth as AccountBuilderDTO.
     builder_verified: bool = False
+    # S1.4 account aggregate over one consistent snapshot; None when the
+    # snapshot is missing. Additive: old consumers ignore it.
+    overview: AccountOverview | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +354,35 @@ class RiskDTO:
     step: Decimal = RISK_STEP
     presets: tuple[Decimal, ...] = RISK_PRESETS
     risk_base: str = RISK_BASE
+
+
+@dataclass(frozen=True, slots=True)
+class RiskPreviewStep:
+    """Server-computed money example for one allowed risk percent.
+
+    The frontend switches these ready rows while the ruler moves instead of
+    requesting per-pixel math. ``budget_usdt`` is the exact position-sizing
+    budget (available × percent), not a guaranteed maximum loss.
+    """
+
+    risk_percent: Decimal
+    budget_usdt: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class RiskPreviewDTO:
+    """Money examples for every allowed risk step over one snapshot.
+
+    Empty steps with ``available_usdt=None`` mean the balance is not
+    available: the screen shows its fallback copy instead of saving or
+    displaying a zero example. A stale snapshot still yields examples,
+    labeled by ``freshness``.
+    """
+
+    available_usdt: Decimal | None
+    steps: tuple[RiskPreviewStep, ...]
+    snapshot_captured_at: datetime | None
+    freshness: SnapshotFreshness
 
 
 class ActivityCategory(StrEnum):
@@ -409,6 +474,9 @@ class PositionSummaryDTO:
     take_profit_price: Decimal | None = None
     risk_to_stop_usdt: Decimal | None = None
 
+    quantity_asset: str | None = None
+    trade_ref: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class PositionPageDTO:
@@ -418,6 +486,240 @@ class PositionPageDTO:
     snapshot_captured_at: datetime | None = None
     is_stale: bool = False
     message: str | None = None
+
+
+class HistoryQuality(StrEnum):
+    """Episode completeness as proven by the history layer.
+
+    ``reconciling`` is reserved for a future import-progress state; only
+    proven values are emitted, never a guess.
+    """
+
+    COMPLETE = "complete"
+    PARTIAL_HISTORY = "partial_history"
+
+
+class TradeState(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class EpisodeSource(StrEnum):
+    COPY = "copy"
+    EXTERNAL = "external"
+    MIXED = "mixed"
+    UNKNOWN = "unknown"
+
+
+class SnapshotFreshness(StrEnum):
+    FRESH = "fresh"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
+class RiskCoverage(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
+class MoneyState(StrEnum):
+    """Per-component money completeness as proven by the C5 accountant.
+
+    ``complete`` means the known amount is exact; ``partial`` means a proven
+    amount is known but gaps remain; ``unavailable`` means nothing is proven
+    for the component. Absent facts never read as zero: callers check the
+    state, never the amount alone.
+    """
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class MoneyComponent:
+    """One proven cost component: canonical amount plus its own proof state."""
+
+    known_amount: str
+    state: MoneyState
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeMoneyView:
+    """Proof-driven money for one episode (C5, plan §23.6).
+
+    ``gross`` is always the proven realized gross; ``net`` is set only with
+    sufficient proof, else None with a concrete gap in ``issues``.
+    ``result_state`` keeps the legacy ``gross_only`` value for insufficient
+    proof and uses ``net_complete`` once the net is proven. ``as_of`` is the
+    read time, ``revision`` the episode revision read.
+    """
+
+    gross: str
+    net: str | None
+    commission: MoneyComponent
+    funding: MoneyComponent
+    builder: MoneyComponent
+    result_state: str = "gross_only"
+    issues: tuple[str, ...] = ()
+    as_of: datetime | None = None
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TradeListItem:
+    """One follower episode for the closed/open lists.
+
+    Money travels as canonical Decimal strings; a zero result and an
+    unavailable one stay distinct. ``executed_qty`` is the total closed
+    volume for a closed episode and the remainder for an open one; it is
+    None only when the remainder was never proven (open placeholder).
+    ``side`` is None when the direction was never proven. ``net_pnl_usdt``
+    stays None until full cost attribution lands (S1.6); only the proven
+    gross is shown before that.
+    """
+
+    trade_ref: str
+    symbol: str
+    quantity_asset: str | None
+    side: PositionSide | None
+    state: TradeState
+    source: EpisodeSource
+    opened_at: datetime | None
+    closed_at: datetime | None
+    executed_qty: str | None
+    realized_pnl_gross_usdt: str
+    net_pnl_usdt: str | None
+    quality: HistoryQuality
+    result_state: str = "gross_only"
+    money: EpisodeMoneyView | None = None
+
+    average_entry: str | None = None
+    average_exit: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TradeListPage:
+    items: tuple[TradeListItem, ...] = ()
+    next_cursor: str | None = None
+    as_of: datetime | None = None
+    coverage_from: datetime | None = None
+    coverage_complete: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class FillFacts:
+    """One episode share of one exchange execution (C2, plan §23.3).
+
+    Ids stay strings, never JS numbers. ``quantity``/``price``/``realized_pnl``
+    are the source exchange facts; ``allocated_quantity``/``role``/
+    ``allocated_realized_pnl``/``position_side`` are this episode's proven
+    share. A shared flip fill appears once per episode with only its share;
+    shares of one fill sum to the source fill.
+    """
+
+    trade_id: str
+    order_id: str
+    side: str
+    quantity: str
+    price: str
+    realized_pnl: str
+    executed_at: datetime
+    allocated_quantity: str
+    role: str
+    allocated_realized_pnl: str
+    position_side: str
+
+
+@dataclass(frozen=True, slots=True)
+class TradeEventItem:
+    """Structured user event: the frontend formats copy, never facts."""
+
+    event_ref: str
+    kind: str
+    trade_ref: str | None
+    occurred_at: datetime
+    facts: dict[str, str | int | bool | None]
+    text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TradeEventsPage:
+    """One episode's fills plus its user events, paged independently.
+
+    ``fills_cursor``/``events_cursor`` are the positions for the next
+    request (None when that array is exhausted); ``next_fills_cursor``/
+    ``next_events_cursor`` repeat the same values under explicit names and
+    legacy ``next_cursor`` repeats the events position.
+    """
+
+    fills: tuple[FillFacts, ...] = ()
+    events: tuple[TradeEventItem, ...] = ()
+    next_cursor: str | None = None
+    fills_cursor: str | None = None
+    events_cursor: str | None = None
+    next_fills_cursor: str | None = None
+    next_events_cursor: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOperation:
+    """One unsettled journal command, without ids or payloads."""
+
+    symbol: str | None
+    operation: str
+    state: str
+    age_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityFeedPage:
+    items: tuple[TradeEventItem, ...] = ()
+    next_cursor: str | None = None
+    high_water: int = 0
+    latest_seq: int = 0
+    pending: tuple[PendingOperation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TradeDetailDTO:
+    """One episode with its money breakdown and provenance.
+
+    ``result_state`` names the finality explicitly: only the proven gross
+    is shown until full cost attribution lands.
+    """
+
+    trade: TradeListItem
+    entry_qty: str
+    exit_qty: str
+    remaining_qty: str | None
+    average_entry: str | None
+    average_exit: str | None
+    duration_ms: int | None
+    revision: int
+    position_side: str
+    result_state: str = "gross_only"
+    money: EpisodeMoneyView | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountOverview:
+    """Dashboard aggregate over one consistent snapshot.
+
+    No summed ``risk_to_stop`` total: the per-position estimate is not a
+    guaranteed loss bound (plan §5), so the aggregate carries counts and
+    the proven unrealized total only.
+    """
+
+    as_of: datetime | None
+    freshness: SnapshotFreshness
+    open_count: int | None
+    unrealized_pnl_usdt: str | None
+    available_usdt: str | None
+    protected_count: int | None
+    risk_coverage: RiskCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +750,24 @@ class Confirmation:
     action: ConfirmationAction
     account_id: str | None
     expires_at: datetime | None = None
+    # S1.4 resume facts for the confirmation copy; None for other actions.
+    # ``master_in_position=None`` means the master read was unavailable, not
+    # flat; ``permission_ok=None`` means no cached proof either way.
+    resume_context: ResumeContextDTO | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeContextDTO:
+    """Proven resume facts so the confirmation explains the real outcome.
+
+    Replaces the hardcoded «master is in position» claim: the client picks
+    its copy from these facts. Snapshot reads are cached-only here; the
+    enforcing fresh checks still happen inside the resume workflow.
+    """
+
+    master_in_position: bool | None
+    snapshot_freshness: SnapshotFreshness
+    permission_ok: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,15 +1011,48 @@ class ApplicationProtocol(Protocol):
         display_name: str | None,
     ) -> AccessRequestDTO: ...
 
-    async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO: ...
-    async def positions(self, user_id: int, refresh: bool = False) -> PositionPageDTO: ...
-    async def status(self, user_id: int, refresh: bool = False) -> StatusDTO: ...
-
-    async def risk(self, user_id: int) -> RiskDTO: ...
-
     async def activity(
         self, user_id: int, page: int = 0, filter: ActivityFilter = ActivityFilter.ALL
     ) -> ActivityPage: ...
+
+    async def trades(
+        self,
+        user_id: int,
+        *,
+        period: str = "7d",
+        cursor: str | None = None,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> TradeListPage: ...
+
+    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO | TradeResolutionDTO: ...
+
+    async def trade_events(
+        self,
+        user_id: int,
+        trade_ref: str,
+        *,
+        cursor: int = 0,
+        limit: int | None = None,
+        fills_cursor: str | None = None,
+        events_cursor: int | str | None = None,
+        fills_limit: int | None = None,
+        events_limit: int | None = None,
+    ) -> TradeEventsPage: ...
+    async def activity_feed(
+        self,
+        user_id: int,
+        *,
+        filter: ActivityFilter = ActivityFilter.ALL,
+        cursor: int | str | None = 0,
+        limit: int | None = None,
+    ) -> ActivityFeedPage: ...
+
+    async def dashboard(self, user_id: int, refresh: bool = False) -> DashboardDTO: ...
+    async def positions(self, user_id: int, refresh: bool = False) -> PositionPageDTO: ...
+    async def status(self, user_id: int, refresh: bool = False) -> StatusDTO: ...
+    async def risk(self, user_id: int) -> RiskDTO: ...
+    async def risk_preview(self, user_id: int) -> RiskPreviewDTO: ...
 
     async def notification_settings(self, user_id: int) -> NotificationSettingsDTO: ...
 

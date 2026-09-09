@@ -1,211 +1,45 @@
-/** Positions screen (эталон 03-positions, Stage 3 part 2 P2.1).
- * Строго read-only экран для просмотра открытых позиций фолловера.
- */
-
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { HOME_REVALIDATE_MS, useWarmRevalidation, type WarmReason } from '../revalidate'
-import { api, ApiError, type AuthContext } from '../api'
+import { useState } from 'react'
+import type { AuthContext } from '../api'
 import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { formatPnl, formatPrice, formatUsdt } from '../format'
-import { snapshotLabel } from '../home'
 import { PROTECTION_WARNING } from '../protectionWarning'
-import type { PositionPageDTO, PositionSummaryDTO } from '../types'
+import type { PositionSummaryDTO } from '../types'
+import type { NestedScreen } from '../navigation'
+import { MiniAppResources } from '../resources'
+import { useResource, useScreenResources } from '../useResource'
+import { PositionSummaryCard } from '../components/PositionSummaryCard'
+import { orderedPositions } from '../tradeView'
+import { ClosedTrades } from './TradeListScreen'
 
-const WarningIcon = ({ size }: { size: number }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
-    <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-  </svg>
-)
+const WarningIcon = ({ size }: { size: number }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden><path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2" /><circle cx="12" cy="12" r="9" stroke="currentColor" /></svg>
 
-type LoadState =
-  | { kind: 'loading' }
-  | { kind: 'ready'; data: PositionPageDTO }
-  | { kind: 'error'; code: string }
-
-export function PositionsScreen({
-  auth,
-  accountMasked,
-  active = true,
-  warm = true,
-  invalidateSignal,
-}: {
-  auth: AuthContext
-  accountMasked?: string | null
-  active?: boolean
-  /** Gate for the first fetch: shell warmup or the user's first tap. */
-  warm?: boolean
-  /** Shell-owned mutation counter; see useWarmRevalidation. */
-  invalidateSignal?: number
+export function PositionsScreen({ auth, accountMasked, active = true, warm = true, resources: providedResources, foregroundSignal, onOpen = () => {} }: {
+  auth: AuthContext; accountMasked?: string | null; active?: boolean; warm?: boolean; resources?: MiniAppResources; foregroundSignal?: number; onOpen?: (screen: NestedScreen) => void
 }) {
-  const [load, setLoad] = useState<LoadState>({ kind: 'loading' })
-  const [refreshing, setRefreshing] = useState(false)
-
-  const seq = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
-  const startedRef = useRef(false)
-
-  const { markFresh } = useWarmRevalidation({
-    active,
-    ttlMs: HOME_REVALIDATE_MS,
-    busy: load.kind === 'loading' || refreshing,
-    invalidateSignal,
-    onRefresh: (reason: WarmReason) =>
-      fetchPositions(reason === 'retry' ? 'foreground' : 'background', false),
-  })
-
-  const fetchPositions = useCallback(
-    async (mode: 'foreground' | 'background', refresh = false) => {
-      const my = ++seq.current
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      if (refresh) setRefreshing(true)
-      try {
-        const data = await api.positions(auth, refresh, { signal: controller.signal })
-        if (seq.current !== my) return
-        markFresh()
-        setLoad({ kind: 'ready', data })
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'aborted') return
-        if (seq.current !== my) return
-        // Background refresh never wipes ready UI; the next activation
-        // past TTL retries automatically.
-        if (mode === 'foreground') {
-          setLoad({ kind: 'error', code: err instanceof ApiError ? err.code : 'network_error' })
-        }
-      } finally {
-        if (refresh) setRefreshing(false)
-      }
-    },
-    [auth, markFresh],
-  )
-
-  useEffect(() => {
-    if (!warm || startedRef.current) return
-    startedRef.current = true
-    // oxlint-disable-next-line react/set-state-in-effect
-    void fetchPositions('foreground', false)
-    return () => abortRef.current?.abort()
-  }, [warm, fetchPositions])
-
-  if (load.kind === 'loading') {
-    return (
-      <div className="screen">
-        <Brand
-          right={
-            accountMasked ? (
-              <span className="wallet-chip num">{accountMasked}</span>
-            ) : (
-              <span className="badge-testnet">Aster testnet</span>
-            )
-          }
-        />
-        <div className="skeleton" style={{ minHeight: 40, width: '60%' }} />
-        <div className="skeleton" style={{ minHeight: 200 }} aria-label="Загрузка позиций" />
-        <div className="skeleton" style={{ minHeight: 200 }} />
-      </div>
-    )
-  }
-
-  if (load.kind === 'error') {
-    const copy = describeError(load.code)
-    return (
-      <div className="screen">
-        <Brand
-          right={
-            accountMasked ? (
-              <span className="wallet-chip num">{accountMasked}</span>
-            ) : (
-              <span className="badge-testnet">Aster testnet</span>
-            )
-          }
-        />
-        <ErrorBox title={copy.title} hint={copy.hint} />
-        <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void fetchPositions('foreground', true)}>
-            Повторить
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  const { data } = load
-  const isStale = data.is_stale || data.system_state === 'stale'
-
-  return (
-    <div className="screen">
-      <Brand
-        right={
-          accountMasked ? (
-            <span className="wallet-chip num">{accountMasked}</span>
-          ) : (
-            <span className="badge-testnet">Aster testnet</span>
-          )
-        }
-      />
-
-      <div className="positions-header">
-        <h1 className="h1" style={{ margin: 0 }}>
-          Позиции
-        </h1>
-        <div className="freshness">
-          <span className={`dot ${isStale ? 'warning' : 'success'}`} aria-hidden />
-          {isStale ? 'Данные устарели' : 'Обновлено'}: {snapshotLabel(data.snapshot_captured_at)}
-        </div>
-        <div className="section-label">
-          Открытые позиции · {data.count}
-        </div>
-      </div>
-
-      {isStale && (
-        <div className="position-warning" role="status">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M12 9v4M12 17h.01" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          <span>Снимок позиций устарел. Проверьте подключение к бирже.</span>
-        </div>
-      )}
-
-      {data.positions.length === 0 ? (
-        <div className="panel" style={{ textAlign: 'center', padding: '32px 16px' }}>
-          <div className="tone-muted" style={{ fontSize: 15, marginBottom: 12 }}>
-            Нет открытых позиций
-          </div>
-          <button
-            type="button"
-            className="btn btn-secondary btn-inline"
-            disabled={refreshing}
-            onClick={() => void fetchPositions('foreground', true)}
-          >
-            {refreshing ? 'Обновляем…' : 'Обновить'}
-          </button>
-        </div>
-      ) : (
-        data.positions.map((pos) => <PositionCard key={`${pos.symbol}-${pos.side}`} position={pos} />)
-      )}
-
-      <div className="info-box">
-        Позиции только для просмотра. Управляет торговое ядро.
-      </div>
-
-      {data.positions.length > 0 && (
-        <div className="btn-stack" style={{ marginTop: 4 }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={refreshing}
-            onClick={() => void fetchPositions('foreground', true)}
-          >
-            {refreshing ? 'Обновляем…' : 'Обновить данные'}
-          </button>
-        </div>
-      )}
+  const resources = useScreenResources(providedResources, auth)
+  const [segment, setSegment] = useState<'open' | 'closed'>('open')
+  const [attention, setAttention] = useState(false)
+  const resource = useResource({ resources, key: 'positions', enabled: warm, active: active && segment === 'open', foregroundSignal })
+  const data = resource.snapshot.data
+  const stale = !!data && (data.is_stale || resource.snapshot.stale || !!resource.snapshot.error)
+  const positions = orderedPositions(data?.positions ?? [], attention)
+  return <div className="screen">
+    <Brand right={accountMasked ? <span className="wallet-chip num">{accountMasked}</span> : undefined} />
+    <h1 className="h1">Позиции</h1>
+    <div className="history-segments" role="tablist" aria-label="Состояние позиций"><button type="button" role="tab" aria-selected={segment === 'open'} onClick={() => setSegment('open')}>Открытые {data?.count ?? '—'}</button><button type="button" role="tab" aria-selected={segment === 'closed'} onClick={() => setSegment('closed')}>Закрытые</button></div>
+    <div hidden={segment !== 'closed'}><ClosedTrades resources={resources} onOpen={onOpen} active={active && segment === 'closed'} preview foregroundSignal={foregroundSignal} /></div>
+    <div hidden={segment !== 'open'} className="history-stack">
+      {resource.snapshot.error && <ErrorBox {...describeError(resource.snapshot.error)} />}
+      {!data && !resource.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка позиций" />}
+      {stale && <p className="position-warning" role="status">Снимок позиций устарел. Статус защиты требует обновления.</p>}
+      {data?.positions.some(p => p.protection_state !== 'protected') && <div className="history-segments"><button type="button" aria-pressed={!attention} onClick={() => setAttention(false)}>Все</button><button type="button" aria-pressed={attention} onClick={() => setAttention(true)}>Требуют внимания</button></div>}
+      {positions.slice(0, 3).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} stale={stale} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
+      {data && positions.length === 0 && <p className="info-box">{!data.snapshot_captured_at ? 'Получаем данные аккаунта' : attention ? 'Нет позиций с проблемой защиты' : 'Нет открытых позиций'}</p>}
+      {positions.length > 3 && <button type="button" className="btn btn-secondary" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all', attention })}>Показать все {positions.length}</button>}
+      <button type="button" className="btn btn-secondary" disabled={resource.snapshot.inflight} onClick={() => void resource.refresh('strong').then(() => resources.invalidate(['dashboard', 'status'])).catch(() => {})}>{resource.snapshot.error ? 'Повторить' : 'Обновить данные'}</button>
     </div>
-  )
+  </div>
 }
 
 export function PositionCard({ position }: { position: PositionSummaryDTO }) {

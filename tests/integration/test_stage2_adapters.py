@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from copytradeaster.app import App
 from copytradeaster.application.adapters import build_stage2_composition
 from copytradeaster.application.models import ActivityFilter
-from copytradeaster.application.service import (
-    _activity_kind_filter,
-    _safe_activity_category,
-    _safe_code,
-)
+from copytradeaster.application.trade_views import feed_kinds
 from copytradeaster.config import Settings
 from copytradeaster.storage.database import Database
-from copytradeaster.storage.repositories import CommandRepo
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryScope
+from copytradeaster.storage.repositories import AccountRepo
 
 
 async def test_real_app_composition_exposes_stage2_adapters(tmp_path: Path):
@@ -39,119 +36,74 @@ async def test_real_app_composition_exposes_stage2_adapters(tmp_path: Path):
         await app.stop()
 
 
-async def test_real_adapter_pushes_activity_category_filter_into_sql(tmp_path: Path):
-    """``AppStage2RuntimeAdapter.read_activity`` must filter before LIMIT/OFFSET.
+async def test_real_feed_page_filters_kinds_in_sql_before_limit(tmp_path: Path):
+    """``EventRepository.list_feed_page`` must filter kinds before LIMIT.
 
-    Regression for the P1 pagination bug.  ``UserApplicationService._activity_rows``
-    delegates to this real adapter whenever the runtime provides it, so the
-    unit tests (which fall back to ``db.fetchall`` because ``FakeRuntime`` has
-    no ``read_activity``) do not exercise the production SQL.  This test drives
-    the real adapter against a real migrated SQLite database.
-
-    It also pins the invariant that keeps both code paths honest: the SQL
-    clause produced for a category must select exactly the rows that
-    ``_safe_activity_category`` classifies into that category — including the
-    unrecognised-kind fallback, which must land in ``system`` rather than
-    silently vanishing from both filters.
+    Adapted from the removed runtime ``read_activity`` regression: the S3
+    feed read path maps an ``ActivityFilter`` through ``feed_kinds`` and the
+    repository applies the kind predicate in SQL.  If it were applied after
+    the LIMIT window, a trade-filtered page would come back empty whenever
+    the newest rows overall are system kinds.  The final invariant keeps
+    both honest: the SQL predicate must select exactly the rows the shared
+    kind map classifies into that filter.
     """
-    db = Database(tmp_path / "stage2-activity.sqlite3")
+    db = Database(tmp_path / "stage2-feed.sqlite3")
     await db.connect()
     await db.migrate()
-    app = App(
-        Settings(
-            encryption_key="22" * 32,
-            db_path=tmp_path / "stage2-activity.sqlite3",
-            log_path=tmp_path / "logs" / "stage2-activity.log",
-        ),
-        db=db,
-    )
     try:
-        runtime = build_stage2_composition(app, admin_ids=[]).runtime
-        commands = CommandRepo(db)
-        base = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
+        events = EventRepository(db)
+        scope = HistoryScope("acct-1", "testnet")
+        await AccountRepo(db).upsert("acct-1", "follower", "acct-1", "0x" + "1" * 40)
+        base_ms = int(datetime(2026, 9, 2, 10, 0, tzinfo=UTC).timestamp() * 1000)
 
-        # Oldest -> newest: 14 system rows, then 14 trade rows, then one row
-        # with an unrecognised kind (must still classify as system).
-        specs: list[tuple[str, str]] = [(f"sys-{i:02d}", "SET_LEVERAGE") for i in range(14)]
-        specs += [(f"trd-{i:02d}", "MARKET_OPEN") for i in range(14)]
-        specs += [("weird-00", "SOME_FUTURE_KIND")]
-
-        for position, (command_key, kind) in enumerate(specs):
-            payload: dict[str, object] = {"symbol": "BTCUSDT"}
-            if kind == "SET_LEVERAGE":
-                payload["leverage"] = str(10 + position)
-            await commands.insert(
-                command_key,
-                "acct-1",
-                None,
-                kind,
-                json.dumps(payload, sort_keys=True),
-                1,
-                f"ct-{command_key}",
-            )
-            await db.execute_write(
-                "UPDATE execution_commands SET status='CONFIRMED', updated_at=? "
-                "WHERE command_key=?",
-                ((base + timedelta(minutes=position)).isoformat(), command_key),
+        # Oldest -> newest: 14 trade rows, then 14 system rows on top, so the
+        # newest unfiltered window holds no trade row at all.
+        specs: list[tuple[str, str]] = [(f"trd-{i:02d}", "POSITION_CLOSED") for i in range(14)]
+        specs += [(f"sys-{i:02d}", "ENTRY_SKIPPED") for i in range(14)]
+        for position, (name, kind) in enumerate(specs):
+            await events.record(
+                scope,
+                kind=kind,
+                occurred_at=base_ms + position,
+                recorded_at=base_ms + position,
+                facts={"symbol": "BTCUSDT"},
+                dedup_key=f"feed:{name}",
+                trade_ref="ref-1" if kind == "POSITION_CLOSED" else None,
+                notify_eligible=False,
             )
 
         limit = 11  # page_size + 1, i.e. the window the service asks for
 
-        # Unfiltered: the newest row is the unrecognised kind, the rest of the
-        # window is trade rows — this is the window the old code filtered in
-        # Python, and it held no SET_LEVERAGE row at all.
-        unfiltered = await runtime.read_activity("acct-1", limit, 0)
+        # Unfiltered: the newest window holds only system rows — this is the
+        # window the old code filtered in Python.
+        unfiltered, pinned = await events.list_feed_page(scope, high_water=None, limit=limit)
         assert len(unfiltered) == limit
-        assert {row["kind"] for row in unfiltered} == {"SOME_FUTURE_KIND", "MARKET_OPEN"}
-        assert "SET_LEVERAGE" not in {row["kind"] for row in unfiltered}
+        assert {row.event.kind for row in unfiltered} == {"ENTRY_SKIPPED"}
 
-        # The exact old failure: with the predicate applied after LIMIT/OFFSET
-        # this window contains no system row at all.
-        system = await runtime.read_activity(
-            "acct-1", limit, 0, kind_filter=_activity_kind_filter(ActivityFilter.SYSTEM)
+        # The exact old failure: with the predicate applied after LIMIT this
+        # window contains no trade row at all.
+        trade, _ = await events.list_feed_page(
+            scope, kinds=feed_kinds(ActivityFilter.TRADE), high_water=pinned, limit=limit
         )
-        assert len(system) == limit, "system rows beyond the general window were hidden"
-        assert {row["kind"] for row in system} == {"SET_LEVERAGE", "SOME_FUTURE_KIND"}
+        assert len(trade) == limit, "trade rows beyond the general window were hidden"
+        assert {row.event.kind for row in trade} == {"POSITION_CLOSED"}
 
-        trade = await runtime.read_activity(
-            "acct-1", limit, 0, kind_filter=_activity_kind_filter(ActivityFilter.TRADE)
+        system, _ = await events.list_feed_page(
+            scope, kinds=feed_kinds(ActivityFilter.SYSTEM), high_water=pinned, limit=limit
         )
-        assert len(trade) == limit
-        assert {row["kind"] for row in trade} == {"MARKET_OPEN"}
+        assert len(system) == limit
+        assert {row.event.kind for row in system} == {"ENTRY_SKIPPED"}
 
-        # OFFSET walks the *filtered* set, not the general journal.
-        system_page1 = await runtime.read_activity(
-            "acct-1", limit, limit, kind_filter=_activity_kind_filter(ActivityFilter.SYSTEM)
-        )
-        assert len(system_page1) == 4, "offset must skip filtered rows, not general rows"
-        trade_page1 = await runtime.read_activity(
-            "acct-1", limit, limit, kind_filter=_activity_kind_filter(ActivityFilter.TRADE)
-        )
-        assert len(trade_page1) == 3
-
-        # Default (no filter) keeps the previous three-argument contract.
-        assert len(await runtime.read_activity("acct-1", limit, 0)) == limit
-
-        # Invariant: for every category the SQL predicate selects exactly the
-        # rows the safe mapper classifies into that category.
-        every = await db.fetchall("SELECT kind FROM execution_commands WHERE account_id='acct-1'")
-        for activity_filter, category in (
-            (ActivityFilter.TRADE, "trade"),
-            (ActivityFilter.SYSTEM, "system"),
-        ):
-            selected = await runtime.read_activity(
-                "acct-1",
-                1000,
-                0,
-                kind_filter=_activity_kind_filter(activity_filter),
-            )
-            assert {row["command_key"] for row in selected} == {
-                row["command_key"]
-                for row in await db.fetchall(
-                    "SELECT command_key, kind FROM execution_commands WHERE account_id='acct-1'"
-                )
-                if _safe_activity_category(_safe_code(row["kind"], "command")).value == category
+        # Invariant: for every filter the SQL predicate selects exactly the
+        # rows the shared kind map classifies into that filter.
+        every = await events.list_owned(scope)
+        assert len(every) == 28
+        for activity_filter in (ActivityFilter.TRADE, ActivityFilter.SYSTEM):
+            kinds = feed_kinds(activity_filter)
+            assert kinds is not None
+            selected, _ = await events.list_feed_page(scope, kinds=kinds, limit=200)
+            assert {row.event.event_ref for row in selected} == {
+                row.event.event_ref for row in every if row.event.kind in kinds
             }
-        assert len(every) == 29
     finally:
-        await app.stop()
+        await db.close()

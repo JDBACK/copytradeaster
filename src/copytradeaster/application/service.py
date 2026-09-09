@@ -9,6 +9,8 @@ importing Telegram types here.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import inspect
 import json
@@ -17,7 +19,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
@@ -35,7 +37,9 @@ from copytradeaster.application.models import (
     AccountBuilderReason,
     AccountBuilderRemediation,
     AccountBuilderState,
+    AccountOverview,
     ActivityCategory,
+    ActivityFeedPage,
     ActivityFilter,
     ActivityItem,
     ActivityPage,
@@ -59,32 +63,55 @@ from copytradeaster.application.models import (
     DirectCredentialsInput,
     GlobalEmergencyActiveError,
     GlobalPauseActiveError,
+    HistoryPageChangedError,
     MiniAppAccessState,
     MiniAppConnectionState,
     MiniAppSessionDTO,
     NotificationSettingsDTO,
     OnboardingApplicationError,
     OnboardingResult,
+    PendingOperation,
     PermissionsState,
     PermissionSummary,
     PositionPageDTO,
     PositionProtectionState,
     PositionSide,
     PositionSummaryDTO,
+    ResumeContextDTO,
     RiskDTO,
+    RiskPreviewDTO,
     RiskUpdateInput,
     ServiceUnavailableError,
+    SnapshotFreshness,
     StaleOperationError,
     StatusDTO,
     StatusReason,
     StatusRemediation,
     StatusState,
     SystemState,
+    TradeDetailDTO,
+    TradeEventsPage,
+    TradeListPage,
+    TradeSplitError,
+    TradeUnavailableError,
     UserContext,
     UserRole,
     ValidationError,
 )
+from copytradeaster.application.trade_views import (
+    build_overview,
+    feed_kinds,
+    present_allocated_fill,
+    present_event,
+    present_trade,
+    present_trade_detail,
+    quantity_assets,
+    resolve_owned_ref,
+    risk_budget_steps,
+)
 from copytradeaster.aster.trading_api import AsterError
+from copytradeaster.history.accounting import EpisodeMoney, load_episode_money
+from copytradeaster.history.models import TradeResolutionDTO
 from copytradeaster.logging_utils import get_logger, log_control_audit, log_onboarding_audit
 from copytradeaster.onboarding.builder import validate_builder_record
 from copytradeaster.onboarding.errors import OnboardingError, OnboardingErrorCode
@@ -96,10 +123,14 @@ from copytradeaster.onboarding.models import (
     mask_address,
     stable_account_id,
 )
+from copytradeaster.storage.episodes import EpisodeRepository, EpisodeRevisionConflict
+from copytradeaster.storage.events import EventRepository
+from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
     AgentValidation,
     AgentValidationRepo,
+    CommandRepo,
     NotificationOutboxRepo,
     SettingsRepo,
     TelegramAccessRequestRepo,
@@ -114,6 +145,7 @@ PERMISSION_TTL_SECONDS = 60
 BUILDER_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60 * 1000
 TESTNET_PERMISSION_FALLBACK_TTL_SECONDS = 86_400
 ACTIVITY_PAGE_SIZE = 10
+TRADE_PAGE_SIZE = 20
 ADMIN_PAGE_SIZE = 10
 ACCESS_REQUEST_RETRY_COOLDOWN_SECONDS = 60
 # The token is embedded together with action/revision in callback_data by the
@@ -121,6 +153,24 @@ ACCESS_REQUEST_RETRY_COOLDOWN_SECONDS = 60
 # comfortably below Telegram's 64-byte callback_data ceiling.
 CONFIRMATION_TOKEN_MAX_BYTES = 16
 _MISSING = object()
+_TRADE_PERIODS = {"7d": 7, "30d": 30, "all": None}
+_PENDING_OPERATIONS = {
+    "MARKET_OPEN": "entry",
+    "MARKET_CLOSE": "exit",
+    "PLACE_STOP": "protection",
+    "PLACE_TP": "protection",
+    "CANCEL_ORDER": "cancel",
+    "SET_LEVERAGE": "leverage",
+}
+
+
+def _payload_symbol(payload: Any) -> str | None:
+    """Command symbol for the pending block; never the payload itself."""
+    parsed = _parse_activity_payload(payload)
+    symbol = _safe_activity_symbol(parsed)
+    return symbol
+
+
 _SAFE_CODE = re.compile(r"[^A-Za-z0-9_.:-]+")
 _SAFE_ERRORS = (
     AuthorizationError,
@@ -129,7 +179,34 @@ _SAFE_ERRORS = (
     ConfirmationExpiredError,
     StaleOperationError,
     ServiceUnavailableError,
+    TradeUnavailableError,
+    HistoryPageChangedError,
+    TradeSplitError,
 )
+
+
+_CONNECTIVITY_ASTER_CODES = frozenset({-1000, -1006, -1007})
+
+
+def _is_connectivity_error(exc: BaseException) -> bool:
+    """Transport-classified failures only; app bugs never read as outages.
+
+    Mirrors the executor outcome-unknown taxonomy (timeout/gateway codes and
+    5xx) plus stdlib transport errors. A 4xx (auth, validation) or a local
+    bug is not a lost exchange connection and records no event.
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    if not isinstance(exc, AsterError):
+        return False
+    if exc.code in _CONNECTIVITY_ASTER_CODES:
+        return True
+    status = exc.http_status
+    if isinstance(status, int) and not isinstance(status, bool) and status >= 500:
+        return True
+    message = exc.msg.lower() if isinstance(exc.msg, str) else ""
+    return exc.code == 0 and ("timeout" in message or "timed out" in message)
+
 
 log = get_logger(__name__)
 
@@ -177,14 +254,6 @@ class Stage2RuntimeAdapter(Protocol):
     async def cached_snapshot(self, account_id: str) -> Any | None: ...
 
     async def refresh_snapshot(self, account_id: str) -> Any: ...
-
-    async def read_activity(
-        self,
-        account_id: str,
-        limit: int,
-        offset: int,
-        kind_filter: ActivityKindFilter | None = None,
-    ) -> Sequence[Any]: ...
 
     async def pause_account(self, account_id: str) -> None:
         """Drain admitted work after the application persisted account pause."""
@@ -304,68 +373,6 @@ def _safe_code(value: Any, fallback: str = "unknown", limit: int = 64) -> str:
     return text or fallback
 
 
-_TRADE_KINDS = frozenset(
-    {
-        "MARKET_OPEN",
-        "MARKET_CLOSE",
-        "PLACE_STOP",
-        "PLACE_TP",
-        "CANCEL_ORDER",
-    }
-)
-_SYSTEM_KINDS = frozenset({"SET_LEVERAGE"})
-# Deterministic ordering keeps the generated SQL and its bound parameters
-# stable between the two code paths that build the same predicate.
-_TRADE_KINDS_ORDERED: tuple[str, ...] = tuple(sorted(_TRADE_KINDS))
-
-
-@dataclass(frozen=True, slots=True)
-class ActivityKindFilter:
-    """Category predicate pushed down into the activity SQL.
-
-    The predicate must be applied **before** ``ORDER BY/LIMIT/OFFSET``.
-    Filtering in Python after the database already truncated the journal to
-    ``page_size + 1`` rows hides every matching row that sits further down the
-    journal and makes ``has_next`` report ``False`` for a page that is merely
-    empty because its slice contained no matching category.  Page N also has
-    to offset the *filtered* set, otherwise rows are skipped.
-
-    ``system`` is expressed as the exact complement of the trade allow-list so
-    an unrecognised journal kind keeps landing in the system bucket exactly as
-    ``_safe_activity_category`` classifies it, instead of silently vanishing
-    from both filters.
-    """
-
-    included: tuple[str, ...] = ()
-    excluded: tuple[str, ...] = ()
-
-    def clause(self) -> tuple[str, tuple[str, ...]]:
-        """Return a ``(sql_fragment, bound_params)`` pair for the WHERE clause."""
-        if self.included:
-            placeholders = ", ".join("?" for _ in self.included)
-            return f" AND kind IN ({placeholders})", self.included
-        if self.excluded:
-            placeholders = ", ".join("?" for _ in self.excluded)
-            return f" AND kind NOT IN ({placeholders})", self.excluded
-        return "", ()
-
-
-def _activity_kind_filter(activity_filter: ActivityFilter) -> ActivityKindFilter:
-    if activity_filter is ActivityFilter.TRADE:
-        return ActivityKindFilter(included=_TRADE_KINDS_ORDERED)
-    if activity_filter is ActivityFilter.SYSTEM:
-        return ActivityKindFilter(excluded=_TRADE_KINDS_ORDERED)
-    return ActivityKindFilter()
-
-
-def _safe_activity_category(kind: str) -> ActivityCategory:
-    if kind in _TRADE_KINDS:
-        return ActivityCategory.TRADE
-    if kind in _SYSTEM_KINDS:
-        return ActivityCategory.SYSTEM
-    return ActivityCategory.SYSTEM
-
-
 def _parse_activity_payload(payload: Any) -> dict[str, Any]:
     if isinstance(payload, Mapping):
         return {str(key): value for key, value in payload.items()}
@@ -390,76 +397,6 @@ def _safe_activity_symbol(payload: Mapping[str, Any]) -> str | None:
     return text
 
 
-def _safe_activity_leverage(payload: Mapping[str, Any]) -> int | None:
-    raw = payload.get("leverage")
-    try:
-        value = int(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if value <= 0 or value > 1000:
-        return None
-    return value
-
-
-def _safe_activity_title(kind: str, payload: Mapping[str, Any], symbol: str | None) -> str:
-    if kind == "MARKET_OPEN":
-        if symbol:
-            return f"Открыта позиция {symbol}"
-        return "Открыта позиция"
-    if kind == "MARKET_CLOSE":
-        if symbol:
-            return f"Закрыта позиция {symbol}"
-        return "Закрыта позиция"
-    if kind == "PLACE_STOP":
-        if symbol:
-            return f"Поставлен защитный Stop · {symbol}"
-        return "Поставлен защитный Stop"
-    if kind == "PLACE_TP":
-        if symbol:
-            return f"Поставлен Take Profit · {symbol}"
-        return "Поставлен Take Profit"
-    if kind == "CANCEL_ORDER":
-        if symbol:
-            return f"Отменён ордер · {symbol}"
-        return "Отменён ордер"
-    if kind == "SET_LEVERAGE":
-        leverage = _safe_activity_leverage(payload)
-        if leverage is not None and symbol:
-            return f"Плечо подготовлено: {leverage}× · {symbol}"
-        if leverage is not None:
-            return f"Плечо подготовлено: {leverage}×"
-        if symbol:
-            return f"Плечо обновлено · {symbol}"
-        return "Плечо обновлено"
-    return "Действие выполнено"
-
-
-def _safe_activity_status(
-    raw_status: Any,
-    occurred_at: datetime | None,
-    now: datetime,
-) -> tuple[ActivityStatus, int | None, str | None]:
-    status = _safe_code(raw_status, "UNKNOWN").upper()
-    if status in {"PENDING", "SENDING", "SUBMITTED"}:
-        age: int | None = None
-        if occurred_at is not None:
-            try:
-                age = max(int((now - occurred_at).total_seconds()), 0)
-            except (TypeError, ValueError, OverflowError):
-                age = None
-        return ActivityStatus.PENDING, age, None
-    if status == "CONFIRMED":
-        return ActivityStatus.COMPLETED, None, None
-    if status in {"UNKNOWN", "FAILED"}:
-        remediation = (
-            "Проверьте фактические позиции и при необходимости нажмите «Обновить»."
-            if status == "UNKNOWN"
-            else "Действие не выполнено. Повторите позже или обновите страницу."
-        )
-        return ActivityStatus.FAILED, None, remediation
-    return ActivityStatus.FAILED, None, "Действие в неизвестном состоянии."
-
-
 def _coerce_activity_filter(value: Any) -> ActivityFilter:
     if isinstance(value, ActivityFilter):
         return value
@@ -469,6 +406,65 @@ def _coerce_activity_filter(value: Any) -> ActivityFilter:
         except ValueError:
             pass
     raise ValidationError("activity filter is invalid")
+
+
+_FEED_CURSOR_PREFIX = "v1:"
+_FEED_CURSOR_FILTERS = ("all", "trade", "system")
+
+
+def _encode_feed_cursor(
+    *,
+    scope: HistoryScope,
+    filter_value: str,
+    high_water: int,
+    last_occurred_at: int,
+    last_seq: int,
+) -> str:
+    """Opaque v1 feed cursor: scope token, filter, high water, last tuple."""
+    payload = {
+        "filter": filter_value,
+        "high_water": high_water,
+        "last_occurred_at": last_occurred_at,
+        "last_seq": last_seq,
+        "scope": f"{scope.account_id}:{scope.environment}",
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _FEED_CURSOR_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_feed_cursor(cursor: str) -> tuple[str, str, int, int, int]:
+    """Split a v1 feed cursor; any malformed input is a plain ValueError."""
+    if not isinstance(cursor, str) or not cursor.startswith(_FEED_CURSOR_PREFIX):
+        raise ValueError("feed cursor version is invalid")
+    encoded = cursor[len(_FEED_CURSOR_PREFIX) :]
+    if not encoded:
+        raise ValueError("feed cursor is invalid")
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise ValueError("feed cursor is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("feed cursor is invalid")
+    scope_token = payload.get("scope")
+    filter_value = payload.get("filter")
+    high_water = payload.get("high_water")
+    last_occurred_at = payload.get("last_occurred_at")
+    last_seq = payload.get("last_seq")
+    if not isinstance(scope_token, str) or not scope_token or ":" not in scope_token:
+        raise ValueError("feed cursor scope is invalid")
+    if not isinstance(filter_value, str):
+        raise ValueError("feed cursor filter is invalid")
+    if filter_value not in _FEED_CURSOR_FILTERS:
+        raise ValueError("feed cursor filter is invalid")
+    if type(high_water) is not int or high_water < 0:
+        raise ValueError("feed cursor high-water is invalid")
+    if type(last_occurred_at) is not int or last_occurred_at < 0:
+        raise ValueError("feed cursor position is invalid")
+    if type(last_seq) is not int or last_seq < 1:
+        raise ValueError("feed cursor position is invalid")
+    if last_seq > high_water:
+        raise ValueError("feed cursor position is beyond the pinned snapshot")
+    return scope_token, filter_value, high_water, last_occurred_at, last_seq
 
 
 def _is_true(value: Any) -> bool:
@@ -652,11 +648,16 @@ class UserApplicationService:
         onboarding: Any | None = None,
         builder_onboarding: Any | None = None,
         emergency_controller: EmergencyControllerPort | None = None,
+        episodes: EpisodeRepository | None = None,
+        user_events: EventRepository | None = None,
+        history: HistoryRepository | None = None,
+        commands: CommandRepo | None = None,
         testnet_check: bool | Callable[[], bool | Awaitable[bool]] | None = None,
         clock: Callable[[], datetime] | None = None,
         confirmation_ttl_seconds: float = 60.0,
         permission_ttl_seconds: int = PERMISSION_TTL_SECONDS,
         activity_page_size: int = ACTIVITY_PAGE_SIZE,
+        trade_page_size: int = TRADE_PAGE_SIZE,
     ) -> None:
         if runtime is None:
             raise ValueError("runtime adapter is required")
@@ -666,6 +667,8 @@ class UserApplicationService:
             raise ValueError("permission TTL must be positive")
         if not 1 <= activity_page_size <= 100:
             raise ValueError("activity page size must be between 1 and 100")
+        if not 1 <= trade_page_size <= 50:
+            raise ValueError("trade page size must be between 1 and 50")
 
         self._runtime = runtime
         db = getattr(runtime, "db", None)
@@ -686,6 +689,10 @@ class UserApplicationService:
             if emergency_controller is not None
             else getattr(runtime, "emergency_controller", None)
         )
+        self._episodes = episodes
+        self._user_events = user_events
+        self._history = history
+        self._commands = commands
         if db is not None:
             self._users = self._users if self._users is not None else TelegramUserRepo(db)
             self._accounts = self._accounts if self._accounts is not None else AccountRepo(db)
@@ -699,16 +706,22 @@ class UserApplicationService:
                 if self._access_requests is not None
                 else TelegramAccessRequestRepo(db)
             )
-
+            self._episodes = episodes if episodes is not None else EpisodeRepository(db)
+            self._user_events = user_events if user_events is not None else EventRepository(db)
+            self._history = history if history is not None else HistoryRepository(db)
+            self._commands = commands if commands is not None else CommandRepo(db)
         self._admin_ids = frozenset(self._parse_admin_ids(admin_ids, runtime))
         self._testnet_check = testnet_check
         self._clock = clock or (lambda: datetime.now(UTC))
         self._confirmation_ttl = float(confirmation_ttl_seconds)
         self._permission_ttl = int(permission_ttl_seconds)
         self._activity_page_size = int(activity_page_size)
+        self._trade_page_size = int(trade_page_size)
         self._confirmations: dict[str, _ConfirmationRecord] = {}
         self._confirmation_lock = asyncio.Lock()
         self._mutation_locks: dict[str, asyncio.Lock] = {}
+        self._refresh_tasks: dict[str, asyncio.Task] = {}
+        self._connectivity: dict[str, bool] = {}
         self._global_mutation_lock = asyncio.Lock()
 
     @staticmethod
@@ -1205,15 +1218,42 @@ class UserApplicationService:
         return value
 
     async def _snapshot(self, account_id: str, *, refresh: bool) -> tuple[Any, datetime | None]:
-        method = "refresh_snapshot" if refresh else "cached_snapshot"
-        result = await self._call_optional(self._runtime, method, account_id)
-        if result is _MISSING and refresh:
+        if not refresh:
+            result = await self._call_optional(self._runtime, "cached_snapshot", account_id)
+            if result is _MISSING or result is None:
+                return None, None
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], datetime):
+                return result[0], result[1]
+            return result, None
+        task = self._refresh_tasks.get(account_id)
+        if task is None or task.done():
+            task = asyncio.ensure_future(
+                self._call_optional(self._runtime, "refresh_snapshot", account_id)
+            )
+            self._refresh_tasks[account_id] = task
+            task.add_done_callback(
+                lambda done, key=account_id, expected=task: (
+                    self._refresh_tasks.pop(key, None)
+                    if self._refresh_tasks.get(key) is expected
+                    else None
+                )
+            )
+        # Shielded join: one exchange read serves every concurrent caller,
+        # and one cancelled waiter never aborts the others.
+        try:
+            result = await asyncio.shield(task)
+        except Exception as exc:
+            if _is_connectivity_error(exc):
+                await self._record_connectivity(account_id, reachable=False)
+            raise
+        if result is _MISSING:
             raise ServiceUnavailableError("account snapshot is unavailable")
-        if result is _MISSING or result is None:
+        await self._record_connectivity(account_id, reachable=True)
+        if result is None:
             return None, None
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], datetime):
             return result[0], result[1]
-        return result, self._now() if refresh else None
+        return result, self._now()
 
     def _snapshot_ttl_seconds(self) -> float:
         """Bounded freshness window for cached snapshots.
@@ -1230,59 +1270,6 @@ class UserApplicationService:
         except (TypeError, ValueError):
             reconcile_value = 15
         return float(max(reconcile_value * 2, 30))
-
-    async def _activity_rows(
-        self, account_id: str, offset: int, kind_filter: ActivityKindFilter
-    ) -> list[Any]:
-        limit = self._activity_page_size + 1
-        reader = getattr(self._runtime, "read_activity", None)
-        if callable(reader):
-            result = await _maybe_await(reader(account_id, limit, offset, kind_filter=kind_filter))
-            return list(result or ())
-        db = getattr(self._runtime, "db", None)
-        fetchall = getattr(db, "fetchall", None)
-        if fetchall is None:
-            raise ServiceUnavailableError("activity read is unavailable")
-        clause, params = kind_filter.clause()
-        return list(
-            await fetchall(
-                "SELECT command_key, kind, status, payload, created_at, updated_at "
-                "FROM execution_commands WHERE account_id=?"
-                f"{clause} "
-                "ORDER BY updated_at DESC, command_key DESC LIMIT ? OFFSET ?",
-                (account_id, *params, limit, offset),
-            )
-        )
-
-    @staticmethod
-    def _map_activity_item(row: Any, now: datetime) -> ActivityItem:
-        """Map a raw ``execution_commands`` row into the safe Activity DTO.
-
-        The mapping is deliberately the only place that knows about journal
-        payload internals.  No ``command_key``, ``account_id``,
-        ``client_order_id``, raw Aster code, payload JSON, address, nonce, or
-        internal exception text ever leaves this helper.
-        """
-        kind = _safe_code(_row_value(row, "kind"), "command")
-        raw_status = _row_value(row, "status")
-        payload = _row_value(row, "payload")
-        parsed_payload = _parse_activity_payload(payload)
-        symbol = _safe_activity_symbol(parsed_payload)
-        occurred_at = _as_datetime(_row_value(row, "updated_at")) or _as_datetime(
-            _row_value(row, "created_at")
-        )
-        category = _safe_activity_category(kind)
-        title = _safe_activity_title(kind, parsed_payload, symbol)
-        status, pending_age, remediation = _safe_activity_status(raw_status, occurred_at, now)
-        return ActivityItem(
-            category=category,
-            title=title,
-            status=status,
-            symbol=symbol,
-            occurred_at=occurred_at,
-            pending_age=pending_age,
-            remediation=remediation,
-        )
 
     @staticmethod
     def _position_count(snapshot: Any) -> int | None:
@@ -1389,6 +1376,9 @@ class UserApplicationService:
             notification_enabled=enabled,
             is_admin=context.role is UserRole.ADMIN,
             builder_verified=await self._builder_verified(account_id),
+            overview=await self._overview_for(
+                account_id, snapshot, snapshot_captured_at, system_state
+            ),
         )
 
     async def _identity(self, account_id: str) -> str | None:
@@ -1579,7 +1569,6 @@ class UserApplicationService:
                     snapshot, captured_at = await self._snapshot(account_id, refresh=False)
             else:
                 snapshot, captured_at = await self._snapshot(account_id, refresh=False)
-
             # Bounded freshness TTL: a cached snapshot is only considered
             # fresh while its capture time is within max(2 x reconcile
             # interval, 30s).  Without this bound a live heartbeat would
@@ -1606,16 +1595,7 @@ class UserApplicationService:
             cfg = getattr(self._runtime, "cfg", None)
             fee_buffer_pct = Decimal(str(getattr(cfg, "fee_buffer_pct", "0.001")))
 
-            positions_map = _row_value(snapshot, "positions", _MISSING)
-            raw_positions = (
-                (
-                    positions_map.values()
-                    if isinstance(positions_map, Mapping)
-                    else (positions_map or ())
-                )
-                if positions_map is not _MISSING and positions_map is not None
-                else ()
-            )
+            raw_positions = self._raw_positions(snapshot)
 
             parsed_list: list[PositionSummaryDTO] = []
             for p in raw_positions:
@@ -1625,7 +1605,11 @@ class UserApplicationService:
                 if summary is not None:
                     parsed_list.append(summary)
 
-            parsed_list.sort(key=lambda item: item.symbol)
+            assets = await self._quantity_assets(account_id, [item.symbol for item in parsed_list])
+            parsed_list = [
+                replace(item, quantity_asset=assets.get(item.symbol)) for item in parsed_list
+            ]
+            parsed_list.sort(key=lambda item: (item.symbol, item.side))
 
             return PositionPageDTO(
                 positions=tuple(parsed_list),
@@ -2666,33 +2650,484 @@ class UserApplicationService:
         page: int = 0,
         filter: ActivityFilter | str = ActivityFilter.ALL,
     ) -> ActivityPage:
-        try:
-            _, _, _ = await self._owned_account(user_id, allow_disabled=True)
-            if isinstance(page, bool) or not isinstance(page, int) or page < 0:
-                raise ValidationError("activity page is invalid")
-            activity_filter = _coerce_activity_filter(filter)
-            context = await self._context(user_id)
-            # The category predicate is applied inside the SQL query, so the
-            # LIMIT/OFFSET window and has_next describe the *filtered* set.
-            rows = await self._activity_rows(
-                str(context.account_id),
-                page * self._activity_page_size,
-                _activity_kind_filter(activity_filter),
+        """Temporary old-WebView adapter over user events, never commands.
+
+        Remove with the legacy HTTP route once pre-S3 WebViews are retired.
+        Numbered pages replay the pinned cursor within this bounded request;
+        current clients use activity_feed and retain its cursor directly.
+        """
+        if isinstance(page, bool) or not isinstance(page, int) or not 0 <= page <= 50:
+            raise ValidationError("activity page is invalid")
+        activity_filter = _coerce_activity_filter(filter)
+        cursor = None
+        feed = await self.activity_feed(user_id, filter=activity_filter, limit=10)
+        for _ in range(page):
+            cursor = feed.next_cursor
+            if cursor is None:
+                return ActivityPage(page=page, has_previous=page > 0, filter=activity_filter)
+            feed = await self.activity_feed(
+                user_id, filter=activity_filter, cursor=cursor, limit=10
             )
+        return ActivityPage(
+            items=tuple(
+                ActivityItem(
+                    category=(
+                        ActivityCategory.TRADE
+                        if item.kind in feed_kinds(ActivityFilter.TRADE)
+                        else ActivityCategory.SYSTEM
+                    ),
+                    title=item.text,
+                    status=ActivityStatus.COMPLETED,
+                    symbol=_safe_activity_symbol(item.facts),
+                    occurred_at=item.occurred_at,
+                )
+                for item in feed.items
+            ),
+            page=page,
+            has_previous=page > 0,
+            has_next=feed.next_cursor is not None,
+            filter=activity_filter,
+        )
+
+    # --- S1.4 history contracts (plan §10.8 B7, §11) --------------------------
+
+    async def _history_environment(self) -> str:
+        """History scope environment derived like the testnet boundary."""
+        check = self._testnet_check
+        if check is not None:
+            result = check() if callable(check) else check
+            return "testnet" if _is_true(await _maybe_await(result)) else "mainnet"
+        cfg = getattr(self._runtime, "cfg", None)
+        if cfg is not None:
+            rest = str(getattr(cfg, "rest_base_url", "")).rstrip("/")
+            return "testnet" if rest == TESTNET_REST_URL else "mainnet"
+        marker = getattr(self._runtime, "testnet", _MISSING)
+        return "testnet" if marker is not _MISSING and _is_true(marker) else "mainnet"
+
+    def _require_history(
+        self,
+    ) -> tuple[EpisodeRepository, EventRepository, HistoryRepository]:
+        if self._episodes is None or self._user_events is None or self._history is None:
+            raise ServiceUnavailableError("trade history is unavailable")
+        return self._episodes, self._user_events, self._history
+
+    async def _quantity_assets(
+        self, account_id: str, symbols: Sequence[str]
+    ) -> dict[str, str | None]:
+        """Per-symbol quantity units; unknown stays None, never guessed."""
+        unique = list(dict.fromkeys(symbols))
+        if not unique:
+            return {}
+        result = await self._call_optional(self._runtime, "symbol_assets", account_id, unique)
+        if result is _MISSING or not isinstance(result, Mapping):
+            return dict.fromkeys(unique)
+        assets = quantity_assets(unique, result)
+        return {
+            symbol: asset if isinstance(asset, str) and asset else None
+            for symbol, asset in assets.items()
+        }
+
+    async def _trade_money(
+        self, scope: HistoryScope, refs: Sequence[str]
+    ) -> dict[str, EpisodeMoney]:
+        """Proof-driven money for owned refs; empty in, empty out."""
+        if not refs:
+            return {}
+        episodes, _, history = self._require_history()
+        batch = await load_episode_money(
+            scope, tuple(refs), history_repo=history, episodes_repo=episodes
+        )
+        return dict(batch.money)
+
+    async def trades(
+        self,
+        user_id: int,
+        *,
+        period: str = "7d",
+        cursor: str | None = None,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> TradeListPage:
+        """Owned closed episodes, newest first, over a stable cursor."""
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            episodes, _, history = self._require_history()
+            page_limit = self._trade_page_size if limit is None else limit
+            if isinstance(page_limit, bool) or not isinstance(page_limit, int):
+                raise ValidationError("trade page limit is invalid")
+            if not 1 <= page_limit <= 50:
+                raise ValidationError("trade page limit is invalid")
+            if not isinstance(period, str) or period not in _TRADE_PERIODS:
+                raise ValidationError("trade period is invalid")
+            if cursor is not None and not isinstance(cursor, str):
+                raise ValidationError("trade cursor is invalid")
+            if symbol is not None and (not isinstance(symbol, str) or not symbol):
+                raise ValidationError("trade symbol filter is invalid")
+            days = _TRADE_PERIODS[period]
+            since_ms = None
+            if days is not None:
+                since_ms = int(self._now().timestamp() * 1000) - days * 86_400_000
+            scope = HistoryScope(account_id, await self._history_environment())
+            try:
+                stored, next_cursor = await episodes.list_closed(
+                    scope, symbol=symbol, since_ms=since_ms, cursor=cursor, limit=page_limit
+                )
+            except ValueError as exc:
+                raise ValidationError("trade cursor is invalid") from exc
+            assets = await self._quantity_assets(
+                account_id, [item.episode.symbol for item in stored]
+            )
+            coverage = await history.coverage_from(scope)
             now = self._now()
-            items = [self._map_activity_item(row, now) for row in rows]
-            has_next = len(items) > self._activity_page_size
-            return ActivityPage(
-                items=tuple(items[: self._activity_page_size]),
-                page=page,
-                has_previous=page > 0,
-                has_next=has_next,
-                filter=activity_filter,
+            money = await self._trade_money(scope, [item.episode.public_ref for item in stored])
+            return TradeListPage(
+                items=tuple(
+                    present_trade(
+                        item.episode,
+                        quantity_asset=assets.get(item.episode.symbol),
+                        money=money.get(item.episode.public_ref),
+                        revision=item.revision,
+                        as_of=now,
+                    )
+                    for item in stored
+                ),
+                next_cursor=next_cursor,
+                as_of=now,
+                coverage_from=datetime.fromtimestamp(coverage / 1000, tz=UTC)
+                if coverage is not None
+                else None,
+                coverage_complete=False,
             )
         except _SAFE_ERRORS:
             raise
         except Exception:
-            raise ServiceUnavailableError("activity is unavailable") from None
+            raise ServiceUnavailableError("trades are unavailable") from None
+
+    async def trade(self, user_id: int, trade_ref: str) -> TradeDetailDTO | TradeResolutionDTO:
+        """One owned episode by opaque ref; foreign and missing read alike."""
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            episodes, _, _ = self._require_history()
+            if not isinstance(trade_ref, str) or not trade_ref:
+                raise ValidationError("trade reference is invalid")
+            scope = HistoryScope(account_id, await self._history_environment())
+            try:
+                owned = await resolve_owned_ref(episodes, scope, trade_ref)
+            except ValueError as exc:
+                raise ValidationError("trade reference is invalid") from exc
+            if owned is None:
+                raise TradeUnavailableError("trade is unavailable")
+            if isinstance(owned, TradeResolutionDTO):
+                return owned
+            stored = owned.stored
+            assets = await self._quantity_assets(account_id, [stored.episode.symbol])
+            now = self._now()
+            money = await self._trade_money(scope, [owned.canonical_ref])
+            return present_trade_detail(
+                stored,
+                quantity_asset=assets.get(stored.episode.symbol),
+                money=money.get(owned.canonical_ref),
+                as_of=now,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("trade is unavailable") from None
+
+    async def trade_events(
+        self,
+        user_id: int,
+        trade_ref: str,
+        *,
+        cursor: int = 0,
+        limit: int | None = None,
+        fills_cursor: str | None = None,
+        events_cursor: int | str | None = None,
+        fills_limit: int | None = None,
+        events_limit: int | None = None,
+    ) -> TradeEventsPage:
+        """Fills and user events of one owned episode family (C2, plan §23.3).
+
+        Fills come from the allocation index, never a time range: overlapping
+        HEDGE legs stay separate and a shared flip fill shows only the
+        episode share. Fills and events page independently (default 20, max
+        50 each); the legacy bare ``cursor`` pages events only.
+        """
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            episodes, events, _ = self._require_history()
+            if not isinstance(trade_ref, str) or not trade_ref:
+                raise ValidationError("trade reference is invalid")
+            if fills_cursor is not None and (not isinstance(fills_cursor, str) or not fills_cursor):
+                raise ValidationError("trade events fills cursor is invalid")
+            after_seq = events_cursor if events_cursor is not None else cursor
+            if isinstance(after_seq, str):
+                if not after_seq.isdigit():
+                    raise ValidationError("trade events cursor is invalid")
+                after_seq = int(after_seq)
+            if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+                raise ValidationError("trade events cursor is invalid")
+            fills_page = self._trade_page_size if fills_limit is None else fills_limit
+            if limit is not None and fills_limit is None:
+                fills_page = limit
+            events_page = self._trade_page_size if events_limit is None else events_limit
+            if limit is not None and events_limit is None:
+                events_page = limit
+            for page in (fills_page, events_page):
+                if isinstance(page, bool) or not isinstance(page, int):
+                    raise ValidationError("trade events page limit is invalid")
+                if not 1 <= page <= 50:
+                    raise ValidationError("trade events page limit is invalid")
+            scope = HistoryScope(account_id, await self._history_environment())
+            try:
+                owned = await resolve_owned_ref(episodes, scope, trade_ref)
+            except ValueError as exc:
+                raise ValidationError("trade reference is invalid") from exc
+            if owned is None:
+                raise TradeUnavailableError("trade is unavailable")
+            if isinstance(owned, TradeResolutionDTO):
+                raise TradeSplitError("trade split into several episodes")
+            try:
+                allocated, next_fills = await episodes.list_allocated_fills(
+                    scope, owned.family_refs, fills_cursor, fills_page
+                )
+            except EpisodeRevisionConflict as exc:
+                raise HistoryPageChangedError("trade history changed under this page") from exc
+            except ValueError as exc:
+                raise ValidationError("trade events fills cursor is invalid") from exc
+            rows = await events.list_by_family(
+                scope, owned.family_refs, after_seq=after_seq, limit=events_page + 1
+            )
+            shown = rows[:events_page]
+            next_seq = str(shown[-1].seq) if len(rows) > events_page else None
+            return TradeEventsPage(
+                fills=tuple(present_allocated_fill(row) for row in allocated),
+                events=tuple(present_event(row) for row in shown),
+                next_cursor=next_seq,
+                fills_cursor=next_fills,
+                events_cursor=next_seq,
+                next_fills_cursor=next_fills,
+                next_events_cursor=next_seq,
+            )
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("trade events are unavailable") from None
+
+    async def activity_feed(
+        self,
+        user_id: int,
+        *,
+        filter: ActivityFilter | str = ActivityFilter.ALL,
+        cursor: int | str | None = 0,
+        limit: int | None = None,
+    ) -> ActivityFeedPage:
+        """Structured user-event feed over a pinned snapshot plus pending ops.
+
+        The first page (``cursor`` omitted, ``None``, or a legacy bare int)
+        pins ``high_water`` to the current max seq and reads ``seq <=
+        high_water`` newest first (``occurred_at DESC, seq DESC``). A
+        continuation passes the opaque ``v1:`` cursor holding the scope
+        token, the pinned filter, the pinned high water, and the last
+        ``(occurred_at, seq)`` tuple; rows above the water never interleave.
+        ``latest_seq`` is the live max at response time so the UI can banner
+        new events. The cursor is never authorization: ownership is
+        re-checked on every request and a foreign scope token fails closed.
+
+        Feed rows are immutable events; a correction arrives as a new
+        ``HISTORY_CORRECTED`` row above a fresh high water, so the page
+        carries no episode/coverage revision. Facts revisions live
+        per-symbol (and coverage per stream/symbol); no single cheap
+        account-level revision exists, and inventing a ``MAX()`` aggregate
+        would signal change when the feed did not move. A
+        correction-model ``history_page_changed`` signal is therefore
+        C1-resolution-driven future work, not part of this snapshot.
+        """
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            _, events, _ = self._require_history()
+            activity_filter = _coerce_activity_filter(filter)
+            page_limit = self._trade_page_size if limit is None else limit
+            if isinstance(page_limit, bool) or not isinstance(page_limit, int):
+                raise ValidationError("feed page limit is invalid")
+            if not 1 <= page_limit <= 50:
+                raise ValidationError("feed page limit is invalid")
+            scope = HistoryScope(account_id, await self._history_environment())
+            kinds = feed_kinds(activity_filter)
+            if (
+                cursor is None
+                or isinstance(cursor, int)
+                or (isinstance(cursor, str) and cursor.isdigit())
+            ):
+                # Legacy seq-only callers: any bare int (or digit string, or
+                # omitted cursor) is a first-page request that pins now. The
+                # numeric value is not a position; continuation needs v1.
+                if isinstance(cursor, bool):
+                    raise ValidationError("feed cursor is invalid")
+                if isinstance(cursor, int) and cursor < 0:
+                    raise ValidationError("feed cursor is invalid")
+                try:
+                    rows, pinned = await events.list_feed_page(
+                        scope,
+                        kinds=kinds,
+                        high_water=None,
+                        last_occurred_at=None,
+                        last_seq=None,
+                        limit=page_limit + 1,
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                latest = await events.max_seq(scope)
+                shown = rows[:page_limit]
+                if len(rows) > page_limit:
+                    last = shown[-1]
+                    next_cursor: str | None = _encode_feed_cursor(
+                        scope=scope,
+                        filter_value=activity_filter.value,
+                        high_water=pinned,
+                        last_occurred_at=last.event.occurred_at,
+                        last_seq=last.seq,
+                    )
+                else:
+                    next_cursor = None
+                return ActivityFeedPage(
+                    items=tuple(present_event(row) for row in shown),
+                    next_cursor=next_cursor,
+                    high_water=pinned,
+                    latest_seq=latest,
+                    pending=await self._pending_operations(account_id),
+                )
+            if isinstance(cursor, str) and cursor.startswith(_FEED_CURSOR_PREFIX):
+                try:
+                    scope_token, cursor_filter, pinned, last_occurred_at, last_seq = (
+                        _decode_feed_cursor(cursor)
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                if scope_token != f"{scope.account_id}:{scope.environment}":
+                    raise ValidationError("feed cursor scope mismatch")
+                if cursor_filter != activity_filter.value:
+                    raise ValidationError("feed cursor filter mismatch")
+                try:
+                    rows, _ = await events.list_feed_page(
+                        scope,
+                        kinds=kinds,
+                        high_water=pinned,
+                        last_occurred_at=last_occurred_at,
+                        last_seq=last_seq,
+                        limit=page_limit + 1,
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                latest = await events.max_seq(scope)
+                shown = rows[:page_limit]
+                if len(rows) > page_limit:
+                    last = shown[-1]
+                    next_cursor = _encode_feed_cursor(
+                        scope=scope,
+                        filter_value=activity_filter.value,
+                        high_water=pinned,
+                        last_occurred_at=last.event.occurred_at,
+                        last_seq=last.seq,
+                    )
+                else:
+                    next_cursor = None
+                return ActivityFeedPage(
+                    items=tuple(present_event(row) for row in shown),
+                    next_cursor=next_cursor,
+                    high_water=pinned,
+                    latest_seq=latest,
+                    pending=await self._pending_operations(account_id),
+                )
+            raise ValidationError("feed cursor is invalid")
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("activity feed is unavailable") from None
+
+    async def _pending_operations(self, account_id: str) -> tuple[PendingOperation, ...]:
+        """Unsettled journal commands as safe pending facts, never payloads."""
+        if self._commands is None:
+            return ()
+        rows = await self._commands.in_flight_for(account_id)
+        now = self._now()
+        pending: list[PendingOperation] = []
+        for row in rows:
+            symbol = _payload_symbol(_row_value(row, "payload"))
+            status = str(_row_value(row, "status", ""))
+            moment = _as_datetime(_row_value(row, "updated_at", _row_value(row, "created_at")))
+            pending.append(
+                PendingOperation(
+                    symbol=symbol,
+                    operation=_PENDING_OPERATIONS.get(
+                        str(_row_value(row, "kind", "")), "operation"
+                    ),
+                    state="unknown" if status == "UNKNOWN" else "pending",
+                    age_seconds=max(int((now - moment).total_seconds()), 0)
+                    if moment is not None
+                    else 0,
+                )
+            )
+        return tuple(pending)
+
+    async def _overview_for(
+        self,
+        account_id: str,
+        snapshot: Any,
+        snapshot_captured_at: datetime | None,
+        system_state: SystemState,
+    ) -> AccountOverview | None:
+        """Dashboard aggregate over one consistent snapshot, or None."""
+        if snapshot is None:
+            return None
+        snapshot_ttl_s = self._snapshot_ttl_seconds()
+        cache_expired = snapshot_captured_at is not None and (
+            (self._now() - snapshot_captured_at).total_seconds() > snapshot_ttl_s
+        )
+        fresh = (
+            snapshot_captured_at is not None
+            and not cache_expired
+            and system_state is SystemState.READY
+        )
+        cfg = getattr(self._runtime, "cfg", None)
+        fee_buffer_pct = Decimal(str(getattr(cfg, "fee_buffer_pct", "0.001")))
+        parsed: list[PositionSummaryDTO] = []
+        for position in self._raw_positions(snapshot):
+            summary = self._parse_position_summary(
+                position, is_fresh=fresh, fee_buffer_pct=fee_buffer_pct
+            )
+            if summary is not None:
+                parsed.append(summary)
+        return build_overview(
+            parsed,
+            available_usdt=self._available_usdt(snapshot),
+            as_of=snapshot_captured_at,
+            freshness=SnapshotFreshness.FRESH if fresh else SnapshotFreshness.STALE,
+        )
+
+    @staticmethod
+    def _raw_positions(snapshot: Any) -> list[Any]:
+        positions_map = _row_value(snapshot, "positions", _MISSING)
+        if positions_map is _MISSING or positions_map is None:
+            return []
+        if isinstance(positions_map, Mapping):
+            return list(positions_map.values())
+        return list(positions_map)
+
+    @staticmethod
+    def _available_usdt(snapshot: Any) -> Decimal | None:
+        raw = _row_value(snapshot, "available_usdt", None)
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return value if value.is_finite() and value >= 0 else None
 
     async def notification_settings(self, user_id: int) -> NotificationSettingsDTO:
         try:
@@ -3603,15 +4038,53 @@ class UserApplicationService:
             if (value - RISK_MIN) % RISK_STEP != 0:
                 raise ValidationError("risk values are invalid")
             changes: dict[str, Any] = {"risk_percent": value}
-            async with self._account_lock(str(context.account_id)):
+            account_id = str(context.account_id)
+            async with self._account_lock(account_id):
+                previous = await self._previous_risk_percent(account_id)
                 policy = await self._call_required(
-                    self._settings, "patch_policy", str(context.account_id), **changes
+                    self._settings, "patch_policy", account_id, **changes
                 )
+            facts: dict[str, str] = {"risk_percent": format(value, "f")}
+            if previous is not None:
+                facts["previous_percent"] = format(previous, "f")
+            await self._record_system_event(account_id, kind="RISK_CHANGED", facts=facts)
             return self._risk_dto(policy)
         except _SAFE_ERRORS:
             raise
         except Exception:
             raise ServiceUnavailableError("risk update is unavailable") from None
+
+    async def risk_preview(self, user_id: int) -> RiskPreviewDTO:
+        """Money examples for every allowed risk step over the cached snapshot.
+
+        Cached-only on purpose: the ruler screen loads this once and switches
+        ready rows locally. No exchange read, no side effects; a missing
+        balance yields empty steps instead of a zero example.
+        """
+        try:
+            context, _, _ = await self._owned_account(user_id, allow_disabled=True)
+            account_id = str(context.account_id)
+            snapshot, captured_at = await self._snapshot(account_id, refresh=False)
+            available = self._available_usdt(snapshot)
+            if snapshot is None or captured_at is None:
+                freshness = SnapshotFreshness.UNAVAILABLE
+            elif (self._now() - captured_at).total_seconds() > self._snapshot_ttl_seconds():
+                freshness = SnapshotFreshness.STALE
+            else:
+                freshness = SnapshotFreshness.FRESH
+            if available is None:
+                return RiskPreviewDTO(None, (), captured_at, freshness)
+            steps = risk_budget_steps(
+                available,
+                min_percent=RISK_MIN,
+                max_percent=RISK_MAX,
+                step=RISK_STEP,
+            )
+            return RiskPreviewDTO(available, steps, captured_at, freshness)
+        except _SAFE_ERRORS:
+            raise
+        except Exception:
+            raise ServiceUnavailableError("risk preview is unavailable") from None
 
     @_control_audit_boundary("pause")
     async def pause(self, user_id: int) -> DashboardDTO:
@@ -3630,6 +4103,11 @@ class UserApplicationService:
                     allow_new_entries=False,
                 )
                 await self._call_required(self._runtime, "pause_account", account_id)
+            # S1.5: the pause itself is a feed fact; a record failure is
+            # logged and never turns the committed pause into an error.
+            await self._record_system_event(
+                account_id, kind="COPY_PAUSED", facts={"allow_new_entries": False}
+            )
             return await self.dashboard(context.user_id)
         except _SAFE_ERRORS:
             raise
@@ -3645,6 +4123,191 @@ class UserApplicationService:
         else:
             result = getter
         return bool(result)
+
+    async def _record_system_event(
+        self, account_id: str, *, kind: str, facts: dict[str, str]
+    ) -> None:
+        """Best-effort feed record for a committed application action.
+
+        The state change already happened; a storage failure is logged and
+        never turns it into an operation error. Push delivery stays a
+        separate concern (S3 activation); the feed shows the fact now.
+        """
+        try:
+            events = self._user_events
+            if events is None:
+                return
+            scope = HistoryScope(account_id, await self._history_environment())
+            now_ms = int(self._now().timestamp() * 1000)
+            await events.record(
+                scope,
+                kind=kind,
+                occurred_at=now_ms,
+                recorded_at=now_ms,
+                facts=facts,
+                dedup_key=(f"evt:sys:{kind}:{account_id}:{now_ms}:{secrets.token_hex(4)}"),
+                trade_ref=None,
+                notify_eligible=True,
+            )
+        except Exception:  # noqa: BLE001 - feed record must not fail the op
+            log.exception("system event record failed (kind=%s)", kind)
+
+    async def _record_entry_skipped(
+        self,
+        account_id: str,
+        *,
+        symbol: str,
+        reason: str,
+        attempt_id: str,
+        pos_side: str | None = None,
+        occurred_at_ms: int | None = None,
+    ) -> None:
+        """Best-effort ENTRY_SKIPPED fact for one risk/planner skip decision.
+
+        Production hook: the trading coordinator skip loop
+        (``_recompute_follower_locked`` over ``_targets_for`` skips), passing
+        the ``SkipRecord`` fields with the stable attempt identity
+        (``_skip_episode_token``: ``trade-{id}`` or the hashed leg-state
+        digest). The dedup key carries that identity, so one decision is one
+        event no matter how many sweeps re-observe it. A storage failure is
+        logged and never fails the trading loop.
+        """
+        if not account_id or not isinstance(account_id, str):
+            raise ValueError("entry skip account required")
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError("entry skip symbol required")
+        if not reason or not isinstance(reason, str):
+            raise ValueError("entry skip reason required")
+        if not attempt_id or not isinstance(attempt_id, str):
+            raise ValueError("entry skip attempt identity required")
+        if pos_side is not None and (not isinstance(pos_side, str) or not pos_side):
+            raise ValueError("entry skip position side must be text or absent")
+        if occurred_at_ms is not None and (type(occurred_at_ms) is not int or occurred_at_ms < 0):
+            raise ValueError("entry skip time must be a nonnegative integer")
+        try:
+            events = self._user_events
+            if events is None:
+                return
+            scope = HistoryScope(account_id, await self._history_environment())
+            now_ms = int(self._now().timestamp() * 1000)
+            facts: dict[str, str] = {
+                "symbol": symbol,
+                "reason": reason,
+                "attempt_id": attempt_id,
+            }
+            if pos_side is not None:
+                facts["pos_side"] = pos_side
+            leg = pos_side if pos_side else "unknown"
+            await events.record(
+                scope,
+                kind="ENTRY_SKIPPED",
+                occurred_at=occurred_at_ms if occurred_at_ms is not None else now_ms,
+                recorded_at=now_ms,
+                facts=facts,
+                dedup_key=(
+                    f"evt:sys:ENTRY_SKIPPED:{account_id}:{symbol}:{leg}:{reason}:{attempt_id}"
+                ),
+                trade_ref=None,
+                notify_eligible=True,
+            )
+        except Exception:  # noqa: BLE001 - feed record must not fail the loop
+            log.exception("entry skipped record failed (account_id=%s)", account_id)
+
+    async def _record_connectivity(self, account_id: str, *, reachable: bool) -> str | None:
+        """Idempotent account connectivity transition; None when unchanged.
+
+        Production hook: the exchange-read seam in ``_snapshot(refresh=True)``
+        (the concrete account-adapter read), called with ``reachable=True``
+        on a response and ``reachable=False`` on a transport-classified
+        failure — never per sweep unconditionally. The last-recorded state
+        guards emission: an identical sweep records nothing, and a restart
+        re-observes from unknown (first success stays silent, first failure
+        reports the outage it just proved). Storage failures are logged;
+        the last state only advances on a durable write so the next sweep
+        retries the report.
+        """
+        if not account_id or not isinstance(account_id, str):
+            raise ValueError("connectivity account required")
+        if not isinstance(reachable, bool):
+            raise ValueError("connectivity reachability must be a boolean")
+        last = self._connectivity.get(account_id)
+        if reachable and last is False:
+            kind = "CONNECTIVITY_RESTORED"
+        elif not reachable and last is not False:
+            kind = "CONNECTIVITY_LOST"
+        else:
+            self._connectivity.setdefault(account_id, reachable)
+            return None
+        try:
+            events = self._user_events
+            if events is None:
+                return None
+            scope = HistoryScope(account_id, await self._history_environment())
+            now_ms = int(self._now().timestamp() * 1000)
+            await events.record(
+                scope,
+                kind=kind,
+                occurred_at=now_ms,
+                recorded_at=now_ms,
+                facts={"reachable": reachable},
+                dedup_key=f"evt:sys:{kind}:{account_id}:{now_ms}",
+                trade_ref=None,
+                notify_eligible=True,
+            )
+        except Exception:  # noqa: BLE001 - feed record must not fail the read
+            log.exception("connectivity record failed (account_id=%s)", account_id)
+            return None
+        self._connectivity[account_id] = reachable
+        return kind
+
+    async def _previous_risk_percent(self, account_id: str) -> Decimal | None:
+        """Last saved risk percent for feed facts; None when unreadable."""
+        try:
+            policy = await self._call_required(self._settings, "get_policy", account_id)
+            return self._decimal_input(_row_value(policy, "risk_percent"), "risk_percent")
+        except Exception:  # noqa: BLE001 - advisory fact only
+            return None
+
+    async def _resume_context(self, account_id: str) -> ResumeContextDTO:
+        """Cached-only resume facts for the confirmation copy.
+
+        Advisory by design: every read degrades to None (unknown) instead of
+        failing begin_confirmation. The enforcing fresh checks still run
+        inside the resume workflow itself.
+        """
+        try:
+            master_in_position: bool | None = await self._master_requires_confirmation()
+        except Exception:
+            master_in_position = None
+        snapshot, captured_at = await self._snapshot(account_id, refresh=False)
+        if snapshot is None or captured_at is None:
+            snapshot_freshness = SnapshotFreshness.UNAVAILABLE
+        elif (self._now() - captured_at).total_seconds() > self._snapshot_ttl_seconds():
+            snapshot_freshness = SnapshotFreshness.STALE
+        else:
+            snapshot_freshness = SnapshotFreshness.FRESH
+        permission_ok = await self._cached_permission_ok(account_id)
+        return ResumeContextDTO(master_in_position, snapshot_freshness, permission_ok)
+
+    async def _cached_permission_ok(self, account_id: str) -> bool | None:
+        """Verified-only cached proof; None when no proof exists either way."""
+        row = await self._validation_row(account_id)
+        if row is None:
+            return None
+        permission, _ = await self._permission(account_id)
+        triple_ok = (
+            permission.can_read is True
+            and permission.can_perp_trade is True
+            and permission.can_withdraw is False
+            and permission.whitelist_ok is True
+        )
+        try:
+            expiry_ms = int(_row_value(row, "expired_ms", 0))
+        except (TypeError, ValueError):
+            return None
+        now_ms = int(self._now().timestamp() * 1000)
+        warning_ok = permission.warning is None
+        return bool(triple_ok and expiry_ms > now_ms and warning_ok)
 
     async def _resume_account(
         self,
@@ -3810,11 +4473,16 @@ class UserApplicationService:
                 context.user_id, confirmation, expected=ConfirmationAction.RESUME
             )
             expected_version = record.account_version
-            return await self._resume_account(
+            account_id = str(context.account_id)
+            dashboard = await self._resume_account(
                 context.user_id,
-                str(context.account_id),
+                account_id,
                 expected_account_version=expected_version,
             )
+            await self._record_system_event(
+                account_id, kind="COPY_RESUMED", facts={"allow_new_entries": True}
+            )
+            return dashboard
         except _SAFE_ERRORS:
             raise
         except Exception:
@@ -3852,6 +4520,11 @@ class UserApplicationService:
             account_version = (
                 None if bound_account is None else await self._account_version(bound_account)
             )
+            # S1.4: RESUME carries proven facts so the confirmation copy
+            # explains the real outcome instead of asserting a master position.
+            resume_context = None
+            if normalized_action is ConfirmationAction.RESUME and bound_account is not None:
+                resume_context = await self._resume_context(bound_account)
             expires = self._now() + timedelta(seconds=self._confirmation_ttl)
             token = _new_confirmation_token()
             record = _ConfirmationRecord(
@@ -3868,6 +4541,7 @@ class UserApplicationService:
                 action=normalized_action,
                 account_id=bound_account,
                 expires_at=expires,
+                resume_context=resume_context,
             )
         except _SAFE_ERRORS:
             raise
