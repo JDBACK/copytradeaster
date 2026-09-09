@@ -490,153 +490,6 @@ async def test_router_enqueue_does_not_call_bot_sender(db):
     assert (await router.backlog())["PENDING"] == 1
 
 
-async def _seed_user_event(db, *, kind="POSITION_CLOSED", eligible=True, recorded_ms=None):
-    from copytradeaster.storage.events import EventRepository
-    from copytradeaster.storage.history import HistoryScope
-
-    scope = HistoryScope("a1", "testnet")
-    base_ms = int(datetime(2026, 8, 23, tzinfo=UTC).timestamp() * 1000)
-    facts = {
-        "symbol": "BTCUSDT",
-        "side": "LONG",
-        "entry_price": "62400",
-        "exit_price": "64100",
-        "realized_gross": "18.42",
-        "duration_ms": 8_280_000,
-    }
-    return await EventRepository(db).record(
-        scope,
-        kind=kind,
-        occurred_at=base_ms,
-        recorded_at=base_ms if recorded_ms is None else recorded_ms,
-        facts=facts,
-        dedup_key=f"evt:test:{kind}:{eligible}:{recorded_ms}",
-        trade_ref="ref-1",
-        notify_eligible=eligible,
-    )
-
-
-async def test_recover_user_events_emits_only_eligible_with_trade_link(db):
-    await setup_account_owner(db)
-    from copytradeaster.storage.history import HistoryScope
-
-    floor_ms = int(datetime(2026, 8, 23, tzinfo=UTC).timestamp() * 1000)
-    await _seed_user_event(db, recorded_ms=floor_ms + 1)
-    await _seed_user_event(db, eligible=False, recorded_ms=floor_ms + 2)
-    await _seed_user_event(db, recorded_ms=floor_ms - 1)
-
-    router = NotificationRouter(db, console=lambda _event: asyncio.sleep(0))
-    from copytradeaster.storage.events import EventRepository
-
-    recovered = await router.recover_user_events(
-        EventRepository(db), [HistoryScope("a1", "testnet")], since_ms=floor_ms
-    )
-    assert recovered == 1
-    row = await db.fetchone("SELECT * FROM notification_outbox")
-    assert row["kind"] == "user.POSITION_CLOSED"
-    assert row["trade_ref"] == "ref-1" and row["action"] == "open_trade"
-    assert "Закрыта BTCUSDT · LONG" in row["text"]
-    assert "Итог сделки: 18,42 USDT до комиссий" in row["text"]
-    # Replay dedupes per recipient: no second row for the same stored event.
-    assert (
-        await router.recover_user_events(
-            EventRepository(db), [HistoryScope("a1", "testnet")], since_ms=floor_ms
-        )
-        == 1
-    )
-    assert (await db.fetchone("SELECT COUNT(*) AS n FROM notification_outbox"))["n"] == 1
-
-
-async def test_recover_user_events_pages_past_first_two_hundred(db):
-    await setup_account_owner(db)
-    from copytradeaster.storage.events import EventRepository
-    from copytradeaster.storage.history import HistoryScope
-
-    scope = HistoryScope("a1", "testnet")
-    floor_ms = int(datetime(2026, 8, 23, tzinfo=UTC).timestamp() * 1000)
-    facts = {
-        "symbol": "BTCUSDT",
-        "side": "LONG",
-        "entry_price": "62400",
-        "exit_price": "64100",
-        "realized_gross": "18.42",
-        "duration_ms": 8_280_000,
-    }
-    events = EventRepository(db)
-    for i in range(204):
-        await events.record(
-            scope,
-            kind="POSITION_CLOSED",
-            occurred_at=floor_ms - 10_000 + i,
-            recorded_at=floor_ms - 10_000 + i,
-            facts=facts,
-            dedup_key=f"evt:page:{i}",
-            trade_ref="ref-old",
-            notify_eligible=True,
-        )
-    await events.record(
-        scope,
-        kind="POSITION_CLOSED",
-        occurred_at=floor_ms + 1,
-        recorded_at=floor_ms + 1,
-        facts=facts,
-        dedup_key="evt:page:fresh",
-        trade_ref="ref-1",
-        notify_eligible=True,
-    )
-    router = NotificationRouter(db, console=lambda _event: asyncio.sleep(0))
-    assert await router.recover_user_events(events, [scope], since_ms=floor_ms) == 1
-    row = await db.fetchone("SELECT * FROM notification_outbox")
-    assert row["trade_ref"] == "ref-1"
-
-
-async def test_recover_user_events_skips_foreign_and_invalid_scopes(db):
-    await setup_account_owner(db)
-    from copytradeaster.storage.events import EventRepository
-    from copytradeaster.storage.history import HistoryScope
-
-    floor_ms = int(datetime(2026, 8, 23, tzinfo=UTC).timestamp() * 1000)
-    await _seed_user_event(db, recorded_ms=floor_ms + 1)
-    router = NotificationRouter(db, console=lambda _event: asyncio.sleep(0))
-    events = EventRepository(db)
-    assert await router.recover_user_events(events, ["not-a-scope"], since_ms=floor_ms) == 0
-    assert await router.recover_user_events(events, [], since_ms=floor_ms) == 0
-    with pytest.raises(ValueError):
-        await router.recover_user_events(events, [HistoryScope("a1", "testnet")], since_ms=-1)
-
-
-async def test_recover_user_events_skips_unrenderable_rows(db):
-    await setup_account_owner(db)
-    from copytradeaster.storage.events import StoredEvent, UserEvent
-    from copytradeaster.storage.history import HistoryScope
-
-    broken = StoredEvent(
-        scope=HistoryScope("a1", "testnet"),
-        event=UserEvent(
-            event_ref="broken",
-            kind="FUTURE_KIND",
-            trade_ref=None,
-            occurred_at=1,
-            recorded_at=2,
-            facts={"symbol": "BTCUSDT"},
-            dedup_key="broken",
-            notify_eligible=True,
-        ),
-        seq=1,
-    )
-
-    class StubEvents:
-        async def list_owned(self, scope, **kwargs):
-            del scope
-            return [] if kwargs.get("after_seq", 0) >= 1 else [broken]
-
-    router = NotificationRouter(db, console=lambda _event: asyncio.sleep(0))
-    scopes = [HistoryScope("a1", "testnet")]
-    result = await router.recover_user_events(StubEvents(), scopes, since_ms=0)  # type: ignore[arg-type]
-    assert result == 0
-    assert (await router.backlog())["PENDING"] == 0
-
-
 def test_trade_keyboard_needs_proven_ref_known_action_and_base_url():
     from copytradeaster.notifications.worker import trade_keyboard
 
@@ -653,7 +506,9 @@ def test_trade_keyboard_needs_proven_ref_known_action_and_base_url():
 
 
 async def test_worker_attaches_button_only_for_structured_rows(db):
-    await setup_account_owner(db)
+    # Web App buttons are attached only in a private recipient chat: chat_id
+    # equals the user's own Telegram ID.
+    await setup_account_owner(db, chat_id=1)
     from copytradeaster.storage.repositories import NotificationOutboxRepo
 
     seen: list[dict] = []
@@ -667,7 +522,7 @@ async def test_worker_attaches_button_only_for_structured_rows(db):
     await outbox.enqueue(
         "evt-structured",
         1,
-        101,
+        1,
         "user.POSITION_CLOSED",
         "INFO",
         "Закрыта BTCUSDT",
@@ -676,7 +531,7 @@ async def test_worker_attaches_button_only_for_structured_rows(db):
         action="open_trade",
     )
     await outbox.enqueue(
-        "evt-legacy", 1, 101, "execution.confirmed", "INFO", "legacy text", account_id="a1"
+        "evt-legacy", 1, 1, "execution.confirmed", "INFO", "legacy text", account_id="a1"
     )
     from copytradeaster.notifications.worker import TelegramOutboxWorker
 

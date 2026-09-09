@@ -59,7 +59,7 @@ def test_open_close_cards_carry_numbers_without_guesses():
         "Закрыта BTCUSDT · LONG",
         "Средний вход: 62 400",
         "Средний выход: 64 100",
-        "Итог сделки: 18,42 USDT до комиссий",
+        "PnL до комиссий: 18,42 USDT",
         "В позиции: 2 ч 18 мин",
     ]
 

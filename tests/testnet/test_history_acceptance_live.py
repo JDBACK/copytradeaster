@@ -33,11 +33,13 @@ history, journal and outbox live in tmp storage.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import os
 import time
 from datetime import UTC, datetime
+from decimal import ROUND_DOWN
 from decimal import Decimal as D
 from pathlib import Path
 from urllib.parse import urlencode
@@ -49,7 +51,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from copytradeaster.application.models import TradeUnavailableError
 from copytradeaster.application.service import UserApplicationService
 from copytradeaster.aster.rate_limits import RateLimits
-from copytradeaster.aster.trading_api import AsterClient
+from copytradeaster.aster.trading_api import AsterClient, AsterError
 from copytradeaster.config import Settings
 from copytradeaster.credentials.service import SqliteCredentials
 from copytradeaster.domain.models import (
@@ -66,6 +68,7 @@ from copytradeaster.history.projection import HistoryProjection
 from copytradeaster.history.reader import HistoryReader, Window
 from copytradeaster.history.sync import HistorySynchronizer
 from copytradeaster.miniapp.server import INIT_DATA_HEADER, create_miniapp_app
+from copytradeaster.notifications.delivery import recover_user_events_durable
 from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.episodes import EpisodeRepository
@@ -291,6 +294,78 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
         {},
         order_observer=observe,
     )
+    reader = HistoryReader(client)
+    episodes = EpisodeRepository(history_db)
+    events = EventRepository(history_db)
+    synchronizer = HistorySynchronizer(reader, history)
+    capture = HistoryCapture(
+        history,
+        episodes,
+        events=events,
+        commands=commands,
+        projection=HistoryProjection(history, episodes, events, commands=commands),
+    )
+    window = Window(t0, int(time.time() * 1000))
+
+    async def capture_until(predicate, *, timeout_s: float = 24.0):
+        """Scheduled intermediate capture between lifecycle steps (N1-N3).
+
+        Retries while the REST edge catches up, then fails loudly instead of
+        publishing a stale step.
+        """
+        nonlocal window
+        last: tuple = ()
+        deadline = time.monotonic() + timeout_s
+        while True:
+            window = Window(t0, int(time.time() * 1000))
+            last, _ = await capture.capture_and_publish(
+                scope,
+                SYMBOL,
+                window,
+                snapshots=client,
+                synchronizer=synchronizer,
+                notify_eligible=True,
+            )
+            if last and predicate(last[0].episode):
+                return last
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"scheduled capture did not prove the step: {last}")
+            await asyncio.sleep(3.0)
+
+    async def place_stop(executor_obj, commands_obj, qty: D, stop_price: str, coid: str):
+        """Place a close STOP through the journal; return (result, wire coid)."""
+        results = await executor_obj.submit(
+            ExecutionPlan(
+                account_id=ACCOUNT,
+                trade_id=None,
+                operation_id=coid,
+                actions=[
+                    ExecutionAction(
+                        kind=ActionKind.PLACE_STOP,
+                        symbol=SYMBOL,
+                        payload={
+                            "symbol": SYMBOL,
+                            "side": Side.SELL.value,
+                            "type": "STOP_MARKET",
+                            "quantity": format(qty, "f"),
+                            "stopPrice": stop_price,
+                            **_close_mode_extras(hedge=hedge, leg=pside.value),
+                            "workingType": "MARK_PRICE",
+                            "newOrderRespType": "ACK",
+                        },
+                        client_order_id=coid,
+                        replaces_client_order_id=None,
+                        priority=1,
+                    )
+                ],
+            ),
+            client=recorder,
+        )
+        (result,) = results
+        assert result.status == "CONFIRMED", f"{coid} stop did not confirm: {result}"
+        row = await commands_obj.get(result.command_key)
+        assert row is not None
+        return result, str(row["client_order_id"])
 
     async def submit(kind: ActionKind, side: Side, qty: D, coid: str):
         # NOTE: the journal key covers (account, operation, kind, revision,
@@ -324,8 +399,13 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
     try:
         await submit(ActionKind.MARKET_OPEN, Side.BUY, QTY, f"{tag}-open-a")
         await _wait_qty(client, QTY)
+        (opened,) = await capture_until(
+            lambda episode: episode.remaining_qty == QTY and episode.closed_at is None
+        )
         await submit(ActionKind.MARKET_OPEN, Side.BUY, QTY, f"{tag}-open-b")
         await _wait_qty(client, QTY * 2)
+        (increased,) = await capture_until(lambda episode: episode.remaining_qty == QTY * 2)
+        assert increased.public_ref == opened.public_ref
         # Distant STOP through the journal: placed, observed, cancelled —
         # the position never changes, the lifecycle math stays intact.
         stop_results = await executor.submit(
@@ -356,6 +436,21 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
             client=recorder,
         )
         assert stop_results[0].status == "CONFIRMED"
+        # N6: the executor rewrites the wire coid to `ct<command_key>`; the
+        # cancel must target that exact exchange order, never the plan label.
+        stop_row = await commands.get(stop_results[0].command_key)
+        assert stop_row is not None
+        stop_exchange_coid = str(stop_row["client_order_id"])
+        assert stop_exchange_coid != stop_coid
+        live_stop = await client.query_order(
+            ACCOUNT, SYMBOL, orig_client_order_id=stop_exchange_coid
+        )
+        assert live_stop is not None and str(live_stop.status) == "NEW"
+        live_stop_id = int(live_stop.order_id)
+        assert any(
+            int(order.order_id) == live_stop_id
+            for order in await client.open_orders(ACCOUNT, SYMBOL)
+        )
         # The exchange coid is executor-owned (`ct<key>`), so the observation
         # is matched by journal command key, not by our tag.
         placed = await history.protection_observations(scope, SYMBOL, t0, int(time.time() * 1000))
@@ -369,9 +464,9 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
                     ExecutionAction(
                         kind=ActionKind.CANCEL_ORDER,
                         symbol=SYMBOL,
-                        payload={"symbol": SYMBOL, "origClientOrderId": stop_coid},
+                        payload={"symbol": SYMBOL, "origClientOrderId": stop_exchange_coid},
                         client_order_id=f"{tag}-stop-cancel",
-                        replaces_client_order_id=None,
+                        replaces_client_order_id=stop_exchange_coid,
                         priority=1,
                     )
                 ],
@@ -379,15 +474,36 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
             client=recorder,
         )
         assert cancel_results[0].status == "CONFIRMED"
+        # N6: a CONFIRMED after -2011 is not proof. The signed query and the
+        # order list must show exactly this STOP gone.
+        after_cancel = await client.query_order(
+            ACCOUNT, SYMBOL, orig_client_order_id=stop_exchange_coid
+        )
+        assert after_cancel is None or str(after_cancel.status) in {"CANCELED", "EXPIRED"}
+        assert all(
+            int(order.order_id) != live_stop_id
+            for order in await client.open_orders(ACCOUNT, SYMBOL)
+        )
         await submit(ActionKind.MARKET_CLOSE, Side.SELL, QTY, f"{tag}-reduce")
         await _wait_qty(client, QTY)
+        (reduced,) = await capture_until(lambda episode: episode.remaining_qty == QTY)
+        assert reduced.public_ref == opened.public_ref
         # Controlled UNKNOWN: the order really reaches the exchange, then
         # the transport "loses" the response. The executor must resolve by
         # querying before any retry — exactly one order per key exists.
         recorder.fail_post_send_once = True
         await submit(ActionKind.MARKET_CLOSE, Side.SELL, QTY, f"{tag}-close")
         await _wait_flat(client)
+        (closed_step,) = await capture_until(lambda episode: episode.closed_at is not None)
+        assert closed_step.public_ref == opened.public_ref
     finally:
+        # N6 cleanup: cancel every protective order this harness created
+        # (the account is exclusive), flatten per leg, then prove both.
+        for order in await client.open_orders(ACCOUNT, SYMBOL):
+            with contextlib.suppress(AsterError):
+                await client.cancel_order(
+                    ACCOUNT, SYMBOL, orig_client_order_id=str(order.client_order_id)
+                )
         # Fail-safe flatten, one leg at a time (hedge close-mode).
         for leg, qty in _leg_qtys(await client.position_risk(ACCOUNT, SYMBOL)).items():
             if qty == 0:
@@ -419,6 +535,8 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
                 client=recorder,
             )
         await _wait_flat(client)
+        leftovers = await client.open_orders(ACCOUNT, SYMBOL)
+        assert leftovers == [], f"open orders left behind: {leftovers}"
     await asyncio.sleep(8.0)  # REST indexing latency for userTrades/income.
 
     journal_kinds = {
@@ -429,20 +547,9 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
     }
     assert {"MARKET_OPEN", "MARKET_CLOSE", "PLACE_STOP", "CANCEL_ORDER"} <= journal_kinds
 
-    reader = HistoryReader(client)
-    episodes = EpisodeRepository(history_db)
-    events = EventRepository(history_db)
-    synchronizer = HistorySynchronizer(reader, history)
     import_window = Window(t0, int(time.time() * 1000))
     await synchronizer.sync_fills(scope, SYMBOL, import_window)
     await synchronizer.sync_income(scope, import_window)
-    capture = HistoryCapture(
-        history,
-        episodes,
-        events=events,
-        commands=commands,
-        projection=HistoryProjection(history, episodes, events, commands=commands),
-    )
     window = Window(t0, int(time.time() * 1000))
     stored, published = await capture.capture_and_publish(
         scope, SYMBOL, window, snapshots=client, synchronizer=synchronizer, notify_eligible=True
@@ -595,8 +702,14 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
 
     detail = await service.trade(USER_ID, ref)
     router = NotificationRouter(history_db, admin_ids=[100])
-    recovered = await router.recover_user_events(EventRepository(history_db), [scope], since_ms=t0)
-    assert recovered >= 1
+    report = await recover_user_events_durable(
+        history_db,
+        router,
+        EventRepository(history_db),
+        [scope],
+        rollout_floor_ms=t0,
+    )
+    assert report.recovered >= 1
     row = await history_db.fetchone("SELECT * FROM notification_outbox WHERE trade_ref=?", (ref,))
     assert detail.trade.trade_ref == row["trade_ref"] == ref
     assert detail.trade.executed_qty == "0.002"
@@ -607,3 +720,153 @@ async def test_s16_lifecycle_open_increase_partial_close(live):
     assert (await service.trades(7002)).items == ()
     with pytest.raises(TradeUnavailableError):
         await service.trade(7002, ref)
+
+    # --- §10.9 SL lifecycle: a real stop fill, proven as its own execution ---
+    # Own journal/capture objects: the restart above reopened the DB. The
+    # scenario is separate so the single-episode evidence stays intact.
+    sl_commands = CommandRepo(history_db)
+    sl_executor = Executor(
+        lambda account_id: client,
+        sl_commands,
+        OrderLinkRepo(history_db),
+        {},
+        order_observer=observe,
+    )
+    sl_history = HistoryRepository(history_db)
+    sl_episodes = EpisodeRepository(history_db)
+    sl_events = EventRepository(history_db)
+    sl_synchronizer = HistorySynchronizer(HistoryReader(client), sl_history)
+    sl_capture = HistoryCapture(
+        sl_history,
+        sl_episodes,
+        events=sl_events,
+        commands=sl_commands,
+        projection=HistoryProjection(sl_history, sl_episodes, sl_events, commands=sl_commands),
+    )
+    filters = (await client.exchange_info()).tradable_filters().get(SYMBOL)
+    assert filters is not None and filters.tick_size > 0
+    sl_start = int(time.time() * 1000)
+    try:
+        open_results = await sl_executor.submit(
+            ExecutionPlan(
+                account_id=ACCOUNT,
+                trade_id=None,
+                operation_id=f"{tag}-sl-open",
+                actions=[
+                    _market_action(ActionKind.MARKET_OPEN, Side.BUY, QTY, f"{tag}-sl-open", pside)
+                ],
+            ),
+            client=recorder,
+        )
+        assert open_results[0].status == "CONFIRMED"
+        await _wait_qty(client, QTY)
+        stop_order_id: int | None = None
+        # Tighten the trigger until the mark reaches it: a distant stop never
+        # proves the SL path, and testnet marks are not movable on demand.
+        for attempt, buffer in enumerate((D("0.001"), D("0.0003"), D("0.0001"))):
+            positions = await client.position_risk(ACCOUNT, SYMBOL)
+            mark = next(
+                (D(str(p.mark_price)) for p in positions if D(str(p.position_amt)) != 0),
+                None,
+            )
+            assert mark is not None and mark > 0
+            raw = mark * (D("1") - buffer)
+            stop_price = (raw / filters.tick_size).to_integral_value(
+                rounding=ROUND_DOWN
+            ) * filters.tick_size
+            coid = f"{tag}-sl-stop-{attempt}"
+            _, exchange_coid = await place_stop(
+                sl_executor, sl_commands, QTY, format(stop_price, "f"), coid
+            )
+            order = await client.query_order(ACCOUNT, SYMBOL, orig_client_order_id=exchange_coid)
+            if order is None:
+                continue  # rejected (e.g. would immediately trigger): tighten next
+            order_id = int(order.order_id)
+            deadline = time.monotonic() + 45.0
+            while time.monotonic() < deadline:
+                fresh = await client.query_order(ACCOUNT, SYMBOL, order_id=order_id)
+                if fresh is not None and str(fresh.status) in {"FILLED", "PARTIALLY_FILLED"}:
+                    stop_order_id = order_id
+                    break
+                await asyncio.sleep(2.0)
+            if stop_order_id is not None:
+                break
+            cancel_results = await sl_executor.submit(
+                ExecutionPlan(
+                    account_id=ACCOUNT,
+                    trade_id=None,
+                    operation_id=f"{tag}-sl-cancel-{attempt}",
+                    actions=[
+                        ExecutionAction(
+                            kind=ActionKind.CANCEL_ORDER,
+                            symbol=SYMBOL,
+                            payload={"symbol": SYMBOL, "origClientOrderId": exchange_coid},
+                            client_order_id=f"{tag}-sl-cancel-{attempt}",
+                            replaces_client_order_id=exchange_coid,
+                            priority=1,
+                        )
+                    ],
+                ),
+                client=recorder,
+            )
+            assert cancel_results[0].status == "CONFIRMED"
+        assert stop_order_id is not None, "no SL fill evidence on the dedicated account"
+        await _wait_flat(client)
+        sl_trades = await client.user_trades(
+            ACCOUNT,
+            SYMBOL,
+            start_time=sl_start - 5_000,
+            end_time=int(time.time() * 1000),
+        )
+        assert any(int(t.order_id) == stop_order_id for t in sl_trades), "SL has no fill"
+        sl_window = Window(sl_start - 5_000, int(time.time() * 1000))
+        await sl_synchronizer.sync_fills(scope, SYMBOL, sl_window)
+        await sl_synchronizer.sync_income(scope, sl_window)
+        sl_stored, _ = await sl_capture.capture_and_publish(
+            scope,
+            SYMBOL,
+            sl_window,
+            snapshots=client,
+            synchronizer=sl_synchronizer,
+            notify_eligible=True,
+        )
+        sl_fill_rows = await history_db.fetchall(_FILLS_SINCE, (ACCOUNT, SYMBOL, sl_start - 5_000))
+        assert any(int(str(r["order_id"])) == stop_order_id for r in sl_fill_rows)
+        assert any(s.episode.closed_at is not None for s in sl_stored)
+    finally:
+        for order in await client.open_orders(ACCOUNT, SYMBOL):
+            with contextlib.suppress(AsterError):
+                await client.cancel_order(
+                    ACCOUNT, SYMBOL, orig_client_order_id=str(order.client_order_id)
+                )
+        for leg, qty in _leg_qtys(await client.position_risk(ACCOUNT, SYMBOL)).items():
+            if qty == 0:
+                continue
+            side = Side.SELL if qty > 0 else Side.BUY
+            await sl_executor.submit(
+                ExecutionPlan(
+                    account_id=ACCOUNT,
+                    trade_id=None,
+                    operation_id=f"{tag}-sl-failsafe-{leg}",
+                    actions=[
+                        ExecutionAction(
+                            kind=ActionKind.MARKET_CLOSE,
+                            symbol=SYMBOL,
+                            payload={
+                                "symbol": SYMBOL,
+                                "side": side.value,
+                                "type": "MARKET",
+                                "quantity": format(abs(qty), "f"),
+                                **_close_mode_extras(hedge=hedge, leg=leg),
+                                "newOrderRespType": "RESULT",
+                            },
+                            client_order_id=f"{tag}-sl-failsafe-{leg}",
+                            replaces_client_order_id=None,
+                            priority=1,
+                        )
+                    ],
+                ),
+                client=recorder,
+            )
+        await _wait_flat(client)
+        assert await client.open_orders(ACCOUNT, SYMBOL) == []

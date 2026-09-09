@@ -24,6 +24,7 @@ from copytradeaster.domain.models import PosSide, RiskPolicy
 from copytradeaster.history.models import PositionSeed
 from copytradeaster.history.projection import HistoryProjection
 from copytradeaster.history.reader import Window, WindowRead
+from copytradeaster.notifications.delivery import recover_user_events_durable
 from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.episodes import EpisodeRepository
@@ -116,12 +117,12 @@ async def test_all_surfaces_share_one_ref_and_facts(accepted_trade):
         i for i in (await service.activity_feed(USER_ID)).items if i.kind == "POSITION_CLOSED"
     )
     router = NotificationRouter(db, admin_ids=[100])
-    recovered = await router.recover_user_events(
-        EventRepository(db), [HistoryScope("h1", "testnet")], since_ms=FLOOR_MS
+    report = await recover_user_events_durable(
+        db, router, EventRepository(db), [HistoryScope("h1", "testnet")], rollout_floor_ms=FLOOR_MS
     )
     row = await db.fetchone("SELECT * FROM notification_outbox WHERE kind='user.POSITION_CLOSED'")
 
-    assert recovered == 4
+    assert report.recovered == 4
 
     assert (
         item.trade_ref == detail.trade.trade_ref == feed_item.trade_ref == row["trade_ref"] == ref
@@ -153,9 +154,7 @@ async def test_foreign_user_sees_nothing_on_any_surface(accepted_trade):
         await service.trade(OTHER_ID, ref)
     assert (await service.activity_feed(OTHER_ID)).items == ()
     router = NotificationRouter(db, admin_ids=[100])
-    assert (
-        await router.recover_user_events(
-            EventRepository(db), [HistoryScope("h2", "testnet")], since_ms=FLOOR_MS
-        )
-        == 0
+    report = await recover_user_events_durable(
+        db, router, EventRepository(db), [HistoryScope("h2", "testnet")], rollout_floor_ms=FLOOR_MS
     )
+    assert report.recovered == 0

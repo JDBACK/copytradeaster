@@ -307,8 +307,12 @@ async def test_foreign_and_missing_refs_stay_indistinguishable(c2_env):
 async def test_n4_long_alias_family_pages_all_events_once(c2_env):
     db, service = c2_env
     scope = HistoryScope("h1", "testnet")
-    rows = [fill(801, "BUY", "1"), fill(802, "SELL", "1"),
-            fill(803, "BUY", "1"), fill(804, "SELL", "1")]
+    rows = [
+        fill(801, "BUY", "1"),
+        fill(802, "SELL", "1"),
+        fill(803, "BUY", "1"),
+        fill(804, "SELL", "1"),
+    ]
     stored = await publish_all(db, scope, project(rows, {PosSide.BOTH: PositionSeed(D(0))}))
     await commit_rows(db, scope, rows)
     target, alias = [item.episode.public_ref for item in stored]
@@ -318,8 +322,9 @@ async def test_n4_long_alias_family_pages_all_events_once(c2_env):
     cursor = None
     refs = []
     while True:
-        page = await service.trade_events(USER_ID, alias, events_cursor=cursor,
-                                          events_limit=50, fills_limit=1)
+        page = await service.trade_events(
+            USER_ID, alias, events_cursor=cursor, events_limit=50, fills_limit=1
+        )
         refs.extend(item.event_ref for item in page.events)
         assert len(page.fills) == 1  # Event cursor never advances fills.
         cursor = page.next_events_cursor

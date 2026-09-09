@@ -8,9 +8,27 @@
 > Offline **1439 passed / 2 skipped / 45 deselected** (точно на `84cabfb`, 2026-09-07), миграции **0..58**, ruff check/format clean, doc links clean (49 файлов).
 > S2 frontend current WIP: **27 test files / 316 passed**, oxlint 0/0, TypeScript + Vite production build PASS; main JS **336.56 kB / 96.46 kB gzip**; recorded G2 browser evidence: cold 4 POST, warm root p95 1.0 ms/160, nested p95 1.9 ms/120, 300 ms RTT p95 6.0 ms/160, все warm 0 reads; browser DOM/listeners bounded, long tasks/errors 0. Финальные corrective после этого browser trace затронули transport validation/cancellation/error edges, поэтому latency/DOM числа ниже остаются reference evidence того G2 прогона, а не заявлением о новом CDP rerun.
 > **S3 WIP snapshot (2026-09-07):** backend history/event slice — **59 targeted tests passed**; `tsc -b && vite build` — PASS; oxlint — PASS с 2 предупреждениями; полный frontend Vitest после перехода на новые Home/Positions/Activity/history contracts — **272 passed / 44 failed (27 files)**. Это промежуточный срез, G3 остаётся OPEN; детали и TODO — [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
+> **S3 verification pass (2026-09-09):** obsolete fixtures переведены на контракты S3 (feed/menu/user-event delivery), offline gate — **1448 passed / 2 skipped / 45 deselected**, frontend — **28 files / 327 passed**, oxlint clean, production build PASS, ruff check/format и doc links clean (54 файла). N5 закрыт тестами (production factory True/False, два boot >1000 событий, crash до/после atomic commit, toggle-границы, остановка recurring task до DB close, retry sweep, command/user duplicates). N6 harness исправлен по коду: cancel по фактическому journal coid, доказательство отсутствия ордера, cleanup flat + `open_orders=[]`, scheduled captures и сценарий реального SL fill. Browser/device/Telegram WebView и signed live не выполнялись; G3 OPEN.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
+
+- **S3 verification pass (2026-09-09):** миграция старых тестов на S3-контракты
+  выполнена, один общий offline gate зелёный: backend **1448 passed / 2 skipped
+  / 45 deselected**, frontend **28 files / 327 passed**, ruff check/format и
+  doc links (54 файла) clean. Мигрированы `test_stage2_adapters`,
+  `test_adapters`, `test_service` (activity feed), `test_renderers`,
+  `test_notifications`, `test_history_acceptance` (+live), `test_builder_resume_live`;
+  presenter-копия и private-chat gate приведены к коду. N5 подтверждён новыми
+  тестами в `test_user_event_delivery_c6` (crash до/после atomic commit,
+  disable→event→enable, prepare→toggle→commit, no-op enable, disable→FAILED
+  outbox, монотонный курсор) и `test_engine` (factory True/False, два boot
+  >1000 событий без дублей, cancel delivery task до DB close, retry sweep,
+  legacy command suppression). N6 harness исправлен по коду (cancel по
+  `execution_commands.client_order_id`, query/order-list отсутствие, cleanup
+  flat + `open_orders=[]`, scheduled captures между шагами, отдельный SL fill
+  сценарий). Signed live и browser/device/Telegram WebView не запускались —
+  evidence впереди; G3 OPEN. Детали — [S3 progress §18](reports/MINIAPP_S3_PROGRESS_2026-09.md).
 
 - **S3 implementation handoff (2026-09-08):** menu/feed/push migration,
   production durable delivery и owned split/link/detail changes реализованы.

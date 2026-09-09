@@ -232,16 +232,6 @@ class LiveSignedRuntime:
             raise KeyError(account_id)
         self.actions.append("reconciled")
 
-    async def read_activity(
-        self,
-        account_id: str,
-        limit: int,
-        offset: int,
-        kind_filter: Any = None,
-    ) -> list[Any]:
-        del account_id, limit, offset, kind_filter
-        return []
-
     async def master_has_open_positions(self) -> bool:
         return False
 

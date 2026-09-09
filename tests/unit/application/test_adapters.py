@@ -253,26 +253,10 @@ async def test_runtime_cache_and_pause_reopens_admission_on_failure(database):
     assert app.coordinator.events[-1] == "reopen_entries_while_paused"
 
 
-async def test_runtime_activity_reconcile_and_master_state(database):
+async def test_runtime_reconcile_and_master_state(database):
     credentials = SqliteCredentials(database, bytes.fromhex("11" * 32))
     app = _App(database, _settings(), credentials)
     adapter = AppStage2RuntimeAdapter(app)
-    await database.execute_write(
-        "INSERT INTO execution_commands(command_key, account_id, kind, payload, priority, "
-        "status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            "activity-1",
-            "tg-7",
-            "MARKET_CLOSE",
-            "{}",
-            1,
-            "CONFIRMED",
-            "2026-08-24T00:00:00+00:00",
-            "2026-08-24T00:00:00+00:00",
-        ),
-    )
-    rows = await adapter.read_activity("tg-7", 10, 0)
-    assert rows[0]["command_key"] == "activity-1"
     await adapter.reconcile_account("tg-7")
     await adapter.reconcile_all()
     await adapter.resume_account("tg-7")

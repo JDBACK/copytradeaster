@@ -297,3 +297,61 @@ Code review после `903d4f4` выявил race: выключение/вкл�
 cursor; поздно подготовленные строки не вставляются, cursor не откатывается.
 Отправку, уже начатую до выключения, эта граница не отзывает.
 Тесты по просьбе владельца не запускались; ruff check/format проходят.
+
+### 18. Verification pass: миграция тестов, N5, N6 harness (2026-09-09)
+
+Проверка по [S3 testing handoff](MINIAPP_S3_TESTING_HANDOFF_2026-09.md),
+блоки 1–2 и N6-исправление. Реализация не менялась — только тесты и живая
+документация.
+
+**Миграция старых тестов (handoff §1).** Collection падал на
+`ImportError: _activity_kind_filter`; после снятия блокера полный offline-прогон
+дал 9 падений — все оказались устаревшими fixtures/assertions, не регрессиями
+кода. Переведены на S3-контракты: `test_stage2_adapters` (feed SQL-фильтр до
+LIMIT вместо удалённого runtime `read_activity`), `test_adapters` (убран
+`read_activity`), `test_service` (5 activity-тестов читают user events,
+категории/порядок/feed-pagination), `test_renderers` (`ActivityFeedPage` +
+pending + owned trade-link), `test_notifications` (удалены 4 теста на удалённый
+`router.recover_user_events`; эквиваленты уже в C6), `test_history_acceptance`
+и `test_history_acceptance_live`/`test_builder_resume_live`
+(`recover_user_events_durable`). Два теста приведены к фактическому коду:
+presenter-копия «PnL до комиссий» (совпадает с frontend) и Web App keyboard
+только в приватном чате (`chat_id == user_id`).
+
+**N5 (handoff §2).** Добавлены тесты, а не ручная проверка:
+- `test_user_event_delivery_c6`: crash до atomic commit (ни строк, ни курсора)
+  и replay ровно один раз; crash после commit → 0 новых строк; disable →
+  событие → enable (muted не доставлен, пост-enable доставлен); prepare →
+  toggle(disable) → commit (строки не вставлены, курсор вперёд); prepare →
+  disable → enable → commit (fence съедает строку); no-op `enable=True` не
+  двигает fence; disable помечает PENDING outbox `FAILED/recipient_disabled`;
+  `_commit_batch` держит курсор монотонным (MAX).
+- `test_engine`: production factory `True` vs low-level `False` (legacy без
+  delivery task); два boot на >1000 событий — ровно 1001 outbox-строк, 0
+  дублей, третий boot 0 новых; delivery task отменяется до закрытия БД;
+  сбой sweep → retry без смерти task; legacy `execution.confirmed`
+  `FAILED/superseded_by_user_events`, `command:cmd-1` не появляется,
+  user-event ровно один.
+
+**N6 live-harness (handoff §7, только код).**
+`tests/testnet/test_history_acceptance_live.py`: CANCEL STOP теперь целится в
+фактический `execution_commands.client_order_id` (`ct<key>`) из строки
+PLACE_STOP, не в исходный plan-label; до отмены доказано наличие ордера
+(`query_order=NEW` + присутствие в `open_orders`), после — `query_order`
+CANCELED/None и отсутствие order_id в списке (одного CONFIRMED после −2011
+недостаточно); cleanup отменяет protective-ордера и подтверждает flat +
+`open_orders()==[]`; добавлены scheduled captures между шагами open →
+increase → reduce → close с проверкой одного `public_ref`; отдельный сценарий
+реального SL fill (триггер подтягивается к mark по tickSize, FILLED по
+query_order, fill в `user_trades` и в импортированных fills, закрытый эпизод).
+
+**Offline gate (handoff §4).** backend **1448 passed / 2 skipped / 45
+deselected**; frontend **28 files / 327 passed**; oxlint clean; `tsc -b && vite
+build` PASS; `ruff check` / `ruff format --check` clean (включая автоформат
+`test_history_acceptance_live.py` и ранее отклонявшегося
+`test_trade_events_c2.py`); doc links OK (54 файла).
+
+**Осталось до G3.** Browser-матрица (production bundle, 320/360/390/430,
+cold/warm budgets, delayed API, 50 циклов), timezone/DST, Telegram WebView
+(owned links, native Back, haptics, WebKit) — нужен owner evidence; signed
+live прогон N6 + SL — нужен выделенный testnet-аккаунт. G3 остаётся **OPEN**.

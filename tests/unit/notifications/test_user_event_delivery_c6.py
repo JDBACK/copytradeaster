@@ -207,22 +207,25 @@ class _CaptureBot:
         return {"ok": True}
 
 
-def _production_settings(db: Database) -> Settings:
+def _production_settings(db: Database, *, trade_links: bool = True) -> Settings:
     return Settings(
         db_path=db.path,
         encryption_key="ab" * 32,
         miniapp_public_url="https://example.com",
+        miniapp_enabled=trade_links,
     )
 
 
 async def test_production_worker_without_trade_links_stays_text_only(tmp_path: Path) -> None:
     db = await _open_db(tmp_path / "c6-gate.sqlite3")
     try:
-        await _setup_owner(db, account_id="a1", user_id=1, chat_id=101)
+        # Private chat (chat_id == user_id) so the links capability is the
+        # only gate under test.
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
         await NotificationOutboxRepo(db).enqueue(
             "evt-structured",
             1,
-            101,
+            1,
             "user.POSITION_CLOSED",
             "INFO",
             "Закрыта BTCUSDT",
@@ -231,7 +234,7 @@ async def test_production_worker_without_trade_links_stays_text_only(tmp_path: P
             action="open_trade",
         )
         bot = _CaptureBot()
-        worker = _build_worker(bot, db, _production_settings(db))
+        worker = _build_worker(bot, db, _production_settings(db, trade_links=False))
         assert await worker.process_once() is True
         assert len(bot.calls) == 1
         assert bot.calls[0]["reply_markup"] is None
@@ -249,11 +252,11 @@ async def test_production_worker_without_trade_links_stays_text_only(tmp_path: P
 async def test_trade_links_capability_enables_button(tmp_path: Path) -> None:
     db = await _open_db(tmp_path / "c6-gate-on.sqlite3")
     try:
-        await _setup_owner(db, account_id="a1", user_id=1, chat_id=101)
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
         await NotificationOutboxRepo(db).enqueue(
             "evt-structured",
             1,
-            101,
+            1,
             "user.POSITION_CLOSED",
             "INFO",
             "Закрыта BTCUSDT",
@@ -362,6 +365,31 @@ async def test_console_only_sweep_advances_without_enqueueing(tmp_path: Path) ->
         await db.close()
 
 
+async def test_durable_sweep_skips_foreign_and_empty_scopes(tmp_path: Path) -> None:
+    db = await _open_db(tmp_path / "c6-scopes.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=101)
+        events = EventRepository(db)
+        scope = HistoryScope("a1", "testnet")
+        base_ms = int(datetime(2026, 9, 6, tzinfo=UTC).timestamp() * 1000)
+        await _seed_closed(events, scope, "kept", recorded_ms=base_ms)
+        router = _router(db)
+
+        empty = await recover_user_events_durable(db, router, events, [])
+        assert empty.recovered == 0
+        foreign = await recover_user_events_durable(
+            db,
+            router,
+            events,
+            ["not-a-scope"],  # type: ignore[list-item]
+        )
+        assert (foreign.recovered, foreign.skipped_no_recipient) == (0, 0)
+        assert await _outbox_count(db) == 0
+        assert await load_scanned_seq(db, scope) == 0
+    finally:
+        await db.close()
+
+
 async def test_durable_sweep_rejects_bad_bounds(tmp_path: Path) -> None:
     db = await _open_db(tmp_path / "c6-bounds.sqlite3")
     try:
@@ -373,5 +401,196 @@ async def test_durable_sweep_rejects_bad_bounds(tmp_path: Path) -> None:
             await recover_user_events_durable(db, _router(db), events, [scope], budget=-1)
         with pytest.raises(ValueError):
             await load_scanned_seq(db, "not-a-scope")  # type: ignore[arg-type]
+    finally:
+        await db.close()
+
+
+async def test_commit_crash_before_and_after_atomic_commit_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outbox insert and cursor advance commit atomically (C6)."""
+    import copytradeaster.notifications.delivery as delivery
+
+    db = await _open_db(tmp_path / "c6-commit-crash.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
+        events = EventRepository(db)
+        scope = HistoryScope("a1", "testnet")
+        base_ms = int(datetime(2026, 9, 8, tzinfo=UTC).timestamp() * 1000)
+        for i in range(3):
+            await _seed_closed(events, scope, f"crash-{i}", recorded_ms=base_ms + i)
+
+        original = delivery._commit_batch
+
+        async def failing_commit(db_, scope_, due_rows, last_seq):
+            del db_, scope_, due_rows, last_seq
+            raise RuntimeError("crash before commit")
+
+        monkeypatch.setattr(delivery, "_commit_batch", failing_commit)
+        with pytest.raises(RuntimeError, match="crash before commit"):
+            await recover_user_events_durable(db, _router(db), events, [scope])
+        # Nothing half-committed: no rows, cursor still before the batch.
+        assert await _outbox_count(db) == 0
+        assert await load_scanned_seq(db, scope) == 0
+
+        # The replay after the crash commits once and only once.
+        monkeypatch.setattr(delivery, "_commit_batch", original)
+        report = await recover_user_events_durable(db, _router(db), events, [scope])
+        assert (report.recovered, await _outbox_count(db)) == (3, 3)
+        assert await load_scanned_seq(db, scope) == await events.max_seq(scope)
+
+        # A crash after commit replays the saved cursor: no doubles.
+        replay = await recover_user_events_durable(db, _router(db), events, [scope])
+        assert replay.recovered == 0
+        assert await _outbox_count(db) == 3
+    finally:
+        await db.close()
+
+
+async def test_toggle_fence_skips_events_recorded_while_disabled(tmp_path: Path) -> None:
+    """Disable -> record -> enable must not deliver the muted gap event."""
+    from copytradeaster.notifications.delivery import ensure_user_event_rollout_floor
+
+    db = await _open_db(tmp_path / "c6-toggle-fence.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
+        events = EventRepository(db)
+        scope = HistoryScope("a1", "testnet")
+        base_ms = int(datetime(2026, 9, 9, tzinfo=UTC).timestamp() * 1000)
+        users = TelegramUserRepo(db)
+        router = _router(db)
+        await ensure_user_event_rollout_floor(db, now=datetime(2026, 9, 9, tzinfo=UTC))
+
+        assert await users.set_notifications_enabled(1, False) is True
+        await _seed_closed(events, scope, "muted", recorded_ms=base_ms)
+        assert await users.set_notifications_enabled(1, True) is True
+
+        report = await recover_user_events_durable(db, router, events, [scope])
+        assert (report.recovered, await _outbox_count(db)) == (0, 0)
+
+        # A fact recorded after re-enable still arrives.
+        await _seed_closed(events, scope, "live", recorded_ms=base_ms + 1_000)
+        live = await recover_user_events_durable(db, router, events, [scope])
+        assert (live.recovered, await _outbox_count(db)) == (1, 1)
+    finally:
+        await db.close()
+
+
+async def test_toggle_between_prepare_and_commit_skips_muted_rows(tmp_path: Path) -> None:
+    """A sweep admitted before a disable must not insert muted rows."""
+    from copytradeaster.notifications.delivery import ensure_user_event_rollout_floor
+
+    db = await _open_db(tmp_path / "c6-toggle-mid.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
+        events = EventRepository(db)
+        scope = HistoryScope("a1", "testnet")
+        base_ms = int(datetime(2026, 9, 9, tzinfo=UTC).timestamp() * 1000)
+        users = TelegramUserRepo(db)
+        router = _router(db)
+        await ensure_user_event_rollout_floor(db, now=datetime(2026, 9, 9, tzinfo=UTC))
+        await _seed_closed(events, scope, "race", recorded_ms=base_ms)
+
+        original = router.prepare_user_event_notification
+
+        async def prepare_then_toggle(stored):
+            planned = await original(stored)
+            await users.set_notifications_enabled(1, False)
+            return planned
+
+        router.prepare_user_event_notification = prepare_then_toggle  # type: ignore[method-assign]
+        report = await recover_user_events_durable(db, router, events, [scope])
+        # Planned before the toggle; the commit rechecks the recipient, so
+        # nothing lands and the cursor still advances past the muted row.
+        assert (report.recovered, await _outbox_count(db)) == (1, 0)
+        assert await load_scanned_seq(db, scope) == await events.max_seq(scope)
+
+        # Disable -> enable between prepare and commit: the fence recorded at
+        # the toggle covers the row, so the late commit inserts nothing.
+        await users.set_notifications_enabled(1, True)
+        await _seed_closed(events, scope, "race-2", recorded_ms=base_ms + 1_000)
+        router.prepare_user_event_notification = original  # type: ignore[method-assign]
+
+        async def prepare_then_cycle(stored):
+            planned = await original(stored)
+            await users.set_notifications_enabled(1, False)
+            await users.set_notifications_enabled(1, True)
+            return planned
+
+        router.prepare_user_event_notification = prepare_then_cycle  # type: ignore[method-assign]
+        second = await recover_user_events_durable(db, router, events, [scope])
+        assert (second.recovered, await _outbox_count(db)) == (1, 0)
+    finally:
+        await db.close()
+
+
+async def test_noop_enable_keeps_pending_events_deliverable(tmp_path: Path) -> None:
+    """A no-op enable=True must not move the fence and eat new events."""
+    from copytradeaster.notifications.delivery import ensure_user_event_rollout_floor
+
+    db = await _open_db(tmp_path / "c6-noop-enable.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
+        events = EventRepository(db)
+        scope = HistoryScope("a1", "testnet")
+        base_ms = int(datetime(2026, 9, 9, tzinfo=UTC).timestamp() * 1000)
+        users = TelegramUserRepo(db)
+        await ensure_user_event_rollout_floor(db, now=datetime(2026, 9, 9, tzinfo=UTC))
+        await _seed_closed(events, scope, "waiting", recorded_ms=base_ms)
+
+        # Already enabled: the toggle is a no-op and must not cut history.
+        assert await users.set_notifications_enabled(1, True) is True
+        assert await load_scanned_seq(db, scope) == 0
+
+        report = await recover_user_events_durable(db, _router(db), events, [scope])
+        assert (report.recovered, await _outbox_count(db)) == (1, 1)
+    finally:
+        await db.close()
+
+
+async def test_disable_marks_pending_outbox_recipient_disabled(tmp_path: Path) -> None:
+    db = await _open_db(tmp_path / "c6-disable-outbox.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
+        await NotificationOutboxRepo(db).enqueue(
+            "evt-pending",
+            1,
+            1,
+            "user.POSITION_CLOSED",
+            "INFO",
+            "Закрыта BTCUSDT",
+            account_id="a1",
+            trade_ref="ref-1",
+            action="open_trade",
+        )
+        assert await TelegramUserRepo(db).set_notifications_enabled(1, False) is True
+        row = await db.fetchone(
+            "SELECT status, last_error FROM notification_outbox WHERE event_key='evt-pending'"
+        )
+        assert row is not None
+        assert (row["status"], row["last_error"]) == ("FAILED", "recipient_disabled")
+    finally:
+        await db.close()
+
+
+async def test_commit_batch_keeps_cursor_monotonic(tmp_path: Path) -> None:
+    """The cursor only moves forward through MAX, never backwards."""
+    import copytradeaster.notifications.delivery as delivery
+    from copytradeaster.notifications.delivery import ensure_user_event_rollout_floor
+
+    db = await _open_db(tmp_path / "c6-monotonic.sqlite3")
+    try:
+        await _setup_owner(db, account_id="a1", user_id=1, chat_id=1)
+        events = EventRepository(db)
+        scope = HistoryScope("a1", "testnet")
+        base_ms = int(datetime(2026, 9, 9, tzinfo=UTC).timestamp() * 1000)
+        await ensure_user_event_rollout_floor(db, now=datetime(2026, 9, 9, tzinfo=UTC))
+        await _seed_closed(events, scope, "mono", recorded_ms=base_ms)
+        await recover_user_events_durable(db, _router(db), events, [scope])
+        high = await load_scanned_seq(db, scope)
+        assert high > 0
+
+        await delivery._commit_batch(db, scope, [], 1)
+        assert await load_scanned_seq(db, scope) == high
     finally:
         await db.close()
