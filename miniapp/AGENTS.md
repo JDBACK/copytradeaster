@@ -108,7 +108,7 @@ cd miniapp
 pnpm install          # deps (@walletconnect lazy chunk needs VITE_WC_PROJECT_ID at runtime)
 pnpm dev              # HMR; needs backend on :8080 (VITE_API_TARGET override) — or real bot via dev-up.sh
 pnpm lint             # oxlint (no ESLint)
-pnpm test             # vitest run, current S2 gate: 27 files / 316 tests
+pnpm test             # vitest run; current counters and UI acceptance map are in docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md
 pnpm build            # tsc -b && vite build -> dist/ (git-ignored, served by bot at /miniapp/)
 pnpm preview          # vite preview
 ```
@@ -149,7 +149,10 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 ## Testing & QA
 
-Current S2 gate: **27 test files / 316 tests**, three styles:
+Frontend test structure and the manual Telegram WebView / Chromium acceptance
+matrix are indexed in
+`../docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md`. The tests use three
+styles:
 
 - **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format/riskRuler` tests — import helpers directly.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/systemStatus/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.

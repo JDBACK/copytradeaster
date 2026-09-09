@@ -335,3 +335,7 @@ S2 Mini App Telegram smoke — **PASS** по перечисленным UI/lifec
 G2 общий статус остаётся **ACCEPTED** по уже записанному automated/CDP evidence;
 доступные mobile-only WebKit/haptics и transport/heap измерения не приписываются
 этому Telegram Desktop проходу.
+
+Сводная карта всех UI-проверок Mini App, включая этот Telegram-only проход,
+Chromium evidence и список frontend-тестов, —
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

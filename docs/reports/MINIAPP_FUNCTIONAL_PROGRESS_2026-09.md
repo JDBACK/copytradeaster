@@ -3,6 +3,10 @@
 Источник требований: [план](MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md), §14.
 Кампания IN PROGRESS. G1 и G2 закрыты; G3 открыт. Реализация небольшими проверяемыми шагами.
 
+Актуальная фактическая UI-приёмка Mini App в Telegram WebView и Chromium/CDP,
+включая frontend-тесты, screenshots и точный список оставшегося G3, собрана в
+[центральном UI acceptance index](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+
 ## Рабочий todo
 
 - [ ] S1.1: typed Aster reads, signed read evidence, учётная политика и units.
@@ -976,3 +980,15 @@ S3.5 документация готова; проверка отложена п
 нового offline/browser/live evidence нет. Источник текущего состояния —
 [журнал S3, §16](MINIAPP_S3_PROGRESS_2026-09.md) и
 [передача тестирования](MINIAPP_S3_TESTING_HANDOFF_2026-09.md).
+
+## Итоговая UI acceptance-сводка (2026-09-09)
+
+Фактические ручные проверки Mini App записаны в append-only разделах S2/S3:
+Telegram Desktop WebView — S2-only revalidation и S3 history/detail/Activity/
+Settings/Home flows; Chromium/Computer — S3 browser pass с ошибочными состояниями
+и 17 screenshots; исторический owner iPhone pass P2.0–P2.7 — в
+`STAGE3_PART2_PROGRESS_2026-09.md` и `acceptance-p27/`.
+
+Список frontend `*.test.ts(x)`, хронология добавления тестов, последний
+автоматический gate, артефакты и G3 OPEN собраны в
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

@@ -197,3 +197,14 @@ status reads 1.45–2.21 s, median 2.05 s.
 viewport/browser, network mode, число API вызовов, ожидаемый/фактический lifecycle
 и воспроизводимость. Для race желательно сохранить sequence запросов и момент Back/
 mutation/foreground, а не только screenshot.
+
+## Фактическая Telegram-only перепроверка
+
+Исходная матрица и baseline этого handoff сохранены как история S2/G2. После
+S3 выполнена отдельная ручная перепроверка именно Mini App внутри Telegram
+Desktop WebView: root/cache/revisit, stale Status/Aster, Notifications,
+dirty Risk + Sheet-first Back, scroll, 50 navigation cycles и pause/resume.
+Факты записаны в [MINIAPP_S2_PROGRESS_2026-09.md](MINIAPP_S2_PROGRESS_2026-09.md)
+в разделе `Telegram WebView revalidation`, а сводная карта всех UI-поверхностей
+и frontend-тестов — в
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

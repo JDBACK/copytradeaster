@@ -583,3 +583,7 @@ Sheet-first Back, Notifications read-only, stale Status/Aster, scroll/back,
 Этот прогон даёт **PASS** для Telegram Desktop S2 Mini App UI/lifecycle smoke.
 Он не измеряет из Telegram Desktop число HTTP POST, CDP heap/listeners или
 mobile WebKit/haptics; эти границы остаются явно отделены от G2/G3 verdict.
+
+Сводная карта фактических S2/S3 UI-проверок Mini App — Telegram WebView,
+Chromium/CDP, frontend-тесты и screenshots — находится в
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

@@ -1,11 +1,11 @@
 # Карта документации
 
 Что где лежит, что из этого живое, а что история, и что читать в каком порядке.
-Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-09-04.
+Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-09-09.
 
 ## Быстрый старт (что читать в новом сеансе)
 
-Обязательный минимум нового сеанса: 1, 2, 3 (только TL;DR сверху), 5, 9.
+Обязательный минимум нового сеанса: 1, 2, 3 (только TL;DR сверху), 5, 7, 10.
 Остальные пункты — по задаче, не подряд.
 
 1. `AGENTS.md` (корень) — правила работы с репо и структура папок.
@@ -20,17 +20,19 @@
 6. `docs/reports/STAGE3_PART2_PROGRESS_2026-09.md` — журнал исполнения
    Stage 3 Part 2: P2.0–P2.7 + post-closure corrective, все CLOSED (2026-09-04).
    Текущая правда по Part 2 (исходный план — только в таблице reports ниже).
-7. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — design-only источник:
+7. `docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` — центральная карта
+   фактических UI-проверок Mini App в Telegram WebView, Chromium/CDP и frontend.
+8. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — design-only источник:
    IA, восемь Aster-style concepts и исходные screen states.
-8. `docs/reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` —
+9. `docs/reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` —
    закрытый corrective gate Part 1 и фактическое acceptance evidence.
-9. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
-10. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
+10. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
+11. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
   план Telegram/direct-V3 этапа и append-only журнал исполнения. Его старые
   sections/checklists — история планирования; текущую правду брать из пункта 4.
-11. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
+12. `docs/reports/STAGE2_ACCESS_APPROVAL_2026-08.md` — фактический журнал
    guest captcha, durable access request, env-admin approval и regression gate.
-12. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
+13. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
     corrective gate после независимого аудита: план, полный журнал и evidence.
 
 Всё остальное — справочники и история: грузить по необходимости, не по умолчанию.
@@ -81,7 +83,8 @@
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Исходный implementation plan follower Mini App: восемь подчастей P2.0–P2.7, конкретные файлы, Testnet acceptance gates и anti-overengineering boundaries (2026-09-01). Статус внутри — `PLAN READY / IMPLEMENTATION NOT STARTED`; факт исполнения — строкой ниже |
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
-| `docs/reports/acceptance-s3/` | Browser-проход S3 (2026-09-09, частичный): 17 скриншотов production bundle на стенде `tg-8264892202`, 390×844, HEAD `09bd528`; факты — `MINIAPP_S3_PROGRESS_2026-09.md` §19; G3 OPEN |
+| `docs/reports/acceptance-s3/` | Browser-проход S3 (2026-09-09, частичный): 17 скриншотов production bundle на стенде `tg-8264892202`, 390×844, HEAD `09bd528`; факты — `MINIAPP_S3_PROGRESS_2026-09.md` §§19–20; G3 OPEN |
+| `MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` | Центральная карта UI-приёмки Mini App: Telegram WebView, Chromium/CDP, frontend-тесты, скриншоты и текущий список G3 OPEN |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 | `MINIAPP_S2_REVIEW_HANDOFF_2026-09.md` | Handoff независимому reviewer по закрытому S2/G2: три архитектурных слоя, инварианты §19/§20, критические race/lifecycle точки и команды gate (2026-09-07) |
 | `MINIAPP_S2_TESTING_HANDOFF_2026-09.md` | Handoff тестировщику S2/G2: browser/manual матрица cold/warm, Settings prefetch, mutation unknown/recovery, Back/Sheet/scroll/focus, 50-cycle memory и граница G3 (2026-09-07) |

@@ -150,3 +150,7 @@ Home flat и pause → Resume Sheet → active. Визуальные факты 
 Открытыми для G3 остаются mobile iOS/Android evidence (haptics, keyboard,
 WebKit gestures), viewports `320/360/430`, полный §19.7 CDP trace и
 split/alias/partial-specific history. **G3 OPEN.**
+
+Полная карта фактически выполненных Mini App UI-проверок S2/S3 — Telegram
+Desktop WebView, Chromium/CDP, frontend-тесты и screenshots — находится в
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

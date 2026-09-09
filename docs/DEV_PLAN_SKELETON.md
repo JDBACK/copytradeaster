@@ -422,10 +422,15 @@ snap-stop A/B) **отложена на потом — устройства не�
   harness. SL fill/STOP live evidence — до production rollout, совместить с G3.
   100-account benchmark не является этим gate; целевой масштаб corrective — 10–30.
 - [x] S2: Скорость — lifecycle, scoped cache, root keep-alive, быстрые Settings;
-  S2.1–S2.6 CLOSED 2026-09-07. Frontend 27/316, measured production-bundle
-  evidence и corrective blocker audits — `MINIAPP_S2_PROGRESS_2026-09.md`.
+  S2.1–S2.6 CLOSED 2026-09-07. Measured production-bundle evidence и
+  corrective blocker audits — `MINIAPP_S2_PROGRESS_2026-09.md`.
 - [x] G2: Скорость принята на нынешних экранах 2026-09-07; разрешён старт S3.
-- [ ] S3: IMPLEMENTED / NOT ACCEPTED — S3.0–S3.4 реализованы; S3.5 guides готовы, тесты/browser/device/N6 live отложены владельцем. Проверка: [S3 handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md). TODO и промежуточные итоги: [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
+- [ ] S3: IMPLEMENTED / PARTIAL ACCEPTANCE — S3.0–S3.4 реализованы; Chromium
+  и Telegram Desktop WebView фактически прошли перечисленные UI-сценарии
+  (S3 §§19–22), а frontend gate зелёный. G3 остаётся OPEN для widths
+  `320/360/430`, свежего §19.7 trace, mobile device evidence и специальных
+  split/alias/partial history-сценариев. Полная карта: [Mini App UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md);
+  план проверки: [S3 handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md).
 - [ ] G3: Итоговая сквозная, визуальная и performance-приёмка; кампания завершена.
 
 **Исторический статус (2026-08-22): этап 1 выполнен и проверен на testnet.**
