@@ -176,7 +176,7 @@ blocked/throttled matrix из `11` кейсов, alias/split/partial history (**
 Через Computer Use дополнительно пройден реальный iPhone Mirroring WebView:
 closed list/detail, события/fills, вертикальные свайпы, раскрытие исполнения,
 native Back, Activity-фильтры/owned link, Settings и Risk tap/keyboard. iPhone
-slice — **PASS**. Android WebView среди подключённых Computer Use surfaces нет,
-поэтому cross-device G3 остаётся **OPEN только для Android evidence**. Финальный
-frontend/backend/ruff/doc-links gate зелёный; итоговая карта —
+slice — **PASS**. Android по решению владельца исключён из scope этой приёмки.
+G3 — **CLOSED в согласованном scope** (Chromium + Telegram Desktop + iPhone
+Mirroring). Финальный frontend/backend/ruff/doc-links gate зелёный; итоговая карта —
 [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

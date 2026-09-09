@@ -16,8 +16,9 @@ Backend, engine и signed Aster testnet suites сюда не включаютс�
 - S3 §19.7 performance, error matrix и alias/split/partial history — **PASS**;
   viewport `320/360/430` — **PASS**.
 - Telegram Desktop и iPhone Mirroring WebView — **PASS** по фактически
-  пройденным сценариям; cross-device G3 остаётся **OPEN только для Android**,
-  которого нет среди подключённых Computer Use surfaces.
+  пройденным сценариям; G3 — **ACCEPTED в согласованном scope** (Chromium,
+  Telegram Desktop и iPhone Mirroring). Android по решению владельца исключён
+  из scope и verdict.
 - Последний frontend gate: `28` test files, `349` passed, lint clean,
   `tsc -b && vite build` PASS.
 
@@ -134,13 +135,12 @@ cd miniapp && CI=true pnpm build
   create the real open/closed data shown by the Mini App. It is an engine
   operator script, not a frontend test.
 
-## Что ещё не закрыто этим индексом
+## Текущий scope и verdict
 
-После S3 §§24–26 остаётся один внешний пункт: Android WebView с повтором
-touch/scroll/keyboard/haptic сценариев. Android surface сейчас не подключён к
-Computer Use, поэтому этот пункт нельзя выдавать за выполненный. iPhone,
-Telegram Desktop, свежий §19.7 trace, error matrix и специальные history cases
-закрыты фактическими проходами.
+Открытых пунктов в согласованном scope нет: iPhone, Telegram Desktop, Chromium,
+свежий §19.7 trace, error matrix и специальные history cases закрыты фактическими
+проходами. Android WebView по решению владельца исключён из scope этой приёмки
+и не влияет на verdict G3.
 
 Для итогового verdict читай этот index вместе с S3 §§19–26. Старую фразу
 «не запускалось» из pre-acceptance-раздела нельзя принимать за текущий статус:

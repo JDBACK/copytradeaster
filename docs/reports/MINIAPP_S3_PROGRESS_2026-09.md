@@ -1,7 +1,7 @@
 # S3 — интерфейс и функциональность: TODO и журнал
 
 Дата начала: 2026-09-07. База перед S3 WIP: `41fba43`.
-Статус: **IN PROGRESS; G3 OPEN**. Исполнение одним агентом, без субагентов.
+Статус: **ACCEPTED; G3 CLOSED в согласованном scope** (Chromium, Telegram Desktop и iPhone Mirroring). Исполнение одним агентом, без субагентов.
 Источник требований: [UX-план](MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md),
 §5–§8, §11–§16, §19–§21; corrective зависимости N4–N6 из §24–§25.
 
@@ -726,10 +726,9 @@ owned `Открыть сделку`; Settings и Risk.
 Computer Use. Горизонтального page overflow или обрезанных подписей на
 portrait-экране не обнаружено; узкие labels корректно переносятся.
 
-Android WebView в подключённых Computer Use surfaces отсутствует, поэтому
-Android-specific повтор и его haptic/WebView evidence остаются внешней
-границей. iPhone slice — **PASS**, полный cross-device G3 — **OPEN только до
-Android evidence**. Финальное состояние аккаунта после всех проходов: flat,
+Android по решению владельца исключён из scope этой приёмки и не входит в
+verdict. iPhone slice — **PASS**; G3 — **CLOSED в согласованном scope**
+(Chromium + Telegram Desktop + iPhone Mirroring). Финальное состояние аккаунта после всех проходов: flat,
 `open_orders=[]`, `allow_new_entries=1`, `risk_percent=0.02`,
 `notifications_enabled=0`; production bot/tunnel продолжают работать на `:8080`,
 одноразовый preview после завершения приёмки остановлен.
