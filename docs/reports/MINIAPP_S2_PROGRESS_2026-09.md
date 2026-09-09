@@ -291,3 +291,47 @@ S2.1–S2.6 выполнены, обязательные regressions и measured
 session lifecycle подтверждены тестами и браузерными измерениями. **G2 ACCEPTED.**
 Следующий этап кампании — S3/G3; S2 не менял визуальный состав Home и не включал
 новые history/detail screens раньше их S3-пакетов.
+
+## Telegram WebView revalidation — S2 Mini App only (2026-09-09)
+
+После S3-прохода выполнена отдельная ручная перепроверка именно Mini App внутри
+открытого Telegram Desktop WebView. Этот раздел не заявляет новый backend gate и
+не подменяет мобильные iOS/Android проверки.
+
+Проверено в Telegram:
+
+- root-переходы `Главная → Позиции → Настройки → Главная`; flat Home показал
+  `0,00 USDT`, `Открытые позиции 0`, риск `2%`, `Копирование включено`;
+- Settings prefetch/revisit: Risk, Notifications, Status и Aster открываются;
+  повторный Risk показывал текущие `2,0%` без skeleton, Status/Aster честно
+  отображали stale/aged состояние, без ложного fresh-green;
+- Notifications прочитаны без клика по toggle: доставка выключена, очередь `0`,
+  ранее не доставлено `0`;
+- Risk dirty draft `2,0% → 2,5%`: Back показал Sheet «Отменить изменения?»;
+  выход без сохранения вернул Settings, повторный Risk снова показал серверные
+  `2,0%`, финансовая настройка не изменилась;
+- native Back из nested Risk/Status/Aster и root navigation отрабатывают;
+  scroll Risk до нижней части и возврат в Settings не оставили экран в сломанном
+  состоянии;
+- **50 циклов** `Settings → Risk → Back` завершились на Settings, без зависания
+  и без изменения server value; это визуальный Telegram lifecycle smoke,
+  сетевые POST/heap/listener counters в Telegram Desktop этим проходом не
+  инструментировались;
+- pause/resume mutation flow: pause показал `Новые входы на паузе`, Resume Sheet
+  открылся после async-загрузки, `Отмена` сохранила paused; повторный Resume с
+  отдельным подтверждением после ожидания вернул `Копирование включено`;
+  быстрый повторный тап во время занятой mutation не создал дополнительного
+  перехода состояния.
+
+Финальная сверка после Telegram-прохода: `risk_percent=0.02`,
+`allow_new_entries=1`, владелец `notifications_enabled=0`, история `170`
+episodes и `487` fills, execution commands в состояниях PENDING/SENDING/
+SUBMITTED/UNKNOWN — `0`. Последняя фактическая пара pause/resume записала ровно
+один `COPY_PAUSED` и один `COPY_RESUMED`; всего в живом аккаунте после всех
+сегодняшних ручных прогонов — по `3` таких события. Dirty Risk изменений в БД
+нет.
+
+S2 Mini App Telegram smoke — **PASS** по перечисленным UI/lifecycle сценариям.
+G2 общий статус остаётся **ACCEPTED** по уже записанному automated/CDP evidence;
+доступные mobile-only WebKit/haptics и transport/heap измерения не приписываются
+этому Telegram Desktop проходу.

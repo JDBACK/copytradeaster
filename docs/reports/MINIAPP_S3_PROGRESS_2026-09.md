@@ -562,3 +562,24 @@ fills/events, Activity, owned navigation, Settings, native Back и pause/resume.
 Мобильные iOS/Android WebView, haptics/keyboard, viewports `320/360/430`,
 полный §19.7 CDP budget trace и split/alias/partial-specific history остаются
 границами G3. G3 — **OPEN**.
+
+### 22. Telegram S2-only revalidation (2026-09-09)
+
+По запросу владельца после S3 detail-pass выполнен отдельный прогон только
+Mini App внутри Telegram Desktop WebView, без повторного backend/S2 общего
+набора. Проверены root-переходы, Settings cache/revisit, Risk dirty draft и
+Sheet-first Back, Notifications read-only, stale Status/Aster, scroll/back,
+`Settings → Risk → Back` **50 циклов**, а также pause → Resume Sheet → Cancel
+с сохранением paused и последующий server-confirmed Resume → active.
+
+Факты: повторный Risk открылся сразу с серверными `2,0%`; draft `2,5%` после
+выхода без сохранения не попал в БД; Telegram Home в финале показывает
+`Копирование включено`, открытых позиций `0`, риск `2%`. Notifications не
+переключались и остались выключены. Финальная БД: `allow_new_entries=1`,
+`risk_percent=0.02`, `notifications_enabled=0`, `170` episodes, `487` fills,
+`0` незавершённых execution commands; за текущий цикл записаны ровно один
+`COPY_PAUSED` и один `COPY_RESUMED`.
+
+Этот прогон даёт **PASS** для Telegram Desktop S2 Mini App UI/lifecycle smoke.
+Он не измеряет из Telegram Desktop число HTTP POST, CDP heap/listeners или
+mobile WebKit/haptics; эти границы остаются явно отделены от G2/G3 verdict.
