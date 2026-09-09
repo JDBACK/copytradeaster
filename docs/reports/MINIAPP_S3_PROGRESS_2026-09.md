@@ -380,3 +380,84 @@ native Back, haptics, WebKit) — нужен owner evidence. Timezone/DST зак
 offline-матрицей (§15: 18 кейсов + локальный день подписи); signed live N6
 выполнен на testnet (`1 passed`, реальный SL fill, чистый выход). G3
 остаётся **OPEN**.
+
+### 19. Browser/UI-проход: частичное покрытие (2026-09-09)
+
+Проход остановлен владельцем по лимиту сессии. Ниже — только фактически
+выполненное; непокрытое перечислено явно, G3 остаётся **OPEN**. Числа — один
+проход, не заменяют §19.7.
+
+**Стенд.** `scripts/preview_miniapp_engine.py --account tg-8264892202
+--confirm-engine-preview --port 8085`: копия прод-БД (backup API), testnet,
+unsigned dev-session (900000001). Production bundle `miniapp/dist` собран с
+`VITE_DEV_USER_ID=900000001` (inline env; `.env.production.local` не создавался
+— известная ловушка dev-режима в проде). HEAD `09bd528`. Browser: Chromium 152
+(browseuse/CDP), viewport 390×844, DPR 3; визуальная проверка скриншотов
+(зрение) по каждому экрану.
+
+**Исправление preview-харнесса (коммит вместе с этим журналом).**
+`preview_miniapp_engine.py` падал `OwnershipConflictError`: dev-юзер 900000001
+в снапшоте прод-БД привязан к `copyc1`. Теперь скрипт перед upsert отвязывает
+dev-юзера (и его outbox-строки) в одноразовой копии; прод-БД не затронута.
+
+**Живые testnet-данные для UI.** Master `open BTCUSDT 0.002 1.0 long` →
+follower tg-8264892202 открыл **0.037 BTC** (200×, риск 2%, стоп 1%, стоп
+подтверждён), затем `close`; обе стороны flat, `open_orders=[]`. По ходу
+зафиксировано ограничение: у BTCUSDT брекет 200× имеет **notional cap $4 000**;
+при стопе 0.5% плановый объём (риск 2% → 0.074 BTC ≈ $5.8k) биржа отвергает
+`-2027`, при стопе 1% объём 0.037 BTC проходит. Плечо follower'а при этом
+корректно-автоматическое: `LeverageManager` сам выставляет `maxInitialLeverage`
+символа (200×) через leverage maintenance, `SET_LEVERAGE` в плане не требуется;
+ручная смена на 10× была возвращена движком к 200×. Bracket-cap сайзинга в
+RiskEngine не учитывается — зафиксировано как наблюдение (не UI-дефект).
+
+**Проверено в браузере** (скриншоты: `docs/reports/acceptance-s3/`, 17 PNG,
+390×844, HEAD 09bd528):
+
+- **Home active**: сводка (копирование включено, PnL открытых, 1 позиция,
+  «Стоп подтверждён 1 из 1», доступно, риск 2%); TrustRail и карточка первой
+  позиции отсутствуют — S3.1 подтверждён визуально и по DOM.
+- **Home paused**: «Новые входы на паузе» + «Возобновить»; пауза применяется
+  сразу. **Resume confirm sheet**: текст варианта «позиция мастера» (не flat);
+  подтверждение server-confirmed, возврат в active ≈4.5 c.
+- **Positions**: сегменты «Открытые 1/Закрытые», карточка BTCUSDT (qty, PnL,
+  200×, вход/марк/стоп «подтверждён»); detail = snapshot-fallback («История
+  этой позиции ещё уточняется») с Вход/Сейчас/Stop/Риск до Stop/Плечо 200× авто.
+- **Activity**: фильтры Все/Сделки/Система, баннер «Есть новые события»,
+  события со временем. На момент прохода — только системные `ENTRY_SKIPPED`
+  (`NO_STOP`, `STALE_MASTER`): проекция fills/episodes в копии пуста
+  (`follower_episodes=0`, `follower_fills=0`, `user_activity_events=13`).
+- **Settings + все 6 вложенных** (Риск, Уведомления, Статус подключения,
+  Подключение Aster, Безопасность, Помощь): отрендерены, секретов/сырых
+  payload нет; Status честно «Данные устарели · не удалось обновить»,
+  AccountBuilder — «Прямое подключение, Builder не используется».
+- **Native Back** (Telegram-WebApp stub с BackButton, initData пустой → dev
+  session сохраняется): detail → список, BackButton visible true→false;
+  вложенные экраны возвращаются на Settings.
+- **RiskRuler**: тапы по тикам меняют draft; реальные save **2%→1%** и
+  **1%→2%** server-confirmed (~1 c, `control_audit`). CDP-драг и
+  синтезированные PointerEvent'ы в этом харнессе не двигают линейку
+  (`Input.dispatchMouseEvent` mouseMoved стабится/таймаутит на pointer-capture);
+  жесты приняты ранее в `MINIAPP_RISK_RULER_2026-09.md` — этот проход их не
+  переобъявляет.
+- **Notifications double-tap gate** (instrumented `fetch`): два клика в одном
+  тике → ровно **1 POST**; интервалы 60 ms и 300 ms → **2 POST** (первая
+  мутация успевала settle: локальный RTT ~1 ms). Гейт закрывает burst в одном
+  тике; осознанные последовательные тапы не блокирует. Итоговое состояние ON
+  восстановлено.
+
+**Не выполнено (продолжение приёмки):**
+
+1. Viewports **320/360/430** — снят только 390×844.
+2. Состояния ошибок списков/details/feed (блокировка API, throttle).
+3. **§19.7 бюджеты**: cold root ≤4 read POST; ≥30 warm samples p95 ≤100 ms;
+   delayed API ~300 ms; длинная история; scroll/long-task trace; 50 циклов
+   root→nested→Back и nodes/listeners/timers/rAF/`body.overflow`.
+4. **Closed trades list + trade detail** (fills/events/partial/split/alias) —
+   нужна непустая проекция истории; в копии её не было.
+5. **§6 Telegram WebView на устройстве владельца** (owned links, native Back,
+   haptics, короткий viewport, keyboard) — нужен owner evidence.
+6. Offline/signed гейты в этом проходе не перезапускались (счётчики не
+   менялись); live N6 закрыт ранее (§18), повторный signed-прогон не требовался.
+
+G3 — **OPEN** до закрытия пунктов 1–6.

@@ -54,7 +54,7 @@
 
 | Файл | Кампания |
 |---|---|
-| `MINIAPP_S3_PROGRESS_2026-09.md` | S3.0–S3.4 реализованы, проверка отложена; журнал решений и изменений; G3 OPEN |
+| `MINIAPP_S3_PROGRESS_2026-09.md` | S3.0–S3.4 реализованы; offline gate и N6 live закрыты; browser-проход частично (§19, 2026-09-09); G3 OPEN |
 | `MINIAPP_S3_TESTING_HANDOFF_2026-09.md` | Передача итогового S3 на offline/browser/device/N6 live проверку: контракты, rollout, сценарии и ограничения |
 | `REFACTOR_STAGE1_REPORT.md` | Базовый рефакторинг Stage 1 + инвентаризация первого ревью (2026-08-22) |
 | `FINAL_STAGE1_FOLLOWUP_REPORT_2026-08.md` | Follow-up по второму ревью + первый hybrid gate 30×100 (2026-08-22/23) |
@@ -81,6 +81,7 @@
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Исходный implementation plan follower Mini App: восемь подчастей P2.0–P2.7, конкретные файлы, Testnet acceptance gates и anti-overengineering boundaries (2026-09-01). Статус внутри — `PLAN READY / IMPLEMENTATION NOT STARTED`; факт исполнения — строкой ниже |
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
 | `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
+| `docs/reports/acceptance-s3/` | Browser-проход S3 (2026-09-09, частичный): 17 скриншотов production bundle на стенде `tg-8264892202`, 390×844, HEAD `09bd528`; факты — `MINIAPP_S3_PROGRESS_2026-09.md` §19; G3 OPEN |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 | `MINIAPP_S2_REVIEW_HANDOFF_2026-09.md` | Handoff независимому reviewer по закрытому S2/G2: три архитектурных слоя, инварианты §19/§20, критические race/lifecycle точки и команды gate (2026-09-07) |
 | `MINIAPP_S2_TESTING_HANDOFF_2026-09.md` | Handoff тестировщику S2/G2: browser/manual матрица cold/warm, Settings prefetch, mutation unknown/recovery, Back/Sheet/scroll/focus, 50-cycle memory и граница G3 (2026-09-07) |

@@ -119,3 +119,16 @@ Cursor обновляется монотонно через MAX. При выкл
 помечается FAILED/recipient_disabled. Уже начатый внешний send не отзывается.
 No-op enable=True не должен съедать ожидающие новые события. Новых тестов и
 прогонов для этого дополнения пока нет.
+
+## Прогресс приёмки (2026-09-09, частичный проход)
+
+Проход остановлен владельцем по лимиту сессии; полные факты — §19
+`MINIAPP_S3_PROGRESS_2026-09.md`. Сделано: стенд `preview_miniapp_engine`
+на `tg-8264892202` (preview-харнесс исправлен — dev-юзер отвязывается в
+одноразовой копии), живые testnet-данные через master open/close,
+браузерный проход 390×844 (Home active/paused + resume sheet, Positions +
+detail, Activity, Settings + 6 вложенных, native Back, RiskRuler save
+2%→1%→2%, notifications double-tap gate), 17 скриншотов в
+`docs/reports/acceptance-s3/`. Не закрыто: 320/360/430, состояния ошибок,
+§19.7 бюджеты, closed list/detail на непустой истории, §6 owner device
+evidence, offline/signed гейты. **G3 OPEN.**
