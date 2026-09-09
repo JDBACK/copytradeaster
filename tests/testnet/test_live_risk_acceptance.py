@@ -48,6 +48,7 @@ from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.risk.engine import entry_quantity
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import SettingsRepo, TelegramUserRepo
+from tests.testnet.support.app_live import arm_manual_master_admission
 
 pytestmark = [
     pytest.mark.testnet,
@@ -231,6 +232,7 @@ async def live_app_stack(tmp_path):
     await app.db.execute_write(
         "DELETE FROM execution_commands WHERE account_id=?", (FOLLOWER_ACCOUNT,)
     )
+    await arm_manual_master_admission(app, app.master_client)
 
     yield {
         "app": app,

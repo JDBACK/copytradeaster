@@ -19,9 +19,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sqlite3
 import time
 from decimal import ROUND_CEILING
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -33,11 +35,13 @@ from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrder
 from copytradeaster.config import Settings
 from copytradeaster.domain.models import PosSide, RiskPolicy, Side
 from copytradeaster.miniapp.server import create_miniapp_app
+from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
     SettingsRepo,
     SyncBasisRepo,
     TelegramUserRepo,
 )
+from tests.testnet.support.app_live import arm_manual_master_admission
 
 pytestmark = [
     pytest.mark.testnet,
@@ -48,6 +52,18 @@ pytestmark = [
 
 SYMBOL = "BTCUSDT"
 TEST_USER_ID = 900000001
+
+
+def _copy_sqlite(src: Path, dst: Path) -> None:
+    src_conn = sqlite3.connect(src)
+    try:
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
 
 
 def _unknown_outcome(exc: Exception) -> bool:
@@ -105,17 +121,24 @@ async def _flatten(client: AsterClient, account_id: str, hedge: bool, prefix: st
 
 
 @pytest.fixture
-async def live_app_stack():
-    settings = Settings(miniapp_dev_unsigned=True, miniapp_dev_user_id=TEST_USER_ID)
-    if "testnet" not in settings.rest_base_url.lower():
-        pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
-
-    app = App(settings)
-    await app.db.connect()
-    await app.db.migrate()
+async def live_app_stack(tmp_path):
+    base_settings = Settings(miniapp_dev_unsigned=True, miniapp_dev_user_id=TEST_USER_ID)
+    if "testnet" not in base_settings.rest_base_url.lower():
+        pytest.fail(f"signed tests are restricted to testnet, got {base_settings.rest_base_url!r}")
+    if not base_settings.db_path.exists():
+        pytest.skip(f"source database required for isolated copy: {base_settings.db_path}")
+    db_copy = tmp_path / "live-positions.sqlite3"
+    _copy_sqlite(base_settings.db_path, db_copy)
+    settings = base_settings.model_copy(
+        update={"db_path": db_copy, "log_path": tmp_path / "live-positions.log"}
+    )
+    db = Database(settings.db_path)
+    await db.connect()
+    await db.migrate()
+    app = App(settings, db=db)
     await app.credentials.load()
     if "main" not in app.credentials.account_ids() or "copyc1" not in app.credentials.account_ids():
-        await app.db.close()
+        await db.close()
         pytest.skip("need main + copyc1 imported in wallet.txt")
 
     # Register copyc1 in FollowerRegistry
@@ -188,6 +211,7 @@ async def live_app_stack():
     basis_repo = SyncBasisRepo(app.db)
     for _side in ("LONG", "SHORT", "BOTH"):
         await basis_repo.clear("copyc1", SYMBOL, _side)
+    await arm_manual_master_admission(app, app.master_client)
 
     yield {
         "app": app,
@@ -215,7 +239,7 @@ async def live_app_stack():
         )
     await test_client.close()
     await app.http.aclose()
-    await app.db.close()
+    await db.close()
 
 
 @pytest.mark.asyncio

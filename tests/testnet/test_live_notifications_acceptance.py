@@ -50,6 +50,7 @@ from copytradeaster.notifications.router import NotificationRouter
 from copytradeaster.notifications.worker import TelegramOutboxWorker
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import SettingsRepo, TelegramUserRepo
+from tests.testnet.support.app_live import arm_manual_master_admission
 
 pytestmark = [
     pytest.mark.testnet,
@@ -221,6 +222,7 @@ async def live_app_stack(tmp_path):
     hedge_follower = await app.master_client.get_position_mode(FOLLOWER_ACCOUNT)
     await _flatten(app.master_client, "main", hedge_master, "pre-m")
     await _flatten(app.master_client, FOLLOWER_ACCOUNT, hedge_follower, "pre-f")
+    await arm_manual_master_admission(app, app.master_client)
 
     # Journal cleanup keeps the copy engine deterministic for this follower.
     await app.db.execute_write(

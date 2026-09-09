@@ -898,3 +898,32 @@ App live acceptance теста — PAUSED/stale-account setup. Это не пр�
 history merge diff без дополнительного reproduction: offline и targeted
 history/UNKNOWN gates зелёные, а исходные hardening semantics sizing/leverage
 в интеграции не менялись.
+
+## 2026-09-09 — Requalification complete after harness alignment
+
+После просмотра merge diff и сверки с текущими production-контрактами live
+харнесы приведены в соответствие с кодом, без ослабления safety assertions:
+
+- leverage: **4/4 passed** (effective signed leverage, rejected SET recovery,
+  real downshift и close/entry protection);
+- ONE_WAY: **2/2 passed за 369.90s** на scratch SQLite с изолированным journal
+  и risk policy;
+- Mini App live: Activity **1/1 за 40.50s**, Notifications/Positions/Risk
+  **3/3 за 143.47s**. Activity теперь проверяет production history capture и
+  `user_activity_events`, а не устаревший `execution_commands` view;
+- HEDGE: **7/7 за 393.65s** (G0–G6, включая asymmetry, per-leg protection,
+  leverage update, partial/one-leg close и flat cleanup);
+- полный hybrid load 0.3: **1 passed за 4085.39s (1:08:05)**, 30 циклов,
+  restart/SIGTERM/SIGKILL, 3 REAL + 10 SHADOW, scratch journal **1988
+  CONFIRMED / 0 FAILED / 0 UNKNOWN / 0 SENDING**;
+- offline **1525 passed / 2 skipped / 87 deselected**, coverage **87%**;
+  shadow scale **2 passed за 69.47s**; frontend **28 файлов / 349 passed**,
+  oxlint, `tsc -b`, Vite build; strict doc-links — 59 файлов.
+
+Независимый signed flat-аудит после полного прогона: `main`, `copyc1`,
+`copyc2`, `copyc3`, `tg-8264892202` — 0 позиций и 0 открытых ордеров.
+Причины прежнего NO-GO были дефектами предпосылок live-тестов (effective
+leverage, stale baseline/cleanup, shared DB/history source и admission seam),
+а не наблюдаемым нарушением engine safety invariants. **Итог: GO для
+fast-forward/push проверенного merge-коммита в Git `main`; mainnet остаётся
+запрещённым fail-closed конфигурацией.**

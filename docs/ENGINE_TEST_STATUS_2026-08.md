@@ -4,26 +4,27 @@
 кампания зафиксирована в `feature/frontend`; ветка Stage 3 части 2
 `codex/stage-3-mini-app-part2` смержена ранее.
 
-> **TL;DR (2026-09-09, integrated hardening + frontend tree):** локальная
-> интеграционная ветка `codex/integrate-hardening-frontend` собрана из
-> `codex/live-copy-tests-hardening` (`4c0d1a1`) и `feature/frontend`
-> (`d6d5791`). Конфликты разрешены с сохранением fail-closed UNKNOWN
-> resolver, history observer и append-only migration lineage **0..59**.
+> **TL;DR (2026-09-09, integrated requalification):** локальная ветка
+> `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
+> `feature/frontend` `d6d5791`; merge diff просмотрен, конфликтные границы
+> сохранены. Исправлены только live-harness assumptions: effective leverage,
+> post-fill baseline/cleanup, one-way scratch DB + quantity sizing, explicit
+> manual admission seam и Activity-переход на канонические
+> `user_activity_events`.
 > Offline backend: **1525 passed / 2 skipped / 87 deselected**, coverage
 > **87%**; Ruff/format/compileall/strict doc-links чистые. Shadow scale:
-> **2 passed** (30×100 и 100×20, 63.49s). Frontend: **28 files / 349 passed**,
-> oxlint, `tsc -b` и Vite build PASS (main JS 361.19 kB / 103.22 kB gzip).
-> Signed Testnet targeted: network **3/3**, UNKNOWN **6/6**, history lifecycle
-> **1/1**, history read **1/1**, corrective **6/6**, master/risk/isolation
-> **14/14** и LIMIT **2/3 + 1 honest skip**; независимый flat audit main +
-> copyc1/copyc2/copyc3 — zero positions / zero open orders. Полная live
-> acceptance пока **NO-GO**: существующий G2 hedge assertion (2 повторения),
-> два leverage-control assumptions и два one-way e2e assumptions не прошли на
-> текущем состоянии Aster Testnet; четыре Mini App live acceptance теста
-> также получили PAUSED/стale-account предпосылки. Эти failures находятся в
-> исторических live harness assumptions (production merge diff не меняет
-> sizing/leverage semantics), но до их отдельного решения mainnet запуск не
-> разрешается. Старые TL;DR ниже сохранены как исторические snapshots.
+> **2 passed за 69.47s**. Frontend: **28 files / 349 passed**, oxlint,
+> `tsc -b` и Vite build PASS.
+> Signed Testnet requalification: leverage **4/4**, one-way **2/2**, Mini App
+> Activity **1/1**, Notifications/Positions/Risk **3/3**, HEDGE **7/7**;
+> полный hybrid load **1 passed за 4085.39s (1:08:05)** — 30 циклов,
+> restart/SIGTERM/SIGKILL, 3 REAL + 10 SHADOW, journal **1988 CONFIRMED / 0
+> FAILED / 0 UNKNOWN / 0 SENDING**. Независимый flat audit после всех прогонов:
+> `main`, `copyc1`, `copyc2`, `copyc3`, `tg-8264892202` — zero positions / zero
+> open orders.
+> **Вердикт: GO для fast-forward/push в Git `main`.** Это не разрешение
+> mainnet-торговли: `CT_ALLOW_MAINNET=false` и сетевой fail-closed guard
+> сохраняются. Старые TL;DR ниже сохранены как исторические snapshots.
 
 > **TL;DR (2026-09-07, QUALIFIED + чистый load):** остаточный post-fill race
 > re-review `ac161b2` закрыт: master/TTL теперь выбираются после `fr.lock` +

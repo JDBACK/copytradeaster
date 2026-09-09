@@ -192,6 +192,7 @@ Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): l
 | `test_live_account_builder_acceptance.py` | P2.6 attestation (copyc1/copyc2) + disconnect + fresh onboarding |
 | `test_live_builder_reauthorize.py` | Same-signer reauth: 5d EXPIRING → re-auth → 30d VERIFIED, no orders |
 | `test_history_acceptance_live.py` | §10.9 history acceptance (copyc2/BTCUSDT): executor/journal lifecycle, distant STOP place+cancel, post-send-timeout query-before-retry, REAL file restart, authenticated HTTP on all surfaces. Requires an EXCLUSIVE window: skips unless flat, no open orders, and no fills in the last 5 minutes |
+| `support/app_live.py` | Controlled production-App admission helper for focused signed Mini App acceptance tests that use REST rebuilds instead of the background master WS loop |
 | `support/builder_live.py` | Shared helpers: wallet.txt parsing, testnet guard, signed reads, state snapshot, flatten |
 
 ## Conventions

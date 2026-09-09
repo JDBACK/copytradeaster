@@ -2,17 +2,17 @@
 
 Covers what the offline fake-based suite cannot prove against a real exchange:
 
-1. over-bracket prepare is rejected (-4028) and falls back to the signed
-   account bracket maximum;
+1. an over-bracket catalog candidate never upshifts a lower authoritative
+   follower configuration; the signed effective value remains ready;
 2. an unready control plane fails closed: entries skip with
    LEVERAGE_NOT_READY, zero order requests reach the exchange, and the live
    background worker provisions readiness;
 3. a REALLY-rejected SET_LEVERAGE (-4028) blocks its dependent MARKET_OPEN /
    PLACE_STOP inside the executor while a risk-reducing MARKET_CLOSE in the
    same situation still executes (P0 contract);
-4. a REAL leverage downshift on the wallet makes the control plane durably
-   unready (observed value disagrees with the candidate), clamping master
-   increases until re-provisioning flows them.
+4. a REAL leverage downshift on the wallet remains authoritative and ready;
+   snapshots and maintenance preserve it instead of pushing it back toward
+   the catalog ceiling, while closes and later entries keep flowing.
 
 Scope notes from live probing:
 * the FULL coordinator pipeline cannot emit an exchange-rejected SET: the
@@ -90,8 +90,6 @@ pytestmark = [
 SYMBOL = "BTCUSDT"
 FOLLOWER = "copyc1"
 QTY = D("0.002")
-RESTORE_LEVERAGE = 200
-
 _event_ids = itertools.count(int(time.time() * 1000))
 
 
@@ -352,6 +350,7 @@ async def lev_stack():
         await client.set_position_mode(FOLLOWER, False)
     await _flatten_strict(client, "main", "lev-setup-m")
     await _flatten_strict(client, FOLLOWER, "lev-setup-f")
+    original_follower_leverage = await _follower_leverage(client, FOLLOWER)
 
     filters_cache: dict[str, SymbolFilters] = {}
     info = await client.exchange_info(force=True)
@@ -418,14 +417,16 @@ async def lev_stack():
         "fr": fr,
         "policy": policy,
         "filters": filters_cache[SYMBOL],
+        "original_follower_leverage": original_follower_leverage,
     }
 
     with contextlib.suppress(Exception):
         await _flatten_strict(client, "main", "lev-tear-m")
     with contextlib.suppress(Exception):
         await _flatten_strict(client, FOLLOWER, "lev-tear-f")
-    with contextlib.suppress(Exception):
-        await client.set_leverage(FOLLOWER, SYMBOL, RESTORE_LEVERAGE)
+    if original_follower_leverage is not None:
+        with contextlib.suppress(Exception):
+            await client.set_leverage(FOLLOWER, SYMBOL, original_follower_leverage)
     if original_master_hedge:
         with contextlib.suppress(Exception):
             await client.set_position_mode("main", True)
@@ -450,13 +451,13 @@ async def _drive(stack: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# S1: reject -> signed account bracket fallback                                #
+# S1: effective signed value wins over a higher catalog ceiling                #
 # --------------------------------------------------------------------------- #
 
 
-async def test_rejected_prepare_falls_back_to_signed_account_maximum(lev_stack):
-    """POST above the bracket is rejected by the REAL exchange (-4028); the
-    manager falls back to the account-specific signed bracket maximum."""
+async def test_overbracket_candidate_preserves_signed_effective_leverage(lev_stack):
+    """A synthetic catalog ceiling above the account bracket must not cause
+    an upshift: the REAL positionRisk value is authoritative and stays ready."""
     stack = lev_stack
     client: AsterClient = stack["client"]
     manager: LeverageManager = stack["manager"]
@@ -464,25 +465,27 @@ async def test_rejected_prepare_falls_back_to_signed_account_maximum(lev_stack):
     await manager.refresh_catalog()
     base = manager._candidate[SYMBOL]
     assert base.leverage > 0
-    # Seed divergence: candidate claims a tier the follower cannot hold.
+    effective_before = await _follower_leverage(client, FOLLOWER)
+    assert effective_before is not None and effective_before > 0
+    # Seed a higher generation ceiling. Effective-is-truth means preparation
+    # reads the account first and never writes upward toward this value.
     manager._candidate[SYMBOL] = CandidateLeverage(
         leverage=999, observed_at=base.observed_at, revision=manager._next_revision()
     )
 
     leverage = await manager.prepare_symbol(FOLLOWER, SYMBOL)
 
-    assert leverage == base.leverage, "fallback must confirm the signed account maximum"
+    assert leverage == effective_before
     assert manager.is_ready(FOLLOWER, SYMBOL)
-    assert manager.confirmed(FOLLOWER, SYMBOL) == base.leverage
-    # Authoritative cross-check: the exchange really sits at that level.
-    assert await _follower_leverage(client, FOLLOWER) == base.leverage
+    assert manager.confirmed(FOLLOWER, SYMBOL) == effective_before
+    assert await _follower_leverage(client, FOLLOWER) == effective_before
 
     # Concurrent re-prepare deduplicates through the singleflight ticket.
     both = await asyncio.gather(
         manager.prepare_symbol(FOLLOWER, SYMBOL),
         manager.prepare_symbol(FOLLOWER, SYMBOL),
     )
-    assert list(both) == [base.leverage, base.leverage]
+    assert list(both) == [effective_before, effective_before]
 
 
 # --------------------------------------------------------------------------- #
@@ -551,6 +554,8 @@ async def test_rejected_set_blocks_dependents_but_close_executes(lev_stack):
 
     await stack["manager"].refresh_catalog()
     await stack["manager"].prepare_account(FOLLOWER, [SYMBOL])
+    valid_leverage = stack["manager"].confirmed(FOLLOWER, SYMBOL)
+    assert valid_leverage is not None and valid_leverage > 0
 
     # Real baseline exposure to prove closes stay independent of leverage.
     await _place(
@@ -640,7 +645,7 @@ async def test_rejected_set_blocks_dependents_but_close_executes(lev_stack):
     await _wait_qty(client, FOLLOWER, lambda q: q == 0, 20, "close fill visibility")
 
     # Recovery arc: valid leverage re-provision lets the entry flow.
-    await client.set_leverage(FOLLOWER, SYMBOL, RESTORE_LEVERAGE)
+    await client.set_leverage(FOLLOWER, SYMBOL, valid_leverage)
     healed_plan = ExecutionPlan(
         account_id=FOLLOWER,
         trade_id=None,
@@ -648,7 +653,7 @@ async def test_rejected_set_blocks_dependents_but_close_executes(lev_stack):
             ExecutionAction(
                 kind=ActionKind.SET_LEVERAGE,
                 symbol=SYMBOL,
-                payload={"symbol": SYMBOL, "leverage": str(RESTORE_LEVERAGE)},
+                payload={"symbol": SYMBOL, "leverage": str(valid_leverage)},
                 client_order_id=None,
                 replaces_client_order_id=None,
                 priority=0,
@@ -673,7 +678,7 @@ async def test_rejected_set_blocks_dependents_but_close_executes(lev_stack):
 
 
 # --------------------------------------------------------------------------- #
-# S4: REAL downshift -> durable unready -> re-entry gated, close flows         #
+# S4: REAL downshift remains authoritative across close/re-entry/maintenance  #
 # --------------------------------------------------------------------------- #
 
 
@@ -701,25 +706,21 @@ async def _master_close(client: AsterClient, projector: MasterProjector) -> None
             )
 
 
-async def test_real_downshift_gates_reentry_until_prepared(lev_stack):
-    """A REAL leverage change on the wallet (200 -> 20) diverges from the RAM
-    confirmation; every snapshot re-observes the disagreement so the pair
-    stays durably unready. While unready:
+async def test_real_downshift_stays_ready_without_worker_upshift(lev_stack):
+    """A REAL downshift below the catalog ceiling becomes the effective value.
 
-    * the master closing still flows (risk-reducing path is never gated);
-    * the master re-entry larger than before is skipped with
-      LEVERAGE_NOT_READY and enqueues preparation - zero orders sent;
-    * prepare_account posts the candidate again and the entry then flows.
+    The next authoritative snapshot keeps the pair ready, a close and later
+    re-entry both flow, and explicit maintenance reads without upshifting.
     """
     stack = lev_stack
     client: AsterClient = stack["client"]
     manager: LeverageManager = stack["manager"]
-    coordinator: Coordinator = stack["coordinator"]
-    fr: FollowerRuntime = stack["fr"]
     projector: MasterProjector = stack["projector"]
 
     await manager.refresh_catalog()
     await manager.prepare_account(FOLLOWER, [SYMBOL])
+    initial_leverage = manager.confirmed(FOLLOWER, SYMBOL)
+    assert initial_leverage is not None and initial_leverage > 1
     await _master_open_long(client, projector, QTY)
     await _drive(stack)
     first_qty = abs(
@@ -727,38 +728,35 @@ async def test_real_downshift_gates_reentry_until_prepared(lev_stack):
     )
     assert first_qty > 0
 
-    # REAL divergence: the exchange now sits at 20 while RAM says 200.
-    await client.set_leverage(FOLLOWER, SYMBOL, 20)
+    downshift = max(1, min(20, initial_leverage - 1))
+    await client.set_leverage(FOLLOWER, SYMBOL, downshift)
 
     # Risk-reducing flow must ignore readiness entirely.
     await _master_close(client, projector)
     await _drive(stack)
-    await _wait_qty(client, FOLLOWER, lambda q: q == 0, 30, "follower close while unready")
-    assert not manager.is_ready(FOLLOWER, SYMBOL), "observation must flag disagreement"
+    await _wait_qty(client, FOLLOWER, lambda q: q == 0, 30, "follower close after downshift")
+    assert manager.is_ready(FOLLOWER, SYMBOL)
+    assert manager.confirmed(FOLLOWER, SYMBOL) == downshift
 
-    # Master re-entry larger than before: gated, nothing reaches the exchange.
+    # A later entry sizes and executes using the lower effective leverage.
     await _master_open_long(client, projector, QTY * 2)
     await _drive(stack)
-    await asyncio.sleep(3)
-    assert await _position_qty(client, FOLLOWER) == 0, "gated entry must not execute"
-    assert await client.open_orders(FOLLOWER, symbol=SYMBOL) == []
-    assert manager.pending_count() >= 1, "gated entry must enqueue preparation"
-    # Fresh master state for the planning read (stale_master window is 5s).
-    await projector.rebuild_full(client, "main")
-    actual = await coordinator.snapshot_follower(fr)
-    _, skips = await coordinator.targets_for(FOLLOWER, projector.state, actual, stack["policy"])
-    assert any(s.reason is SkipReason.LEVERAGE_NOT_READY for s in skips), [s.reason for s in skips]
-
-    # Honest re-provision posts the candidate; the entry then flows.
-    report = await manager.prepare_account(FOLLOWER, [SYMBOL])
-    assert report.failed == {}, report.failed
-    assert await _follower_leverage(client, FOLLOWER) == RESTORE_LEVERAGE
-    assert manager.is_ready(FOLLOWER, SYMBOL)
-
-    await _drive(stack)
-    # Engine sizing is risk-based, not master-proportional: a flowed entry is
-    # simply non-zero again, at the freshly confirmed leverage.
     reentered = await _wait_qty(
-        client, FOLLOWER, lambda q: q != 0, 40, "gated entry flowing after prepare"
+        client, FOLLOWER, lambda q: q != 0, 40, "entry at downshifted leverage"
     )
     assert abs(reentered) >= D("0.001")
+    assert (
+        await _wait_cond_count(
+            client, FOLLOWER, lambda n: n == 1, 20, "protection at downshifted leverage"
+        )
+        == 1
+    )
+    assert await _follower_leverage(client, FOLLOWER) == downshift
+
+    # Explicit maintenance is read-before-write and must preserve the lower
+    # value instead of causing SET-tennis toward the catalog ceiling.
+    report = await manager.prepare_account(FOLLOWER, [SYMBOL])
+    assert report.failed == {}, report.failed
+    assert report.confirmed[SYMBOL] == downshift
+    assert await _follower_leverage(client, FOLLOWER) == downshift
+    assert manager.is_ready(FOLLOWER, SYMBOL)

@@ -2,18 +2,18 @@
 
 Reviewer verification gate:
 1. Master opens real BTCUSDT LONG + Stop on Aster Testnet.
-2. Production copy engine (Projector -> Coordinator -> Planner -> Executor -> journal)
-   reconciles and copies position + Stop to follower copyc1, writing
-   SET_LEVERAGE / MARKET_OPEN / PLACE_STOP / MARKET_CLOSE rows into the
-   durable ``execution_commands`` table.
-3. Production application/runtime (AppStage2RuntimeAdapter + UserApplicationService)
+2. Production copy engine (Projector -> Coordinator -> Planner -> Executor)
+   reconciles and copies position + Stop to follower copyc1.
+3. Production history capture imports the signed fills and projects immutable
+   ``POSITION_*`` / ``PROTECTION_*`` user events.
+4. Production application/runtime (AppStage2RuntimeAdapter + UserApplicationService)
    serves POST /miniapp/api/activity.
-4. The Mini App activity payload is verified against the durable journal:
+5. The Mini App activity payload is verified against the durable user-event feed:
    the safe DTO contains the expected category / title / status / symbol,
    trade vs system filters split the rows correctly, and no internal
    fields (command_key, account_id, client_order_id, payload, addresses)
    ever reach the wire.
-5. Master and follower are flattened cleanly for repeatable re-runs.
+6. Master and follower are flattened cleanly for repeatable re-runs.
 """
 
 from __future__ import annotations
@@ -21,30 +21,37 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sqlite3
 import time
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from copytradeaster.app import App
 from copytradeaster.application.adapters import AppStage2RuntimeAdapter
+from copytradeaster.application.models import RiskUpdateInput
 from copytradeaster.application.service import UserApplicationService
 from copytradeaster.aster.trading_api import AsterClient, AsterError, PlaceOrderRequest
 from copytradeaster.config import Settings
 from copytradeaster.domain.models import (
-    ActionKind,
-    ExecutionAction,
-    ExecutionPlan,
     PosSide,
     RiskPolicy,
     Side,
 )
+from copytradeaster.history.capture import HistoryCapture
+from copytradeaster.history.reader import HistoryReader, Window
+from copytradeaster.history.reconcile import HistoryReconciliationError
+from copytradeaster.history.sync import HistorySynchronizer
 from copytradeaster.miniapp.server import create_miniapp_app
+from copytradeaster.storage.database import Database
+from copytradeaster.storage.history import HistoryScope
 from copytradeaster.storage.repositories import (
     SettingsRepo,
     TelegramUserRepo,
 )
+from tests.testnet.support.app_live import arm_manual_master_admission
 
 pytestmark = [
     pytest.mark.testnet,
@@ -55,6 +62,18 @@ pytestmark = [
 
 SYMBOL = "BTCUSDT"
 TEST_USER_ID = 900000001
+
+
+def _copy_sqlite(src: Path, dst: Path) -> None:
+    src_conn = sqlite3.connect(src)
+    try:
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
 
 
 def _unknown_outcome(exc: Exception) -> bool:
@@ -111,18 +130,122 @@ async def _flatten(client: AsterClient, account_id: str, hedge: bool, prefix: st
             )
 
 
-@pytest.fixture
-async def live_app_stack():
-    settings = Settings(miniapp_dev_unsigned=True, miniapp_dev_user_id=TEST_USER_ID)
-    if "testnet" not in settings.rest_base_url.lower():
-        pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
+async def _reset_activity_history(db: Database, account_id: str) -> None:
+    """Clear only the copied follower history inside the per-test database."""
+    params = (account_id, "testnet")
+    await db.execute_write(
+        "DELETE FROM user_activity_events WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_episode_allocations WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_episode_resolutions WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_episode_aliases WHERE alias_ref IN "
+        "(SELECT public_ref FROM follower_episode_refs WHERE account_id=? AND environment=?) "
+        "OR target_ref IN "
+        "(SELECT public_ref FROM follower_episode_refs WHERE account_id=? AND environment=?)",
+        (*params, *params),
+    )
+    await db.execute_write(
+        "DELETE FROM follower_episodes WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_episode_refs WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM history_projection_boundaries WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM history_capture_state WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM history_scope_state WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM history_sync_state WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM history_order_checks WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_order_observations WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_cash_flows WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write(
+        "DELETE FROM follower_fills WHERE account_id=? AND environment=?", params
+    )
+    await db.execute_write("DELETE FROM order_links WHERE account_id=?", (account_id,))
+    await db.execute_write("DELETE FROM execution_commands WHERE account_id=?", (account_id,))
 
-    app = App(settings)
-    await app.db.connect()
-    await app.db.migrate()
+
+async def _capture_until(
+    app: App,
+    client: AsterClient,
+    *,
+    start_ms: int,
+    wanted: set[str],
+    timeout_s: float = 30.0,
+) -> None:
+    """Import signed follower fills and wait until projection proves wanted events."""
+    scope = HistoryScope("copyc1", "testnet")
+    capture = HistoryCapture(
+        app.history,
+        app.episodes,
+        events=app.user_events,
+        commands=app.commands,
+    )
+    synchronizer = HistorySynchronizer(HistoryReader(client), app.history)
+    deadline = time.monotonic() + timeout_s
+    last_kinds: set[str] = set()
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            await capture.capture_and_publish(
+                scope,
+                SYMBOL,
+                Window(start_ms, int(time.time() * 1000)),
+                snapshots=client,
+                synchronizer=synchronizer,
+                notify_eligible=True,
+            )
+            last_error = None
+        except HistoryReconciliationError as exc:
+            last_error = exc
+        rows = await app.user_events.list_owned(scope, limit=100)
+        last_kinds = {row.event.kind for row in rows}
+        if wanted <= last_kinds:
+            return
+        await asyncio.sleep(2)
+    raise AssertionError(
+        f"history capture did not publish {sorted(wanted)}; "
+        f"seen={sorted(last_kinds)} last_error={last_error}"
+    )
+
+
+@pytest.fixture
+async def live_app_stack(tmp_path):
+    base_settings = Settings(miniapp_dev_unsigned=True, miniapp_dev_user_id=TEST_USER_ID)
+    if "testnet" not in base_settings.rest_base_url.lower():
+        pytest.fail(f"signed tests are restricted to testnet, got {base_settings.rest_base_url!r}")
+    if not base_settings.db_path.exists():
+        pytest.skip(f"source database required for isolated copy: {base_settings.db_path}")
+    db_copy = tmp_path / "live-activity.sqlite3"
+    _copy_sqlite(base_settings.db_path, db_copy)
+    settings = base_settings.model_copy(
+        update={"db_path": db_copy, "log_path": tmp_path / "live-activity.log"}
+    )
+    db = Database(settings.db_path)
+    await db.connect()
+    await db.migrate()
+    app = App(settings, db=db)
     await app.credentials.load()
     if "main" not in app.credentials.account_ids() or "copyc1" not in app.credentials.account_ids():
-        await app.db.close()
+        await db.close()
         pytest.skip("need main + copyc1 imported in wallet.txt")
 
     await app.register_follower("copyc1")
@@ -165,45 +288,37 @@ async def live_app_stack():
     hedge_follower = await app.master_client.get_position_mode("copyc1")
     await _flatten(app.master_client, "main", hedge_master, "pre-m")
     await _flatten(app.master_client, "copyc1", hedge_follower, "pre-f")
-
-    # Clean the journal for the follower so the gate is reproducible.  The
-    # master account keeps its own journal untouched (only the follower is
-    # served by the activity endpoint).
-    await app.db.execute_write("DELETE FROM execution_commands WHERE account_id=?", ("copyc1",))
-
-    # Baseline exchange leverage: Phase 2b drifts it via a journaled
-    # SET_LEVERAGE; restore it in teardown for cross-test repeatability.
-    baseline_leverage = app.leverage.confirmed("copyc1", SYMBOL)
+    await _reset_activity_history(app.db, "copyc1")
+    await arm_manual_master_admission(app, app.master_client)
 
     yield {
         "app": app,
+        "application": app_service,
         "client": app.master_client,
         "http_client": test_client,
         "hedge_master": hedge_master,
         "hedge_follower": hedge_follower,
     }
 
-    if baseline_leverage is not None:
-        with contextlib.suppress(Exception):
-            await app.master_client.set_leverage("copyc1", SYMBOL, int(baseline_leverage))
     with contextlib.suppress(Exception):
         await _flatten(app.master_client, "main", hedge_master, "post-m")
     with contextlib.suppress(Exception):
         await _flatten(app.master_client, "copyc1", hedge_follower, "post-f")
     await test_client.close()
     await app.http.aclose()
-    await app.db.close()
+    await db.close()
 
 
 @pytest.mark.asyncio
 async def test_live_production_activity_acceptance_gate(live_app_stack):
     app: App = live_app_stack["app"]
+    application: UserApplicationService = live_app_stack["application"]
     client: AsterClient = live_app_stack["client"]
     http_client: TestClient = live_app_stack["http_client"]
     hedge_master = live_app_stack["hedge_master"]
     auth_headers = {"X-Dev-User-Id": str(TEST_USER_ID), "Content-Type": "application/json"}
 
-    # Phase 0: Empty activity journal (after flatten)
+    # Phase 0: Empty durable user-event feed (after isolated reset).
     resp0 = await http_client.post(
         "/miniapp/api/activity",
         headers=auth_headers,
@@ -239,6 +354,7 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     order_qty = D("0.002")
 
     ts = int(time.time() * 1000)
+    capture_start = ts - 5_000
 
     await _place(
         client,
@@ -269,44 +385,20 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     # Phase 2: Feed master state to Projector and reconcile through Coordinator
     await app.projector.rebuild_full(client, "main")
     await app.reconcile_follower("copyc1", reason="test_live_activity_open")
-
-    # Phase 2b: create a real system (SET_LEVERAGE) journal event.
-    #
-    # The coordinator entry path can never journal SET_LEVERAGE by itself:
-    # a drifted exchange leverage is folded into the control plane by
-    # `observe()` on the very snapshot that reveals it, which fail-closes the
-    # entry with LEVERAGE_NOT_READY and re-provisions outside the journal.
-    # The production path for journaled leverage transitions is the Executor
-    # (same as tests/testnet/test_leverage_control_plane_live.py): submit a
-    # real SET_LEVERAGE plan, which signs a live POST /leverage against the
-    # testnet and persists the command into the same execution_commands
-    # journal the activity endpoint reads.
-    #
-    # It runs AFTER the open cycle on purpose: the resulting exchange-side
-    # leverage drift must not block the trade events (and reductions/protection
-    # never consult the leverage control plane anyway).
-    prepared_leverage = app.leverage.confirmed("copyc1", SYMBOL)
-    assert prepared_leverage is not None, "control plane must confirm leverage first"
-    current_leverage = int(prepared_leverage)
-    target_leverage = current_leverage - 1 if current_leverage > 1 else current_leverage + 1
-    leverage_plan = ExecutionPlan(
-        account_id="copyc1",
-        trade_id=None,
-        actions=[
-            ExecutionAction(
-                kind=ActionKind.SET_LEVERAGE,
-                symbol=SYMBOL,
-                payload={"symbol": SYMBOL, "leverage": str(target_leverage)},
-                client_order_id=None,
-                replaces_client_order_id=None,
-                priority=0,
-                action_id="leverage:BTCUSDT",
-            ),
-        ],
+    await _capture_until(
+        app,
+        client,
+        start_ms=capture_start,
+        wanted={"POSITION_OPENED", "PROTECTION_SET"},
     )
-    leverage_results = await app.executor.submit(leverage_plan)
-    assert leverage_results, "executor must return a result per action"
-    assert leverage_results[0].status == "CONFIRMED", leverage_results
+
+    # Phase 2b: use the current public application path for a system event.
+    # Activity is intentionally no longer a view over execution_commands;
+    # RISK_CHANGED is an immutable, user-facing event in the same feed.
+    updated_risk = await application.update_risk(
+        TEST_USER_ID, RiskUpdateInput(risk_percent=D("0.02"))
+    )
+    assert updated_risk.risk_percent == D("0.02")
 
     # Phase 3: Query Mini App activity endpoint through production Application
     resp1 = await http_client.post(
@@ -317,14 +409,14 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     assert resp1.status == 200
     data1 = await resp1.json()
     items = data1["items"]
-    assert items, "expected at least one journal row after the open + stop cycle"
+    assert items, "expected user events after the open + stop cycle"
 
     titles = [item["title"] for item in items]
-    # Trade timeline: at minimum the open (BTCUSDT) and the protective stop.
-    # System timeline: the leverage row produced by Phase 2b.
-    assert any(t == "Открыта позиция BTCUSDT" for t in titles), titles
-    assert any(t == "Поставлен защитный Stop · BTCUSDT" for t in titles), titles
-    assert any(t.startswith("Плечо") for t in titles), titles
+    # Trade timeline: the proven fill and protective order. System timeline:
+    # the public risk update from Phase 2b.
+    assert any(t.startswith("Открыта BTCUSDT") for t in titles), titles
+    assert any(t.startswith("Стоп BTCUSDT установлен") for t in titles), titles
+    assert any(t.startswith("Риск на сделку") for t in titles), titles
 
     # Phase 4: Trade/system filters split cleanly.
     # Both branches are asserted on a NON-EMPTY result: an empty page proves
@@ -341,9 +433,9 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     assert trade_data["items"], "trade filter must not be empty after the open + stop cycle"
     assert all(item["category"] == "trade" for item in trade_data["items"])
     assert all(item["symbol"] == SYMBOL for item in trade_data["items"])
-    assert any(t == "Открыта позиция BTCUSDT" for t in (i["title"] for i in trade_data["items"]))
+    assert any(t.startswith("Открыта BTCUSDT") for t in (i["title"] for i in trade_data["items"]))
     assert any(
-        t == "Поставлен защитный Stop · BTCUSDT" for t in (i["title"] for i in trade_data["items"])
+        t.startswith("Стоп BTCUSDT установлен") for t in (i["title"] for i in trade_data["items"])
     )
 
     system_resp = await http_client.post(
@@ -354,29 +446,23 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     assert system_resp.status == 200
     system_data = await system_resp.json()
     assert system_data["filter"] == "system"
-    # Positive branch: the real SET_LEVERAGE row must survive the filter even
-    # though trade rows are newer and fill the first general page.
-    assert system_data["items"], "system filter must return the real SET_LEVERAGE row"
+    assert system_data["items"], "system filter must return the real RISK_CHANGED row"
     assert all(item["category"] == "system" for item in system_data["items"])
     system_titles = [item["title"] for item in system_data["items"]]
-    assert any(t.startswith("Плечо") for t in system_titles), system_titles
-    assert all(item["symbol"] == SYMBOL for item in system_data["items"])
+    assert any(t.startswith("Риск на сделку") for t in system_titles), system_titles
+    assert all(item["symbol"] is None for item in system_data["items"])
     assert all(
         item["status"] in {"completed", "pending", "failed"} for item in system_data["items"]
     )
 
-    # trade + system must not overlap, and both must come from the same journal.
+    # trade + system must not overlap, and both come from the same event feed.
     trade_titles = [item["title"] for item in trade_data["items"]]
     assert not (set(trade_titles) & set(system_titles)), "categories must partition the journal"
 
     # Phase 5: Each item maps to a safe DTO surface, no internal codes leak.
     for item in items:
         assert item["status"] in {"completed", "pending", "failed"}
-        # remediation is only present for failed/UNKNOWN events.
-        if item["status"] == "failed":
-            assert item["remediation"]
-        else:
-            assert item["remediation"] is None
+        assert item["remediation"] is None
         for forbidden in (
             "command_key",
             "client_order_id",
@@ -388,12 +474,13 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
             "MARKET_OPEN",
             "PLACE_STOP",
             "MARKET_CLOSE",
-            "SET_LEVERAGE",
+            "RISK_CHANGED",
         ):
             assert forbidden not in (item["title"] or "")
             assert forbidden not in (item.get("remediation") or "")
 
-    # Phase 6: Master does a partial close → MARKET_CLOSE row is added.
+    # Phase 6: master closes fully; the engine converges the follower flat and
+    # history publishes a POSITION_CLOSED event.
     await _place(
         client,
         "main",
@@ -401,14 +488,20 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
             symbol=SYMBOL,
             side=Side.SELL,
             type="MARKET",
-            quantity=D("0.001"),
+            quantity=order_qty,
             position_side=PosSide.LONG if hedge_master else PosSide.BOTH,
             reduce_only=not hedge_master,
-            new_client_order_id=f"live-act-m-partial-{ts}"[:36],
+            new_client_order_id=f"live-act-m-close-{ts}"[:36],
         ),
     )
     await app.projector.rebuild_full(client, "main")
-    await app.reconcile_follower("copyc1", reason="test_live_activity_partial")
+    await app.reconcile_follower("copyc1", reason="test_live_activity_close")
+    await _capture_until(
+        app,
+        client,
+        start_ms=capture_start,
+        wanted={"POSITION_CLOSED"},
+    )
 
     resp2 = await http_client.post(
         "/miniapp/api/activity",
@@ -417,7 +510,7 @@ async def test_live_production_activity_acceptance_gate(live_app_stack):
     )
     data2 = await resp2.json()
     trade_titles = [item["title"] for item in data2["items"]]
-    assert any(t == "Закрыта позиция BTCUSDT" for t in trade_titles), trade_titles
+    assert any(t.startswith("Закрыта BTCUSDT") for t in trade_titles), trade_titles
 
     # Phase 7: Cleanup flat.  After flatten the activity DTO stays consistent:
     # the same safe shape, same no-leak guarantees.

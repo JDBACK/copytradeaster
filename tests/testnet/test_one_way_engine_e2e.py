@@ -73,18 +73,35 @@ def _unknown_outcome(exc: Exception) -> bool:
 
 
 @pytest.fixture
-async def stack():
+async def stack(tmp_path):
     settings = Settings()
     if "testnet" not in settings.rest_base_url.lower():
         pytest.fail(f"signed tests are restricted to testnet, got {settings.rest_base_url!r}")
-    db = Database(settings.db_path)
-    await db.connect()
-    await db.migrate()
-    creds = SqliteCredentials(db, settings.encryption_key_bytes())
+    # The provisioned DB supplies encrypted credentials and durable nonces
+    # only. Journal, episodes, policies and sync-basis state live in a fresh
+    # per-test DB so prior signed campaigns cannot influence this harness.
+    db_main = Database(settings.db_path)
+    await db_main.connect()
+    await db_main.migrate()
+    creds = SqliteCredentials(db_main, settings.encryption_key_bytes())
     await creds.load()
     if "main" not in creds.account_ids() or "copyc1" not in creds.account_ids():
-        await db.close()
+        await db_main.close()
         pytest.skip("need main + copyc1 imported - run import-wallet first")
+
+    db = Database(tmp_path / "one-way-engine.sqlite3")
+    await db.connect()
+    await db.migrate()
+    for account in await db_main.fetchall("SELECT id, role, label, user_address FROM accounts"):
+        await db.execute_write(
+            "INSERT OR IGNORE INTO accounts(id, role, label, user_address) VALUES (?,?,?,?)",
+            (
+                account["id"],
+                account["role"],
+                f"{account['label']} (isolated)",
+                f"{account['user_address']}-isolated",
+            ),
+        )
 
     import httpx
 
@@ -94,7 +111,7 @@ async def stack():
     limiter = RateLimits(
         settings.weight_limit_per_min, settings.orders_limit_per_min, settings.orders_limit_per_10s
     )
-    client = AsterClient(http, settings.rest_base_url, limiter, creds, creds, NonceStore(db))
+    client = AsterClient(http, settings.rest_base_url, limiter, creds, creds, NonceStore(db_main))
 
     filters_cache: dict[str, SymbolFilters] = {}
     followers = [FollowerRuntime(account_id="copyc1", client=client, identity=None)]
@@ -147,11 +164,10 @@ async def stack():
     # entries explicitly instead of depending on test execution order.
     await settings_repo.set_flag("allow_new_entries", "true")
     await settings_repo.set_flag("emergency_active", "false")
-    if await settings_repo.get_policy("copyc1") is None:
-        await settings_repo.upsert_policy(
-            RiskPolicy(risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("1")),
-            "copyc1",
-        )
+    await settings_repo.upsert_policy(
+        RiskPolicy(risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("1")),
+        "copyc1",
+    )
 
     yield {
         "settings": settings,
@@ -165,6 +181,7 @@ async def stack():
     with contextlib.suppress(Exception):
         await http.aclose()
     await db.close()
+    await db_main.close()
 
 
 async def _place(client: AsterClient, account_id: str, req: PlaceOrderRequest):
@@ -349,13 +366,43 @@ async def test_one_way_full_engine_signed_cycle(stack):
         follower_usdt = next(
             (b.available_balance for b in follower_budget_probe if b.asset == "USDT"), D("10")
         )
+        master_budget_probe = await client.balance("main")
+        master_usdt = next(
+            (b.available_balance for b in master_budget_probe if b.asset == "USDT"), D(0)
+        )
+        master_rows = await client.position_risk("main", SYMBOL)
+        master_row = next((p for p in master_rows if p.symbol == SYMBOL), None)
+        master_mark = (
+            master_row.mark_price
+            if master_row is not None and master_row.mark_price > 0
+            else D("65000")
+        )
+        master_leverage = (
+            int(master_row.leverage)
+            if master_row is not None and int(master_row.leverage) > 0
+            else 1
+        )
         probe_policy = await SettingsRepo(stack["db"]).get_policy(fr_id)
         assert probe_policy is not None
         # mirror entry_quantity(): qty = budget*risk% / (distance*(1+fee))
         est_follower_qty = _snap(
             follower_usdt * probe_policy.risk_percent / D("500"), step
         )  # ~stop distance used below
-        open_qty = max(_snap(est_follower_qty * D("20"), step), D("0.005"))
+        desired_open_qty = max(_snap(est_follower_qty * D("20"), step), step * 5)
+        # Keep half of the signed available-margin envelope unused. The old
+        # harness sized the master solely from follower equity and could ask
+        # this separate wallet for an unaffordable 0.180 BTC order.
+        max_affordable = _snap(
+            master_usdt * D(master_leverage) * D("0.5") / master_mark,
+            step,
+        )
+        minimum_shape = max(est_follower_qty + step, step * 5)
+        if max_affordable < minimum_shape:
+            pytest.skip(
+                "master Testnet balance cannot safely shape the mandatory dust scenario "
+                f"(safe_qty={max_affordable}, required={minimum_shape})"
+            )
+        open_qty = min(desired_open_qty, max_affordable)
         await _place(
             client,
             "main",
@@ -737,6 +784,14 @@ async def test_hedge_fixed_protection_resizes_long_and_short(stack):
     fr_id = "copyc1"
     trades = CopyTradeRepo(stack["db"])
     test_trade_ids: list[int] = []
+    # This test needs at least two follower lot steps so the middle state is
+    # a genuine partial reduction rather than a legitimate dust-flat. A
+    # higher isolated test policy plus a still-distant stop shapes that state
+    # without touching the operator's production policy DB.
+    await SettingsRepo(stack["db"]).upsert_policy(
+        RiskPolicy(risk_percent=D("0.05"), max_leverage=20, max_entry_deviation_pct=D("1")),
+        fr_id,
+    )
     original_hedge = await client.get_position_mode(fr_id)
     await _flatten(client, fr_id, original_hedge, f"hedge-pre-{int(time.time())}")
     if not original_hedge:
@@ -776,9 +831,10 @@ async def test_hedge_fixed_protection_resizes_long_and_short(stack):
             mode_row = next(row for row in rows if row.position_side == pos_side)
             mark = mode_row.mark_price
             # This test verifies fixed-quantity replacement, not triggering.
-            # Keep the order far enough from a volatile public testnet market.
+            # The isolated 5% policy and 1000-point distance ensure that the
+            # first risk-sized leg has room for a non-zero half reduction.
             stop_level = _snap(
-                mark - D("3000") if sign > 0 else mark + D("3000"), filters.tick_size
+                mark - D("1000") if sign > 0 else mark + D("1000"), filters.tick_size
             )
 
             def state(

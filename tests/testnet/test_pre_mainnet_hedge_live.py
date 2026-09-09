@@ -11,8 +11,8 @@ Row coverage (HEDGE dual-leg matrix):
 - G0 ``test_hedge_precheck_flat``: exchange starts flat / no open orders.
 - G1 ``test_hedge_long_and_short_together``: master LONG + SHORT legs open
   together; the follower mirrors BOTH legs simultaneously (no netting).
-- G2 ``test_hedge_different_fills``: asymmetric leg sizes; the follower keeps
-  both legs with the same size ordering (no netting, no leg drop).
+- G2 ``test_hedge_different_fills``: asymmetric stop-risk geometry produces
+  asymmetric follower sizes; both legs stay independent (no netting/drop).
 - G3 ``test_hedge_stop_per_leg_replace``: each leg carries its own resting
   stop on the correct side; replacing the master SHORT stop converges the
   follower SHORT stop while the LONG stop is untouched.
@@ -269,27 +269,43 @@ async def _cancel_master_leg_stops(client, leg: PosSide) -> None:
 
 
 async def _flatten_account(client, account_id: str) -> None:
-    for order in await client.open_orders(account_id, SYMBOL):
-        with contextlib.suppress(Exception):
-            await client.cancel_order(
-                account_id, SYMBOL, orig_client_order_id=order.client_order_id
-            )
-    for position in await client.position_risk(account_id, SYMBOL):
-        if position.symbol == SYMBOL and position.position_amt != 0:
-            with contextlib.suppress(Exception):
-                await client.place_order(
-                    account_id,
-                    PlaceOrderRequest(
-                        symbol=SYMBOL,
-                        side=Side.SELL if position.position_amt > 0 else Side.BUY,
-                        type="MARKET",
-                        quantity=abs(position.position_amt),
-                        reduce_only=position.position_side.value == "BOTH",
-                        position_side=position.position_side,
-                        new_client_order_id=f"pm-flat-{account_id}-{time.time_ns()}"[:36],
-                        new_order_resp_type="RESULT",
-                    ),
-                )
+    for attempt in range(6):
+        try:
+            for order in await client.open_orders(account_id, SYMBOL):
+                with contextlib.suppress(Exception):
+                    await client.cancel_order(
+                        account_id, SYMBOL, orig_client_order_id=order.client_order_id
+                    )
+            positions = await client.position_risk(account_id, SYMBOL)
+            for position in positions:
+                if position.symbol == SYMBOL and position.position_amt != 0:
+                    with contextlib.suppress(Exception):
+                        await client.place_order(
+                            account_id,
+                            PlaceOrderRequest(
+                                symbol=SYMBOL,
+                                side=Side.SELL if position.position_amt > 0 else Side.BUY,
+                                type="MARKET",
+                                quantity=abs(position.position_amt),
+                                reduce_only=position.position_side.value == "BOTH",
+                                position_side=position.position_side,
+                                new_client_order_id=(
+                                    f"pm-flat-{account_id}-{attempt}-{time.time_ns()}"[:36]
+                                ),
+                                new_order_resp_type="RESULT",
+                            ),
+                        )
+            await asyncio.sleep(0.8)
+            remaining = await client.position_risk(account_id, SYMBOL)
+            orders = await client.open_orders(account_id, SYMBOL)
+            is_flat = not any(p.symbol == SYMBOL and p.position_amt != 0 for p in remaining)
+            if is_flat and not orders:
+                return
+        except Exception:
+            if attempt == 5:
+                raise
+        await asyncio.sleep(0.5 * (attempt + 1))
+    raise AssertionError(f"{account_id} failed to flatten on {SYMBOL}")
 
 
 async def _assert_flat(client, account_ids: list[str]) -> None:
@@ -344,6 +360,8 @@ async def _flatten_audit_stop(
     finally:
         with contextlib.suppress(Exception):
             await audit_http.aclose()
+        with contextlib.suppress(Exception):
+            await app.db.close()
 
 
 async def _start_app(settings: Settings) -> App:
@@ -354,7 +372,7 @@ async def _start_app(settings: Settings) -> App:
     return app
 
 
-async def _stable_leg_qtys(audit, fid: str, what: str) -> tuple:
+async def _stable_leg_qtys(app: App, audit, fid: str, what: str) -> tuple:
     """Both legs nonzero AND unchanging across polls; returns settled qtys.
 
     Capturing a baseline right after legs first appear races the engine's
@@ -362,6 +380,13 @@ async def _stable_leg_qtys(audit, fid: str, what: str) -> tuple:
     the open). Stability across polls absorbs one-shot convergence, so the
     baseline is a value the engine itself already holds still.
     """
+    # Finish the post-fill risk cap before capturing a baseline. The second
+    # leg can otherwise be trimmed several seconds after it first appears,
+    # making an unrelated leverage/reduction event look as if it changed both
+    # legs at once.
+    await app.projector.rebuild_full(app.master_client, "main")
+    await app.reconcile_follower(fid, reason="pm-hedge-baseline")
+    await app.executor.wait_until_idle(fid)
     holder: dict = {}
 
     async def settled():
@@ -443,8 +468,24 @@ async def test_hedge_different_fills(tmp_path) -> None:
     audit = _audit_client(app, audit_http)
     account_ids = ["main", fid]
     try:
-        await _open_master_leg(app.master_client, PosSide.LONG, QTY, "pm-g2")
-        await _open_master_leg(app.master_client, PosSide.SHORT, QTY_BIG, "pm-g2")
+        # Follower entry sizing is risk/stop based, not proportional to the
+        # master's absolute fill. Give the SHORT leg a materially tighter
+        # protective distance so the expected asymmetry is deterministic and
+        # the test still proves that HEDGE legs never net into one another.
+        await _open_master_leg(
+            app.master_client,
+            PosSide.LONG,
+            QTY,
+            "pm-g2",
+            stop_distance=D("1600"),
+        )
+        await _open_master_leg(
+            app.master_client,
+            PosSide.SHORT,
+            QTY,
+            "pm-g2",
+            stop_distance=D("600"),
+        )
 
         async def asymmetric():
             long_qty = await _leg_qty(audit, fid, PosSide.LONG)
@@ -550,7 +591,7 @@ async def test_hedge_leverage_update_keeps_legs(tmp_path) -> None:
         await _open_master_leg(app.master_client, PosSide.SHORT, QTY, "pm-g4")
 
         long_before, short_before = await _stable_leg_qtys(
-            audit, fid, "follower LONG+SHORT legs settled"
+            app, audit, fid, "follower LONG+SHORT legs settled"
         )
         # The engine owns follower leverage (LeverageManager control plane);
         # a master leverage change must not disturb either leg (no
@@ -611,7 +652,7 @@ async def test_hedge_partial_close_one_leg(tmp_path) -> None:
         await _open_master_leg(app.master_client, PosSide.SHORT, QTY_BIG, "pm-g5")
 
         long_before, short_before = await _stable_leg_qtys(
-            audit, fid, "follower LONG+SHORT legs settled"
+            app, audit, fid, "follower LONG+SHORT legs settled"
         )
         master_long = await _leg_qty(audit, "main", PosSide.LONG)
         await _reduce_master_leg(app.master_client, PosSide.LONG, abs(master_long) / 2, "pm-g5")
@@ -643,7 +684,7 @@ async def test_hedge_close_one_leg_keeps_other(tmp_path) -> None:
         await _open_master_leg(app.master_client, PosSide.SHORT, QTY, "pm-g6")
 
         long_before, short_before = await _stable_leg_qtys(
-            audit, fid, "follower LONG+SHORT legs settled"
+            app, audit, fid, "follower LONG+SHORT legs settled"
         )
 
         master_long = await _leg_qty(audit, "main", PosSide.LONG)

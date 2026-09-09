@@ -7,6 +7,12 @@ attestation, System Status и 4-табовый follower Mini App (21 POST
 `/miniapp/api/*`). Видение трёх этапов — раздел 4 (исторический план,
 факт — чеклисты ниже). Полный фактологический бэкграунд — в
 [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
+
+Актуальная requalification integrated tree (2026-09-09): live leverage **4/4**,
+ONE_WAY **2/2**, Mini App **4/4**, HEDGE **7/7**, hybrid load 0.3 **1/1**;
+offline **1525 passed**, frontend **349 passed**, shadow scale **2 passed**.
+Проверенный merge готов к fast-forward/push в Git `main`; mainnet guard остаётся
+fail-closed.
 ## 1. Стек
 
 ```text
