@@ -56,7 +56,7 @@
 
 | Файл | Кампания |
 |---|---|
-| `MINIAPP_S3_PROGRESS_2026-09.md` | S3.0–S3.4 реализованы; offline gate и N6 live закрыты; browser-проход частично (§19, 2026-09-09); G3 OPEN |
+| `MINIAPP_S3_PROGRESS_2026-09.md` | S3.0–S3.4 реализованы; browser §§19–20 и viewport §23 проверены, Telegram Desktop §§21–22 проверен; G3 OPEN по оставшимся performance/device/history блокам |
 | `MINIAPP_S3_TESTING_HANDOFF_2026-09.md` | Передача итогового S3 на offline/browser/device/N6 live проверку: контракты, rollout, сценарии и ограничения |
 | `REFACTOR_STAGE1_REPORT.md` | Базовый рефакторинг Stage 1 + инвентаризация первого ревью (2026-08-22) |
 | `FINAL_STAGE1_FOLLOWUP_REPORT_2026-08.md` | Follow-up по второму ревью + первый hybrid gate 30×100 (2026-08-22/23) |

@@ -587,3 +587,29 @@ mobile WebKit/haptics; эти границы остаются явно отде�
 Сводная карта фактических S2/S3 UI-проверок Mini App — Telegram WebView,
 Chromium/CDP, frontend-тесты и screenshots — находится в
 [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+
+### 23. Browser viewport recheck — 320/360/430 (2026-09-09)
+
+После основного S3 browser pass выполнен отдельный Computer Use-проход на
+production bundle preview-стенда `:8085` с dev-session `900000001`, высота
+viewport — `844px`. Последовательно проверены ширины `320px`, `360px` и
+`430px`.
+
+На каждой ширине фактически открыты и проверены Home, Positions (Открытые и
+Закрытые), Activity, Settings и все шесть nested screens: Risk, Notifications,
+System Status, Aster connection, Security и Help. AX/DOM-проверка дала на всех
+экранах `documentWidth = bodyWidth = viewportWidth` и `horizontalOverflow=false`:
+
+| Viewport | documentWidth | bodyWidth | page-level overflow |
+|---:|---:|---:|---|
+| `320×844` | `320` | `320` | отсутствует |
+| `360×844` | `360` | `360` | отсутствует |
+| `430×844` | `430` | `430` | отсутствует |
+
+Home визуально проверен на всех трёх ширинах, Risk — на `320px`. Элементы,
+выходящие за границы в Risk, относятся к его штатной внутренней горизонтальной
+шкале выбора; горизонтального overflow страницы нет. В процессе не менялись
+risk/settings/notifications и торговые данные. После проверки viewport override
+сброшен, browser возвращён на Home; Telegram Desktop состояние не затронуто.
+
+**Результат: viewport-пункт G3 закрыт — PASS.**

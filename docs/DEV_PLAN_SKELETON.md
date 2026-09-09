@@ -427,9 +427,9 @@ snap-stop A/B) **отложена на потом — устройства не�
 - [x] G2: Скорость принята на нынешних экранах 2026-09-07; разрешён старт S3.
 - [ ] S3: IMPLEMENTED / PARTIAL ACCEPTANCE — S3.0–S3.4 реализованы; Chromium
   и Telegram Desktop WebView фактически прошли перечисленные UI-сценарии
-  (S3 §§19–22), а frontend gate зелёный. G3 остаётся OPEN для widths
-  `320/360/430`, свежего §19.7 trace, mobile device evidence и специальных
-  split/alias/partial history-сценариев. Полная карта: [Mini App UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md);
+  (S3 §§19–23), а frontend gate зелёный. Viewport `320/360/430` закрыт
+  отдельным browser pass; G3 остаётся OPEN для свежего §19.7 trace, mobile
+  device evidence и специальных split/alias/partial history-сценариев. Полная карта: [Mini App UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md);
   план проверки: [S3 handoff](reports/MINIAPP_S3_TESTING_HANDOFF_2026-09.md).
 - [ ] G3: Итоговая сквозная, визуальная и performance-приёмка; кампания завершена.
 

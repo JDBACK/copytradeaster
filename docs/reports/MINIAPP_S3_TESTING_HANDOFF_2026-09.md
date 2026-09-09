@@ -154,3 +154,12 @@ split/alias/partial-specific history. **G3 OPEN.**
 Полная карта фактически выполненных Mini App UI-проверок S2/S3 — Telegram
 Desktop WebView, Chromium/CDP, frontend-тесты и screenshots — находится в
 [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+
+### Актуализация после handoff: viewport-пункт закрыт (2026-09-09)
+
+Computer Use-проход на `320×844`, `360×844` и `430×844` завершён. На каждой
+ширине открыты Home, Positions (Открытые/Закрытые), Activity, Settings и все
+шесть nested screens; page-level horizontal overflow отсутствует. Фактическая
+таблица и границы результата записаны в S3 §23 и в [UI acceptance index](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+В G3 остаются свежий §19.7 trace, mobile iOS/Android evidence и специальные
+split/alias/partial-history/error-сценарии.
