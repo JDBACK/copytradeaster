@@ -163,3 +163,20 @@ Computer Use-проход на `320×844`, `360×844` и `430×844` заверш
 таблица и границы результата записаны в S3 §23 и в [UI acceptance index](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
 В G3 остаются свежий §19.7 trace, mobile iOS/Android evidence и специальные
 split/alias/partial-history/error-сценарии.
+
+### Финальная актуализация приёмки (2026-09-09)
+
+После этой handoff-записи выполнены и зафиксированы S3 §§24–26 в
+`MINIAPP_S3_PROGRESS_2026-09.md`: свежий §19.7 trace (**PASS**, cold `4` read
+POST, `160` warm root samples p95 `5,3 ms`, delayed `300 ms` p95 `4,4 ms`,
+`200` nested samples, bounded DOM/listeners, long tasks/errors `0`), полная
+blocked/throttled matrix из `11` кейсов, alias/split/partial history (**PASS**)
+и повторный чистый Telegram bundle.
+
+Через Computer Use дополнительно пройден реальный iPhone Mirroring WebView:
+closed list/detail, события/fills, вертикальные свайпы, раскрытие исполнения,
+native Back, Activity-фильтры/owned link, Settings и Risk tap/keyboard. iPhone
+slice — **PASS**. Android WebView среди подключённых Computer Use surfaces нет,
+поэтому cross-device G3 остаётся **OPEN только для Android evidence**. Финальный
+frontend/backend/ruff/doc-links gate зелёный; итоговая карта —
+[MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).

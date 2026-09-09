@@ -613,3 +613,122 @@ risk/settings/notifications и торговые данные. После про�
 сброшен, browser возвращён на Home; Telegram Desktop состояние не затронуто.
 
 **Результат: viewport-пункт G3 закрыт — PASS.**
+
+### 24. Свежий S3 §19.7 performance trace — PASS (2026-09-09)
+
+После финальных S3 transport/history changes выполнен новый trace на
+production bundle `HEAD=49cbde7`. Стенд —
+`preview_miniapp_engine.py --account tg-8264892202 --confirm-engine-preview
+--port 8085`, testnet и disposable SQLite backup; production DB не менялась.
+Для измерений использован отдельный одноразовый профиль Chrome `152.0.7977.83`
+с viewport `390×844`, DPR 3, Playwright/CDP-инструментацией. User Chrome и
+Telegram UI этим измерителем не управлялись; Computer Use-проходы записаны в
+§§23 и 26.
+
+**Cold root.** Получены ровно **4 успешных read POST**: `session` (200),
+`dashboard(refresh=true)` (200, около 1,5 с из-за testnet snapshot),
+`positions(refresh=false)` (200) и `activity/feed` (200). В ответе Home:
+testnet, `0x3c45…F975`, active, открытых позиций `0`, риск `2%`, доступно
+около `1 474,5 USDT`.
+
+**Warm navigation.** Выполнено `40` переключений каждого root tab — всего
+`160` samples, и ни один переход не добавил API read (`apiDelta=0`):
+
+| Экран | Samples | p95 | Max |
+|---|---:|---:|---:|
+| Главная | 40 | 4,2 ms | 7,6 ms |
+| Позиции | 40 | 4,4 ms | 10,9 ms |
+| Активность | 40 | 5,4 ms | 11,3 ms |
+| Настройки | 40 | 5,6 ms | 7,9 ms |
+| Все root tabs | 160 | 5,3 ms | 11,3 ms |
+
+Nested pass — `50` открытий Risk и по `30` открытий Notifications, System
+Status, Aster, Security и Help: всего **200 samples**, aggregate p95 `5,3 ms`,
+max `7,7 ms`; худший отдельный p95 — Aster `6,6 ms`. Delayed API с задержкой
+`300 ms` на каждый `/miniapp/api/**` дал ещё `160` warm root samples,
+`apiDelta=0`, p95 `4,4 ms`, max `15,9 ms`. На delayed pass не было long task
+`>50 ms`, ошибок страницы или unhandled rejection.
+
+**Длинная история и lifecycle.** В Activity подтверждены реальные `493`
+события; четыре нажатия `Показать ещё` дали пять feed pages, итоговый body —
+`12 554` символа. Scroll trace занял около `253,2 ms`, long tasks/errors —
+`0/0/0`. В deep link на реальный ref
+`740d3c5c52d9423a9a38b8afbfc0e774` выполнен ровно один `/trade` read и один
+`/trade/events` read для detail; shell prefetch остался отдельными reads.
+Risk drag trace не делал mutation и также не дал long task/page error.
+
+В `50` Risk cycles и по `30` cycles остальных пяти nested screens одновременно
+сняты bounds: перед nested pass CDP показывал `1` document, `512` nodes и
+`210` JS listeners; после — `1`, `512` и `214`. Рост nodes отсутствует,
+listener counter увеличился только на `4` после `200` смешанных переходов и не
+образовал runaway; page-level timers, intervals и rAF в финальном trace — `0`.
+Layout на проверенных фазах: `documentWidth=bodyWidth=viewportWidth=390`.
+
+Машинный артефакт: `data/miniapp-perf/g3-cdp-trace-2026-09-09.json`.
+Этот раздел закрывает свежий S3 §19.7 budget evidence — **PASS**.
+
+### 25. Error matrix и специальные history cases — PASS (2026-09-09)
+
+Через реальный Mini App/API path на preview выполнен controlled response fault
+injection; production DB и состояние аккаунта не менялись. Проверены `11`
+кейсов: blocked и throttled для Positions list, Closed trades list, Activity
+feed, trade detail и trade events, а также throttled `filter=trade`. В каждом
+случае экран показал правильное разделение `Нет связи` или `Сервис недоступен`
+и пользовательский retry. При ошибке events ранее загруженный detail остался
+на экране, а ошибка ограничилась блоком истории/fills. Для blocked Positions
+повторный retry был виден как второй intercepted request; бесконечного
+background retry в этом finite pass не обнаружено.
+
+Три специальные history-варианта прогнаны отдельными fresh sessions на
+реальной разметке и роутинге Mini App, с подменой только DTO-ответа:
+
+- **alias** — opaque alias открыл тот же owned detail, события и два fills;
+- **split** — показаны `История сделки уточнена`, объяснение разделения и
+  `Открыть эпизод 1`; переход открыл канонический detail с событиями/fills;
+- **partial history** — показано `Начало истории восстановлено не полностью`,
+  неизвестные начало/объём/цена отображены как `—`, доказанные события и fills
+  остались доступны.
+
+Каноническая запись для fixture была реальной закрытой BTCUSDT-сделкой
+`740d3c5c52d9423a9a38b8afbfc0e774`, фактическая БД не мутировалась. Скриншоты:
+[alias](acceptance-s3/g3-history-alias.png),
+[split](acceptance-s3/g3-history-split.png),
+[partial](acceptance-s3/g3-history-partial.png). Машинный результат —
+`data/miniapp-perf/g3-error-matrix-2026-09-09.json` и
+`data/miniapp-perf/g3-history-variants-2026-09-09.json`.
+
+Нормальный non-empty closed list/detail, stale/history-changed и unknown-ref
+остаются подтверждены живыми данными в §§21, 23 и 26. Этот раздел закрывает
+error/history slice — **PASS**.
+
+### 26. Повторный Telegram WebView и мобильный iPhone pass — 2026-09-09
+
+После удаления временного `VITE_DEV_USER_ID` и чистого `pnpm build` Mini App
+заново открыт из меню бота `@aster_copytrade_bot` в Telegram Desktop. После
+короткого skeleton-экрана через примерно `5 s` показан production Home без
+dev-banner: testnet, `0x3c45…F975`, `Копирование включено`, открытых позиций
+`0`, `Стоп подтверждён 0 из 0`, риск `2%`. Это подтверждает чистый bundle на
+реальном Telegram WebView после повторного открытия.
+
+Через Computer Use тот же Mini App открыт в iPhone Mirroring, portrait
+WebKit/WebView. Фактически прошли: Home; Positions `Открытые/Закрытые`; две
+реальные закрытые BTCUSDT-карточки; detail с `+2,25 USDT`, входом/выходом
+`0,037 BTC`; несколько вертикальных свайпов до `События сделки` и
+`Исполнения`; раскрытие первого fill; native Back; Activity `Все` и `Сделки`;
+owned `Открыть сделку`; Settings и Risk.
+
+На физическом iPhone RiskRuler tap перевёл draft `2,0%→2,5%`, клавиша Right —
+`2,5%→3,0%`, End — к `5,0%`, Home + три Right вернули draft на `2,0%`.
+Сохранение в этой mobile-сессии не нажималось, поэтому server state не
+менялся; риск остался `2%`. Реальные touch/scroll/keyboard paths WebKit
+пройдены; haptic wrapper вызывался теми же пользовательскими tap/selection
+действиями, но физический импульс не имеет отдельного машинного датчика в
+Computer Use. Горизонтального page overflow или обрезанных подписей на
+portrait-экране не обнаружено; узкие labels корректно переносятся.
+
+Android WebView в подключённых Computer Use surfaces отсутствует, поэтому
+Android-specific повтор и его haptic/WebView evidence остаются внешней
+границей. iPhone slice — **PASS**, полный cross-device G3 — **OPEN только до
+Android evidence**. Финальное состояние аккаунта после всех проходов: flat,
+`open_orders=[]`, `allow_new_entries=1`, `risk_percent=0.02`,
+`notifications_enabled=0`; preview продолжает работать на `:8085`.

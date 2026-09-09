@@ -13,8 +13,11 @@ Backend, engine и signed Aster testnet suites сюда не включаютс�
   записан в S2 §Telegram WebView revalidation и S3 §22.
 - S3 Telegram Desktop evidence — **PASS** по фактически проверенным экранам и
   переходам, записан в S3 §§21–22.
-- S3/G3 — **OPEN**: остаются отдельные performance/device-проверки и несколько
-  специальных history-сценариев; viewport-блок закрыт текущим browser pass.
+- S3 §19.7 performance, error matrix и alias/split/partial history — **PASS**;
+  viewport `320/360/430` — **PASS**.
+- Telegram Desktop и iPhone Mirroring WebView — **PASS** по фактически
+  пройденным сценариям; cross-device G3 остаётся **OPEN только для Android**,
+  которого нет среди подключённых Computer Use surfaces.
 - Последний frontend gate: `28` test files, `349` passed, lint clean,
   `tsc -b && vite build` PASS.
 
@@ -43,10 +46,13 @@ Backend, engine и signed Aster testnet suites сюда не включаютс�
 | P2.0–P2.7, Telegram WebView владельца, iPhone, 2026-09-02/03 | Home, 4 root tabs, Positions, Activity, Risk, Status, Account/Builder, Notifications on/off, Pause/Resume с confirm | `STAGE3_PART2_PROGRESS_2026-09.md`, owner section; `docs/reports/acceptance-p27/` | `9/9 PASS`, исторический owner gate закрыт |
 | S2/G2, Chromium/CDP, 2026-09-07, production bundle, 390×844 | Cold root budget, warm roots, Settings prefetch, cached nested, 300 ms latency, 50 cycles, DOM/listeners/heap, long tasks and explicit Status | `MINIAPP_S2_PROGRESS_2026-09.md`, `G2 measured evidence`; `MINIAPP_TAB_PERF_2026-09.md` | G2 ACCEPTED; cold `4` reads, warm root `160` samples p95 `1.0 ms`, nested `120` p95 `1.9 ms`, throttled root p95 `6.0 ms`, warm API delta `0` |
 | Risk ruler, Chromium/CDP, 2026-09-06, 390×844 | Touch short/long/reversal/vertical, tap settle, interrupted settle, mouse capture, save freeze, wheel gates, keyboard/ARIA, idle, frame/layout, reduced motion, edge fade and widths in the browser checklist | `MINIAPP_RISK_RULER_2026-09.md` | Browser slice `15/15 PASS`; device-only WebKit/haptics remains outside that gate |
-| S3, Chromium/Computer, 2026-09-09, 390×844 | Home active/paused/resume sheet, live copy open→close, Positions, Activity, Settings and 6 nested screens, Risk save `2%→1%→2%`, error/stale/unknown states and notification gate probe | `MINIAPP_S3_PROGRESS_2026-09.md` §§19–20; `docs/reports/acceptance-s3/` | Partial S3 browser evidence; 17 PNGs, G3 remains open |
+| S3, Chromium/Computer, 2026-09-09, 390×844 | Home active/paused/resume sheet, live copy open→close, Positions, Activity, Settings and 6 nested screens, Risk save `2%→1%→2%`, error/stale/unknown states and notification gate probe | `MINIAPP_S3_PROGRESS_2026-09.md` §§19–20; `docs/reports/acceptance-s3/` | PASS for listed browser scenarios; 17 PNGs |
 | S3 viewport recheck, Chromium/Computer, 2026-09-09, `320/360/430×844` | Home, Positions open/closed, Activity, Settings и все 6 nested screens; AX/DOM проверка page-level overflow; визуальная проверка Home на трёх ширинах и Risk на `320` | `MINIAPP_S3_PROGRESS_2026-09.md` §23 | PASS: на каждой ширине `documentWidth = bodyWidth = viewportWidth`, page-level horizontal overflow отсутствует |
 | S3, Telegram Desktop WebView, 2026-09-09 | Closed list, non-empty trade detail, event blocks, two fills раскрываются, Activity filters and owned link, native Back, Settings/nested screens, Home flat and pause/resume | `MINIAPP_S3_PROGRESS_2026-09.md` §21; handoff addition | PASS for listed Telegram Desktop scenarios |
 | S2-only revalidation, Telegram Desktop WebView, 2026-09-09 | Root transitions, Settings cache/revisit, stale Status/Aster, Notifications read-only, Risk dirty draft and discard Sheet, scroll/Back, 50 `Settings→Risk→Back` cycles, Resume Sheet Cancel and confirmed Resume | `MINIAPP_S2_PROGRESS_2026-09.md`, final section; `MINIAPP_S3_PROGRESS_2026-09.md` §22 | PASS for listed UI/lifecycle smoke |
+| S3 §19.7, Chromium/CDP, 2026-09-09, 390×844 | Cold root, 160 warm root samples, 200 nested samples, 300 ms delayed API, 5-page/493-event feed, Risk trace, deep link, DOM/listener/timer bounds | `MINIAPP_S3_PROGRESS_2026-09.md` §24; `data/miniapp-perf/g3-cdp-trace-2026-09-09.json` | PASS: cold `4`; warm root p95 `5,3 ms`; delayed p95 `4,4 ms`; no long tasks/errors |
+| S3 errors/history, Chromium/CDP, 2026-09-09, 390×844 | 11 blocked/throttled list/feed/detail/events cases; alias, split choice and partial-history warning through real Mini App route | `MINIAPP_S3_PROGRESS_2026-09.md` §25; `docs/reports/acceptance-s3/g3-history-*.png` | PASS; no production DB mutation |
+| S3 device, Telegram Desktop + iPhone Mirroring, 2026-09-09 | Clean bundle reopen, iPhone portrait WebView, Positions/closed detail/events/fills, scroll, native Back, Activity filters/owned link, Risk tap + keyboard | `MINIAPP_S3_PROGRESS_2026-09.md` §26; owner history §§21–22 | PASS for Desktop+iPhone; Android remains unavailable |
 
 Последний Telegram-проход завершился в безопасном подключённом состоянии:
 Home показывал `Копирование включено`, открытых позиций `0`, риск `2%`;
@@ -118,7 +124,7 @@ cd miniapp && CI=true pnpm build
   включая all tabs, Settings, Risk, Status, Notifications, Pause/Resume and
   Account/Builder.
 - `docs/reports/acceptance-s3/` — 17 PNG S3 browser pass, production bundle,
-  viewport 390×844: Home, Positions, Activity, Settings and nested screens.
+  viewport 390×844, plus alias/split/partial history screenshots from §25.
 - `data/miniapp-perf/` — git-ignored browser perf captures referenced by
   `MINIAPP_TAB_PERF_2026-09.md`.
 - `scripts/dev-up.sh` — bot + tunnel + production bundle at port `8080`;
@@ -130,20 +136,12 @@ cd miniapp && CI=true pnpm build
 
 ## Что ещё не закрыто этим индексом
 
-G3 остаётся открытым для отдельно обозначенного evidence:
+После S3 §§24–26 остаётся один внешний пункт: Android WebView с повтором
+touch/scroll/keyboard/haptic сценариев. Android surface сейчас не подключён к
+Computer Use, поэтому этот пункт нельзя выдавать за выполненный. iPhone,
+Telegram Desktop, свежий §19.7 trace, error matrix и специальные history cases
+закрыты фактическими проходами.
 
-1. Свежий S3 §19.7 CDP trace после финальных S3 transport/history changes:
-   cold/warm request budget, delayed API, long history, long tasks and 50-cycle
-   memory/listener counters. The S2/G2 measurements above are valid S2 evidence
-   and must not be reused as a new S3 trace.
-2. S3-specific mobile iOS/Android WebKit evidence for haptics, keyboard,
-   gestures and short viewport. The earlier iPhone P2.0–P2.7 acceptance remains
-   valid for that historical scope.
-3. Visual split/alias/partial-history cases and a full blocked/throttled API
-   matrix. Normal closed detail, stale/incomplete history and unknown-ref
-   fail-closed states were already checked in Chromium/Telegram as recorded
-   above.
-
-Для итогового verdict читай этот index вместе с S3 §§19–23. Старую фразу
+Для итогового verdict читай этот index вместе с S3 §§19–26. Старую фразу
 «не запускалось» из pre-acceptance-раздела нельзя принимать за текущий статус:
 актуальные факты находятся в более поздних append-only sections.
