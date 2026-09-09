@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { homeViewModel, RESUME_CONFIRM_BODY, snapshotLabel, trustSummary } from './home'
-import type { DashboardDTO } from './types'
+import {
+  homeViewModel,
+  RESUME_CONFIRM_BODY,
+  RESUME_CONFIRM_FLAT_BODY,
+  resumeConfirmBody,
+  snapshotLabel,
+  trustSummary,
+} from './home'
+import type { DashboardDTO, ResumeContextDTO } from './types'
 
 function dashboard(overrides: Partial<DashboardDTO> = {}): DashboardDTO {
   return {
@@ -50,8 +57,30 @@ describe('home view model', () => {
     expect(view.actionLabel).toBeNull()
   })
 
-  it('resume confirmation explains the master-in-position entry', () => {
-    expect(RESUME_CONFIRM_BODY).toContain('Мастер сейчас в позиции')
+  it('resume confirmation picks its copy from the proven resume context', () => {
+    expect(
+      resumeConfirmBody({ snapshot_freshness: 'fresh', master_in_position: false, permission_ok: true }),
+    ).toBe(RESUME_CONFIRM_FLAT_BODY)
+    expect(
+      resumeConfirmBody({ snapshot_freshness: 'fresh', master_in_position: true, permission_ok: true }),
+    ).toBe(RESUME_CONFIRM_BODY)
+  })
+
+  it('unknown or stale resume context stays neutral and never claims flat', () => {
+    const contexts: Array<ResumeContextDTO | null | undefined> = [
+      undefined,
+      null,
+      { snapshot_freshness: 'fresh', master_in_position: null, permission_ok: null },
+      { snapshot_freshness: 'stale', master_in_position: false, permission_ok: true },
+      { snapshot_freshness: 'unavailable', master_in_position: true, permission_ok: true },
+    ]
+    for (const context of contexts) {
+      const body = resumeConfirmBody(context)
+      expect(body).not.toBe(RESUME_CONFIRM_FLAT_BODY)
+      expect(body).not.toBe(RESUME_CONFIRM_BODY)
+      expect(body).not.toContain('Мастер сейчас в позиции')
+      expect(body).toContain('После проверки актуального состояния')
+    }
   })
 
   it('never substitutes account updated_at for a missing exchange snapshot', () => {

@@ -91,6 +91,21 @@ def test_missing_result_is_explicit_not_zero():
     assert "0" not in text
 
 
+def test_negative_and_sub_unit_pnl_keep_their_sign():
+    for gross, expected in (
+        ("-0.5", "PnL до комиссий: -0,5 USDT"),
+        ("-12.25", "PnL до комиссий: -12,25 USDT"),
+        ("-0.0004", "PnL до комиссий: -0,0004 USDT"),
+    ):
+        text = format_user_event(
+            _event(
+                "POSITION_CLOSED",
+                {"symbol": "BTCUSDT", "side": "LONG", "realized_gross": gross},
+            )
+        )
+        assert expected in text.splitlines(), (gross, text)
+
+
 def test_unknown_side_is_omitted_not_guessed():
     text = format_user_event(_event("POSITION_OPENED", {"symbol": "BTCUSDT", "entry_qty": "1"}))
     assert text.splitlines()[0] == "Открыта BTCUSDT"

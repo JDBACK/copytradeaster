@@ -22,6 +22,7 @@ import { HOME_REVALIDATE_MS, HomeScreen } from './screens/HomeScreen'
 import { PositionsScreen } from './screens/PositionsScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
 import { MiniAppResources } from './resources'
+import { RESUME_CONFIRM_BODY, RESUME_CONFIRM_FLAT_BODY } from './home'
 import type {
   AccountBuilderDTO,
   ActivityItemDTO,
@@ -31,6 +32,7 @@ import type {
   NotificationSettingsDTO,
   PositionPageDTO,
   PositionSummaryDTO,
+  ResumeContextDTO,
   RiskDTO,
 } from './types'
 
@@ -575,6 +577,49 @@ describe('AppShell keep-alive', () => {
     await screen.findByRole('button', { name: /возобновить/i })
     expect(screen.queryByText('Возобновить копирование?')).toBeNull()
     expect(resume).not.toHaveBeenCalled()
+  })
+
+  async function openResumeSheet(resume_context: ResumeContextDTO | null) {
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard({ copy_state: 'paused' }))
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    vi.spyOn(api, 'activityFeed').mockResolvedValue(activityPage({ items: [], has_next: false }))
+    vi.spyOn(api, 'beginConfirmation').mockResolvedValue({
+      token: 'resume-context',
+      action: 'resume',
+      account_id: 'copyc1',
+      expires_at: null,
+      resume_context,
+    })
+    render(<AppShell auth={AUTH} onNotConnected={noop} />)
+    fireEvent.click(await screen.findByRole('button', { name: /возобновить/i }))
+    await screen.findByText('Возобновить копирование?')
+  }
+
+  it('resume Sheet explains the proven flat context instead of claiming a position', async () => {
+    await openResumeSheet({
+      snapshot_freshness: 'fresh',
+      master_in_position: false,
+      permission_ok: true,
+    })
+    expect(screen.getByText(RESUME_CONFIRM_FLAT_BODY)).toBeDefined()
+    expect(screen.queryByText(RESUME_CONFIRM_BODY)).toBeNull()
+  })
+
+  it('resume Sheet claims a position only for a fresh exposed master', async () => {
+    await openResumeSheet({
+      snapshot_freshness: 'fresh',
+      master_in_position: true,
+      permission_ok: true,
+    })
+    expect(screen.getByText(RESUME_CONFIRM_BODY)).toBeDefined()
+    expect(screen.queryByText(RESUME_CONFIRM_FLAT_BODY)).toBeNull()
+  })
+
+  it('resume Sheet stays neutral for stale or unknown context', async () => {
+    await openResumeSheet({ snapshot_freshness: 'stale', master_in_position: false, permission_ok: null })
+    expect(screen.queryByText(RESUME_CONFIRM_FLAT_BODY)).toBeNull()
+    expect(screen.queryByText(RESUME_CONFIRM_BODY)).toBeNull()
+    expect(document.querySelector('.lede')?.textContent).toContain('После проверки актуального состояния')
   })
 
   it('50 Settings → Risk → Back cycles keep DOM and API ownership bounded', async () => {
