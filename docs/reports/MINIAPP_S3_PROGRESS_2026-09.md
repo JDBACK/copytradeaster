@@ -731,4 +731,5 @@ Android-specific повтор и его haptic/WebView evidence остаются
 границей. iPhone slice — **PASS**, полный cross-device G3 — **OPEN только до
 Android evidence**. Финальное состояние аккаунта после всех проходов: flat,
 `open_orders=[]`, `allow_new_entries=1`, `risk_percent=0.02`,
-`notifications_enabled=0`; preview продолжает работать на `:8085`.
+`notifications_enabled=0`; production bot/tunnel продолжают работать на `:8080`,
+одноразовый preview после завершения приёмки остановлен.
