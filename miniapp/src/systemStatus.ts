@@ -224,3 +224,10 @@ export function statusTrust(dto: StatusDTO): StatusTrustItem[] {
 
 /** Marker shown when the transport failed but a previous DTO stays on screen. */
 export const TRANSPORT_STALE_WARNING = 'Связь с сервером потеряна. Показаны последние полученные данные.'
+
+/** Marker for our own verification deadline passing, not a transport failure.
+ *
+ * The Agent attestation carries an expiry; past it the screen stops claiming a
+ * verified Agent and re-proves the evidence once. Saying "связь потеряна" here
+ * blamed the network for a deadline, on a screen whose last read succeeded. */
+export const AGENT_EVIDENCE_EXPIRED_NOTE = 'Срок подтверждения истёк — проверяем заново.'

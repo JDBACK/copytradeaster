@@ -1307,6 +1307,62 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     expect(positionsSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, false])
   })
 
+  it('a live history invalidation leaves the hidden keep-alive tab alone', async () => {
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue(positionPage({ positions: [], count: 0 }))
+    const activitySpy = vi
+      .spyOn(api, 'activityFeed')
+      .mockResolvedValue(activityPage({ items: [], has_next: false }))
+    const resources = new MiniAppResources(AUTH, 'shell-hidden-history-live')
+    render(<AppShell auth={AUTH} resources={resources} onNotConnected={noop} />)
+    await screen.findByText('Событий пока нет')
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+
+    // Activity is a hidden keep-alive root: a live invalidation must not spend
+    // a REST read on an invisible tab, exactly like TTL and foreground paths.
+    act(() => resources.history.liveInvalidate())
+    await act(async () => {})
+    expect(activitySpy).toHaveBeenCalledTimes(1)
+
+    // Showing the aged tab is the refresh edge that revalidates it.
+    fireEvent.click(tabButton('Активность'))
+    await act(async () => {})
+    await screen.findByText('Событий пока нет')
+    expect(activitySpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('widens the history self-heal delay while failures repeat', async () => {
+    vi.useFakeTimers()
+    try {
+      const activitySpy = vi
+        .spyOn(api, 'activityFeed')
+        .mockRejectedValue(new ApiError(0, 'network_error', 'down'))
+      render(<ActivityScreen auth={AUTH} />)
+
+      await act(async () => {})
+      expect(activitySpy).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(activitySpy).toHaveBeenCalledTimes(2)
+
+      // The second failure waits the widened step: resetting on the cleared
+      // error slot kept every attempt at 1s, so an outage became a ~1 Hz loop.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(activitySpy).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(activitySpy).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+
   it('activity keeps its 60 s floor: 35 s is free, 65 s refetches once', async () => {
     const t0 = Date.now()
     const activitySpy = vi

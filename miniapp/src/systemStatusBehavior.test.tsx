@@ -257,9 +257,12 @@ describe('SystemStatusScreen behavior', () => {
     vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
 
     const { rerender } = render(<SystemStatusScreen auth={AUTH} resources={resources} />)
-    await screen.findByText(TRANSPORT_STALE_WARNING)
+    // The rail is already reporting the outage, so the screen does not repeat
+    // the same fact in a second banner — but the cached DTO still stops
+    // reading as fresh green health.
+    await screen.findByText('Данные устарели')
     expect(screen.queryByText('Всё работает')).toBeNull()
-    expect(screen.getByText('Данные устарели')).toBeDefined()
+    expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
 
     // The channel recovers: the same cached DTO is trustworthy again and the
     // warning clears without the user doing anything.

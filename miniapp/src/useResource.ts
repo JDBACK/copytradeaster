@@ -51,6 +51,15 @@ export function useResource<K extends ResourceKey>(args: {
   const lastForegroundSignal = useRef(args.foregroundSignal ?? 0)
   const lastFailedRetryAt = useRef(0)
 
+  // Hidden keep-alive tabs stay mounted, so subscription alone is not a live
+  // consumer. Only a visible screen registers here; the store uses it to decide
+  // which resources a live event may re-read.
+  useEffect(() => {
+    if (!enabled || !active) return
+    resources.setActive(key, true)
+    return () => resources.setActive(key, false)
+  }, [resources, key, enabled, active])
+
   useEffect(() => {
     const foregroundSignal = args.foregroundSignal ?? 0
     const reactivated = active && !lastActive.current
@@ -103,12 +112,20 @@ export function useResource<K extends ResourceKey>(args: {
   // on and in front of the user, which is what lets the whole app drop manual
   // refresh affordances: a screen that failed comes back without being asked.
   const failures = useRef(0)
+  const settledAt = useRef(snapshot.receivedAt)
   useEffect(() => {
     if (!enabled || !active) return
-    if (snapshot.error === null) {
+    if (snapshot.receivedAt !== settledAt.current) {
+      // Only a read that actually landed may restart the ladder. Starting a
+      // read clears the error slot (startFlight publishes error: null), so a
+      // reset on "error === null" fired on every attempt: the delay stayed at
+      // the first step and a sustained outage retried at ~1 Hz instead of
+      // widening.
+      settledAt.current = snapshot.receivedAt
       failures.current = 0
       return
     }
+    if (snapshot.error === null) return
     if (snapshot.inflight) return
     const delay = SELF_HEAL_BACKOFF_MS[Math.min(failures.current, SELF_HEAL_BACKOFF_MS.length - 1)]
     const timer = setTimeout(() => {
@@ -116,7 +133,17 @@ export function useResource<K extends ResourceKey>(args: {
       void resources.refresh(key, strength).catch(() => {})
     }, delay)
     return () => clearTimeout(timer)
-  }, [resources, key, enabled, active, strength, snapshot.error, snapshot.inflight, snapshot.revision])
+  }, [
+    resources,
+    key,
+    enabled,
+    active,
+    strength,
+    snapshot.error,
+    snapshot.inflight,
+    snapshot.revision,
+    snapshot.receivedAt,
+  ])
 
   return { snapshot, refresh }
 }

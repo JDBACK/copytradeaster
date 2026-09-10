@@ -15,4 +15,3 @@ export type TrustStepKey = keyof typeof TRUST_STEP
 
 /** Порядок этапов на рельсе: подпись → подтверждено. */
 export const TRUST_RAIL_STEPS: readonly TrustStepKey[] = ['wallet', 'agent', 'builder', 'sync']
-

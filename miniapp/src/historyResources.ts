@@ -32,6 +32,9 @@ type LoadMode = 'ensure' | 'refresh' | 'more' | 'fills' | 'events'
 export class HistoryResources {
   private entries = new Map<string, Entry>()
   private disposed = false
+  /** Visible consumers per query: a hidden keep-alive tab stays subscribed but
+   * must not be re-read by every live event, exactly like screen resources. */
+  private readonly activeConsumers = new Map<string, number>()
   private readonly auth: AuthContext
   private readonly owner: MiniAppResources
   constructor(auth: AuthContext, owner: MiniAppResources) { this.auth = auth; this.owner = owner }
@@ -47,6 +50,16 @@ export class HistoryResources {
   }
   get<Q extends HistoryQuery>(query: Q): HistorySnapshot<HistoryValues[Q['kind']]> {
     return this.entry(query).snapshot as HistorySnapshot<HistoryValues[Q['kind']]>
+  }
+  hasActiveConsumers(query: HistoryQuery): boolean {
+    return (this.activeConsumers.get(historyKey(query)) ?? 0) > 0
+  }
+  /** Register or unregister one visible consumer of a query (refcounted). */
+  setActive(query: HistoryQuery, active: boolean): void {
+    const key = historyKey(query)
+    const next = Math.max(0, (this.activeConsumers.get(key) ?? 0) + (active ? 1 : -1))
+    if (next === 0) this.activeConsumers.delete(key)
+    else this.activeConsumers.set(key, next)
   }
   subscribe(query: HistoryQuery, listener: () => void): () => void {
     const entry = this.entry(query)
@@ -216,11 +229,28 @@ export class HistoryResources {
     }
   }
   liveInvalidate(): void {
+    void this.revalidateActive().catch(() => {})
+  }
+  /** Re-read every visible query; reject when any of those reads failed.
+   *
+   * Hidden queries are only marked stale (activation revalidates them), but a
+   * visible read is part of the truth: the pull-down reports its outcome to the
+   * user, so it must not resolve while a read is still loading or after one has
+   * failed. */
+  async revalidateActive(): Promise<void> {
     if (this.disposed) return
+    const watched: Entry[] = []
+    const pending: Promise<void>[] = []
     for (const entry of this.entries.values()) {
       entry.revision++
       this.publish(entry, { receivedAt: 0 })
-      if (entry.listeners.size > 0) void this.load(entry.query, 'refresh')
+      if (!this.hasActiveConsumers(entry.query)) continue
+      watched.push(entry)
+      pending.push(this.load(entry.query, 'refresh'))
+    }
+    await Promise.all(pending)
+    if (watched.some((entry) => entry.snapshot.error !== null)) {
+      throw new Error('history refresh failed')
     }
   }
   dispose(): void {

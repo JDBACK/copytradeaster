@@ -26,6 +26,27 @@ it('auto-rebases a re-cut page instead of demanding a manual reload', async () =
   owner.dispose()
 })
 
+it('reports a failed visible revalidation instead of resolving early', async () => {
+  const owner = new MiniAppResources({ initData: 'test' }, 'revalidate-failure')
+  const read = vi
+    .spyOn(api, 'activityFeed')
+    .mockRejectedValue(new ApiError(0, 'network_error', 'down'))
+  const unsubscribe = owner.history.subscribe(query, () => {})
+
+  // Hidden: the query is only marked stale, so there is nothing to report.
+  await expect(owner.history.revalidateActive()).resolves.toBeUndefined()
+  expect(read).not.toHaveBeenCalled()
+
+  // Visible: the read is part of the truth the pull-down reports on.
+  owner.history.setActive(query, true)
+  await expect(owner.history.revalidateActive()).rejects.toThrow('history refresh failed')
+  expect(read).toHaveBeenCalledTimes(1)
+
+  owner.history.setActive(query, false)
+  unsubscribe()
+  owner.dispose()
+})
+
 it('retries the failed events cursor without dropping previous pages or moving the fills cursor', async () => {
   const event = (ref: string) => ({ event_ref: ref, text: ref, kind: 'OPENED',
     trade_ref: 'trade', occurred_at: '2026-09-08T00:00:00Z', facts: {} })

@@ -17,4 +17,3 @@ export function usePaging(): [boolean, (action: () => Promise<unknown>) => void]
   }
   return [paging, start]
 }
-

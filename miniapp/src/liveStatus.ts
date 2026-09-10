@@ -19,3 +19,14 @@ export function liveStatusLabel(snapshot: LiveSnapshot, now: number): string {
       return `Нет связи · ${ageLabel(snapshot.lastUpdatedAt, now)}`
   }
 }
+
+/** The verdict half of the stale label: announced once, never ticking. */
+export function liveStatusVerdict(snapshot: LiveSnapshot): string {
+  return snapshot.health === 'stale' ? 'Нет связи' : liveStatusLabel(snapshot, 0)
+}
+
+/** The measurement half: it changes every second and stays outside the live
+ * region, so a screen reader is not woken by a clock. */
+export function liveStatusAge(snapshot: LiveSnapshot, now: number): string {
+  return ageLabel(snapshot.lastUpdatedAt, now)
+}

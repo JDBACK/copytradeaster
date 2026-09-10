@@ -38,14 +38,15 @@ import {
   reasonCopy,
   stateCopy,
 } from '../accountBuilder'
-import { TRANSPORT_STALE_WARNING } from '../systemStatus'
+import { AGENT_EVIDENCE_EXPIRED_NOTE, TRANSPORT_STALE_WARNING } from '../systemStatus'
 import type { AccountBuilderDTO, BuilderPrepareDTO, ConfirmationDTO } from '../types'
+import { railSpeaks } from '../live'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources, useTransportStale } from '../useResource'
+import { useLiveSnapshot, useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
-  | { kind: 'ready'; dto: AccountBuilderDTO; transportStale: boolean }
+  | { kind: 'ready'; dto: AccountBuilderDTO; transportStale: boolean; evidenceExpired: boolean }
   | { kind: 'error'; code: string }
 
 type ReauthState =
@@ -95,10 +96,21 @@ export function AccountBuilderScreen({
         expiryReached),
   )
   const builderTransportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  // Two different facts, deliberately not merged: a transport failure says the
+  // exchange is unreachable, while the local Agent deadline says our evidence
+  // aged out. Painting the second as "Нет связи" blamed the network for a
+  // verification deadline the app answers by proving the Agent again.
+  const evidenceExpired = expired && resourceDto !== null
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), resourceDto !== null)
   const resourceTransportStale =
-    resourceDto !== null && (builderTransportUnhealthy || expired)
+    resourceDto !== null && builderTransportUnhealthy && !railOwnsOutage && !evidenceExpired
   const load: LoadState = resourceDto
-    ? { kind: 'ready', dto: resourceDto, transportStale: resourceTransportStale }
+    ? {
+        kind: 'ready',
+        dto: resourceDto,
+        transportStale: resourceTransportStale,
+        evidenceExpired,
+      }
     : resource.snapshot.error
       ? { kind: 'error', code: resource.snapshot.error }
       : { kind: 'loading' }
@@ -143,6 +155,18 @@ export function AccountBuilderScreen({
       if (timer !== null) window.clearTimeout(timer)
     }
   }, [resourceDto?.agent_expires_at_ms])
+
+  // Expired evidence is answered by proving it again once, the way System
+  // Status re-proves aged permission evidence: keeping the amber banner and
+  // waiting for the user to press something is the nag L6 removed.
+  const reproofedExpiry = useRef<number | null>(null)
+  useEffect(() => {
+    if (!expired || resourceDto === null) return
+    const deadline = resourceDto.agent_expires_at_ms ?? null
+    if (reproofedExpiry.current === deadline) return
+    reproofedExpiry.current = deadline
+    void resource.refresh('weak').catch(() => {})
+  }, [expired, resource, resourceDto])
 
   const refresh = useCallback(async () => {
     if (!resourceDto || refreshing) return
@@ -408,27 +432,23 @@ export function AccountBuilderScreen({
         <h1 className="h1" style={{ marginTop: 4 }}>
           Подключение Aster
         </h1>
-        <ErrorBox title={error.title} hint={error.hint} code={load.code}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => {
-              void resource.refresh('weak').catch(() => {})
-            }}
-          >
-            Попробовать снова
-          </button>
-        </ErrorBox>
+        {/* No retry button: a failed read heals on the bounded backoff, and the
+            one explicit control on this screen re-proves Agent permissions. */}
+        <ErrorBox title={error.title} hint={error.hint} code={load.code} />
       </div>
     )
   }
 
-  const { dto, transportStale } = load
+  const { dto, transportStale, evidenceExpired: expiredEvidence } = load
   // P2.5 pattern: past data stays visible, but a transport failure strips
   // the green verified visual until a refresh succeeds again.  A
   // transport-stale snapshot must never render as fresh verified.
-  const hero = transportStale ? { label: 'Данные устарели', tone: 'warning' as const } : stateCopy(dto.state)
-  const verified = isAccountBuilderVerified(dto) && !transportStale
+  const hero = transportStale
+    ? { label: 'Данные устарели', tone: 'warning' as const }
+    : expiredEvidence
+      ? { label: 'Требуется проверка', tone: 'warning' as const }
+      : stateCopy(dto.state)
+  const verified = isAccountBuilderVerified(dto) && !transportStale && !expiredEvidence
   const canReauthorize = dto.remediation === 'reauthorize'
   const reauthBusy =
     reauth.kind === 'preparing' || reauth.kind === 'signing' || reauth.kind === 'submitting'
@@ -449,6 +469,12 @@ export function AccountBuilderScreen({
       {transportStale && (
         <div className="transport-stale" role="status">
           {TRANSPORT_STALE_WARNING}
+        </div>
+      )}
+
+      {expiredEvidence && !transportStale && (
+        <div className="stale-note" role="status">
+          {AGENT_EVIDENCE_EXPIRED_NOTE}
         </div>
       )}
 

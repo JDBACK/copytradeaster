@@ -72,4 +72,3 @@ describe('обратная связь по нажатию, а не по фоно
     await waitFor(() => expect(screen.queryByRole('button', { name: /Загружаем/ })).toBeNull())
   })
 })
-

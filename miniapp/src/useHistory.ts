@@ -12,13 +12,25 @@ export function useHistory<Q extends HistoryQuery>(resources: HistoryResources, 
   const get = useCallback(() => resources.get(query), [resources, query])
   const snapshot = useSyncExternalStore(subscribe, get, get)
   useEffect(() => { if (active) void resources.load(query) }, [resources, query, active, foregroundSignal])
-  const failures = useRef(0)
+  // Hidden keep-alive tabs stay mounted: a live invalidation must not re-read
+  // their history, because activation already revalidates them.
   useEffect(() => {
     if (!active) return
-    if (snapshot.error === null) {
+    resources.setActive(query, true)
+    return () => resources.setActive(query, false)
+  }, [resources, query, active])
+  const failures = useRef(0)
+  const settledAt = useRef(snapshot.receivedAt)
+  useEffect(() => {
+    if (!active) return
+    if (snapshot.receivedAt !== settledAt.current) {
+      // A landed read restarts the ladder; merely starting one clears the
+      // error slot and must not, or every retry keeps the first delay.
+      settledAt.current = snapshot.receivedAt
       failures.current = 0
       return
     }
+    if (snapshot.error === null) return
     if (snapshot.loading) return
     const delay = SELF_HEAL_BACKOFF_MS[Math.min(failures.current, SELF_HEAL_BACKOFF_MS.length - 1)]
     const timer = setTimeout(() => {

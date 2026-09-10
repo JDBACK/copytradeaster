@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { LiveHealth } from '../live'
-import { liveStatusLabel } from '../liveStatus'
+import { liveStatusAge, liveStatusVerdict } from '../liveStatus'
 import type { MiniAppResources } from '../resources'
 
 export function LiveStatus({ resources }: { resources: MiniAppResources }) {
@@ -30,9 +30,17 @@ export function LiveStatus({ resources }: { resources: MiniAppResources }) {
   // attention, and then it carries the age and no button.
   if (health !== 'stale') return null
   return (
-    <div className={`live-status live-status-${health}`} role="status" aria-live="polite">
+    <div className={`live-status live-status-${health}`}>
       <span className="live-status-dot" aria-hidden />
-      <span>{liveStatusLabel(snapshot, now || snapshot.lastUpdatedAt)}</span>
+      {/* The verdict is the fact worth announcing, and it is announced once:
+          kept inside the live region, the ticking age re-announced the outage
+          to a screen reader every second. The age now sits outside it. */}
+      <span role="status" aria-live="polite">
+        {liveStatusVerdict(snapshot)}
+      </span>
+      <span className="live-status-age">
+        {liveStatusAge(snapshot, now || snapshot.lastUpdatedAt)}
+      </span>
       {/* No retry button: reconnects keep retrying by themselves, and the whole
           surface refreshes on a pull-down, so the user is never asked to press
           anything to make data current. */}

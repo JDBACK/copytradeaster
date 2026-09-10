@@ -34,12 +34,13 @@ import { closeMiniApp, hapticImpact } from '../telegram'
 import { formatTime } from '../format'
 import { useAgeSeconds } from '../useAge'
 import type { StatusDTO } from '../types'
+import { railSpeaks } from '../live'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources, useTransportStale } from '../useResource'
+import { useLiveSnapshot, useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
-  | { kind: 'ready'; dto: StatusDTO; transportStale: boolean }
+  | { kind: 'ready'; dto: StatusDTO; transportStale: boolean; outageNote: boolean }
   | { kind: 'error'; code: string }
 
 export function SystemStatusScreen({
@@ -68,7 +69,11 @@ export function SystemStatusScreen({
   })
   const dto = resource.snapshot.data
   const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), dto !== null)
   const transportStale = dto !== null && transportUnhealthy
+  // One fact, one voice: the cached DTO keeps its honest stale verdict, but the
+  // outage itself is not repeated here while the rail is already reporting it.
+  const outageNote = transportStale && !railOwnsOutage
   // Verification evidence ages out on its own (the backend TTL is a minute), so
   // opening this screen re-proves it once instead of telling the user to ask
   // again. Bounded by the DTO itself: as soon as permissions read valid (or the
@@ -85,7 +90,7 @@ export function SystemStatusScreen({
     void resource.refresh('strong').catch(() => {})
   }, [permissionsUnproven, resource])
   const load: LoadState = dto
-    ? { kind: 'ready', dto, transportStale }
+    ? { kind: 'ready', dto, transportStale, outageNote }
     : resource.snapshot.error
       ? { kind: 'error', code: resource.snapshot.error }
       : { kind: 'loading' }
@@ -138,6 +143,7 @@ export function SystemStatusScreen({
     <SystemStatusView
       dto={load.dto}
       transportStale={load.transportStale}
+      outageNote={load.outageNote}
       accountMasked={accountMasked}
       onOpenBot={openBot}
       receivedAt={resource.snapshot.receivedAt}
@@ -149,12 +155,15 @@ export function SystemStatusScreen({
 export function SystemStatusView({
   dto,
   transportStale,
+  outageNote = transportStale,
   accountMasked,
   onOpenBot,
   receivedAt = 0,
 }: {
   dto: StatusDTO
   transportStale: boolean
+  /** Whether this screen may repeat the outage in its own banner. */
+  outageNote?: boolean
   accountMasked?: string | null
   onOpenBot: () => void
   /** When this DTO arrived: the backend age is a snapshot, and the row must stay
@@ -176,7 +185,7 @@ export function SystemStatusView({
   const trust = statusTrust(dto)
   const account = dto.account_masked ?? accountMasked ?? null
 
-  const amberNote = transportStale
+  const amberNote = outageNote
     ? TRANSPORT_STALE_WARNING
     : dto.state === 'ready'
       ? null

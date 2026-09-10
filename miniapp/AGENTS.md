@@ -69,12 +69,12 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | File | Purpose |
 |---|---|
 | `api.ts` | Typed POST client mirroring all 27 routes; initData headers (+ dev-only `X-Dev-User-Id`), 15s AbortController timeout covering headers + body, external-abort cleanup, safe `invalid_response`, `ApiError` |
-| `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks |
+| `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks. A live **quote** tick marks DTOs stale without fencing the read that is already in flight (fencing on every quote starved any client slower than the publication cadence); state publications still fence. Live re-reads go only to visible consumers (`setActive` refcount), so hidden keep-alive tabs cost nothing. `pullRefresh()` awaits the visible history re-read and rejects when a read failed |
 | `historyResources.ts` / `historyResources.test.ts` | Session history cache and invalidation revision fence; regressions for late responses, coalesced follow-up and inactive reads |
 | `useHistory.ts` | External-store subscription for history list/feed/detail/events + bounded self-heal retry of failed slices |
 | `screens/TradeListScreen.tsx` / `screens/TradeDetailScreen.tsx` | S3 history lists, independent fills/events pagination, grouped executions, owned split choice and stale/partial detail states |
 | `components/PositionSummaryCard.tsx` / `TradeSummaryCard.tsx` / `TradeEventRow.tsx` | S3 position, trade and event presentation |
-| `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL + bounded self-heal retry + `useTransportStale` (error or live-stale, never a routine re-read) |
+| `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL + bounded self-heal retry (the ladder restarts only when a read actually landed: a retry clears the error slot, and resetting on that pinned every attempt at 1 s) + `useTransportStale` (error or live-stale, never a routine re-read) |
 | `live.ts` | Session-scoped live client: ticket → WebSocket, epoch-aware revision watermark, gap reconciliation, backoff reconnect with a silence grace before anything is shown, heartbeat/stale deadline, resource invalidation |
 | `liveStatus.ts` | Pure rail copy: `LIVE`/`Подключаем`/`Восстанавливаем связь…`/`Нет связи · N сек назад` |
 | `pullToRefresh.ts` | Pure damped pull tracker: slop, threshold, ownership rules, release/cancel semantics. The app's only manual refresh path |
@@ -106,7 +106,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `SystemStatusScreen.tsx` (+`systemStatus.ts`) | READ-ONLY status slice, seq-guarded refresh, transport-stale honesty | `status` |
 | `components/ui.tsx` | Shared `Brand/TrustRail/Sheet/Row/ErrorBox` (+ inline SVG icons) | — |
 | `components/RiskRuler.tsx` | Snap-strip control: native touch/trackpad inertia, mouse drag w/ pointer capture, gated wheel, interruptible settle animator, scrollend+fallback settle, rate-limited selection haptics, save freeze | — |
-| `components/LiveStatus.tsx` | Transport rail; renders only for the `stale` verdict (channel silent past its deadline). Healthy, connecting and reconnecting states render nothing | — |
+| `components/LiveStatus.tsx` | Transport rail; renders only for the `stale` verdict (channel silent past its deadline). Healthy, connecting and reconnecting states render nothing. The verdict sits in `role="status"` and is announced once; the per-second age is a sibling outside that region, because inside it a screen reader re-announced the outage every tick | — |
 | `components/PullToRefresh.tsx` | Shell-bound pull gesture over `.shell-content`: arms only at scroll top, claims the vertical drag from Telegram while armed, opens a gap the content rides down into and places one wordless arc spinner in it (variables live on `.shell`, the caption is screen-reader only, a light tap lands at the threshold), then triggers one authoritative `resources.pullRefresh()`; the gap rests at 44 px while the read is in flight and eases shut afterwards | — |
 | `riskRuler.ts` | Pure ruler decisions: wheel deltaMode normalization + `wheelIntent` gating, ease-out/duration, clamp, haptic rate limit | — |
 | `protectionWarning.ts` | Protection-state → Russian warning copy map | — |

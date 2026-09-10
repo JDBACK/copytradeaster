@@ -45,4 +45,20 @@ describe('LiveStatus', () => {
     // Reconnects continue in the background; the only manual path is the pull.
     expect(html).not.toContain('<button')
   })
+
+  it('keeps the ticking age out of the live region so it is announced once', () => {
+    // The age changes every second. Inside role="status" aria-live="polite" it
+    // re-announced the whole outage on every tick, so a screen reader chattered
+    // while the user was reading something else.
+    const resources = {
+      subscribeLive: () => () => {},
+      getLiveSnapshot: () => ({ health: 'stale' as const, revision: 2, lastUpdatedAt: 100_000, retrying: true }),
+      retryLive: vi.fn(),
+    } as unknown as MiniAppResources
+    const html = renderToStaticMarkup(<LiveStatus resources={resources} />)
+    const live = html.slice(html.indexOf('role="status"'), html.indexOf('</span>', html.indexOf('role="status"')))
+    expect(live).toContain('Нет связи')
+    expect(live).not.toContain('назад')
+    expect(html).toContain('назад')
+  })
 })

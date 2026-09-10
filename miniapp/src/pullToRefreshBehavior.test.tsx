@@ -8,7 +8,7 @@ import '@testing-library/jest-dom/vitest'
 import { useRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { api } from './api'
+import { api, ApiError } from './api'
 import { AppShell } from './components/AppShell'
 import { PullToRefresh } from './components/PullToRefresh'
 import { MiniAppResources } from './resources'
@@ -186,5 +186,25 @@ describe('pull-to-refresh behavior', () => {
     await waitFor(() => expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 3000 })
     // The pull forces the authoritative read regardless of cache age.
     expect(loader.mock.calls.at(-1)?.[1]).toBe(true)
+  })
+
+  it('a failed pull reports failure instead of a false success', async () => {
+    const resources = new MiniAppResources(AUTH, 'pull-failure')
+    vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard())
+    vi.spyOn(api, 'positions').mockResolvedValue({
+      positions: [],
+      count: 0,
+      system_state: 'ready',
+      is_stale: false,
+      snapshot_captured_at: null,
+    } as never)
+    vi.spyOn(api, 'status').mockResolvedValue({} as never)
+    render(<AppShell auth={AUTH} resources={resources} onNotConnected={noop} accountMasked={null} />)
+    await waitFor(() => expect(resources.hasSubscribers('dashboard')).toBe(true))
+
+    vi.spyOn(api, 'dashboard').mockRejectedValue(new ApiError(0, 'network_error', 'down'))
+    // The indicator and the haptic read the outcome: a pull whose reads failed
+    // must not settle as success while the numbers on screen never changed.
+    await expect(resources.pullRefresh()).rejects.toThrow('pull refresh incomplete')
   })
 })
