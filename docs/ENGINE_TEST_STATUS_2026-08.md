@@ -41,8 +41,10 @@
 > (`test_live_channel_cadence_acceptance.py`: coalescing, догон, single-use тикет). Живой UI в
 > Chromium с реальной позицией: jitter 70 с — 6 текстовых мутаций без предупреждений, pull-to-refresh
 > `ready → refreshing → idle`, все четыре вкладки с живыми данными, `churn` 50 переключений при
-> `liveSockets=1`. После кампании все пять аккаунтов flat / 0 orders. Детали — live-план,
-> «live-перепроверка снятых ограничений».
+> `liveSockets=1`. После кампании все пять аккаунтов flat / 0 orders. Мобильный WebView
+> закрыт владельцем на iPhone в Telegram iOS (тот же инстанс): индикатор pull-to-refresh не
+> полоса, прокрутка и отрисовка без замечаний. Детали — live-план, «live-перепроверка снятых
+> ограничений».
 
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
