@@ -487,8 +487,17 @@ export function AccountBuilderScreen({
           }
         />
         <Row
-          label="Проверено сервером"
-          value={dto.verified_at ? formatTime(dto.verified_at) : 'Нет подтверждения'}
+          label="Подтверждение Builder"
+          value={
+            dto.verified_at
+              ? formatTime(dto.verified_at)
+              : // A direct connection has nothing to confirm; saying "no
+                // confirmation" next to "Builder не используется" reads like a
+                // problem where the honest answer is that no Builder is needed.
+                dto.state === 'not_applicable'
+                ? 'Не требуется'
+                : 'Нет подтверждения'
+          }
         />
         {dto.last_check_at && <Row label="Последняя проверка" value={formatTime(dto.last_check_at)} />}
       </div>

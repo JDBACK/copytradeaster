@@ -186,11 +186,16 @@ describe('AccountBuilderScreen behavior', () => {
         builder_address_masked: null,
         builder_name: null,
         max_fee_rate: null,
+        verified_at: null,
       }),
     )
     renderScreen()
     await screen.findByText('Прямое подключение')
     expect(screen.getByText('Не используется')).toBeDefined()
+    // Nothing to confirm for a direct account: the old copy said "Нет
+    // подтверждения" right under "Не используется", which reads as a fault.
+    expect(screen.getByText('Не требуется')).toBeDefined()
+    expect(screen.queryByText('Нет подтверждения')).toBeNull()
     expect(screen.queryByText('Переавторизовать')).toBeNull()
   })
 

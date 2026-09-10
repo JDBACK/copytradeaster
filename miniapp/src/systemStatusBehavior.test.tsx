@@ -191,6 +191,24 @@ describe('SystemStatusScreen behavior', () => {
     expect(close).not.toHaveBeenCalled()
   })
 
+  it('re-proves aged verification evidence by itself instead of nagging', async () => {
+    // The permission evidence TTL is a minute, so a healthy account would read
+    // "Разрешения: устарели" on every visit. Opening the screen re-verifies
+    // once; the user is never asked to press anything.
+    const loader = vi
+      .spyOn(api, 'status')
+      .mockResolvedValueOnce(dto({ permissions_state: 'stale', state: 'ready' }))
+      .mockResolvedValue(dto())
+    render(<SystemStatusScreen auth={AUTH} />)
+
+    await waitFor(() => expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2))
+    expect(loader.mock.calls.every((call) => call[1] === true)).toBe(true)
+    await screen.findByText('Подтверждены')
+    // Bounded: the successful re-check does not start a loop.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(loader.mock.calls.length).toBeLessThanOrEqual(3)
+  })
+
   it('a failed first read heals itself without any manual retry', async () => {
     const loader = vi
       .spyOn(api, 'status')

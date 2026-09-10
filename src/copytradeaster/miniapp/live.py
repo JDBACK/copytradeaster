@@ -156,13 +156,15 @@ class MiniAppLiveHub:
     def publish_history(self, account_id: str) -> None:
         self._publish(account_id, {"type": "update", "resources": ["history"]})
 
-    def publish_health(self, account_id: str, health: str) -> None:
+    def publish_health(self, account_id: str, health: str) -> bool:
+        """Publish a changed health verdict; False when it was already current."""
         if health not in {"connecting", "live", "reconnecting"}:
             raise ValueError("invalid live health")
         if self._health.get(account_id) == health:
-            return
+            return False
         self._health[account_id] = health
         self._publish(account_id, {"type": "health", "health": health})
+        return True
 
     def _publish(self, account_id: str, payload: dict[str, Any]) -> None:
         revision = self._revisions.get(account_id, 0) + 1
@@ -553,7 +555,15 @@ class MiniAppLiveRuntime:
         health = (
             "live" if self._private_health.get(account_id) and self._quotes_live else "reconnecting"
         )
-        self.hub.publish_health(account_id, health)
+        if self.hub.publish_health(account_id, health) and health != "live":
+            # One line per real transition: without it, a user-visible flap is
+            # impossible to attribute (private stream blip vs quote fallback gap).
+            log.info(
+                "live health dropped account_id=%s private=%s quotes=%s",
+                account_id,
+                self._private_health.get(account_id),
+                self._quotes_live,
+            )
 
 
 __all__ = ["LiveGrant", "LiveTicketStore", "MiniAppLiveHub", "MiniAppLiveRuntime"]

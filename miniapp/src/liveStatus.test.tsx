@@ -21,6 +21,19 @@ describe('LiveStatus', () => {
     expect(renderToStaticMarkup(<LiveStatus resources={resources} />)).toBe('')
   })
 
+  it('stays silent through reconnects and speaks only when the data goes stale', () => {
+    // Reconnecting is normal background work; a rail that announces every blip
+    // is noise. Only the stale verdict — the channel silent past its deadline —
+    // is worth showing, and it carries the age.
+    const snapshot = (health: 'live' | 'reconnecting' | 'stale') => ({
+      subscribeLive: () => () => {},
+      getLiveSnapshot: () => ({ health, revision: 2, lastUpdatedAt: 100_000, retrying: true }),
+      retryLive: vi.fn(),
+    }) as unknown as MiniAppResources
+    expect(renderToStaticMarkup(<LiveStatus resources={snapshot('live')} />)).toBe('')
+    expect(renderToStaticMarkup(<LiveStatus resources={snapshot('reconnecting')} />)).toBe('')
+  })
+
   it('announces an outage without asking for a tap', () => {
     const resources = {
       subscribeLive: () => () => {},

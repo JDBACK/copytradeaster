@@ -22,11 +22,13 @@ export function LiveStatus({ resources }: { resources: MiniAppResources }) {
   }, [snapshot.health])
 
   const health: LiveHealth = snapshot.health
-  // A healthy transport is not news. This rail exists for the one case a user
-  // has to act on: the stream is down long enough that automatic recovery has
-  // already failed, so the numbers on screen stopped moving. "LIVE",
-  // "connecting" and every transient blip stay out of the way.
-  if (health !== 'reconnecting' && health !== 'stale') return null
+  // The rail exists for exactly one situation: the numbers on screen stopped
+  // moving. "LIVE", "Подключаем…" and "Восстанавливаем связь…" all describe the
+  // transport doing its job — reconnecting is normal background work and every
+  // blip of it used to flash here for a second or two. Only the stale verdict
+  // (the channel has been silent past its deadline) is worth the user's
+  // attention, and then it carries the age and no button.
+  if (health !== 'stale') return null
   return (
     <div className={`live-status live-status-${health}`} role="status" aria-live="polite">
       <span className="live-status-dot" aria-hidden />

@@ -5,7 +5,7 @@
 Статус: Stage 1, Stage 2 и Stage 3 (Part 1 + Part 2, P2.0–P2.7 с corrective)
 закрыты; всё смержено в `main`. Сверх исходного видения сделаны: RAM
 leverage control-plane, notification outbox, captcha-доступ, Builder
-attestation, System Status и 4-табовый follower Mini App (26 POST
+attestation, System Status и 4-табовый follower Mini App (27 POST
 `/miniapp/api/*`). Видение трёх этапов — раздел 4 (исторический план,
 факт — чеклисты ниже). Полный фактологический бэкграунд — в
 [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).

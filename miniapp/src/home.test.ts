@@ -84,8 +84,10 @@ describe('home view model', () => {
   })
 
   it('never substitutes account updated_at for a missing exchange snapshot', () => {
-    expect(snapshotLabel(undefined)).toBe('не получен')
-    expect(snapshotLabel(null)).toBe('не получен')
+    // Nothing to show is nothing: the caller must not print "обновлено не получен".
+    expect(snapshotLabel(undefined)).toBeNull()
+    expect(snapshotLabel(null)).toBeNull()
+    expect(snapshotLabel('2026-09-10T11:05:00Z')).toMatch(/\d{2}:\d{2}/)
   })
 })
 

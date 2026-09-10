@@ -187,16 +187,38 @@ _SAFE_ERRORS = (
 
 _CONNECTIVITY_ASTER_CODES = frozenset({-1000, -1006, -1007})
 
-# Degraded reasons that describe the engine's own scheduled re-verification
-# rather than a fault. ``_establish_master_boundary`` fail-closes every few
-# sweeps, rebuilds the master against REST and proves convergence again within
-# seconds; its only real consequence is withheld entry admission, which the
-# trading gate (``allow_new_entries`` / ``_entry_admission_ready``) already
-# enforces on its own. Presenting that as DEGRADED made Dashboard, Positions and
-# Status flash "requires attention" several times a minute for work that is
-# routine and self-resolving. Every other reason — lost master stream, failed
-# sweeps, critical margin/liquidation recovery — stays fully user-visible.
-ROUTINE_MAINTENANCE_REASONS = frozenset({"periodic-snapshot", "master-dirty"})
+# Degraded reasons that describe the engine's own scheduled re-verification and
+# reconnect churn rather than a fault. ``_establish_master_boundary`` fail-closes
+# every few sweeps, rebuilds the master against REST and proves convergence again
+# within seconds; a master stream blip does the same while it re-listens. Their
+# only real consequence is withheld entry admission, which the trading gate
+# (``allow_new_entries`` / ``_entry_admission_ready``) already enforces on its
+# own. Presenting them as DEGRADED made Dashboard, Positions and Status flash
+# "requires attention" for work that is routine and self-resolving.
+ROUTINE_MAINTENANCE_REASONS = frozenset(
+    {
+        "periodic-snapshot",
+        "master-dirty",
+        "stream-connected",
+        "stream-disconnected",
+        "stream-reconnecting",
+        "stream-startup-timeout",
+        "master-changed-before-ready",
+        "master-boundary-not-quiescent",
+    }
+)
+# ``master-recovery:<reason>:<category>`` inherits its reason from whatever made
+# the projector dirty, so it is always self-healing by construction.
+ROUTINE_MAINTENANCE_PREFIXES = ("master-recovery:",)
+# A routine window that outlives this is no longer routine: the engine is stuck
+# in a fail-closed state and the user has to know, however inoffensive the
+# reason looks.
+ROUTINE_DEGRADED_GRACE_MS = 20_000
+
+
+def _is_routine_maintenance(reason: str) -> bool:
+    """True while the engine is only re-proving itself."""
+    return reason in ROUTINE_MAINTENANCE_REASONS or reason.startswith(ROUTINE_MAINTENANCE_PREFIXES)
 
 
 def _is_connectivity_error(exc: BaseException) -> bool:
@@ -1100,9 +1122,13 @@ class UserApplicationService:
         """System state as a user should read it.
 
         Identical to :meth:`_system_state` except that the engine's scheduled
-        re-verification (``ROUTINE_MAINTENANCE_REASONS``) is not presented as a
-        fault: it is fail-closed by design, resolves within seconds and leaves
-        the displayed account data authoritative. Trading safety is unaffected —
+        re-verification and reconnect churn (``ROUTINE_MAINTENANCE_REASONS``) is
+        not presented as a fault while it is still resolving. Those windows are
+        fail-closed by design, close within seconds and leave the displayed
+        account data authoritative, so reporting them is noise rather than
+        information. A routine window that outlives
+        ``ROUTINE_DEGRADED_GRACE_MS`` is a stall, not churn, and is reported like
+        any other degradation. Trading safety is unaffected either way —
         admission is gated by ``allow_new_entries`` and the engine's own
         admission flag, never by this presentation verdict.
         """
@@ -1110,8 +1136,10 @@ class UserApplicationService:
         if state is not SystemState.DEGRADED:
             return state
         try:
-            reason = await self._flag("degraded_reason")
-            if str(reason or "").strip().lower() not in ROUTINE_MAINTENANCE_REASONS:
+            reason = str(await self._flag("degraded_reason") or "").strip().lower()
+            if not _is_routine_maintenance(reason):
+                return state
+            if await self._degraded_episode_exceeded_grace():
                 return state
             # The boundary also lowers ``ready`` (it withholds entry admission).
             # That is the trading gate's business, not the user's, so the
@@ -1119,6 +1147,24 @@ class UserApplicationService:
             return await self._readiness_state(honour_not_ready=False)
         except Exception:  # noqa: BLE001 - presentation never fails a read
             return state
+
+    async def _degraded_episode_exceeded_grace(self) -> bool:
+        """Has this degraded episode lasted longer than routine churn can?
+
+        ``degraded_since`` is stamped by the runtime next to ``heartbeat_at`` and
+        both are compared against the same wall clock that writes them, not the
+        injectable snapshot clock.
+        """
+        since = await self._flag("degraded_since")
+        if not since:
+            # No transition stamp (older row, or a writer that predates it):
+            # treat the episode as new, which is the conservative silence.
+            return False
+        try:
+            started_ms = int(since)
+        except (TypeError, ValueError):
+            return False
+        return int(time.time() * 1000) - started_ms > ROUTINE_DEGRADED_GRACE_MS
 
     async def _ensure_testnet(self) -> None:
         check = self._testnet_check
@@ -1901,7 +1947,14 @@ class UserApplicationService:
                 state = StatusState.STALE
                 reason = StatusReason.PERMISSION_UNAVAILABLE
                 remediation = StatusRemediation.REFRESH
-            elif permissions_state is PermissionsState.STALE:
+            elif permissions_state is PermissionsState.STALE and signed_refresh_failed:
+                # A verification that was just attempted and failed is a real
+                # answer: say so. Merely *aged* evidence is not — the cached
+                # triple (read/perp/withdraw) is still the last proven truth, the
+                # row carries its age, and the screen re-verifies itself on open.
+                # Painting the whole status amber for it told a user with a
+                # healthy account that "data is stale" every time they looked,
+                # because the evidence TTL is one minute.
                 state = StatusState.STALE
                 reason = StatusReason.PERMISSION_STALE
                 remediation = StatusRemediation.REFRESH

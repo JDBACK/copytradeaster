@@ -1,7 +1,7 @@
 # Miniapp Guidelines
 
 Map of `miniapp/`: Vite 8 + React 19 + TypeScript follower SPA served by the bot
-process at `/miniapp/`. Talks to the backend only via 26 POST `/miniapp/api/*`
+process at `/miniapp/`. Talks to the backend only via 27 POST `/miniapp/api/*`
 (routes in `src/copytradeaster/miniapp/server.py`); all business logic lives in
 `UserApplicationService`, never here.
 
@@ -25,7 +25,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
   -> sessionDestination(session.ts) maps MiniAppSessionDTO -> destination
   -> onboarding onConnected or session->home opens one MiniAppResources owner per session generation; success reuses it, home mounts AppShell with it
   -> AppShell (navigation.ts RouteState tab + nested[] stack) shares that owner
-  -> screens/resources -> api.ts -> 26 POST /miniapp/api/* -> UserApplicationService
+  -> screens/resources -> api.ts -> 27 POST /miniapp/api/* -> UserApplicationService
 ```
 
 - Gate/Wizard/Recovery/Success render standalone (no bottom nav); only `home`
@@ -68,7 +68,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 
 | File | Purpose |
 |---|---|
-| `api.ts` | Typed POST client mirroring all 26 routes; initData headers (+ dev-only `X-Dev-User-Id`), 15s AbortController timeout covering headers + body, external-abort cleanup, safe `invalid_response`, `ApiError` |
+| `api.ts` | Typed POST client mirroring all 27 routes; initData headers (+ dev-only `X-Dev-User-Id`), 15s AbortController timeout covering headers + body, external-abort cleanup, safe `invalid_response`, `ApiError` |
 | `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks |
 | `historyResources.ts` / `historyResources.test.ts` | Session history cache and invalidation revision fence; regressions for late responses, coalesced follow-up and inactive reads |
 | `useHistory.ts` | External-store subscription for history list/feed/detail/events + bounded self-heal retry of failed slices |
@@ -103,7 +103,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `SystemStatusScreen.tsx` (+`systemStatus.ts`) | READ-ONLY status slice, seq-guarded refresh, transport-stale honesty | `status` |
 | `components/ui.tsx` | Shared `Brand/TrustRail/Sheet/Row/ErrorBox` (+ inline SVG icons) | — |
 | `components/RiskRuler.tsx` | Snap-strip control: native touch/trackpad inertia, mouse drag w/ pointer capture, gated wheel, interruptible settle animator, scrollend+fallback settle, rate-limited selection haptics, save freeze | — |
-| `components/LiveStatus.tsx` | Transport rail; renders nothing while healthy, so it only ever appears for an outage that needs the user | — |
+| `components/LiveStatus.tsx` | Transport rail; renders only for the `stale` verdict (channel silent past its deadline). Healthy, connecting and reconnecting states render nothing | — |
 | `components/PullToRefresh.tsx` | Shell-bound pull gesture over `.shell-content`: arms only at scroll top, claims the vertical drag from Telegram while armed, triggers one authoritative `resources.pullRefresh()` | — |
 | `riskRuler.ts` | Pure ruler decisions: wheel deltaMode normalization + `wheelIntent` gating, ease-out/duration, clamp, haptic rate limit | — |
 | `protectionWarning.ts` | Protection-state → Russian warning copy map | — |
@@ -132,9 +132,12 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 - **No manual refresh in the product**: routine re-reads (live invalidation, TTL,
   reconcile, batch refetch) are invisible — `snapshot.stale` is a cache-revision
   flag and must never be painted as staleness. Transport verdicts come only from
-  `useTransportStale` (failed request or live rail past its stale deadline), the
-  rail renders nothing while healthy, and a failed read retries itself with
-  bounded backoff. The single manual path is pull-down at the top of the shell.
+  `useTransportStale` (failed request or the live channel past its stale
+  deadline), the rail renders only a stale channel, and a failed read retries
+  itself with bounded backoff. Evidence that merely *ages* (Agent/Builder
+  verification) is the row's business, not an overall verdict: the Status screen
+  re-verifies once on open instead of asking the user. The single manual path is
+  pull-down at the top of the shell.
 - **Secret-safety**: masked addresses only; `describeError` maps codes, raw payloads never render; wallet private key never enters the app.
 - **Russian UI copy** (`ROOT_TAB_LABELS`, errors, info screens); inline SVG icons, no emoji; `:focus-visible`, semantic dialog roles; native BackButton/Haptics.
 - **Naming**: `*.test.ts(x)` next to source; `*View.ts` = pure VM; `*Behavior.test.tsx` = jsdom interaction.
@@ -146,7 +149,7 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 | `src/App.tsx` | Phase machine, session routing, dev banner |
 | `src/navigation.ts` | Tab + nested-stack state (no router dep) |
 | `src/session.ts` | Session-DTO → destination router |
-| `src/api.ts` | 26-method typed transport client |
+| `src/api.ts` | 27-method typed transport client |
 | `src/wallet.ts` | Injected + WalletConnect adapters, chain 56 |
 | `src/telegram.ts` | Sole Telegram boundary |
 | `src/types.ts` | Backend DTO mirrors |

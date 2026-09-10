@@ -1,0 +1,347 @@
+/** Real-Chromium acceptance for the Mini App (no npm dependencies).
+ *
+ * jsdom proves logic, not the shipped gesture, and screenshots cannot prove that
+ * a screen stopped moving. This drives headless Chrome over CDP against the
+ * running bot and measures both: a real dispatched touch pull (indicator phases,
+ * Telegram swipe handoff, the strong reads it triggers, the scrolled-away guard)
+ * and every DOM mutation on the visible surface, so "no user-visible jitter" is
+ * recorded rather than asserted.
+ *
+ * Gates: local and read-only. It talks to the running bot's Mini App API as the
+ * session user (reads plus one explicit refresh) and never sends trading commands
+ * or writes remote state.
+ *
+ * Needs a locally minted Telegram stub: a file that assigns `window.Telegram`
+ * with a *signed* initData (see the live-mode plan, §8 "browser audit"). It is a
+ * session credential — keep it out of git and out of logs. The page's own
+ * `telegram-web-app.js` is blocked, because outside a Telegram client it would
+ * overwrite the stub with an empty initData and silently audit the wrong state.
+ *
+ * Usage:
+ *   node scripts/audit_miniapp_browser.mjs smoke  --init <file>
+ *   node scripts/audit_miniapp_browser.mjs swipe  --init <file>
+ *   node scripts/audit_miniapp_browser.mjs series --init <file>
+ *   node scripts/audit_miniapp_browser.mjs nested --init <file>
+ *   node scripts/audit_miniapp_browser.mjs jitter --init <file> --seconds 190
+ *
+ * Options: --url (default http://127.0.0.1:8080/miniapp/), --port 9333,
+ * --chrome (default /Applications/Google Chrome.app/...; Chrome/Chromium only).
+ */
+
+import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
+
+function parseArgs(argv) {
+  const options = {
+    mode: argv[0] ?? 'smoke',
+    url: 'http://127.0.0.1:8080/miniapp/',
+    port: 9333,
+    seconds: 60,
+    chrome: process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    init: null,
+  }
+  for (let index = 1; index < argv.length; index += 1) {
+    const flag = argv[index]
+    const value = argv[index + 1]
+    if (flag === '--url') options.url = value
+    else if (flag === '--port') options.port = Number(value)
+    else if (flag === '--seconds') options.seconds = Number(value)
+    else if (flag === '--chrome') options.chrome = value
+    else if (flag === '--init') options.init = value
+  }
+  if (!options.init) throw new Error('--init <signed Telegram stub file> is required')
+  return options
+}
+
+const options = parseArgs(process.argv.slice(2))
+
+async function main() {
+  const chrome = spawn(
+    options.chrome,
+    [
+      '--headless=new',
+      `--remote-debugging-port=${options.port}`,
+      // Unique per run: a SIGKILLed previous run leaves a profile lock behind,
+      // and Chrome then exits instantly (leaving this script awaiting a browser
+      // that is not there).
+      `--user-data-dir=/tmp/chrome-miniapp-audit-${options.port}-${process.pid}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-gpu',
+      'about:blank',
+    ],
+    { stdio: 'ignore' },
+  )
+
+  const endpoint = await browserEndpoint(options.port)
+  const socket = new WebSocket(endpoint)
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, { once: true })
+    socket.addEventListener('error', reject, { once: true })
+  })
+
+  let nextId = 1
+  const pending = new Map()
+  const events = []
+  socket.addEventListener('message', (message) => {
+    const payload = JSON.parse(message.data)
+    if (payload.id && pending.has(payload.id)) {
+      const { resolve, reject } = pending.get(payload.id)
+      pending.delete(payload.id)
+      if (payload.error) reject(new Error(payload.error.message))
+      else resolve(payload.result)
+      return
+    }
+    if (payload.method) events.push(payload)
+  })
+
+  const send = (method, params = {}, sessionId) => {
+    const id = nextId++
+    const message = { id, method, params }
+    if (sessionId) message.sessionId = sessionId
+    socket.send(JSON.stringify(message))
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
+  }
+
+  const waitEvent = async (method, sessionId, timeoutMs = 20000) => {
+    const started = Date.now()
+    for (;;) {
+      const found = events.find((item) => item.method === method && (!sessionId || item.sessionId === sessionId))
+      if (found) return found
+      if (Date.now() - started > timeoutMs) throw new Error(`timeout waiting for ${method}`)
+      await delay(50)
+    }
+  }
+
+  const { targetId } = await send('Target.createTarget', { url: 'about:blank' })
+  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
+  await send('Page.enable', {}, sessionId)
+  await send('Runtime.enable', {}, sessionId)
+  await send('Network.enable', {}, sessionId)
+  await send('Network.setBlockedURLs', { urls: ['https://telegram.org/*'] }, sessionId)
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 390, height: 780, deviceScaleFactor: 2, mobile: true }, sessionId)
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 }, sessionId)
+  await send('Page.addScriptToEvaluateOnNewDocument',
+    { source: readFileSync(options.init, 'utf8') }, sessionId)
+
+  const evaluate = async (expression) => {
+    const result = await send('Runtime.evaluate',
+      { expression, returnByValue: true, awaitPromise: true }, sessionId)
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails).slice(0, 400))
+    return result.result.value
+  }
+  const touch = (type, points) => send('Input.dispatchTouchEvent', { type, touchPoints: points }, sessionId)
+  const posts = () => events
+    .filter((item) => item.method === 'Network.requestWillBeSent'
+      && item.params.request.url.includes('/miniapp/api/'))
+    .map((item) => `${item.params.request.method} ${item.params.request.url.split('/miniapp/api/')[1]} ${item.params.request.postData || ''}`)
+  const pull = async (x, fromY, steps) => {
+    await touch('touchStart', [{ x, y: fromY }])
+    for (const step of steps) {
+      await touch('touchMove', [{ x, y: fromY + step }])
+      await delay(60)
+    }
+  }
+
+  await send('Page.navigate', { url: options.url }, sessionId)
+  await waitEvent('Page.loadEventFired', sessionId)
+  await delay(4000)
+  const shellReady = await evaluate(`new Promise((done) => { const t = setInterval(() => { if (document.querySelector('.shell-content')) { clearInterval(t); done(true) } }, 200); setTimeout(() => { clearInterval(t); done(false) }, 20000) })`)
+  if (!shellReady) throw new Error('Mini App shell never mounted (session rejected?)')
+
+  if (options.mode === 'smoke') {
+    const text = await evaluate('document.body.innerText')
+    const state = await evaluate(`JSON.stringify({
+      initLen: (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData || '').length,
+      railVisible: !!document.querySelector('.live-status'),
+      demands: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+      updateButtons: [...document.querySelectorAll('button')].map((b) => b.innerText.trim()).filter((t) => /обнов|повтор/i.test(t)),
+    })`)
+    console.log(JSON.stringify({ text: text.slice(0, 700), ...JSON.parse(state), posts: posts().slice(-8) }, null, 1))
+  }
+
+  if (options.mode === 'swipe') {
+    const box = JSON.parse(await evaluate(`(() => { const r = document.querySelector('.shell-content').getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + 6 }) })()`))
+    const before = posts().length
+    await pull(box.x, box.y, [12, 26, 44, 62, 80, 96])
+    const mid = JSON.parse(await evaluate(`JSON.stringify({
+      phase: document.querySelector('.pull-refresh').dataset.phase,
+      distance: document.querySelector('.pull-refresh').style.getPropertyValue('--pull-distance'),
+      label: document.querySelector('.pull-refresh').innerText.trim(),
+      swipes: window.__audit.swipes.map((s) => s[0]),
+    })`))
+    await touch('touchEnd', [])
+    await delay(300)
+    const released = JSON.parse(await evaluate(`JSON.stringify({
+      phase: document.querySelector('.pull-refresh').dataset.phase,
+      label: document.querySelector('.pull-refresh').innerText.trim(),
+      swipes: window.__audit.swipes.map((s) => s[0]),
+      haptics: window.__audit.haptics.map((h) => h[0] + ':' + h[1]),
+    })`))
+    await delay(4000)
+    const settled = JSON.parse(await evaluate(`JSON.stringify({ phase: document.querySelector('.pull-refresh').dataset.phase })`))
+    console.log(JSON.stringify({ mid, released, settled, requests: posts().slice(before) }, null, 1))
+
+    // Pulling while reading further down must stay a scroll. The viewport is
+    // shrunk first so the surface genuinely scrolls instead of "passing" the
+    // guard because it could not move at all.
+    await send('Emulation.setDeviceMetricsOverride',
+      { width: 390, height: 360, deviceScaleFactor: 2, mobile: true }, sessionId)
+    await delay(400)
+    const scrolled = JSON.parse(await evaluate(`(() => { const el = document.querySelector('.shell-content'); el.scrollTop = 200; return JSON.stringify({ scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }) })()`))
+    const scrolledBefore = posts().length
+    await pull(box.x, 20, [20, 45, 70])
+    const duringScroll = JSON.parse(await evaluate(`JSON.stringify({ phase: document.querySelector('.pull-refresh').dataset.phase, scrollTop: document.querySelector('.shell-content').scrollTop })`))
+    await touch('touchEnd', [])
+    await delay(2500)
+    console.log(JSON.stringify({
+      scrolledContext: scrolled,
+      duringScroll,
+      requestsWhileScrolled: posts().slice(scrolledBefore).length,
+      swipes: JSON.parse(await evaluate(`JSON.stringify(window.__audit.swipes.map((s) => s[0]))`)),
+    }, null, 1))
+  }
+
+  if (options.mode === 'series') {
+    const labels = ['Главная', 'Позиции', 'Активность', 'Настройки']
+    const report = {}
+    for (const [index, label] of labels.entries()) {
+      await evaluate(`(() => { [...document.querySelectorAll('.nav-item')][${index}].click(); return true })()`)
+      await delay(2500)
+      report[label] = JSON.parse(await evaluate(`JSON.stringify({
+        text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 700),
+        noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+        rail: (document.querySelector('.live-status') || {}).innerText || null,
+      })`))
+    }
+    console.log(JSON.stringify(report, null, 1))
+  }
+
+  if (options.mode === 'nested') {
+    // Every nested surface a follower can open, reached the way a user reaches
+    // it. Re-clicking a root tab is the only way back without the Telegram
+    // BackButton, and it resets the nested stack.
+    const report = {}
+    const openHome = async () => {
+      await evaluate("(() => { [...document.querySelectorAll('.nav-item')][0].click(); return true })()")
+      await delay(1200)
+    }
+    const capture = async (label, clickExpression) => {
+      await evaluate(clickExpression)
+      await delay(2600)
+      report[label] = JSON.parse(await evaluate(`JSON.stringify({
+        heading: (document.querySelector('.screen h1') || {}).innerText || null,
+        text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 900),
+        noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+        buttons: [...document.querySelectorAll('button')].map((b) => b.innerText.trim()).filter(Boolean).slice(0, 14),
+      })`))
+    }
+    await openHome()
+    await capture('Статус системы', "(() => { document.querySelector('.summary-status').click(); return true })()")
+    await openHome()
+    await capture('Риск на Stop', "(() => { [...document.querySelectorAll('.summary-row')].find((r) => /Риск на сделку/.test(r.innerText)).click(); return true })()")
+    await openHome()
+    await capture('Account Builder', "(() => { document.querySelector('.wallet-chip').click(); return true })()")
+    await openHome()
+    await evaluate("(() => { [...document.querySelectorAll('.nav-item')][3].click(); return true })()")
+    await delay(1400)
+    await evaluate("(() => { [...document.querySelectorAll('.row, button')].find((r) => /Уведомления в Telegram/.test(r.innerText)).click(); return true })()")
+    await delay(2600)
+    report['Экран уведомлений'] = JSON.parse(await evaluate(`JSON.stringify({
+      text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 700),
+      noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+    })`))
+    await openHome()
+    await evaluate("(() => { [...document.querySelectorAll('.nav-item')][1].click(); return true })()")
+    await delay(2000)
+    await evaluate("(() => { [...document.querySelectorAll('[role=tab]')].find((b) => /Закрытые/.test(b.innerText)).click(); return true })()")
+    await delay(2600)
+    report['Закрытые сделки'] = JSON.parse(await evaluate(`JSON.stringify({
+      text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 900),
+      noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+    })`))
+    await openHome()
+    for (const [label, needle] of [['Безопасность', 'Безопасность'], ['Помощь', 'Как работает копирование']]) {
+      await evaluate("(() => { [...document.querySelectorAll('.nav-item')][3].click(); return true })()")
+      await delay(1400)
+      await evaluate(`(() => { [...document.querySelectorAll('.row, button')].find((r) => r.innerText.includes(${JSON.stringify(needle)})).click(); return true })()`)
+      await delay(2200)
+      report[label] = JSON.parse(await evaluate(`JSON.stringify({
+        text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 500),
+        noise: (document.body.innerText.match(/Обновить|обновите|требует проверки|Нет связи|устарел/gi) || []),
+      })`))
+    }
+    console.log(JSON.stringify(report, null, 1))
+  }
+
+  if (options.mode === 'jitter') {
+    await evaluate(`(() => {
+      window.__mutations = [];
+      const describe = (node) => {
+        const el = node.nodeType === 3 ? node.parentElement : node;
+        if (!el) return null;
+        return (el.closest('.live-status, .summary-status, .freshness, .position-warning, .stale-note, .info-box, .error-box, .pull-refresh') || el).className || el.tagName;
+      };
+      new MutationObserver((records) => {
+        for (const record of records) {
+          const at = Date.now();
+          if (record.type === 'characterData') {
+            window.__mutations.push({ at, kind: 'text', where: describe(record.target), value: String(record.target.data).slice(0, 60) });
+          } else if (record.type === 'childList') {
+            const added = [...record.addedNodes].map((n) => (n.textContent || '').trim().slice(0, 60)).filter(Boolean);
+            const removed = [...record.removedNodes].map((n) => (n.textContent || '').trim().slice(0, 60)).filter(Boolean);
+            if (added.length || removed.length) window.__mutations.push({ at, kind: 'nodes', where: describe(record.target), added, removed });
+          } else if (record.type === 'attributes') {
+            window.__mutations.push({ at, kind: 'attr', where: describe(record.target), name: record.attributeName, value: String(record.target.getAttribute(record.attributeName)).slice(0, 60) });
+          }
+        }
+      }).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'data-phase', 'style'] });
+      return true;
+    })()`)
+    console.log(`recording ${options.seconds}s of DOM mutations on the visible surface...`)
+    await delay(options.seconds * 1000)
+    const log = JSON.parse(await evaluate('JSON.stringify(window.__mutations)'))
+    const warnings = log.filter((item) =>
+      JSON.stringify(item).match(/обнов|требует проверки|Нет связи|устарел|Восстанавлива|Подключаем/i))
+    console.log(JSON.stringify({
+      total: log.length,
+      userVisibleWarnings: warnings,
+      kinds: log.reduce((acc, item) => ({ ...acc, [item.kind]: (acc[item.kind] ?? 0) + 1 }), {}),
+      sample: log.slice(0, 25),
+    }, null, 1))
+  }
+
+  socket.close()
+  chrome.kill('SIGKILL')
+}
+
+async function browserEndpoint(port) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`)
+      if (response.ok) return (await response.json()).webSocketDebuggerUrl
+    } catch {
+      /* not up yet */
+    }
+    await delay(250)
+  }
+  throw new Error('Chrome did not expose a debugging endpoint')
+}
+
+const budgetMs = (options.mode === 'jitter' ? options.seconds * 1000 : 0) + 120_000
+let watchdog
+try {
+  await Promise.race([
+    main(),
+    new Promise((_, reject) => {
+      watchdog = setTimeout(
+        () => reject(new Error(`audit did not finish within ${budgetMs} ms`)),
+        budgetMs,
+      )
+    }),
+  ])
+} finally {
+  clearTimeout(watchdog)
+}

@@ -401,9 +401,7 @@ async def test_successful_master_boundary_republishes_system_state_after_degrade
     app.projector = ProjectorDouble()
     app.reconciler = ReconcilerDouble()
     app.settings = SettingsDouble()
-    app.follower_registry = FollowerRegistry(
-        [FollowerRuntime("copyc1", object(), identity=None)]
-    )
+    app.follower_registry = FollowerRegistry([FollowerRuntime("copyc1", object(), identity=None)])
     app.follower_snapshots = FollowerSnapshotStore()
     app.follower_snapshots.publish(
         AccountState(
@@ -465,6 +463,7 @@ async def test_successful_master_boundary_republishes_system_state_after_degrade
             original.captured_at,
         )
     ]
+
 
 @pytest.mark.asyncio
 async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):

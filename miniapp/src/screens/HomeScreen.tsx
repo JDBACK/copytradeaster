@@ -308,7 +308,7 @@ export function HomeScreen({
         <button type="button" className={`summary-pnl num pnl-${pnl.tone}`} onClick={() => onTab?.('positions')}>
           {pnl.text}
         </button>
-        <p className="freshness">По маркировочной цене · обновлено {snapshotLabel(overview?.as_of)}</p>
+        <p className="freshness">По маркировочной цене{snapshotLabel(overview?.as_of) ? ` · обновлено ${snapshotLabel(overview?.as_of)}` : ''}</p>
         <button type="button" className="summary-row" onClick={() => onTab?.('positions')}><span>Открытые позиции</span><strong className="num">{overview?.open_count ?? '—'}</strong></button>
         <div className="summary-row"><span>Стоп подтверждён</span><strong>{`${overview?.protected_count ?? '—'} из ${overview?.open_count ?? '—'}`}</strong></div>
         <div className="summary-row"><span>Доступно для торговли</span><strong className="num">{formatUsdt(overview?.available_usdt)}</strong></div>

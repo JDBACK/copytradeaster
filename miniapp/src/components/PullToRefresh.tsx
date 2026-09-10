@@ -35,6 +35,8 @@ export function PullToRefresh({
     if (!element) return
     const tracker = createPullTracker()
     let busy = false
+    // Telegram owns the vertical drag unless this gesture actually took it.
+    let swipesHeld = false
     let settle: ReturnType<typeof setTimeout> | null = null
 
     const begin = (x: number, y: number) => {
@@ -44,7 +46,16 @@ export function PullToRefresh({
       // Telegram drags the whole mini app sheet down with the same gesture.
       // While the user is at the top of the content that gesture is ours; it is
       // handed straight back on release (Bot API 7.7+; older clients ignore it).
-      if (atTop) setVerticalSwipes(false)
+      if (atTop) {
+        swipesHeld = true
+        setVerticalSwipes(false)
+      }
+    }
+
+    const releaseSwipes = () => {
+      if (!swipesHeld) return
+      swipesHeld = false
+      setVerticalSwipes(true)
     }
 
     const move = (x: number, y: number, claim: (() => void) | null) => {
@@ -55,7 +66,7 @@ export function PullToRefresh({
     }
 
     const finish = (cancelled: boolean) => {
-      setVerticalSwipes(true)
+      releaseSwipes()
       if (busy) return
       const { state: next, refresh: trigger } = tracker.release()
       if (cancelled || !trigger) {
@@ -122,7 +133,7 @@ export function PullToRefresh({
       element.removeEventListener('mousedown', mouseDown)
       detachMouse()
       if (settle) clearTimeout(settle)
-      setVerticalSwipes(true)
+      releaseSwipes()
     }
   }, [scroller])
 

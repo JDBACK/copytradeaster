@@ -776,7 +776,7 @@ reconcile()
 - Этап 1 — backend/testnet: `domain aster master risk trading storage credentials cli`; master + testnet followers без Telegram.
 - Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; `marginType` этап не меняет.
 - Этап 3 — Aster Code / Builder: + `onboarding/builder`, `history`, `miniapp`
-  (aiohttp-транспорт под `/miniapp/`: 26 POST `/miniapp/api/*` + собранный
+  (aiohttp-транспорт под `/miniapp/`: 27 POST `/miniapp/api/*` + собранный
   Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow
   SessionGate/BuilderWizard/Recovery/Success и account-owned trade history).
   Builder metadata передаётся в Aster requests вместе с ордерами;
@@ -871,18 +871,25 @@ Revision counter живёт в одном процессе, поэтому ка�
 `hello` штампуются per-process `epoch`: после рестарта backend клиент видит смену
 epoch и пере-baseline'ит watermark с полной reconciliation вместо того, чтобы
 отбросить более низкие revision как out-of-order и залипнуть в `stale`.
-При разрыве UI не очищает данные. Транспортные состояния сообщаются один раз, в
-rail сверху, и rail существует только для них: пока канал здоров, там нет ни
-`LIVE`, ни `connecting`, а blip короче grace-окна (2,5 s) не виден вообще.
+При разрыве UI не очищает данные. Rail сверху существует ровно для одного
+случая — канал молчит дольше своего deadline и данные на экране перестали
+обновляться; тогда показывается `Нет связи · N сек назад`. Пока канал здоров,
+rail не рендерится (`LIVE`, `connecting` и `Восстанавливаем связь…` — это работа
+транспорта, а не информация для пользователя; короткое переподключение чинится в
+фоне и не видно вообще).
 Ручного обновления в продукте не осталось ни одной кнопкой: routine re-read (live
 invalidation, TTL, очередной reconcile) никогда не рисуется как «данные
 устарели», упавшее чтение перечитывается само с расширяющимся backoff, а
 единственный ручной путь — pull-to-refresh вниз с верха скролла, который делает
 сильное чтение и сразу возвращает вертикальный жест Telegram. Служебные
 fail-closed окна движка (periodic master boundary) пользователю не показываются
-как деградация: presentation-verdict отдаёт их как READY, тогда как admission
-остаётся закрыт собственным рычагом. Explicit permission recheck Agent/Builder
-остаётся отдельным security use case.
+как деградация: presentation-verdict отдаёт их как READY, пока окно короче
+`ROUTINE_DEGRADED_GRACE_MS` (затянувшееся окно снова видно), тогда как admission
+остаётся закрыт собственным рычагом. Давность доказательств (`Разрешения`)
+считается возрастом строки, а не отказом: общий вердикт падает в STALE только
+когда попытка проверки реально сорвалась. Explicit permission recheck
+Agent/Builder остаётся отдельным security use case; экран Статуса один раз при
+открытии перепроверяет права сам.
 
 L4 — один shared presentation-стрим котировок на процесс. На Aster **testnet**
 кластер mark-price поток молчит и через raw path, и через SUBSCRIBE-ack (кадров

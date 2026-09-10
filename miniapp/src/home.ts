@@ -61,8 +61,13 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
   }
 }
 
-export function snapshotLabel(capturedAt: string | null | undefined): string {
-  return capturedAt ? formatTime(capturedAt) : 'не получен'
+/** Timestamp of the last exchange snapshot, or null while there is none yet.
+ *
+ * Returning text here used to produce "обновлено не получен" on a freshly
+ * connected account, which reads as a defect in the app's own copy. Callers
+ * decide what to say when there is nothing to show. */
+export function snapshotLabel(capturedAt: string | null | undefined): string | null {
+  return capturedAt ? formatTime(capturedAt) : null
 }
 
 export interface TrustItem {

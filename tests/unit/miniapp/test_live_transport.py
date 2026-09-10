@@ -142,6 +142,7 @@ async def test_follower_live_burst_coalesces_to_one_post_boundary_rest_refresh()
     from types import SimpleNamespace
 
     from copytradeaster.aster.user_stream import StreamEvent
+
     class Registry:
         def __init__(self) -> None:
             self.runtime = None

@@ -11,7 +11,7 @@
  * the existing ``closeMiniApp()``.
  */
 
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import type { AuthContext } from '../api'
 import { Brand, ErrorBox, Row } from '../components/ui'
 import { describeError } from '../errors'
@@ -67,6 +67,19 @@ export function SystemStatusScreen({
   const dto = resource.snapshot.data
   const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
   const transportStale = dto !== null && transportUnhealthy
+  // Verification evidence ages out on its own (the backend TTL is a minute), so
+  // opening this screen re-proves it once instead of telling the user to ask
+  // again. Bounded by the DTO itself: as soon as permissions read valid (or the
+  // attempt failed and is described by the row) the effect stops re-firing.
+  const permissionsUnproven = dto !== null && dto.permissions_state !== 'valid'
+  const permissionsAutoChecked = useRef(false)
+  useEffect(() => {
+    if (!permissionsUnproven || permissionsAutoChecked.current) return
+    // Once per open: evidence that ages out is re-proven by the app, not by a
+    // button, and a failed attempt must not become a retry loop.
+    permissionsAutoChecked.current = true
+    void resource.refresh('strong').catch(() => {})
+  }, [permissionsUnproven, resource])
   const load: LoadState = dto
     ? { kind: 'ready', dto, transportStale }
     : resource.snapshot.error

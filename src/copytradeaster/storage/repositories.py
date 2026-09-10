@@ -386,6 +386,8 @@ class SettingsRepo:
             (key, value),
         )
         if key == "degraded":
+            # A repeated re-arm inside one episode must not restart the clock.
+            previous = await self.get_flag("degraded_active")
             await self.db.execute_write(
                 "INSERT INTO app_state(key, value) VALUES ('degraded_active', 'true')"
                 " ON CONFLICT(key) DO UPDATE SET value='true'"
@@ -395,6 +397,15 @@ class SettingsRepo:
                 " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (value,),
             )
+            if previous != "true":
+                # Stamp the transition: presentation needs the age of the
+                # current episode to tell the engine's own fail-closed churn
+                # (seconds, self-healing) from a real stall.
+                await self.db.execute_write(
+                    "INSERT INTO app_state(key, value) VALUES ('degraded_since', ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(int(time.time() * 1000)),),
+                )
 
     async def start_runtime(self, runtime_id: str, now_ms: int) -> None:
         await self.set_flag("ready", "false")
@@ -403,6 +414,7 @@ class SettingsRepo:
         await self.set_flag("heartbeat_at", str(now_ms))
         await self.set_flag("degraded_active", "false")
         await self.set_flag("degraded_reason", "")
+        await self.set_flag("degraded_since", "")
 
     async def heartbeat(self, runtime_id: str, now_ms: int) -> bool:
         current = await self.get_flag("runtime_id")
@@ -414,6 +426,7 @@ class SettingsRepo:
     async def clear_degraded(self) -> None:
         await self.set_flag("degraded_active", "false")
         await self.set_flag("degraded_reason", "")
+        await self.set_flag("degraded_since", "")
 
 
 class MasterEventRepo:
