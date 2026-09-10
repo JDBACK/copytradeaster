@@ -5,6 +5,11 @@
 `codex/stage-3-mini-app-part2` смержена ранее.
 
 > **Примечание (2026-09-10):** вердикт ниже покрывает дерево `f7df60b`; коммиты `58c10f7` / `ffa2848` (поведенческие, `scripts/dev-up.sh`) приземлились позже — повторная квалификация pending; покрытие этих коммитов не утверждается.
+> **Текущая ветка (2026-09-10):** на `codex/miniapp-live-updates` полный offline gate прогонялся уже
+> на актуальном дереве (включая `58c10f7` / `ffa2848`): backend **1549 passed / 2 skipped / 87 deselected**,
+> frontend **34 файла / 400 passed**, ruff/format, doc links/budgets/facts и `git diff --check` чисто;
+> браузерная приёмка Mini App — top-блок ниже и live-план §8. Это не переоценка вердикта по слиянию в
+> `main`: он остаётся привязанным к своему дереву.
 
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
@@ -1933,7 +1938,7 @@ recipient/ownership повторно проверяются при commit, curso
 Тестовые прогоны отложены владельцем; ruff check/format изменённых файлов
 проходят. Дополнительные сценарии внесены в S3 testing handoff; G3 OPEN.
 
-## Mini App Live Mode checkpoint — 2026-09-10
+## Mini App Live Mode checkpoint — 2026-09-10 (снимок момента)
 
 В ветке `codex/miniapp-live-updates` реализованы L1–L6 live presentation mode:
 process-local follower snapshots, authenticated single-use ticket/WebSocket,
@@ -1959,7 +1964,7 @@ REST `premiumIndex` fallback (на testnet-кластере mark-стримы п
 неразмеченного серверного сбоя как retryable `service_unavailable` вместо утечки
 имени класса исключения в public code.
 
-Текущий frontend full gate: **30 files / 367 passed**, Oxlint **0 warnings /
+Frontend full gate на этом срезе: **30 files / 367 passed**, Oxlint **0 warnings /
 0 errors**, `tsc -b` и Vite production build PASS. Backend full offline gate
 после финальных protocol-hardening изменений: **1540 passed / 2 skipped /
 87 deselected**. `ruff check`/format для изменённого live Python surface и
