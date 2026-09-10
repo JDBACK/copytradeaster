@@ -1,7 +1,7 @@
 /** Minimal Home (эталон 02-home-active, part-1 scope): состояние, риск,
  * открытые позиции, freshness и одна primary action — pause/resume. */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { HOME_REVALIDATE_MS } from '../revalidate'
 import { api, ApiError, type AuthContext } from '../api'
 import { describeError } from '../errors'
@@ -17,7 +17,7 @@ import type { ConfirmationDTO, DashboardDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
 import type { NestedScreen, RootTab } from '../navigation'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 
 // Re-exported for existing importers (behavior tests); the value lives in
 // the shared warm-activation primitive and doubles as the 30 s client floor
@@ -77,12 +77,10 @@ export function HomeScreen({
     foregroundSignal,
   })
   const resourceDashboard = dashboardResource.snapshot.data
-  const transportStale =
-    resourceDashboard !== null &&
-    (dashboardResource.snapshot.stale || dashboardResource.snapshot.error !== null)
+  const transportUnhealthy = useTransportStale(resources, dashboardResource.snapshot.error)
+  const transportStale = resourceDashboard !== null && transportUnhealthy
   const ownerMutationState = resources.mutationState('pause-resume')
   const ownerActing = ownerMutationState !== null
-  const ownerActive = ownerMutationState === 'active'
   const ownerUnknownSince = resources.mutationUnknownSinceRevision('pause-resume')
   const load: LoadState = resourceDashboard
     ? {
@@ -112,23 +110,6 @@ export function HomeScreen({
       onMutated?.()
     }
   }, [dashboardResource.snapshot, onMutated, ownerMutationState, ownerUnknownSince, resources])
-
-  const refresh = useCallback(
-    async (isUserTriggered = false) => {
-      if (isUserTriggered) setActing(true)
-      setError(null)
-      try {
-        await dashboardResource.refresh('strong')
-      } catch (err) {
-        if (!(err instanceof ApiError && err.code === 'aborted')) {
-          setError(err instanceof ApiError ? err.code : 'network_error')
-        }
-      } finally {
-        if (isUserTriggered) setActing(false)
-      }
-    },
-    [dashboardResource],
-  )
 
   useEffect(() => {
     if (resourceDashboard?.copy_state === 'empty') onNotConnected()
@@ -286,11 +267,8 @@ export function HomeScreen({
       <div className="screen">
         <Brand right={<span className="badge-testnet">Aster testnet</span>} />
         <ErrorBox title={copy.title} hint={copy.hint} />
-        <div className="btn-stack">
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh()}>
-            Обновить
-          </button>
-        </div>
+        {/* No retry button: the read heals on its own (bounded backoff) and the
+            pull-down at the top of the shell forces it deliberately. */}
       </div>
     )
   }
@@ -322,7 +300,7 @@ export function HomeScreen({
 
       <button type="button" className="summary-status" onClick={() => onOpen?.({ kind: 'system-status' })}>
         <span className={`dot ${stale ? 'warning' : view.tone === 'active' ? 'success' : 'warning'}`} aria-hidden />
-        <span>{transportStale ? 'Данные требуют проверки' : view.title}</span>
+        <span>{view.title}</span>
         <span className="summary-chevron" aria-hidden>›</span>
       </button>
       <section className="panel account-summary" aria-label="Сводка аккаунта">
@@ -330,9 +308,9 @@ export function HomeScreen({
         <button type="button" className={`summary-pnl num pnl-${pnl.tone}`} onClick={() => onTab?.('positions')}>
           {pnl.text}
         </button>
-        <p className="freshness">По маркировочной цене · {stale ? 'данные требуют обновления' : 'обновлено'} {snapshotLabel(overview?.as_of)}</p>
+        <p className="freshness">По маркировочной цене · обновлено {snapshotLabel(overview?.as_of)}</p>
         <button type="button" className="summary-row" onClick={() => onTab?.('positions')}><span>Открытые позиции</span><strong className="num">{overview?.open_count ?? '—'}</strong></button>
-        <div className="summary-row"><span>Стоп подтверждён</span><strong>{stale ? 'Не обновлён' : `${overview?.protected_count ?? '—'} из ${overview?.open_count ?? '—'}`}</strong></div>
+        <div className="summary-row"><span>Стоп подтверждён</span><strong>{`${overview?.protected_count ?? '—'} из ${overview?.open_count ?? '—'}`}</strong></div>
         <div className="summary-row"><span>Доступно для торговли</span><strong className="num">{formatUsdt(overview?.available_usdt)}</strong></div>
         <button type="button" className="summary-row" onClick={() => onOpen?.({ kind: 'risk' })}><span>Риск на сделку</span><strong className="num">{formatPercent(dashboard.risk_percent)}</strong></button>
       </section>
@@ -359,16 +337,9 @@ export function HomeScreen({
               </>
             )}
           </button>
-          {ownerMutationState === 'unknown' && (
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => void refresh(true)}
-              disabled={acting || ownerActive}
-            >
-              Обновить данные
-            </button>
-          )}
+          {/* An unknown pause/resume outcome resolves itself: the resolution
+              effect above waits for the next authoritative publication, and a
+              failed read retries on its own. Nothing to press. */}
           <p className="footer-note">Пауза останавливает только новые входы — защита продолжит работать.</p>
         </div>
       )}
@@ -391,29 +362,6 @@ export function HomeScreen({
                 Возобновить
               </>
             )}
-          </button>
-          {(transportStale || ownerMutationState === 'unknown') && (
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => void refresh(true)}
-              disabled={acting || ownerActive}
-            >
-              Проверить состояние
-            </button>
-          )}
-        </div>
-      )}
-
-      {view.actionLabel === null && (transportStale || ownerMutationState === 'unknown') && (
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={acting || ownerActive}
-            onClick={() => void refresh(true)}
-          >
-            {acting ? 'Проверяем…' : 'Проверить состояние'}
           </button>
         </div>
       )}

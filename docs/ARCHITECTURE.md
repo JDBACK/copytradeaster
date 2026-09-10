@@ -871,10 +871,18 @@ Revision counter живёт в одном процессе, поэтому ка�
 `hello` штампуются per-process `epoch`: после рестарта backend клиент видит смену
 epoch и пере-baseline'ит watermark с полной reconciliation вместо того, чтобы
 отбросить более низкие revision как out-of-order и залипнуть в `stale`.
-При разрыве UI не очищает данные; после истечения freshness budget показывает
-`Данные устарели`. Постоянной общей кнопки refresh в healthy UI нет; manual retry
-появляется только как контекстное восстановление после ошибки. Explicit
-permission recheck Agent/Builder остаётся отдельным security use case.
+При разрыве UI не очищает данные. Транспортные состояния сообщаются один раз, в
+rail сверху, и rail существует только для них: пока канал здоров, там нет ни
+`LIVE`, ни `connecting`, а blip короче grace-окна (2,5 s) не виден вообще.
+Ручного обновления в продукте не осталось ни одной кнопкой: routine re-read (live
+invalidation, TTL, очередной reconcile) никогда не рисуется как «данные
+устарели», упавшее чтение перечитывается само с расширяющимся backoff, а
+единственный ручной путь — pull-to-refresh вниз с верха скролла, который делает
+сильное чтение и сразу возвращает вертикальный жест Telegram. Служебные
+fail-closed окна движка (periodic master boundary) пользователю не показываются
+как деградация: presentation-verdict отдаёт их как READY, тогда как admission
+остаётся закрыт собственным рычагом. Explicit permission recheck Agent/Builder
+остаётся отдельным security use case.
 
 L4 — один shared presentation-стрим котировок на процесс. На Aster **testnet**
 кластер mark-price поток молчит и через raw path, и через SUBSCRIBE-ack (кадров

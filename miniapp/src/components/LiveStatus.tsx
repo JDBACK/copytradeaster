@@ -22,15 +22,18 @@ export function LiveStatus({ resources }: { resources: MiniAppResources }) {
   }, [snapshot.health])
 
   const health: LiveHealth = snapshot.health
+  // A healthy transport is not news. This rail exists for the one case a user
+  // has to act on: the stream is down long enough that automatic recovery has
+  // already failed, so the numbers on screen stopped moving. "LIVE",
+  // "connecting" and every transient blip stay out of the way.
+  if (health !== 'reconnecting' && health !== 'stale') return null
   return (
     <div className={`live-status live-status-${health}`} role="status" aria-live="polite">
       <span className="live-status-dot" aria-hidden />
       <span>{liveStatusLabel(snapshot, now || snapshot.lastUpdatedAt)}</span>
-      {health === 'stale' && (
-        <button type="button" className="live-status-retry" onClick={() => resources.retryLive()}>
-          Повторить
-        </button>
-      )}
+      {/* No retry button: reconnects keep retrying by themselves, and the whole
+          surface refreshes on a pull-down, so the user is never asked to press
+          anything to make data current. */}
     </div>
   )
 }

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -102,7 +103,8 @@ async def _place_protective(
     tick: Decimal,
 ) -> None:
     price_q = price.quantize(tick)
-    coid = f"manual-{kind}-{int(price_q)}"
+    # Same -4015 hazard as the entry: a repeated protective id is rejected.
+    coid = f"manual-{kind}-{int(price_q)}-{int(time.time()) % 100000}"
     await client.place_order(
         "main",
         PlaceOrderRequest(
@@ -143,7 +145,10 @@ async def cmd_open(
                 quantity=qty,
                 new_order_resp_type="RESULT",
                 position_side=ps,
-                new_client_order_id=f"manual-open-{int(price)}",
+                # Aster rejects a clientOrderId it has already seen with
+                # -4015 while the mark price sits still between runs, so the
+                # id must carry a varying suffix rather than the price alone.
+                new_client_order_id=f"manual-open-{int(price)}-{int(time.time()) % 100000}",
             ),
         )
         if stop_pct is not None:

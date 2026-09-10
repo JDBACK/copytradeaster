@@ -135,6 +135,7 @@ describe('statusTrust', () => {
   })
 
   it('exports the transport-stale warning copy', () => {
-    expect(TRANSPORT_STALE_WARNING).toContain('Не удалось обновить')
+    expect(TRANSPORT_STALE_WARNING).toContain('Связь с сервером потеряна')
+    expect(TRANSPORT_STALE_WARNING).not.toMatch(/обнови/i)
   })
 })

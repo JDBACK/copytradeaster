@@ -16,6 +16,6 @@ export function liveStatusLabel(snapshot: LiveSnapshot, now: number): string {
     case 'reconnecting':
       return 'Восстанавливаем связь…'
     case 'stale':
-      return `Данные устарели · ${ageLabel(snapshot.lastUpdatedAt, now)}`
+      return `Нет связи · ${ageLabel(snapshot.lastUpdatedAt, now)}`
   }
 }

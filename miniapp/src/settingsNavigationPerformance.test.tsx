@@ -334,19 +334,19 @@ describe('Settings G2 navigation performance', () => {
 
     act(() => resources.invalidate(['dashboard']))
     await waitFor(() => expect(dashboardRead).toHaveBeenCalledTimes(1))
-    // The cached settings stay usable while the refresh hangs, but the old
-    // ready verdict is transport-stale and must not remain green.
+    // The cached settings stay usable while the refresh hangs, and a routine
+    // re-read is not an outage: nothing flashes, nothing is demanded.
     expect(screen.getByText('Настройки копирования')).toBeInTheDocument()
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(screen.queryByText('Всё работает')).toBeNull()
-    expect(screen.getByText('Данные устарели')).toBeInTheDocument()
+    expect(screen.getByText('Всё работает')).toBeInTheDocument()
+    expect(screen.queryByText('Данные устарели')).toBeNull()
 
     await act(async () => {
       refreshGate.reject(new ApiError(500, 'network_error', 'down'))
       await Promise.resolve()
     })
-    // A failed background read keeps the same cached frame amber instead of
-    // replacing it with a skeleton/error-only surface or restoring green.
+    // A genuinely failed background read keeps the same cached frame amber
+    // instead of replacing it with a skeleton/error-only surface.
     expect(screen.getByText('Настройки копирования')).toBeInTheDocument()
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
     expect(screen.queryByText('Всё работает')).toBeNull()

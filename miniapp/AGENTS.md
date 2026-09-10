@@ -71,14 +71,17 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `api.ts` | Typed POST client mirroring all 26 routes; initData headers (+ dev-only `X-Dev-User-Id`), 15s AbortController timeout covering headers + body, external-abort cleanup, safe `invalid_response`, `ApiError` |
 | `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks |
 | `historyResources.ts` / `historyResources.test.ts` | Session history cache and invalidation revision fence; regressions for late responses, coalesced follow-up and inactive reads |
-| `useHistory.ts` | External-store subscription for history list/feed/detail/events |
+| `useHistory.ts` | External-store subscription for history list/feed/detail/events + bounded self-heal retry of failed slices |
 | `screens/TradeListScreen.tsx` / `screens/TradeDetailScreen.tsx` | S3 history lists, independent fills/events pagination, grouped executions, owned split choice and stale/partial detail states |
 | `components/PositionSummaryCard.tsx` / `TradeSummaryCard.tsx` / `TradeEventRow.tsx` | S3 position, trade and event presentation |
-| `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL |
+| `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL + bounded self-heal retry + `useTransportStale` (error or live-stale, never a routine re-read) |
+| `live.ts` | Session-scoped live client: ticket → WebSocket, epoch-aware revision watermark, gap reconciliation, backoff reconnect with a silence grace before anything is shown, heartbeat/stale deadline, resource invalidation |
+| `liveStatus.ts` | Pure rail copy: `LIVE`/`Подключаем`/`Восстанавливаем связь…`/`Нет связи · N сек назад` |
+| `pullToRefresh.ts` | Pure damped pull tracker: slop, threshold, ownership rules, release/cancel semantics. The app's only manual refresh path |
 | `resourceScopeContext.ts` | Connected-session owner context for direct screen-owned paths such as Activity so auth loss still hits the hard session boundary |
 | `settingsPrefetch.ts` | Settings-only bounded speculative queue: max two concurrent weak reads; click priority/join; no hidden signed refresh |
 | `wallet.ts` | Adapters: injected EIP-1193 first, lazy WalletConnect second; BSC-56 signing domain; typed `WalletError` (`VITE_WC_PROJECT_ID`) |
-| `telegram.ts` | Sole Telegram wrapper: initData, setup, haptics, close, closing-confirm, BackButton registry |
+| `telegram.ts` | Sole Telegram wrapper: initData, setup, haptics, close, closing-confirm, BackButton registry, vertical-swipe handoff (Bot API 7.7+, optional) |
 | `errors.ts` | Server-code → Russian `{title,hint}` map + FALLBACK; never leaks raw payloads |
 | `types.ts` | DTO mirrors of backend `application/models.py` (session/dashboard/positions/activity+feed/risk+preview/notifications/status/confirmation/builder+reauthorize/account-builder/trade history+events/overview/resume) |
 | `wizard.ts` | Pure onboarding machine: wallet→review→signing→sync + trust-rail index |
@@ -100,6 +103,8 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `SystemStatusScreen.tsx` (+`systemStatus.ts`) | READ-ONLY status slice, seq-guarded refresh, transport-stale honesty | `status` |
 | `components/ui.tsx` | Shared `Brand/TrustRail/Sheet/Row/ErrorBox` (+ inline SVG icons) | — |
 | `components/RiskRuler.tsx` | Snap-strip control: native touch/trackpad inertia, mouse drag w/ pointer capture, gated wheel, interruptible settle animator, scrollend+fallback settle, rate-limited selection haptics, save freeze | — |
+| `components/LiveStatus.tsx` | Transport rail; renders nothing while healthy, so it only ever appears for an outage that needs the user | — |
+| `components/PullToRefresh.tsx` | Shell-bound pull gesture over `.shell-content`: arms only at scroll top, claims the vertical drag from Telegram while armed, triggers one authoritative `resources.pullRefresh()` | — |
 | `riskRuler.ts` | Pure ruler decisions: wheel deltaMode normalization + `wheelIntent` gating, ease-out/duration, clamp, haptic rate limit | — |
 | `protectionWarning.ts` | Protection-state → Russian warning copy map | — |
 | `format.ts` | USDT/fee/date/pnl formatting | — |
@@ -124,6 +129,12 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 - **View-models are pure**: `home.ts`, `tradeView.ts`, `riskView.ts`, `activityView.ts`, `notificationsView.ts`, `systemStatus.ts`, `settingsView.ts`, `navigation.ts`, `session.ts`, `wizard.ts` — no fetch, no Telegram, unit-testable in node. Server DTO ownership lives in the session resource owner; component state is presentation/draft/interaction state, not an independent data store.
 - **Read-only honesty**: read-only screens assert it in markup (no trading controls, no secrets/ids); mutating screens change confirmed values only.
+- **No manual refresh in the product**: routine re-reads (live invalidation, TTL,
+  reconcile, batch refetch) are invisible — `snapshot.stale` is a cache-revision
+  flag and must never be painted as staleness. Transport verdicts come only from
+  `useTransportStale` (failed request or live rail past its stale deadline), the
+  rail renders nothing while healthy, and a failed read retries itself with
+  bounded backoff. The single manual path is pull-down at the top of the shell.
 - **Secret-safety**: masked addresses only; `describeError` maps codes, raw payloads never render; wallet private key never enters the app.
 - **Russian UI copy** (`ROOT_TAB_LABELS`, errors, info screens); inline SVG icons, no emoji; `:focus-visible`, semantic dialog roles; native BackButton/Haptics.
 - **Naming**: `*.test.ts(x)` next to source; `*View.ts` = pure VM; `*Behavior.test.tsx` = jsdom interaction.
@@ -159,4 +170,4 @@ styles:
 
 - **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format/riskRuler` tests — import helpers directly.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
-- **Behavior** (jsdom + testing-library, mocked `api.*`): `resources`/`useResource` (singleflight, fencing, invalidation, scope disposal), `settingsNavigationPerformance` (weak prefetch/join/cached nested), `activityInvalidSession` + `notificationsBehavior` (direct hard-session boundary), `riskBehavior` (draft/save/unknown/auth), `riskRulerBehavior`, `systemStatusBehavior`, `accountBuilderBehavior` (expiry/reauth/disconnect/unknown outcomes), `appShellKeepAlive` (startup four-read budget, StrictMode, early tap, TTL/foreground, scroll/focus/Sheet lifecycle, cross-remount locks, 50 cycles).
+- **Behavior** (jsdom + testing-library, mocked `api.*`): `resources`/`useResource` (singleflight, fencing, invalidation, scope disposal), `settingsNavigationPerformance` (weak prefetch/join/cached nested), `activityInvalidSession` + `notificationsBehavior` (direct hard-session boundary), `riskBehavior` (draft/save/unknown/auth), `riskRulerBehavior`, `systemStatusBehavior`, `pullToRefreshBehavior` (indicator, threshold, scrolled-away guard, swipe handoff, shell-wide strong read), `accountBuilderBehavior` (expiry/reauth/disconnect/unknown outcomes), `appShellKeepAlive` (startup four-read budget, StrictMode, early tap, TTL/foreground, scroll/focus/Sheet lifecycle, cross-remount locks, 50 cycles).

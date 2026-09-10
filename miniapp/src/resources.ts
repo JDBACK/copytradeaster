@@ -39,6 +39,18 @@ export interface ResourceValues {
 
 export type ReadStrength = 'weak' | 'strong'
 
+/** Screens a pull-down refresh re-reads. ``accountBuilder`` is deliberately
+ * absent: re-verifying Agent permissions is a signed security action with its
+ * own explicit control, not a data freshness read. */
+const PULL_REFRESH_KEYS: readonly ResourceKey[] = [
+  'dashboard',
+  'positions',
+  'risk',
+  'riskPreview',
+  'notifications',
+  'status',
+]
+
 export const RESOURCE_TTL_MS: Record<ResourceKey, number> = {
   dashboard: 30_000,
   positions: 30_000,
@@ -305,6 +317,21 @@ export class MiniAppResources {
     }
     if (this.getSnapshot(key).stale) data = await this.refresh(key, strength)
     return data
+  }
+
+  /** The one explicit user refresh: pull down at the top of the shell.
+   *
+   * Everything else heals by itself — live invalidations, TTL reads, focus
+   * recovery and bounded retry. This exists for the moment a user wants to
+   * force the truth now: every mounted screen is re-read authoritatively and
+   * the live transport is re-armed if it had stopped retrying. */
+  async pullRefresh(): Promise<void> {
+    if (this.disposed) return
+    const active = PULL_REFRESH_KEYS.filter((key) => this.hasSubscribers(key))
+    this.invalidate(active)
+    this.history.liveInvalidate()
+    this.retryLive()
+    await Promise.allSettled(active.map((key) => this.refresh(key, 'strong')))
   }
 
   /** Mark dependent DTOs suspect and fence every read that started before it. */

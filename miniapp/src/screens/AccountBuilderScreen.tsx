@@ -41,7 +41,7 @@ import {
 import { TRANSPORT_STALE_WARNING } from '../systemStatus'
 import type { AccountBuilderDTO, BuilderPrepareDTO, ConfirmationDTO } from '../types'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -94,8 +94,9 @@ export function AccountBuilderScreen({
         resourceDto.agent_expires_at_ms <= resource.snapshot.receivedAt ||
         expiryReached),
   )
+  const builderTransportUnhealthy = useTransportStale(resources, resource.snapshot.error)
   const resourceTransportStale =
-    resourceDto !== null && (resource.snapshot.error !== null || resource.snapshot.stale || expired)
+    resourceDto !== null && (builderTransportUnhealthy || expired)
   const load: LoadState = resourceDto
     ? { kind: 'ready', dto: resourceDto, transportStale: resourceTransportStale }
     : resource.snapshot.error

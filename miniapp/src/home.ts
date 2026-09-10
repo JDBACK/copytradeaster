@@ -40,7 +40,7 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
     case 'degraded':
       return {
         title: 'Требуется проверка',
-        subtitle: 'Обнаружены расхождения — обновите статус',
+        subtitle: 'Обнаружены расхождения — проверка уже идёт',
         tone: 'attention',
         actionLabel: null,
       }
@@ -54,7 +54,7 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
     default:
       return {
         title: 'Состояние неизвестно',
-        subtitle: 'Обновите данные или откройте бота',
+        subtitle: 'Проверяем состояние — данные появятся сами',
         tone: 'attention',
         actionLabel: null,
       }

@@ -21,6 +21,10 @@ export interface LiveUpdate {
 const STALE_AFTER_MS = 12_000
 const RECONNECT_MAX_MS = 15_000
 const HEARTBEAT_TIMEOUT_MS = 30_000
+/** Grace before a dropped socket becomes visible in the rail. Reconnects
+ * routinely succeed in milliseconds; flashing "reconnecting" for a blip the
+ * user never needed to know about is noise, not information. */
+const CONNECTING_NOTICE_MS = 2_500
 const FULL_RECONCILE_RESOURCES = [
   'dashboard',
   'positions',
@@ -44,6 +48,7 @@ export class MiniAppLiveSession {
   private socket: WebSocket | null = null
   private ticketAbort: AbortController | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectNoticeTimer: ReturnType<typeof setTimeout> | null = null
   private staleTimer: ReturnType<typeof setTimeout> | null = null
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null
   private lifecycleAttached = false
@@ -107,6 +112,7 @@ export class MiniAppLiveSession {
     this.disposed = true
     this.generation += 1
     this.clearReconnectTimer()
+    this.clearReconnectNotice()
     this.clearStaleTimer()
     this.clearHeartbeatTimer()
     this.detachLifecycle()
@@ -182,6 +188,7 @@ export class MiniAppLiveSession {
     const updatedAt = typeof value.updated_at === 'string' ? Date.parse(value.updated_at) : Number.NaN
     this.reconnectAttempt = 0
     this.clearReconnectTimer()
+    this.clearReconnectNotice()
     if (nextHealth === 'live') this.clearStaleTimer()
     else if (nextHealth) this.armStaleTimer()
     this.publish({
@@ -211,14 +218,15 @@ export class MiniAppLiveSession {
     if (this.disposed || generation !== this.generation) return
     this.socket = null
     this.clearHeartbeatTimer()
-    this.publish({ health: this.automaticReconnectHealth(), retrying: true })
+    // Stay on the last healthy verdict while the transport heals itself.
+    this.armReconnectNotice()
     this.armStaleTimer()
     this.scheduleReconnect()
   }
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer) return
-    this.publish({ health: this.automaticReconnectHealth(), retrying: true })
+    this.armReconnectNotice()
     this.armStaleTimer()
     const delay = Math.min(1_000 * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS)
     this.reconnectAttempt += 1
@@ -226,6 +234,23 @@ export class MiniAppLiveSession {
       this.reconnectTimer = null
       void this.connect()
     }, delay)
+  }
+
+  /** Surface a failed reconnect only after it has actually been failing. */
+  private armReconnectNotice(): void {
+    if (this.reconnectNoticeTimer || this.disposed) return
+    this.reconnectNoticeTimer = setTimeout(() => {
+      this.reconnectNoticeTimer = null
+      if (this.disposed || this.snapshot.health === 'live' || this.snapshot.health === 'stale') {
+        return
+      }
+      this.publish({ health: this.automaticReconnectHealth(), retrying: true })
+    }, CONNECTING_NOTICE_MS)
+  }
+
+  private clearReconnectNotice(): void {
+    if (this.reconnectNoticeTimer) clearTimeout(this.reconnectNoticeTimer)
+    this.reconnectNoticeTimer = null
   }
 
   private armStaleTimer(): void {

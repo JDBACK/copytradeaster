@@ -7,7 +7,7 @@ import { PROTECTION_WARNING } from '../protectionWarning'
 import type { PositionSummaryDTO } from '../types'
 import type { NestedScreen } from '../navigation'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 import { PositionSummaryCard } from '../components/PositionSummaryCard'
 import { orderedPositions } from '../tradeView'
 import { ClosedTrades } from './TradeListScreen'
@@ -22,7 +22,8 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
   const [attention, setAttention] = useState(false)
   const resource = useResource({ resources, key: 'positions', enabled: warm, active: active && segment === 'open', foregroundSignal })
   const data = resource.snapshot.data
-  const stale = !!data && (data.is_stale || resource.snapshot.stale || !!resource.snapshot.error)
+  const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const stale = !!data && (data.is_stale || transportUnhealthy)
   const positions = orderedPositions(data?.positions ?? [], attention)
   return <div className="screen">
     <Brand right={accountMasked ? <span className="wallet-chip num">{accountMasked}</span> : undefined} />
@@ -32,12 +33,11 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
     <div hidden={segment !== 'open'} className="history-stack">
       {resource.snapshot.error && <ErrorBox {...describeError(resource.snapshot.error)} />}
       {!data && !resource.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка позиций" />}
-      {stale && <p className="position-warning" role="status">Снимок позиций устарел. Статус защиты требует обновления.</p>}
+      {stale && <p className="position-warning" role="status">Снимок позиций не обновляется. Статус защиты может быть неполным.</p>}
       {data?.positions.some(p => p.protection_state !== 'protected') && <div className="history-segments"><button type="button" aria-pressed={!attention} onClick={() => setAttention(false)}>Все</button><button type="button" aria-pressed={attention} onClick={() => setAttention(true)}>Требуют внимания</button></div>}
       {positions.slice(0, 3).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} stale={stale} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
       {data && positions.length === 0 && <p className="info-box">{!data.snapshot_captured_at ? 'Получаем данные аккаунта' : attention ? 'Нет позиций с проблемой защиты' : 'Нет открытых позиций'}</p>}
       {positions.length > 3 && <button type="button" className="btn btn-secondary" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all', attention })}>Показать все {positions.length}</button>}
-      {resource.snapshot.error && <button type="button" className="btn btn-secondary" disabled={resource.snapshot.inflight} onClick={() => void resource.refresh('strong').then(() => resources.invalidate(['dashboard', 'status'])).catch(() => {})}>Повторить</button>}
     </div>
   </div>
 }

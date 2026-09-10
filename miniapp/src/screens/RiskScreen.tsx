@@ -26,7 +26,7 @@ import {
 import type { RiskDTO } from '../types'
 import { hapticNotify } from '../telegram'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -76,12 +76,13 @@ export function RiskScreen({
     foregroundSignal,
   })
   const preview = useResource({ resources, key: 'riskPreview', active: true, foregroundSignal })
+  const previewUnhealthy = useTransportStale(resources, preview.snapshot.error)
   const resourceDto = resource.snapshot.data
   const lastServerValueRef = useRef<string | null>(null)
   const ownerSaving = ownerMutationState !== null
   const busy = saving || ownerSaving
-  const transportStale =
-    resourceDto !== null && (resource.snapshot.stale || resource.snapshot.error !== null)
+  const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const transportStale = resourceDto !== null && transportUnhealthy
   const load: LoadState = resourceDto
     ? { kind: 'ready', dto: resourceDto }
     : resource.snapshot.error
@@ -187,15 +188,6 @@ export function RiskScreen({
           Риск на Stop
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => void resource.refresh('weak').catch(() => {})}
-          >
-            Повторить
-          </button>
-        </div>
       </div>
     )
   }
@@ -321,16 +313,7 @@ export function RiskScreen({
         </div>
         {steps.length === 0 ? (
           <div className="risk-ruler-fallback">
-            <ErrorBox title="Шкала недоступна" hint="Сервер вернул пустую шкалу риска. Попробуйте обновить." />
-            <div className="btn-stack">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => void resource.refresh('weak').catch(() => {})}
-              >
-                Повторить
-              </button>
-            </div>
+            <ErrorBox title="Шкала недоступна" hint="Сервер вернул пустую шкалу риска. Данные обновятся автоматически." />
           </div>
         ) : (
           <RiskRuler steps={steps} active={active} onPick={pick} disabled={busy} />
@@ -345,7 +328,7 @@ export function RiskScreen({
         <h2 className="h2">Что это значит</h2>
         {preview.snapshot.data?.available_usdt != null && preview.snapshot.data.steps.some(step => !isRiskDirty(step.risk_percent, active)) ? <>
           <p className="lede">При доступных {formatUsdt(preview.snapshot.data.available_usdt)} расчётный бюджет на сделку — около {formatUsdt(preview.snapshot.data.steps.find(step => !isRiskDirty(step.risk_percent, active))?.budget_usdt)}.</p>
-          <p className="freshness">{preview.snapshot.data.freshness !== 'fresh' || preview.snapshot.stale || preview.snapshot.error ? 'Пример по прежнему снимку' : 'Снимок'}: {formatDateTime(preview.snapshot.data.snapshot_captured_at)}</p>
+          <p className="freshness">{preview.snapshot.data.freshness !== 'fresh' || previewUnhealthy ? 'Пример по прежнему снимку' : 'Снимок'}: {formatDateTime(preview.snapshot.data.snapshot_captured_at)}</p>
         </> : <p className="lede">Денежный пример появится после обновления баланса.</p>}
         <p className="footer-note">Это бюджет расчёта объёма, а не гарантированный предел убытка: цена исполнения стопа и доступная сумма могут измениться.</p>
         <p className="footer-note">Новое значение используется в последующих расчётах. При проверке открытой позиции её объём может быть сокращён.</p>
@@ -369,20 +352,6 @@ export function RiskScreen({
         >
           {busy ? 'Сохранение…' : `Сохранить ${formatRiskPercent(active)}`}
         </button>
-        {(ownerMutationState === 'unknown' || resource.snapshot.error !== null) && (
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={resource.snapshot.inflight}
-            onClick={() =>
-              void resource
-                .refresh(ownerMutationState === 'unknown' ? 'strong' : 'weak')
-                .catch(() => {})
-            }
-          >
-            Обновить данные
-          </button>
-        )}
       </div>
 
       <span data-risk-saving={String(busy)} hidden />

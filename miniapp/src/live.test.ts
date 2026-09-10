@@ -212,7 +212,7 @@ describe('MiniAppLiveSession', () => {
     session.dispose()
   })
 
-  it('becomes stale after the deadline even while automatic reconnect attempts keep failing', async () => {
+  it('surfaces a failing reconnect only after the grace window, then goes stale', async () => {
     const session = new MiniAppLiveSession({ initData: 'signed' }, vi.fn(), vi.fn())
     session.start()
     await flush()
@@ -221,6 +221,10 @@ describe('MiniAppLiveSession', () => {
     vi.mocked(api.liveTicket).mockRejectedValue(new ApiError(0, 'network_error', 'offline'))
 
     socket.close()
+    // A dropped socket is not news: the rail keeps its last healthy verdict
+    // while the client reconnects on its own.
+    expect(session.getSnapshot().health).toBe('live')
+    await vi.advanceTimersByTimeAsync(3_000)
     expect(session.getSnapshot().health).toBe('reconnecting')
 
     await vi.advanceTimersByTimeAsync(12_100)
@@ -230,6 +234,23 @@ describe('MiniAppLiveSession', () => {
     // "reconnecting" until an authoritative hello actually recovers it.
     await vi.advanceTimersByTimeAsync(20_000)
     expect(session.getSnapshot().health).toBe('stale')
+    session.dispose()
+  })
+
+  it('never flashes anything when a dropped socket reconnects within the grace window', async () => {
+    const session = new MiniAppLiveSession({ initData: 'signed' }, vi.fn(), vi.fn())
+    session.start()
+    await flush()
+    const first = FakeWebSocket.instances[0]
+    first.message({ type: 'hello', revision: 1, health: 'live', updated_at: '2026-09-10T03:00:00Z' })
+
+    first.close()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const second = FakeWebSocket.instances[1]
+    second.message({ type: 'hello', revision: 2, health: 'live', updated_at: '2026-09-10T03:01:00Z' })
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    expect(session.getSnapshot().health).toBe('live')
     session.dispose()
   })
 

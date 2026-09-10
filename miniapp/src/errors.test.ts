@@ -31,6 +31,7 @@ describe('describeError', () => {
   it('reads a dropped live transport as a degraded hint, not a failure', () => {
     const copy = describeError('live_unavailable')
     expect(copy.title).toMatch(/недоступны/i)
-    expect(copy.hint).toMatch(/повтор/i)
+    expect(copy.hint).toMatch(/обновляются сами/i)
+    expect(copy.hint).not.toMatch(/заново/i)
   })
 })

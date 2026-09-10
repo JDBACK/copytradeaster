@@ -187,6 +187,17 @@ _SAFE_ERRORS = (
 
 _CONNECTIVITY_ASTER_CODES = frozenset({-1000, -1006, -1007})
 
+# Degraded reasons that describe the engine's own scheduled re-verification
+# rather than a fault. ``_establish_master_boundary`` fail-closes every few
+# sweeps, rebuilds the master against REST and proves convergence again within
+# seconds; its only real consequence is withheld entry admission, which the
+# trading gate (``allow_new_entries`` / ``_entry_admission_ready``) already
+# enforces on its own. Presenting that as DEGRADED made Dashboard, Positions and
+# Status flash "requires attention" several times a minute for work that is
+# routine and self-resolving. Every other reason — lost master stream, failed
+# sweeps, critical margin/liquidation recovery — stays fully user-visible.
+ROUTINE_MAINTENANCE_REASONS = frozenset({"periodic-snapshot", "master-dirty"})
+
 
 def _is_connectivity_error(exc: BaseException) -> bool:
     """Transport-classified failures only; app bugs never read as outages.
@@ -1052,28 +1063,62 @@ class UserApplicationService:
             degraded = await self._flag("degraded_active")
             if _is_true(degraded):
                 return SystemState.DEGRADED
-            ready = await self._flag("ready")
-            if _is_true(ready):
-                heartbeat = await self._flag("heartbeat_at")
-                if heartbeat:
-                    try:
-                        age_ms = max(int(time.time() * 1000) - int(heartbeat), 0)
-                        interval = int(
-                            getattr(getattr(self._runtime, "cfg", None), "reconcile_interval_s", 15)
-                        )
-                        if age_ms > max(2 * interval, 30) * 1000:
-                            return SystemState.STALE
-                    except (TypeError, ValueError):
-                        return SystemState.STALE
-                return SystemState.READY
-            if _is_false(ready):
-                return SystemState.UNKNOWN
-            marker = getattr(self._runtime, "ready", _MISSING)
-            if marker is True:
-                return SystemState.READY
-            return SystemState.UNKNOWN
+            return await self._readiness_state()
         except Exception:
             return SystemState.UNKNOWN
+
+    async def _readiness_state(self, *, honour_not_ready: bool = True) -> SystemState:
+        """READY/STALE/UNKNOWN ladder, ignoring the degraded latch."""
+        ready = await self._flag("ready")
+        if _is_true(ready):
+            return await self._heartbeat_state()
+        if honour_not_ready and _is_false(ready):
+            return SystemState.UNKNOWN
+        if not honour_not_ready:
+            return await self._heartbeat_state()
+        marker = getattr(self._runtime, "ready", _MISSING)
+        if marker is True:
+            return SystemState.READY
+        return SystemState.UNKNOWN
+
+    async def _heartbeat_state(self) -> SystemState:
+        """Alive-and-publishing verdict; a dead heartbeat is real staleness."""
+        heartbeat = await self._flag("heartbeat_at")
+        if heartbeat:
+            try:
+                age_ms = max(int(time.time() * 1000) - int(heartbeat), 0)
+                interval = int(
+                    getattr(getattr(self._runtime, "cfg", None), "reconcile_interval_s", 15)
+                )
+                if age_ms > max(2 * interval, 30) * 1000:
+                    return SystemState.STALE
+            except (TypeError, ValueError):
+                return SystemState.STALE
+        return SystemState.READY
+
+    async def _presentation_state(self) -> SystemState:
+        """System state as a user should read it.
+
+        Identical to :meth:`_system_state` except that the engine's scheduled
+        re-verification (``ROUTINE_MAINTENANCE_REASONS``) is not presented as a
+        fault: it is fail-closed by design, resolves within seconds and leaves
+        the displayed account data authoritative. Trading safety is unaffected —
+        admission is gated by ``allow_new_entries`` and the engine's own
+        admission flag, never by this presentation verdict.
+        """
+        state = await self._system_state()
+        if state is not SystemState.DEGRADED:
+            return state
+        try:
+            reason = await self._flag("degraded_reason")
+            if str(reason or "").strip().lower() not in ROUTINE_MAINTENANCE_REASONS:
+                return state
+            # The boundary also lowers ``ready`` (it withholds entry admission).
+            # That is the trading gate's business, not the user's, so the
+            # presentation verdict falls back to the liveness heartbeat.
+            return await self._readiness_state(honour_not_ready=False)
+        except Exception:  # noqa: BLE001 - presentation never fails a read
+            return state
 
     async def _ensure_testnet(self) -> None:
         check = self._testnet_check
@@ -1339,7 +1384,7 @@ class UserApplicationService:
         snapshot: Any = None,
         snapshot_captured_at: datetime | None = None,
     ) -> DashboardDTO:
-        system_state = await self._system_state()
+        system_state = await self._presentation_state()
         user_row = await self._user_row(context.user_id)
         enabled = bool(_row_value(user_row, "notifications_enabled", 1))
         if account_id is None or account_row is None:
@@ -1540,7 +1585,7 @@ class UserApplicationService:
         try:
             context = await self._context(user_id)
             account_id = str(context.account_id) if context.account_id else None
-            system_state = await self._system_state()
+            system_state = await self._presentation_state()
             if account_id is None:
                 return PositionPageDTO(
                     positions=(),
@@ -1679,7 +1724,7 @@ class UserApplicationService:
     async def status(self, user_id: int, refresh: bool = False) -> StatusDTO:
         """Authoritative read-only System Status (P2.5 control-plane slice).
 
-        Reuses ``_system_state()``, the shared Dashboard copy-state
+        Reuses ``_presentation_state()``, the shared Dashboard copy-state
         semantics, the process-local runtime snapshot cache, and the signed
         Agent permission refresh.  A failed refresh never destroys the last
         useful snapshot and never mints a new timestamp: stale evidence is
@@ -1690,7 +1735,7 @@ class UserApplicationService:
         try:
             context = await self._context(user_id)
             account_id = str(context.account_id) if context.account_id else None
-            system_state = await self._system_state()
+            system_state = await self._presentation_state()
             if account_id is None:
                 return StatusDTO(
                     state=StatusState.BLOCKED,

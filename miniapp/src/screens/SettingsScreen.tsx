@@ -22,7 +22,7 @@ import { Brand, ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { MiniAppResources } from '../resources'
 import { createSettingsPrefetch, type SettingsPrefetchKey } from '../settingsPrefetch'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -67,9 +67,8 @@ export function SettingsScreen({
   })
   const prefetch = useMemo(() => createSettingsPrefetch(resources), [resources])
   const dashboard = resource.snapshot.data
-  const transportStale =
-    dashboard !== null &&
-    (resource.snapshot.stale || resource.snapshot.error !== null || resource.snapshot.inflight)
+  const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const transportStale = dashboard !== null && transportUnhealthy
   const load: LoadState = dashboard
     ? { kind: 'ready', dashboard }
     : resource.snapshot.error
@@ -135,15 +134,6 @@ export function SettingsScreen({
           Настройки
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => void resource.refresh('weak').catch(() => {})}
-          >
-            Повторить
-          </button>
-        </div>
       </div>
     )
   }

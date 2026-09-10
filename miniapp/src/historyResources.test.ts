@@ -8,7 +8,7 @@ const page = (seq: number): ActivityFeedPage => ({
   items: [], next_cursor: null, high_water: seq, latest_seq: seq, pending: [],
 })
 
-it('retains a rejected revision through foreground until explicit restart', async () => {
+it('auto-rebases a re-cut page instead of demanding a manual reload', async () => {
   const first = { ...page(1), next_cursor: 'old-cursor' }
   const read = vi.spyOn(api, 'activityFeed').mockResolvedValueOnce(first)
     .mockRejectedValueOnce(new ApiError(409, 'history_page_changed', 'revision changed'))
@@ -16,16 +16,13 @@ it('retains a rejected revision through foreground until explicit restart', asyn
   const owner = new MiniAppResources({ initData: 'test' }, 'revision-test')
   await owner.history.load(query)
   await owner.history.load(query, 'more')
-  expect(owner.history.get(query).changed).toBe(true)
-  owner.history.invalidate()
-  await owner.history.load(query)
-  await owner.history.load(query, 'more')
-  expect(read).toHaveBeenCalledTimes(2)
-  expect(owner.history.get(query).data).toEqual(first)
-  await owner.history.retry(query)
-  expect(read.mock.calls[2]?.[2]).toBeNull()
+  // A correction re-cuts the page under the user. That is not their error and
+  // must not become one: exactly one silent re-base follows, no error state and
+  // no button to press.
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3))
   expect(owner.history.get(query).data?.high_water).toBe(2)
   expect(owner.history.get(query).changed).toBe(false)
+  expect(owner.history.get(query).error).toBeNull()
   owner.dispose()
 })
 
@@ -91,7 +88,7 @@ it('keeps a large active slice intact and evicts it as a whole after release', a
   owner.dispose()
 })
 
-it('keeps closed-trade pages and their continuation until explicit replacement', async () => {
+it('keeps a continuation while the page holds and adopts it silently when it moves', async () => {
   const trade = (ref: string): TradeListItem => ({ trade_ref: ref, symbol: 'BTCUSDT',
     quantity_asset: 'BTC', side: 'LONG', state: 'closed', source: 'copy',
     opened_at: null, closed_at: null, executed_qty: '1', realized_pnl_gross_usdt: '0',
@@ -99,7 +96,7 @@ it('keeps closed-trade pages and their continuation until explicit replacement',
     average_entry: '100', average_exit: '100' })
   const first: TradeListPage = { items: [trade('a')], next_cursor: 'c1',
     as_of: null, coverage_from: null, coverage_complete: false }
-  const read = vi.spyOn(api, 'trades').mockResolvedValueOnce(first)
+  vi.spyOn(api, 'trades').mockResolvedValueOnce(first)
     .mockResolvedValueOnce({ ...first, items: [trade('a'), trade('b')], next_cursor: 'c2' })
     .mockResolvedValueOnce(first)
     .mockResolvedValue({ ...first, items: [trade('new')], next_cursor: null })
@@ -113,15 +110,14 @@ it('keeps closed-trade pages and their continuation until explicit replacement',
   expect(owner.history.get(query).data?.next_cursor).toBe('c2')
   owner.history.invalidate()
   await owner.history.load(query)
-  expect(owner.history.get(query).changed).toBe(true)
-  expect(owner.history.get(query).data?.items).toHaveLength(2)
-  await owner.history.retry(query)
-  expect(read.mock.lastCall?.[1]?.cursor).toBeNull()
   expect(owner.history.get(query).data?.items.map(item => item.trade_ref)).toEqual(['new'])
+  expect(owner.history.get(query).data?.next_cursor).toBeNull()
+  expect(owner.history.get(query).changed).toBe(false)
+  expect(owner.history.get(query).error).toBeNull()
   owner.dispose()
 })
 
-it('preserves appended detail events on a TTL probe and exposes changed first-page facts', async () => {
+it('preserves appended detail events on a TTL probe and adopts a corrected first page silently', async () => {
   const event = (ref: string) => ({ event_ref: ref, text: ref, kind: 'OPENED',
     trade_ref: 'trade', occurred_at: '2026-09-08T00:00:00Z', facts: {} })
   const first: TradeEventsPage = { events: [event('a')], fills: [], next_cursor: null,
@@ -141,8 +137,9 @@ it('preserves appended detail events on a TTL probe and exposes changed first-pa
   expect(owner.history.get(query).changed).toBe(false)
   owner.history.invalidate()
   await owner.history.load(query)
-  expect(owner.history.get(query).changed).toBe(true)
-  expect(owner.history.get(query).data?.events.map(item => item.event_ref)).toEqual(['a', 'b'])
+  expect(owner.history.get(query).changed).toBe(false)
+  expect(owner.history.get(query).error).toBeNull()
+  expect(owner.history.get(query).data?.events.map(item => item.event_ref)).toEqual(['corrected'])
   expect(read).toHaveBeenCalledTimes(4)
   owner.dispose()
 })

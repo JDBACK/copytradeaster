@@ -19,6 +19,9 @@ interface Entry {
   used: number
   generation: number
   revision: number
+  /** One silent re-base is allowed per loaded slice: a correction can re-cut
+   * the page under the user, and that is not an error they caused. */
+  rebased: boolean
   flightRevision?: number
   followUp: boolean
   controller: AbortController | null
@@ -36,7 +39,7 @@ export class HistoryResources {
     const key = historyKey(query)
     let entry = this.entries.get(key)
     if (!entry) {
-      entry = { query, snapshot: { data: null, loading: false, error: null, receivedAt: 0, changed: false }, listeners: new Set(), pins: 0, used: Date.now(), generation: 0, revision: 0, followUp: false, controller: null, flight: null }
+      entry = { query, snapshot: { data: null, loading: false, error: null, receivedAt: 0, changed: false }, listeners: new Set(), pins: 0, used: Date.now(), generation: 0, revision: 0, followUp: false, rebased: false, controller: null, flight: null }
       this.entries.set(key, entry)
     }
     entry.used = Date.now()
@@ -105,23 +108,39 @@ export class HistoryResources {
           const cursor = mode === 'more' ? old?.next_cursor : null
           if (mode === 'more' && !cursor) return
           const page = await api.trades(this.auth, { period: query.period, symbol: query.symbol || undefined, limit: query.limit ?? 20, cursor }, options)
-          if (mode === 'ensure' && old) {
-            if (entry.firstPage !== JSON.stringify(page.items)) throw new ApiError(409, 'history_page_changed', 'History changed')
+          const signature = JSON.stringify(page.items)
+          if (cursor && old) {
+            data = { ...page, items: merge(old.items, page.items, 'trade_ref') }
+          } else if (old && entry.firstPage === signature) {
+            // Same first page: keep the loaded slice and its continuation.
             data = old
           } else {
-          data = cursor && old ? { ...page, items: merge(old.items, page.items, 'trade_ref') } : page
+            // A first-page read (initial load, live invalidation, tab
+            // activation or explicit refresh). A changed list is good news:
+            // the new trade simply appears. The previous behaviour raised
+            // `history_page_changed` and demanded a manual reload, which turned
+            // every ordinary update into an error the user had to clear by hand.
+            data = page
+            firstPage = signature
           }
-          if ((!cursor && mode !== 'ensure') || !old) firstPage = JSON.stringify(page.items)
         } else if (query.kind === 'feed') {
           const old = previous as ActivityFeedPage | null
           const cursor = mode === 'more' ? old?.next_cursor : null
           if (mode === 'more' && !cursor) return
           const page = await api.activityFeed(this.auth, query.filter, cursor, options)
-          // Automatic freshness probes preserve the pinned slice and offer an
-          // explicit new-events reset; never interleave a late event.
-          if (mode === 'ensure' && old) {
+          const signature = JSON.stringify(page.items)
+          // Continuations append to the loaded slice; a first-page read adopts
+          // the server's fresh pin, so new events simply appear instead of
+          // asking the user to tap "there are new events". Late events never
+          // interleave either way: the pin is server-side.
+          if (cursor && old) {
+            data = { ...page, items: merge(old.items, page.items, 'event_ref') }
+          } else if (old && entry.firstPage === signature) {
             data = { ...old, pending: page.pending, latest_seq: page.latest_seq }
-          } else data = cursor && old ? { ...page, items: merge(old.items, page.items, 'event_ref') } : page
+          } else {
+            data = page
+            firstPage = signature
+          }
         } else if (query.kind === 'detail') data = await api.trade(this.auth, query.tradeRef, options)
         else {
           const old = previous as TradeEventsPage | null
@@ -130,20 +149,22 @@ export class HistoryResources {
           if ((mode === 'fills' && !moreFills) || (mode === 'events' && !moreEvents)) return
           const page = await api.tradeEvents(this.auth, query.tradeRef, { fills_cursor: moreFills || null, events_cursor: moreEvents || null }, options)
           const signature = JSON.stringify([page.fills, page.events])
-          if (mode === 'ensure' && old) {
-            if (entry.firstPage !== signature) throw new ApiError(409, 'history_page_changed', 'History changed')
+          if (old && (moreFills || moreEvents)) {
+            data = {
+              ...old,
+              ...(moreFills ? { fills: merge(old.fills, page.fills, item => `${item.trade_id}:${item.role}`), next_fills_cursor: page.next_fills_cursor } : {}),
+              ...(moreEvents ? { events: merge(old.events, page.events, 'event_ref'), next_events_cursor: page.next_events_cursor } : {}),
+            }
+          } else if (old && entry.firstPage === signature) {
             data = old
           } else {
-          data = old && (moreFills || moreEvents) ? {
-            ...old,
-            ...(moreFills ? { fills: merge(old.fills, page.fills, item => `${item.trade_id}:${item.role}`), next_fills_cursor: page.next_fills_cursor } : {}),
-            ...(moreEvents ? { events: merge(old.events, page.events, 'event_ref'), next_events_cursor: page.next_events_cursor } : {}),
-          } : page
+            data = page
+            firstPage = signature
           }
-          if ((!moreFills && !moreEvents && mode !== 'ensure') || !old) firstPage = signature
         }
         if (!this.disposed && generation === entry.generation && revision === entry.revision) {
           entry.failedMode = undefined
+          entry.rebased = false
           if (firstPage !== undefined) entry.firstPage = firstPage
           this.publish(entry, { data, receivedAt: Date.now(), changed: false })
         }
@@ -151,6 +172,25 @@ export class HistoryResources {
         if (this.owner.handleInvalidSessionError(error)) return
         if (this.disposed || generation !== entry.generation || revision !== entry.revision || (error instanceof ApiError && error.code === 'aborted')) return
         const code = error instanceof ApiError ? error.code : 'network_error'
+        // A live correction can re-cut the page the user is reading. Re-base the
+        // slice silently once instead of asking them to clear an error they did
+        // not cause and cannot interpret; only a second failure surfaces.
+        if (code === 'history_page_changed' && !entry.rebased) {
+          entry.rebased = true
+          entry.failedMode = undefined
+          // Force the re-base to adopt the server's fresh pin instead of
+          // matching the slice that was just rejected.
+          entry.firstPage = undefined
+          const target = entry
+          const attempted = revision
+          // Deferred: the `finally` below owns clearing this flight, so the
+          // re-base must not race it for the single-flight slot.
+          setTimeout(() => {
+            if (this.disposed || target.revision !== attempted) return
+            void this.load(query, 'refresh')
+          }, 0)
+          return
+        }
         entry.failedMode = mode
         this.publish(entry, { error: code, changed: code === 'history_page_changed', ...(code === 'trade_unavailable' ? { data: null } : {}) })
       } finally {

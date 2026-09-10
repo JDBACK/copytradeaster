@@ -3,16 +3,16 @@
  * Read-only control-plane slice over the authoritative backend StatusDTO:
  * overall health, trust rail, and six diagnostic rows (Система,
  * Копирование, Aster, Разрешения, Позиции, Последняя проверка).  The last
- * successfully received DTO stays on screen in local component state only
- * (no store): a failed manual refresh marks the view transport-stale
- * instead of destroying data, and a late request never overwrites a newer
- * one (sequence guard).  Remediation executes only the closed backend set:
- * ``refresh`` re-runs ``api.status(auth, true)``, ``open_bot`` returns to
- * the Telegram chat via the existing ``closeMiniApp()``.
+ * successfully received DTO stays on screen: a failed read marks the view
+ * transport-stale instead of destroying data, and a late request never
+ * overwrites a newer one (sequence guard).  There is no manual refresh here —
+ * the read heals on its own and the pull-down at the top of the shell forces
+ * it.  The only action is ``open_bot``, which returns to the Telegram chat via
+ * the existing ``closeMiniApp()``.
  */
 
-import { useCallback, useState } from 'react'
-import { ApiError, type AuthContext } from '../api'
+import { useCallback } from 'react'
+import type { AuthContext } from '../api'
 import { Brand, ErrorBox, Row } from '../components/ui'
 import { describeError } from '../errors'
 import {
@@ -29,11 +29,11 @@ import {
   systemRowValue,
   TRANSPORT_STALE_WARNING,
 } from '../systemStatus'
-import { closeMiniApp, hapticImpact, hapticNotify } from '../telegram'
+import { closeMiniApp, hapticImpact } from '../telegram'
 import { formatTime } from '../format'
 import type { StatusDTO } from '../types'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
@@ -51,7 +51,6 @@ export function SystemStatusScreen({
   resources?: MiniAppResources
   foregroundSignal?: number
 }) {
-  const [refreshing, setRefreshing] = useState(false)
   const resources = useScreenResources(providedResources, auth)
   // A healthy live boundary guarantees that the shared follower store was
   // authoritatively refreshed. Use its cheap cached Status read in steady
@@ -66,30 +65,13 @@ export function SystemStatusScreen({
     foregroundSignal,
   })
   const dto = resource.snapshot.data
-  const transportStale =
-    dto !== null &&
-    (resource.snapshot.error !== null ||
-      resource.snapshot.stale ||
-      (!liveCacheReady && resource.snapshot.strength !== 'strong'))
+  const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const transportStale = dto !== null && transportUnhealthy
   const load: LoadState = dto
     ? { kind: 'ready', dto, transportStale }
     : resource.snapshot.error
       ? { kind: 'error', code: resource.snapshot.error }
       : { kind: 'loading' }
-
-  const refresh = useCallback(async () => {
-    if (!resource.snapshot.data || refreshing) return
-    hapticImpact('light')
-    setRefreshing(true)
-    try {
-      await resource.refresh('strong')
-    } catch (err) {
-      if (err instanceof ApiError && err.code === 'aborted') return
-      hapticNotify('error')
-    } finally {
-      setRefreshing(false)
-    }
-  }, [refreshing, resource])
 
   const openBot = useCallback(() => {
     hapticImpact('light')
@@ -131,15 +113,6 @@ export function SystemStatusScreen({
           Статус системы
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => void resource.refresh('strong').catch(() => {})}
-          >
-            Повторить
-          </button>
-        </div>
       </div>
     )
   }
@@ -148,9 +121,7 @@ export function SystemStatusScreen({
     <SystemStatusView
       dto={load.dto}
       transportStale={load.transportStale}
-      refreshing={refreshing}
       accountMasked={accountMasked}
-      onRefresh={() => void refresh()}
       onOpenBot={openBot}
     />
   )
@@ -160,16 +131,12 @@ export function SystemStatusScreen({
 export function SystemStatusView({
   dto,
   transportStale,
-  refreshing,
   accountMasked,
-  onRefresh,
   onOpenBot,
 }: {
   dto: StatusDTO
   transportStale: boolean
-  refreshing: boolean
   accountMasked?: string | null
-  onRefresh: () => void
   onOpenBot: () => void
 }) {
   // A transport failure keeps the previous DTO visible but must never let an
@@ -265,11 +232,6 @@ export function SystemStatusView({
       )}
 
       <div className="btn-stack">
-        {remediation === 'refresh' && (
-          <button type="button" className="btn btn-primary" disabled={refreshing} onClick={onRefresh}>
-            {refreshing ? 'Обновляем…' : 'Обновить'}
-          </button>
-        )}
         {remediation === 'open_bot' && (
           <button type="button" className="btn btn-primary" onClick={onOpenBot}>
             Открыть бота

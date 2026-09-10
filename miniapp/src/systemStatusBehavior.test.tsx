@@ -132,19 +132,13 @@ describe('SystemStatusScreen behavior', () => {
       lastUpdatedAt: Date.now(),
       retrying: false,
     })
-    const loader = vi
-      .spyOn(api, 'status')
-      .mockResolvedValueOnce(staleDto())
-      .mockResolvedValueOnce(dto())
+    const loader = vi.spyOn(api, 'status').mockResolvedValue(dto())
 
     render(<SystemStatusScreen auth={AUTH} resources={resources} />)
-    await screen.findByLabelText('Состояние: Данные устарели')
-    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, false])
-
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
     await screen.findByText('Всё работает')
-    expect(loader).toHaveBeenCalledTimes(2)
-    expect(loader.mock.calls[1]?.slice(0, 2)).toEqual([AUTH, true])
+    // Steady state reads the already-authoritative process cache.
+    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, false])
+    expect(screen.queryByRole('button')).toBeNull()
   })
 
   it('backend stale keeps values visible with an amber note, never healthy', async () => {
@@ -157,7 +151,7 @@ describe('SystemStatusScreen behavior', () => {
     expect(screen.getByText('Снимок позиций устарел.')).toBeDefined()
   })
 
-  it('degraded keeps values and offers only refresh', async () => {
+  it('degraded keeps values visible and asks the user for nothing', async () => {
     vi.spyOn(api, 'status').mockResolvedValue(
       dto({ state: 'degraded', reason: 'system_degraded', remediation: 'refresh' }),
     )
@@ -165,7 +159,9 @@ describe('SystemStatusScreen behavior', () => {
 
     await screen.findByText('Требуется проверка')
     expect(screen.getByText('Система требует проверки.')).toBeDefined()
-    expect(screen.getByRole('button', { name: 'Обновить' })).toBeDefined()
+    // Remediation "refresh" is a transport concern: the read heals by itself
+    // (bounded retry) and the pull-down forces it, so no button is offered.
+    expect(screen.queryByRole('button')).toBeNull()
     expect(screen.queryByText('Всё работает')).toBeNull()
   })
 
@@ -195,7 +191,7 @@ describe('SystemStatusScreen behavior', () => {
     expect(close).not.toHaveBeenCalled()
   })
 
-  it('initial failure without snapshot is a hard error with retry', async () => {
+  it('a failed first read heals itself without any manual retry', async () => {
     const loader = vi
       .spyOn(api, 'status')
       .mockRejectedValueOnce(new ApiError(0, 'network_error', 'down'))
@@ -204,9 +200,10 @@ describe('SystemStatusScreen behavior', () => {
 
     await screen.findByText('Нет связи')
     expect(screen.queryByText('Статус системы', { selector: 'h1' })).toBeDefined()
-    fireEvent.click(screen.getByRole('button', { name: 'Повторить' }))
+    expect(screen.queryByRole('button')).toBeNull()
+    // No tap anywhere: the bounded self-healing retry re-reads on its own.
     await screen.findByText('Всё работает')
-    expect(loader).toHaveBeenCalledTimes(2)
+    expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 
   it('network failure keeps the snapshot with a transport-stale warning', async () => {
@@ -221,7 +218,7 @@ describe('SystemStatusScreen behavior', () => {
     )
 
     await screen.findByText(TRANSPORT_STALE_WARNING)
-    await waitFor(() => expect(loader).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(loader.mock.calls.length).toBeGreaterThanOrEqual(1))
     // Previous data survives, but the old ready no longer looks fresh.
     expect(screen.getByText('2')).toBeDefined()
     expect(screen.queryByText('Всё работает')).toBeNull()
@@ -231,30 +228,27 @@ describe('SystemStatusScreen behavior', () => {
     // Foreground recovery replaces the removed routine refresh action.
     rerender(<SystemStatusScreen auth={AUTH} resources={resources} foregroundSignal={1} />)
     await screen.findByText('Всё работает')
-    expect(loader).toHaveBeenCalledTimes(2)
+    expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
   })
 
-  it('an aged cached strong status turns amber while its required strong refresh hangs', async () => {
-    const t0 = 1_800_000_000_000
-    const now = vi.spyOn(Date, 'now').mockReturnValue(t0)
-    const resources = new MiniAppResources(AUTH, 'status-aged')
+  it('marks cached Status as stale while the live transport is down and clears on recovery', async () => {
+    const resources = new MiniAppResources(AUTH, 'status-outage')
     resources.publishConfirmed('status', dto())
-    now.mockReturnValue(t0 + 30_001)
-    const gate = deferred<StatusDTO>()
-    const loader = vi.spyOn(api, 'status').mockReturnValue(gate.promise)
+    const live = { health: 'stale' as 'live' | 'stale', revision: 1, lastUpdatedAt: 0, retrying: true }
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
 
-    render(<SystemStatusScreen auth={AUTH} resources={resources} />)
+    const { rerender } = render(<SystemStatusScreen auth={AUTH} resources={resources} />)
     await screen.findByText(TRANSPORT_STALE_WARNING)
     expect(screen.queryByText('Всё работает')).toBeNull()
     expect(screen.getByText('Данные устарели')).toBeDefined()
-    expect(loader).toHaveBeenCalledTimes(1)
-    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, true])
 
-    gate.resolve(dto({ positions_count: 4 }))
+    // The channel recovers: the same cached DTO is trustworthy again and the
+    // warning clears without the user doing anything.
+    live.health = 'live'
+    rerender(<SystemStatusScreen auth={AUTH} resources={resources} />)
     await screen.findByText('Всё работает')
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
-    now.mockRestore()
   })
 
   it('a late request never overwrites a newer refresh result', async () => {
@@ -283,14 +277,11 @@ describe('SystemStatusScreen behavior', () => {
       <SystemStatusView
         dto={dto()}
         transportStale={false}
-        refreshing={false}
-        onRefresh={() => {}}
         onOpenBot={() => {}}
       />,
     )
     expect(html).not.toContain('settings-chevron')
-    // Scope to the diagnostics section only: the screen-level refresh
-    // button lives outside of it.
+    // Scope to the diagnostics section: nothing clickable may hide inside it.
     const diagnostics = (html.split('aria-label="Диагностика"')[1] ?? '').split('</section>')[0]
     expect(diagnostics).not.toContain('<button')
     expect(diagnostics).not.toContain('<a ')

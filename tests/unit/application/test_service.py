@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,6 +33,7 @@ from copytradeaster.application.models import (
     StatusReason,
     StatusRemediation,
     StatusState,
+    SystemState,
     UserRole,
     ValidationError,
 )
@@ -1738,6 +1740,41 @@ async def test_dashboard_status_degraded_disconnected_and_refresh_failure(enviro
     assert refreshed.positions_count == 0
     assert refreshed.snapshot_captured_at is None
     assert refreshed.last_check_at is not None
+
+
+async def test_routine_master_reverification_is_not_a_user_facing_degradation(environment):
+    """The scheduled boundary must not read to a user as a fault.
+
+    ``_establish_master_boundary`` fail-closes on schedule (every few sweeps),
+    rebuilds the master against REST and proves convergence again within
+    seconds. Showing that as DEGRADED made Dashboard/Positions/Status flash
+    "requires attention" several times a minute for routine work. Only the
+    trading gate should care; every genuine fault stays visible.
+    """
+    db, _, _, _, service = environment
+    settings = SettingsRepo(db)
+    await settings.set_flag("degraded", "periodic-snapshot")
+    await settings.set_flag("ready", "false")
+    await settings.set_flag("heartbeat_at", str(int(time.time() * 1000)))
+
+    dashboard = await service.dashboard(7)
+    assert dashboard.system_state is SystemState.READY
+    assert dashboard.copy_state is not CopyState.DEGRADED
+    positions = await service.positions(7)
+    assert positions.is_stale is False
+    status = await service.status(7)
+    assert status.system_state is SystemState.READY
+
+    # A real fault is reported exactly as before.
+    await settings.set_flag("degraded", "sweep-failed:tg-7:timeout")
+    faulted = await service.dashboard(7)
+    assert faulted.system_state is SystemState.DEGRADED
+    assert faulted.copy_state is CopyState.DEGRADED
+    assert faulted.message == "runtime requires attention"
+
+    # The latch still rules when no routine reason explains it.
+    await settings.set_flag("degraded", "")
+    assert (await service.dashboard(7)).system_state is SystemState.DEGRADED
 
 
 async def test_system_state_handles_stale_bad_heartbeat_and_unknown_runtime(environment):

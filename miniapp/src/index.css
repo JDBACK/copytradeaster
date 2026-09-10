@@ -571,6 +571,10 @@ body {
   height: 100dvh;
   display: flex;
   flex-direction: column;
+  /* Anchor and clip the pull-down indicator: at rest it sits folded above the
+     top edge, and it slides in only as far as the finger travels. */
+  position: relative;
+  overflow: hidden;
 }
 
 .shell-content {
@@ -583,6 +587,72 @@ body {
 
 .shell-content .screen {
   padding-bottom: 24px;
+}
+
+/* --- pull to refresh ------------------------------------------------------- */
+
+.pull-refresh {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--canvas);
+  color: var(--text-muted);
+  font-size: 13px;
+  /* Never eats a tap: the gesture belongs to the scroller underneath. */
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(calc(var(--pull-distance, 0px) - 44px));
+  transition: transform 220ms ease-out, opacity 140ms linear;
+}
+
+.pull-refresh[data-phase='pulling'] {
+  /* During a live drag the sheet follows the finger exactly; easing here
+     reads as lag. */
+  transition: none;
+  opacity: 1;
+  color: var(--champagne);
+}
+
+.pull-refresh[data-phase='ready'],
+.pull-refresh[data-phase='refreshing'] {
+  opacity: 1;
+  color: var(--champagne);
+}
+
+.pull-refresh-icon {
+  display: flex;
+}
+
+/* The arrow points up exactly when letting go would refresh. */
+.pull-refresh[data-phase='pulling'] .pull-refresh-icon {
+  transform: rotate(180deg);
+}
+
+.pull-refresh[data-phase='refreshing'] .pull-refresh-icon {
+  animation: pull-refresh-spin 900ms linear infinite;
+}
+
+@keyframes pull-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull-refresh {
+    transition: none;
+  }
+
+  .pull-refresh[data-phase='refreshing'] .pull-refresh-icon {
+    animation: none;
+  }
 }
 
 .live-status {
@@ -613,17 +683,6 @@ body {
 .live-status-reconnecting,
 .live-status-stale {
   color: var(--warning);
-}
-
-.live-status-retry {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--champagne);
-  font: inherit;
-  font-weight: 600;
-  padding: 2px 4px;
-  cursor: pointer;
 }
 
 .bottom-nav {

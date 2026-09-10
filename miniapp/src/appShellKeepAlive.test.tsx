@@ -790,7 +790,7 @@ describe('HomeScreen loading lifecycle', () => {
     const dashboardSpy = vi
       .spyOn(api, 'dashboard')
       .mockRejectedValueOnce(new ApiError(0, 'network_error', 'verify lost'))
-      .mockResolvedValueOnce(dashboard({ copy_state: 'active' }))
+      .mockResolvedValue(dashboard({ copy_state: 'active' }))
     const pauseSpy = vi
       .spyOn(api, 'pause')
       .mockRejectedValueOnce(new ApiError(0, 'timeout_error', 'response lost'))
@@ -815,16 +815,14 @@ describe('HomeScreen loading lifecycle', () => {
     expect(resources.mutationLocked('pause-resume')).toBe(true)
     expect(resources.mutationState('pause-resume')).toBe('unknown')
 
-    // Network later recovers. Unknown keeps pause blocked, but explicit
-    // authoritative recovery remains available in the UI. Active in-flight
-    // mutations still disable that button; only retained uncertainty may use it.
-    const recover = screen.getByRole('button', { name: 'Обновить данные' })
-    expect(recover).toBeEnabled()
-    fireEvent.click(recover)
-    await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull())
-    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+    // Network later recovers. Unknown keeps pause blocked, and there is no
+    // button to press: the screen performs the authoritative read by itself
+    // (bounded retry) and only that answer may clear the uncertainty.
+    expect(screen.queryByRole('button', { name: 'Обновить данные' })).toBeNull()
+    await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull(), { timeout: 3000 })
+    expect(dashboardSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(pauseSpy).toHaveBeenCalledTimes(1)
-    expect(onMutated).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(onMutated).toHaveBeenCalledTimes(1))
     expect(screen.getByRole('button', { name: /поставить на паузу/i })).toBeEnabled()
 
     // A new user gesture may now admit one fresh mutation; double-click cannot
@@ -836,22 +834,41 @@ describe('HomeScreen loading lifecycle', () => {
     expect(pauseSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('qualifies cached Home and Positions as transport-stale while refresh is pending', async () => {
+  it('treats a pending refresh as normal and only an outage as transport-stale', async () => {
     const resources = new MiniAppResources(AUTH, 'root-stale-honesty')
     resources.publishConfirmed('dashboard', dashboard({ system_state: 'ready' }))
     resources.publishConfirmed('positions', positionPage({ positions: [], count: 0 }))
     resources.invalidate(['dashboard', 'positions'])
     vi.spyOn(api, 'dashboard').mockReturnValue(new Promise(() => {}))
     vi.spyOn(api, 'positions').mockReturnValue(new Promise(() => {}))
+    const live = {
+      health: 'live' as 'live' | 'reconnecting' | 'connecting' | 'stale',
+      revision: 1,
+      lastUpdatedAt: Date.now(),
+      retrying: false,
+    }
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
 
+    // A live invalidation is routine: it must not paint a warning nor a
+    // "requires attention" verdict over healthy, visible data.
     const home = render(
       <HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} active={true} />,
     )
-    expect(screen.getByText(/данные требуют проверки/i)).toBeDefined()
+    expect(screen.queryByText(/данные требуют проверки/i)).toBeNull()
     home.unmount()
+    const positions = render(
+      <PositionsScreen auth={AUTH} resources={resources} active={true} warm={true} />,
+    )
+    expect(screen.queryByText(/снимок позиций устарел/i)).toBeNull()
+    positions.unmount()
 
-    render(<PositionsScreen auth={AUTH} resources={resources} active={true} warm={true} />)
-    expect(screen.getByText(/снимок позиций устарел/i)).toBeDefined()
+    // A transport that is actually down still says so — once, in the live rail
+    // that exists for that purpose, without painting a second warning over
+    // healthy visible data.
+    live.health = 'stale'
+    render(<AppShell auth={AUTH} resources={resources} onNotConnected={noop} />)
+    expect(screen.getByText(/нет связи/i)).toBeDefined()
+    expect(screen.queryByText(/данные требуют проверки/i)).toBeNull()
   })
 
   it('reconciles an ambiguous resume timeout from authoritative Dashboard without replaying resume', async () => {
@@ -1001,13 +1018,15 @@ describe('HomeScreen loading lifecycle', () => {
 
   it('a strong Dashboard response covers its own matching REST live publication', async () => {
     const resources = new MiniAppResources(AUTH, 'home-live-self-fence')
-    let liveHealth: 'connecting' | 'live' = 'connecting'
-    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => ({
-      health: liveHealth,
-      revision: liveHealth === 'live' ? 2 : 1,
-      lastUpdatedAt: liveHealth === 'live' ? Date.now() : 0,
+    // useSyncExternalStore requires a cached snapshot: the production getter
+    // returns a stored reference, so the double must as well.
+    const live = {
+      health: 'connecting' as 'live' | 'reconnecting' | 'connecting' | 'stale',
+      revision: 1,
+      lastUpdatedAt: 0,
       retrying: false,
-    }))
+    }
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
     const strongGate = deferred<DashboardDTO>()
     const dashboardSpy = vi.spyOn(api, 'dashboard').mockReturnValue(strongGate.promise)
     const capturedAt = '2026-09-10T06:02:48.123456+00:00'
@@ -1020,7 +1039,9 @@ describe('HomeScreen loading lifecycle', () => {
     // FollowerSnapshotStore update to live clients before its HTTP response
     // can settle. The publication must fence that response, but it must not
     // make Home start another refresh=true request.
-    liveHealth = 'live'
+    live.health = 'live'
+    live.revision = 2
+    live.lastUpdatedAt = Date.now()
     act(() => applyLiveUpdate(resources, {
       resources: ['dashboard', 'positions', 'status'],
       revision: 2,
@@ -1039,13 +1060,13 @@ describe('HomeScreen loading lifecycle', () => {
 
   it('a newer mark live boundary still fences the strong response and converges with one weak cache read', async () => {
     const resources = new MiniAppResources(AUTH, 'home-live-mark-overtake')
-    let liveHealth: 'connecting' | 'live' = 'connecting'
-    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => ({
-      health: liveHealth,
-      revision: liveHealth === 'live' ? 3 : 1,
-      lastUpdatedAt: liveHealth === 'live' ? Date.now() : 0,
+    const live = {
+      health: 'connecting' as 'live' | 'reconnecting' | 'connecting' | 'stale',
+      revision: 1,
+      lastUpdatedAt: 0,
       retrying: false,
-    }))
+    }
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
     const strongGate = deferred<DashboardDTO>()
     const weakGate = deferred<DashboardDTO>()
     const dashboardSpy = vi
@@ -1056,7 +1077,9 @@ describe('HomeScreen loading lifecycle', () => {
 
     render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
     await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(1))
-    liveHealth = 'live'
+    live.health = 'live'
+    live.revision = 3
+    live.lastUpdatedAt = Date.now()
     act(() => {
       applyLiveUpdate(resources, {
         resources: ['dashboard', 'positions', 'status'],
@@ -1106,7 +1129,9 @@ describe('HomeScreen loading lifecycle', () => {
     await act(async () => {})
     expect(resources.mutationState('pause-resume')).toBe('unknown')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить данные' }))
+    // The one manual escape hatch left in the app: pulling the surface down
+    // performs the strong authoritative read that clears the uncertainty.
+    await act(async () => { await resources.pullRefresh() })
     await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(2))
     expect(dashboardSpy.mock.calls[1]?.slice(0, 2)).toEqual([AUTH, true])
     await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull())
@@ -1361,7 +1386,9 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     await screen.findByText('Сделка B открыта')
     // A freshness probe runs, but never replaces the pinned paginated slice.
     expect(screen.getByText('Открыта позиция BTCUSDT')).toBeDefined()
-    expect(await screen.findByText('Есть новые события')).toBeDefined()
+    // New events are picked up silently by the next first-page read instead of
+    // asking the user to tap a banner they did not ask for.
+    expect(screen.queryByText('Есть новые события')).toBeNull()
     expect(activitySpy).toHaveBeenCalledTimes(3)
   })
 
@@ -1381,7 +1408,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     expect(positionsSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('failed warmup shows error UI with retry, activation past TTL retries', async () => {
+  it('failed warmup shows the honest error UI without a button, activation past TTL retries', async () => {
     const positionsSpy = vi
       .spyOn(api, 'positions')
       .mockRejectedValueOnce(new ApiError(500, 'network_error', 'down'))
@@ -1390,9 +1417,11 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     // Gated: the loading frame shows, but no request leaves.
     expect(screen.getByLabelText('Загрузка позиций')).toBeDefined()
     expect(positionsSpy).toHaveBeenCalledTimes(0)
-    // Warmup fires and fails while hidden: error UI waits for the opener.
+    // Warmup fires and fails while hidden: the error is honest but offers no
+    // manual retry — the screen heals when the user actually opens it.
     rerender(<PositionsScreen auth={AUTH} active={false} warm={true} />)
-    await screen.findByRole('button', { name: 'Повторить' })
+    await screen.findByText('Нет связи')
+    expect(screen.queryByRole('button', { name: /повторить/i })).toBeNull()
     expect(positionsSpy).toHaveBeenCalledTimes(1)
 
     // Opening the tab past TTL retries automatically and lands ready.

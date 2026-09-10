@@ -36,8 +36,7 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
     <h1 className="h1">Активность</h1>
     <div className="segmented" role="tablist" aria-label="Фильтр журнала">{(['all', 'trade', 'system'] as const).map(value => <button type="button" role="tab" key={value} className={`segmented-item${filter === value ? ' active' : ''}`} aria-selected={filter === value} onClick={() => { setFilter(value); hapticImpact('light') }}>{value === 'all' ? 'Все' : value === 'trade' ? 'Сделки' : 'Система'}</button>)}</div>
     {!!feed.data?.pending.length && <section className="panel"><h2 className="h2">В процессе</h2>{feed.data.pending.map((operation, index) => <p key={`${operation.symbol}:${operation.operation}:${index}`}>{operation.state === 'UNKNOWN' ? 'Проверяем результат на бирже' : 'Ожидаем подтверждения'} {operation.symbol ?? ''}</p>)}</section>}
-    {feed.data && feed.data.latest_seq > feed.data.high_water && <button type="button" className="btn btn-secondary" onClick={() => void feed.refresh()}>Есть новые события</button>}
-    {feed.error && <><ErrorBox {...describeError(feed.error)} /><button type="button" className="btn btn-secondary" onClick={() => void feed.retry()}>Повторить</button></>}
+    {feed.error && <ErrorBox {...describeError(feed.error)} />}
     {!feed.data && !feed.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка журнала" />}
     {feed.data?.items.length === 0 && <p className="info-box">{filter === 'trade' ? 'Сделок пока нет' : filter === 'system' ? 'Системных событий пока нет' : 'Событий пока нет'}</p>}
     {groups.filter(group => group.items.length).map(group => <section key={group.bucket} aria-label={ACTIVITY_TIME_LABELS[group.bucket]}><h2 className="activity-day-label">{ACTIVITY_TIME_LABELS[group.bucket]}</h2>{group.items.map(event => <TradeEventRow key={event.event_ref} event={event} onOpen={tradeRef => onOpen({ kind: 'trade-detail', tradeRef })} />)}</section>)}

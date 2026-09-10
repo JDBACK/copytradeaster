@@ -30,6 +30,7 @@ import { RiskScreen } from '../screens/RiskScreen'
 import { SettingsScreen } from '../screens/SettingsScreen'
 import { SystemStatusScreen } from '../screens/SystemStatusScreen'
 import { LiveStatus } from './LiveStatus'
+import { PullToRefresh } from './PullToRefresh'
 
 export function AppShell({
   auth,
@@ -247,6 +248,8 @@ export function AppShell({
   }, [route])
 
   const homeActive = route.tab === 'home' && !nested
+  // The single manual refresh in the app: pull down at the top of the surface.
+  const handlePullRefresh = useCallback(() => resources.pullRefresh(), [resources])
   const positionsActive = route.tab === 'positions' && !nested
   const activityActive = route.tab === 'activity' && !nested
   const settingsActive = route.tab === 'settings' && !nested
@@ -255,6 +258,7 @@ export function AppShell({
     <div className="shell">
       {banner}
       <LiveStatus resources={resources} />
+      <PullToRefresh scroller={contentRef} onRefresh={handlePullRefresh} />
       <div className="shell-content" ref={contentRef}>
         <div hidden={!homeActive}>
           <HomeScreen

@@ -195,4 +195,4 @@ export function statusTrust(dto: StatusDTO): StatusTrustItem[] {
 }
 
 /** Marker shown when the transport failed but a previous DTO stays on screen. */
-export const TRANSPORT_STALE_WARNING = 'Не удалось обновить. Показаны последние полученные данные.'
+export const TRANSPORT_STALE_WARNING = 'Связь с сервером потеряна. Показаны последние полученные данные.'

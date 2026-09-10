@@ -16,7 +16,7 @@ import { Brand, ErrorBox, Row } from '../components/ui'
 import { describeError } from '../errors'
 import { formatTime } from '../format'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useResource, useScreenResources, useTransportStale } from '../useResource'
 
 export function NotificationsScreen({
   auth,
@@ -46,8 +46,8 @@ export function NotificationsScreen({
   })
   const dto = resource.snapshot.data
   const ownerSaving = ownerMutationState !== null
-  const transportStale =
-    dto !== null && (resource.snapshot.stale || resource.snapshot.error !== null)
+  const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const transportStale = dto !== null && transportUnhealthy
 
   useEffect(() => {
     if (ownerMutationState !== 'unknown' || ownerUnknownSince === null) return
@@ -137,15 +137,6 @@ export function NotificationsScreen({
             Уведомления
           </h1>
           <ErrorBox title={copy.title} hint={copy.hint} />
-          <div className="btn-stack">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => void resource.refresh('weak').catch(() => {})}
-            >
-              Повторить
-            </button>
-          </div>
         </div>
       )
     }
@@ -200,23 +191,6 @@ export function NotificationsScreen({
           onToggle={handleToggle}
         />
       </section>
-
-      {(ownerMutationState === 'unknown' || resource.snapshot.error !== null) && (
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={resource.snapshot.inflight}
-            onClick={() =>
-              void resource
-                .refresh(ownerMutationState === 'unknown' ? 'strong' : 'weak')
-                .catch(() => {})
-            }
-          >
-            Обновить данные
-          </button>
-        </div>
-      )}
 
       <div className="panel">
         <Row
