@@ -18,6 +18,8 @@ or storage imports live here.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
 from dataclasses import asdict
@@ -25,11 +27,11 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from aiogram.utils.web_app import safe_parse_webapp_init_data
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 from copytradeaster.application.models import (
     ActivityFilter,
@@ -46,6 +48,12 @@ from copytradeaster.application.models import (
 from copytradeaster.config import Settings
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.onboarding.errors import OnboardingErrorCode
+
+if TYPE_CHECKING:
+    from copytradeaster.miniapp.live import MiniAppLiveRuntime
+
+if TYPE_CHECKING:
+    from copytradeaster.miniapp.live import MiniAppLiveRuntime
 
 log = get_logger(__name__)
 
@@ -125,6 +133,7 @@ def _dev_mode_allowed(settings: Settings) -> bool:
 def create_miniapp_app(
     settings: Settings,
     application: ApplicationProtocol,
+    live: MiniAppLiveRuntime | None = None,
 ) -> web.Application:
     """Build the Mini App aiohttp application (API + static)."""
 
@@ -176,6 +185,54 @@ def create_miniapp_app(
             return _json_dto(await application.miniapp_session(user_id))
         except Exception as exc:  # noqa: BLE001 - typed application errors carry public_code
             return _failure(exc, MSG_UNAVAILABLE)
+
+    async def live_ticket(request: web.Request) -> web.Response:
+        user_id = await _identity(request)
+        if user_id is None:
+            return _unauthorized()
+        if live is None:
+            return _json_error(503, "live_unavailable", MSG_UNAVAILABLE)
+        try:
+            ticket = await live.issue_ticket(user_id)
+        except Exception:  # noqa: BLE001 - live transport is isolated from API reads
+            log.exception("live ticket issue failed user_id=%s", user_id)
+            return _json_error(503, "live_unavailable", MSG_UNAVAILABLE)
+        if ticket is None:
+            return _json_error(403, "live_scope_unavailable", MSG_UNAVAILABLE)
+        return web.json_response(ticket)
+
+    async def live_socket(request: web.Request) -> web.StreamResponse:
+        if live is None:
+            return _json_error(503, "live_unavailable", MSG_UNAVAILABLE)
+        grant = await live.consume_ticket(request.query.get("ticket", ""))
+        if grant is None:
+            return _unauthorized()
+        socket = web.WebSocketResponse(heartbeat=20.0, autoping=True)
+        await socket.prepare(request)
+        queue, initial = live.hub.subscribe(grant.account_id)
+
+        async def send_updates() -> None:
+            try:
+                while not socket.closed:
+                    await socket.send_json(await queue.get(), dumps=_json_dumps)
+            except (ConnectionError, RuntimeError):
+                pass
+            finally:
+                if not socket.closed:
+                    await socket.close()
+
+        sender = asyncio.create_task(send_updates())
+        try:
+            await socket.send_json(initial, dumps=_json_dumps)
+            async for message in socket:
+                if message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
+                    break
+        finally:
+            sender.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sender
+            live.hub.unsubscribe(grant.account_id, queue)
+        return socket
 
     async def dashboard(request: web.Request) -> web.Response:
         user_id = await _identity(request)
@@ -699,6 +756,8 @@ def create_miniapp_app(
 
     app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[security_headers])
     app.router.add_post("/miniapp/api/session", session)
+    app.router.add_post("/miniapp/api/live-ticket", live_ticket)
+    app.router.add_get("/miniapp/api/live", live_socket)
     app.router.add_post("/miniapp/api/client-log", client_log)
     app.router.add_post("/miniapp/api/dashboard", dashboard)
     app.router.add_post("/miniapp/api/positions", positions)
@@ -751,9 +810,15 @@ def create_miniapp_app(
 class MiniAppServer:
     """Bounded aiohttp AppRunner lifecycle for the Mini App transport."""
 
-    def __init__(self, settings: Settings, application: ApplicationProtocol) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        application: ApplicationProtocol,
+        live: MiniAppLiveRuntime | None = None,
+    ) -> None:
         self._settings = settings
         self._application = application
+        self._live = live
         self._runner: web.AppRunner | None = None
 
     @property
@@ -763,7 +828,7 @@ class MiniAppServer:
     async def start(self) -> None:
         if not self.enabled:
             return
-        app = create_miniapp_app(self._settings, self._application)
+        app = create_miniapp_app(self._settings, self._application, self._live)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(

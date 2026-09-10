@@ -707,3 +707,19 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 - Повторная квалификация движка pending: последняя — `f7df60b` (requalify integrated live gates, 2026-09-09); после неё в launch-path зашли ровно `ffa2848` + `58c10f7` (`9b65312` — только docs/maps/гейты, переквалификации не требует).
 - Дальше — прогоны по `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:6-11` (NO-GO до повторной квалификации); verdict и счётчики — только в `docs/ENGINE_TEST_STATUS_2026-08.md`.
 - Исторический план A–G демотирован из корня `docs/` в `docs/reports/plan_live_test.md` (история — `git log --follow`); старые A–G — история прогонов предыдущего кода (`docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:10-11`).
+
+## 10. Mini App Live Mode — STARTED 2026-09-10
+
+Исполняемый план и append-only журнал:
+[MINIAPP_LIVE_MODE_PLAN_2026-09.md](reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md).
+
+- [x] Подтверждены текущий snapshot/cache flow и Aster private/public WS
+  контракты; выбрана схема WS-hint → authoritative REST boundary.
+- [ ] Общий process-local follower read model с monotonic revision.
+- [ ] Authenticated browser WebSocket через short-lived single-use ticket.
+- [ ] Private stream pool для REAL followers с coalesced snapshot refresh.
+- [ ] Shared public mark-price stream для presentation PnL.
+- [ ] Frontend live client, reconnect/stale states и resource fencing.
+- [ ] Удалены постоянные generic refresh-кнопки; explicit permission recheck
+  сохранён.
+- [ ] Offline, REAL Aster Testnet, Telegram WebView и lifecycle acceptance.

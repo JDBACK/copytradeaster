@@ -160,7 +160,7 @@ export class HistoryResources {
           this.publish(entry, { loading: false })
           this.prune()
           if (!this.disposed && revision !== entry.revision && entry.followUp) {
-            await this.load(query)
+            await this.load(query, 'refresh')
           }
         }
       }
@@ -173,6 +173,14 @@ export class HistoryResources {
     for (const entry of this.entries.values()) {
       entry.revision++
       this.publish(entry, { receivedAt: 0 })
+    }
+  }
+  liveInvalidate(): void {
+    if (this.disposed) return
+    for (const entry of this.entries.values()) {
+      entry.revision++
+      this.publish(entry, { receivedAt: 0 })
+      if (entry.listeners.size > 0) void this.load(entry.query, 'refresh')
     }
   }
   dispose(): void {

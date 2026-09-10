@@ -47,6 +47,7 @@ from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.leverage import LeverageManager
 from copytradeaster.trading.reconciler import Reconciler, build_snapshot_scope
 from copytradeaster.trading.registry import FollowerRegistry
+from copytradeaster.trading.snapshots import FollowerSnapshotStore
 
 log = get_logger(__name__)
 CLOCK_DRIFT_MAX_MS = 2000
@@ -223,9 +224,11 @@ class App:
         self.episodes = EpisodeRepository(self.db)
         self.user_events = EventRepository(self.db)
         self.history_mark_dirty = None
+        self.history_live_publish = None
         self.nonces = NonceStore(self.db)
         self.basis = SyncBasisRepo(self.db)
         self.follower_registry = FollowerRegistry(max_real_followers=cfg.max_followers)
+        self.follower_snapshots = FollowerSnapshotStore()
         self.shadow_exchange = ShadowExchange(
             hedge=cfg.position_mode == "HEDGE",
             auto_trigger_conditionals=cfg.shadow_auto_trigger_conditionals,
@@ -288,6 +291,7 @@ class App:
             entry_admission=self._master_entry_admitted,
             operator_max_leverage=cfg.operator_max_leverage,
             max_total_risk_pct=cfg.max_total_risk_pct,
+            snapshot_observer=self.follower_snapshots.publish,
         )
         self.reconciler = Reconciler(self.coordinator, metrics=self.metrics)
         self.stream: UserStream | None = None

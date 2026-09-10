@@ -7,6 +7,7 @@
 
 import { HistoryResources } from './historyResources'
 import { api, ApiError, type AuthContext } from './api'
+import { MiniAppLiveSession, type LiveSnapshot, type LiveUpdate } from './live'
 import type {
   AccountBuilderDTO,
   DashboardDTO,
@@ -56,6 +57,13 @@ export type MutationUnknownReason =
   | 'notifications'
   | 'account-reauthorize'
   | 'account-disconnect'
+
+const IDLE_LIVE_SNAPSHOT: LiveSnapshot = {
+  health: 'connecting',
+  revision: 0,
+  lastUpdatedAt: 0,
+  retrying: false,
+}
 
 type MutationLock =
   | { state: 'active'; token: symbol }
@@ -132,6 +140,7 @@ export class MiniAppResources {
   private readonly onInvalidSession?: () => void
   private invalidSessionReported = false
   private disposed = false
+  private live: MiniAppLiveSession | null = null
   private readonly locks = new Map<MutationKey, MutationLock>()
   private readonly entries: { [K in ResourceKey]: Entry<ResourceValues[K]> } = {
     dashboard: emptyEntry<DashboardDTO>(),
@@ -148,6 +157,29 @@ export class MiniAppResources {
     this.auth = auth
     this.scope = scope
     this.onInvalidSession = onInvalidSession
+  }
+
+  startLive(): void {
+    if (this.disposed || this.live) return
+    this.live = new MiniAppLiveSession(
+      this.auth,
+      (event) => this.applyLiveUpdate(event),
+      (error) => this.handleInvalidSessionError(error),
+    )
+    this.live.start()
+  }
+
+  liveEnabled(): boolean {
+    return this.live !== null
+  }
+
+  getLiveSnapshot = (): LiveSnapshot => this.live?.getSnapshot() ?? IDLE_LIVE_SNAPSHOT
+
+  subscribeLive = (listener: () => void): (() => void) =>
+    this.live?.subscribe(listener) ?? (() => {})
+
+  retryLive(): void {
+    this.live?.retryNow()
   }
 
   getSnapshot<K extends ResourceKey>(key: K): ResourceSnapshot<ResourceValues[K]> {
@@ -373,6 +405,8 @@ export class MiniAppResources {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.live?.dispose()
+    this.live = null
     this.history.dispose()
     this.locks.clear()
     for (const key of Object.keys(this.entries) as ResourceKey[]) {
@@ -522,5 +556,30 @@ export class MiniAppResources {
       if (this.mutationResourceKey(mutationKey) === key) return true
     }
     return false
+  }
+
+  private applyLiveUpdate(event: LiveUpdate): void {
+    if (this.disposed) return
+    const allowed = new Set<ResourceKey>([
+      'dashboard',
+      'positions',
+      'risk',
+      'riskPreview',
+      'notifications',
+      'status',
+      'accountBuilder',
+    ])
+    const keys = [...new Set(event.resources)].filter(
+      (key): key is ResourceKey => allowed.has(key as ResourceKey),
+    )
+    if (keys.length) this.invalidate(keys)
+    if (event.resources.includes('history')) this.history.liveInvalidate()
+    queueMicrotask(() => {
+      if (this.disposed) return
+      for (const key of keys) {
+        if (!this.hasSubscribers(key) || this.resourceMutationProtected(key)) continue
+        void this.ensure(key, { strength: 'weak', force: true, maxAgeMs: 0 }).catch(() => {})
+      }
+    })
   }
 }

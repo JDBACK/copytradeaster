@@ -1916,3 +1916,24 @@ mute/re-enable между sweep. Toggle/outbox cursor boundary транзакц�
 recipient/ownership повторно проверяются при commit, cursor монотонный.
 Тестовые прогоны отложены владельцем; ruff check/format изменённых файлов
 проходят. Дополнительные сценарии внесены в S3 testing handoff; G3 OPEN.
+
+## Mini App Live Mode checkpoint — 2026-09-10
+
+В ветке `codex/miniapp-live-updates` добавлен незавершённый фундамент live
+presentation mode: process-local follower snapshots, authenticated Mini App
+ticket/WebSocket hub, private follower-stream hints с coalesced REST refresh,
+общий public mark-price stream, а также frontend live session с reconnect,
+stale/auth states и resource invalidation. History worker теперь может публиковать
+изменение activity как presentation hint; execution correctness по-прежнему
+остаётся за REST confirmation и reconciler.
+
+Проверено на текущем срезе: frontend `28 files / 349 passed`, Oxlint, TypeScript
+build и Vite build; backend targeted suites `77 passed` и adapter contract
+suite `20 passed`; ruff для изменённых backend-файлов и `git diff --check`
+чистые. Эти проверки не являются REAL testnet или ручным Telegram acceptance
+live mode.
+
+Осталось: live status UI и замена общих refresh-кнопок на contextual
+reconnect/stale affordances; dedicated live unit/integration tests; REAL Aster
+Testnet и ручной Mini App прогон; затем lifecycle/backoff/rate-limit hardening
+и финальная проверка регрессий.

@@ -63,6 +63,7 @@ from copytradeaster.storage.repositories import (
     _conn_fetchone,
 )
 from copytradeaster.trading.leverage import LeverageError
+from copytradeaster.trading.snapshots import FollowerSnapshotStore
 
 log = get_logger(__name__)
 
@@ -661,10 +662,13 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
         self.db = app.db
         self.cfg = app.cfg
         self.credentials = app.credentials
-        self._snapshot_cache: dict[str, tuple[AccountState, datetime]] = {}
         # Injectable for deterministic snapshot-TTL tests; production keeps
         # wall-clock time so captured_at reflects the true exchange read.
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._snapshot_store = getattr(app, "follower_snapshots", None)
+        if self._snapshot_store is None:
+            # Small adapter fakes do not compose App's shared read model.
+            self._snapshot_store = FollowerSnapshotStore(clock=self._clock)
 
     @property
     def testnet(self) -> bool:
@@ -727,16 +731,19 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
     async def cached_snapshot(
         self, account_id: str
     ) -> AccountState | tuple[AccountState, datetime] | None:
-        entry = self._snapshot_cache.get(account_id)
-        return entry
+        entry = self._snapshot_store.get(account_id)
+        if entry is None:
+            return None
+        return entry.state, entry.captured_at
 
     async def refresh_snapshot(
         self, account_id: str
     ) -> AccountState | tuple[AccountState, datetime]:
         snapshot = await self.app.snapshot_follower(account_id)
-        captured_at = self._clock()
-        self._snapshot_cache[account_id] = (snapshot, captured_at)
-        return (snapshot, captured_at)
+        entry = self._snapshot_store.get(account_id)
+        if entry is None or entry.state is not snapshot:
+            entry = self._snapshot_store.publish(snapshot, captured_at=self._clock())
+        return (entry.state, entry.captured_at)
 
     async def symbol_assets(self, account_id: str, symbols: list[str]) -> dict[str, str | None]:
         """Base-asset units from cached exchange metadata.
@@ -923,7 +930,7 @@ class AppStage2RuntimeAdapter(Stage2RuntimeAdapter):
     async def commit_disconnect(self, account_id: str) -> None:
         if not await self.credentials.remove_identity(account_id):
             raise KeyError(f"account {account_id!r} is not registered")
-        self._snapshot_cache.pop(account_id, None)
+        self._snapshot_store.discard(account_id)
 
     async def build_replacement_runtime(
         self, account_id: str, request: DirectOnboardingRequest, preflight: Any

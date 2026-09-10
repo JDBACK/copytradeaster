@@ -36,6 +36,11 @@ export interface AuthContext {
   devUserId?: number
 }
 
+export interface LiveTicketDTO {
+  ticket: string
+  expires_in: number
+}
+
 type Validator<T> = (value: unknown) => value is T
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -91,6 +96,11 @@ function validActivityItem(value: unknown): boolean {
 }
 
 const validators = {
+  liveTicket: ((value: unknown): value is { ticket: string; expires_in: number } =>
+    isRecord(value) && hasString(value, 'ticket') && hasNumber(value, 'expires_in')) satisfies Validator<{
+    ticket: string
+    expires_in: number
+  }>,
   session: ((value: unknown): value is MiniAppSessionDTO => {
     if (!isRecord(value)) return false
     return hasNumber(value, 'user_id') && oneOf(value.access_state, accessStates) && hasString(value, 'environment') && hasBoolean(value, 'account_connected') &&
@@ -250,6 +260,9 @@ export async function post<T>(
 export const api = {
   session: (auth: AuthContext, options?: { timeoutMs?: number; signal?: AbortSignal }) =>
     post<MiniAppSessionDTO>('/miniapp/api/session', {}, auth, options, validators.session),
+
+  liveTicket: (auth: AuthContext, options?: { timeoutMs?: number; signal?: AbortSignal }) =>
+    post<LiveTicketDTO>('/miniapp/api/live-ticket', {}, auth, options, validators.liveTicket),
 
   dashboard: (
     auth: AuthContext,

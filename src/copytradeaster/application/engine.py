@@ -319,6 +319,7 @@ class Stage2Process:
         self.application: ApplicationProtocol | None = None
         self.telegram: Stage2TelegramRuntime | None = None
         self.miniapp: Any | None = None
+        self.miniapp_live: Any | None = None
         self.worker: Stage2OutboxWorker | None = None
         self.notifier: Notifier | None = None
         self._worker_started = False
@@ -390,6 +391,11 @@ class Stage2Process:
             # App owns the shared DB close after all workers have drained.  It
             # must be READY/started before Telegram can begin polling.
             await self.app.start()
+            if self.settings.miniapp_enabled:
+                from copytradeaster.miniapp.live import MiniAppLiveRuntime
+
+                self.miniapp_live = MiniAppLiveRuntime(self.app)
+                self.app.history_live_publish = self.miniapp_live.publish_history
             self.history_worker = self._history_factory(self.app)
             await self.history_worker.start()
             if self._enable_user_event_delivery:
@@ -400,7 +406,12 @@ class Stage2Process:
             if self.settings.miniapp_enabled:
                 from copytradeaster.miniapp.server import MiniAppServer
 
-                self.miniapp = MiniAppServer(self.settings, self.application)
+                if self.miniapp_live is None:
+                    raise RuntimeError("Mini App live runtime was not composed")
+                await self.miniapp_live.start()
+                self.miniapp = MiniAppServer(
+                    self.settings, self.application, live=self.miniapp_live
+                )
                 await self.miniapp.start()
 
             if self.settings.telegram_notifications_enabled:
@@ -503,6 +514,15 @@ class Stage2Process:
                     errors.append(exc)
                 finally:
                     self.miniapp = None
+
+            miniapp_live = getattr(self, "miniapp_live", None)
+            if miniapp_live is not None:
+                try:
+                    await miniapp_live.stop()
+                except BaseException as exc:  # noqa: BLE001 - continue teardown
+                    errors.append(exc)
+                finally:
+                    self.miniapp_live = None
 
             if self.history_worker is not None:
                 try:

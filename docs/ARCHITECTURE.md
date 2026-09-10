@@ -539,15 +539,19 @@ entry admission и запрашивают coalesced REST recovery. Не боле
 потоке система остаётся close-only/dirty и повторяет recovery по
 периодическому sweep, не крутя бесконечный REST-loop.
 
-Для followers на первом этапе достаточно:
+Для торговой корректности followers по-прежнему достаточно `REST confirmation +
+reconciliation`: private WebSocket никогда не становится authoritative входом
+planner/executor. Для live presentation Mini App процесс дополнительно держит
+отдельный user-data stream каждого REAL follower. `ACCOUNT_UPDATE`,
+`ORDER_TRADE_UPDATE`, `ACCOUNT_CONFIG_UPDATE` и `MARGIN_CALL` — только
+low-latency hints для coalesced REST snapshot. SHADOW follower внешнего socket не
+создаёт.
 
-```text
-REST confirmation + reconciliation
-```
-
-Не нужно сразу держать отдельный WebSocket на каждого follower.
-
-Follower stream pool добавляется позже только если testnet покажет, что REST confirmation недостаточно быстра для post-fill risk correction.
+На reconnect follower сначала получает новый REST boundary и только после этого
+публикуется как `live`. На disconnect торговый state не переписывается, а Mini App
+сохраняет последний подтверждённый снимок с presentation-status
+`reconnecting/stale`. Public mark-price stream общий для symbol и меняет только
+presentation quote/PnL; он не влияет на entry admission и финансовые команды.
 
 ## 10. Stop / TP и Strategy Orders
 
@@ -827,3 +831,39 @@ Tree отражает фактическую структуру на уровн�
 3. Новый модуль в существующем пакете — новая обязанность внутри известной границы (§4).
 4. Новый пакет `src/copytradeaster/<name>/` — новая граница с протоколом; карта доков обновляется в том же коммите.
 5. Новый процесс/инфраструктура — только при измеренной причине (§1, §8); текущий масштаб держится на одном процессе.
+
+## 20. Live presentation Mini App
+
+Live mode остаётся внутри существующего asyncio-процесса и состоит из четырёх
+границ:
+
+1. process-local `FollowerSnapshotStore` хранит только последний нормализованный
+   `AccountState`, UTC `captured_at` и monotonic revision на account;
+2. follower private streams дают быстрый сигнал переснять REST state, но никогда
+   не мутируют trading target напрямую;
+3. `MiniAppLiveHub` публикует authenticated browser-клиентам только безопасные
+   resource invalidations/health/revisions через bounded latest-wins queues;
+4. frontend live client перечитывает существующие application DTO слабым запросом
+   из общего cache и сохраняет last-good DTO во время reconnect.
+
+WebSocket handshake не передаёт Telegram `initData` в URL. Сначала
+аутентифицированный POST выдаёт short-lived single-use opaque ticket, затем GET
+upgrade атомарно его поглощает. User/account scope определяется сервером.
+
+Порядок freshness:
+
+```text
+private event -> coalesced REST snapshot -> store revision -> live invalidation
+public mark event -------------------------> quote revision -> live invalidation
+browser reconnect -> REST resnapshot ------> LIVE
+```
+
+HTTP resource generations и live revisions монотонны: duplicate/out-of-order
+события игнорируются, а старый request не может затереть более новую публикацию.
+При разрыве UI не очищает данные; после истечения freshness budget показывает
+`Данные устарели`. Постоянной общей кнопки refresh в healthy UI нет; manual retry
+появляется только как контекстное восстановление после ошибки. Explicit
+permission recheck Agent/Builder остаётся отдельным security use case.
+
+Детальный план и acceptance:
+`docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.

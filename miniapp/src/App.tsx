@@ -72,6 +72,7 @@ export default function App() {
         `${userId}:${environment}:session-${generation}`,
         handleResourceInvalidSession,
       )
+      next.startLive()
       resourcesRef.current = next
       setResources(next)
       return next
