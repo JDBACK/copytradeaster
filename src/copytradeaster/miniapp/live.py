@@ -31,6 +31,7 @@ LIVE_QUEUE_MAX = 8
 FOLLOWER_SYNC_INTERVAL_S = 1.0
 FOLLOWER_EVENT_DEBOUNCE_S = 0.2
 MARKET_BACKOFF_MAX_S = 30.0
+MARKET_BACKOFF_INITIAL_S = 1.0
 LIVE_MARK_ACK_TIMEOUT_S = 10.0
 MARK_FALLBACK_INTERVAL_S = 3.0
 MARK_FALLBACK_FRESH_S = 12.0
@@ -429,19 +430,18 @@ class MiniAppLiveRuntime:
             await asyncio.gather(stream_task, refresh_task, return_exceptions=True)
 
     async def _run_market_stream(self) -> None:
-        backoff = 1.0
+        backoff = MARKET_BACKOFF_INITIAL_S
         # The documented raw path (<ws>/<stream>) is not served by the Aster
         # testnet cluster: the socket opens and then stays silent forever, so
         # the stream is established through the SUBSCRIBE protocol, which the
-        # same endpoint acknowledges. Liveness is only claimed once the
-        # exchange actually produced a frame, so a silent half-open socket
-        # cannot masquerade as a healthy presentation stream.
+        # same endpoint acknowledges. Liveness is only claimed once a frame
+        # carrying a mark price arrives, so an acknowledged-but-silent socket
+        # neither masquerades as a healthy stream nor keeps the fallback idle.
         url = self.app.cfg.ws_user_base.rstrip("/")
         params = [f"{symbol.lower()}@markPrice@1s" for symbol in self.app.cfg.symbol_whitelist]
         while not self._stop.is_set():
             try:
                 async with self._market_ws_factory(url) as ws:
-                    backoff = 1.0
                     await ws.send(json.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}))
                     deadline = time.monotonic() + LIVE_MARK_ACK_TIMEOUT_S
                     while not self._stop.is_set():
@@ -481,6 +481,11 @@ class MiniAppLiveRuntime:
                             if not self._market_live:
                                 self._market_live = True
                                 self._refresh_health()
+                            # A delivered quote is the only proof the endpoint
+                            # is healthy: an accepted-and-silent socket must
+                            # keep growing the backoff instead of paying a new
+                            # handshake every 11 s forever.
+                            backoff = MARKET_BACKOFF_INITIAL_S
                         deadline = time.monotonic() + LIVE_MARK_ACK_TIMEOUT_S
             except asyncio.CancelledError:
                 raise

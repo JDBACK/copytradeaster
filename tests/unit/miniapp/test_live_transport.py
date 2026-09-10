@@ -485,3 +485,138 @@ async def test_mark_fallback_stands_down_while_stream_frames_flow() -> None:
         live_module.MARK_FALLBACK_INTERVAL_S = original
 
     assert calls == []
+
+
+async def test_mark_frame_from_the_stream_claims_live_quotes() -> None:
+    """A frame with a price is the proof; the ack before it never was."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    import pytest
+
+    class FrameWS:
+        def __init__(self) -> None:
+            self.frames = [
+                json.dumps({"id": 1, "result": None}),
+                json.dumps({"e": "markPriceUpdate", "s": "BTCUSDT", "p": "70000.5"}),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, payload: str) -> None:
+            pass
+
+        async def recv(self):
+            if self.frames:
+                return self.frames.pop(0)
+            await asyncio.sleep(3600)
+
+    ws = FrameWS()
+    hub = MiniAppLiveHub()
+    queue, _ = hub.subscribe("a")
+    applied: list[dict[str, Decimal]] = []
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = False
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
+    live._private_health = {"a": True}
+    live.hub = hub
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=applied.append),
+    )
+    live._market_ws_factory = lambda url: ws
+
+    task = asyncio.create_task(live._run_market_stream())
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    events = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+    assert applied == [{"BTCUSDT": Decimal("70000.5")}]
+    # The published verdict is the proof: the teardown afterwards (cancellation
+    # clears the claim, by design) must not be mistaken for "never live".
+    assert [event for event in events if event.get("health") == "live"]
+
+
+async def test_silent_stream_backs_off_instead_of_reconnecting_forever() -> None:
+    """An accepted-but-silent socket must not buy a handshake every second."""
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    import pytest
+
+    import copytradeaster.miniapp.live as live_module
+
+    opens: list[float] = []
+
+    class SilentWS:
+        async def __aenter__(self):
+            opens.append(time.monotonic())
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, payload: str) -> None:
+            pass
+
+        async def recv(self):
+            await asyncio.sleep(3600)
+
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = False
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
+    live._private_health = {}
+    live.hub = MiniAppLiveHub()
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=lambda prices: None),
+    )
+    live._market_ws_factory = lambda url: SilentWS()
+
+    originals = (
+        live_module.LIVE_MARK_ACK_TIMEOUT_S,
+        live_module.MARKET_BACKOFF_INITIAL_S,
+        live_module.MARKET_BACKOFF_MAX_S,
+    )
+    live_module.LIVE_MARK_ACK_TIMEOUT_S = 0.01
+    live_module.MARKET_BACKOFF_INITIAL_S = 0.02
+    live_module.MARKET_BACKOFF_MAX_S = 0.16
+    try:
+        task = asyncio.create_task(live._run_market_stream())
+        await asyncio.sleep(0.6)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        (
+            live_module.LIVE_MARK_ACK_TIMEOUT_S,
+            live_module.MARKET_BACKOFF_INITIAL_S,
+            live_module.MARKET_BACKOFF_MAX_S,
+        ) = originals
+
+    assert len(opens) >= 3
+    gaps = [later - earlier for earlier, later in zip(opens, opens[1:], strict=False)]
+    # Resetting the backoff on every successful handshake (not on a delivered
+    # frame) kept this interval constant, so a silent cluster paid ~7800
+    # connections a day for nothing.
+    assert gaps[-1] > gaps[0] * 2
