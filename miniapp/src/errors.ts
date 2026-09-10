@@ -9,7 +9,7 @@ export interface ErrorCopy {
 const COPY: Record<string, ErrorCopy> = {
   trade_unavailable: { title: 'Сделка недоступна', hint: 'Откройте список своих позиций. Ссылка могла устареть или относиться к другому аккаунту.' },
   trade_split: { title: 'История сделки уточнена', hint: 'Исходная запись разделена на несколько эпизодов. Откройте актуальную историю.' },
-  history_page_changed: { title: 'История изменилась', hint: 'Обновите список, чтобы продолжить по согласованным данным.' },
+  history_page_changed: { title: 'История уточняется', hint: 'Список собирается заново по согласованным данным.' },
   owner_conflict: {
     title: 'Аккаунт уже подключён',
     hint: 'Этот аккаунт подключён прямым вводом. Отключите его в боте (Аккаунт → Отключить) и вернитесь в мини-ап.',
@@ -85,6 +85,30 @@ const COPY: Record<string, ErrorCopy> = {
   invalid_input: {
     title: 'Проверьте данные',
     hint: 'Формат запроса неверен. Начните заново.',
+  },
+  // Readiness and live-transport classification. These reach the UI while the
+  // engine is still starting, re-snapshotting or briefly unreachable, so the
+  // copy has to read as "wait a moment" — the generic fallback would tell the
+  // user to start the whole connection over for a self-healing condition.
+  not_ready: {
+    title: 'Сервис завершает запуск',
+    hint: 'Данные появятся через несколько секунд автоматически.',
+  },
+  stale_operation: {
+    title: 'Состояние изменилось',
+    hint: 'Данные уже перечитаны — повторите действие.',
+  },
+  application_error: {
+    title: 'Действие не выполнено',
+    hint: 'Повторите попытку через несколько секунд.',
+  },
+  live_unavailable: {
+    title: 'Живые обновления недоступны',
+    hint: 'Данные подтягиваются запросами и обновляются сами.',
+  },
+  live_scope_unavailable: {
+    title: 'Аккаунт ещё не в живом контуре',
+    hint: 'Откройте мини-ап заново, чтобы переподключить обновления.',
   },
   invalid_session: {
     title: 'Сессия недействительна',

@@ -19,6 +19,9 @@ interface TelegramWebApp {
   setBackgroundColor(color: string): void
   enableClosingConfirmation(): void
   disableClosingConfirmation(): void
+  /** Bot API 7.7+; absent on older clients, hence optional. */
+  disableVerticalSwipes?(): void
+  enableVerticalSwipes?(): void
   BackButton?: TelegramBackButton
   HapticFeedback?: {
     impactOccurred(style: 'light' | 'medium' | 'heavy'): void
@@ -98,6 +101,24 @@ export function setClosingConfirmation(enabled: boolean): void {
   try {
     if (enabled) webApp()?.enableClosingConfirmation()
     else webApp()?.disableClosingConfirmation()
+  } catch {
+    /* unsupported clients */
+  }
+}
+
+/** Hand the vertical drag between the mini app sheet and the page.
+ *
+ * Telegram closes the sheet with a downward swipe — the same direction as
+ * pull-to-refresh. The gesture belongs to the page only while the content is
+ * already at its top, and is returned to the client the moment the finger
+ * lifts, so sheet dragging keeps working everywhere else. Older clients without
+ * the method simply ignore it (the WebView then suppress-overscrolls instead). */
+export function setVerticalSwipes(enabled: boolean): void {
+  try {
+    const app = webApp()
+    if (!app) return
+    if (enabled) app.enableVerticalSwipes?.()
+    else app.disableVerticalSwipes?.()
   } catch {
     /* unsupported clients */
   }

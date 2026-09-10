@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,6 +33,7 @@ from copytradeaster.application.models import (
     StatusReason,
     StatusRemediation,
     StatusState,
+    SystemState,
     UserRole,
     ValidationError,
 )
@@ -1740,6 +1742,143 @@ async def test_dashboard_status_degraded_disconnected_and_refresh_failure(enviro
     assert refreshed.last_check_at is not None
 
 
+async def test_routine_master_reverification_is_not_a_user_facing_degradation(environment):
+    """The scheduled boundary must not read to a user as a fault.
+
+    ``_establish_master_boundary`` fail-closes on schedule (every few sweeps),
+    rebuilds the master against REST and proves convergence again within
+    seconds. Showing that as DEGRADED made Dashboard/Positions/Status flash
+    "requires attention" several times a minute for routine work. Only the
+    trading gate should care; every genuine fault stays visible.
+    """
+    db, _, _, _, service = environment
+    settings = SettingsRepo(db)
+    await settings.set_flag("degraded", "periodic-snapshot")
+    await settings.set_flag("ready", "false")
+    await settings.set_flag("heartbeat_at", str(int(time.time() * 1000)))
+
+    dashboard = await service.dashboard(7)
+    assert dashboard.system_state is SystemState.READY
+    assert dashboard.copy_state is not CopyState.DEGRADED
+    positions = await service.positions(7)
+    assert positions.is_stale is False
+    status = await service.status(7)
+    assert status.system_state is SystemState.READY
+
+    # A real fault is reported exactly as before.
+    await settings.set_flag("degraded", "sweep-failed:tg-7:timeout")
+    faulted = await service.dashboard(7)
+    assert faulted.system_state is SystemState.DEGRADED
+    assert faulted.copy_state is CopyState.DEGRADED
+    assert faulted.message == "runtime requires attention"
+
+    # The latch still rules when no routine reason explains it.
+    await settings.set_flag("degraded", "")
+    assert (await service.dashboard(7)).system_state is SystemState.DEGRADED
+
+
+async def test_master_stream_blip_is_not_a_user_facing_fault(environment):
+    """Reconnect churn is engine work, not a user-visible incident.
+
+    A dropped master stream re-listens within seconds and the reconciler keeps
+    REST snapshots flowing, so painting "requires attention" for the blip would
+    jitter every screen; the recovery reasons inherit the same treatment.
+    """
+    db, _, _, _, service = environment
+    settings = SettingsRepo(db)
+    now_ms = int(time.time() * 1000)
+    for reason in (
+        "stream-disconnected",
+        "stream-reconnecting",
+        "stream-startup-timeout",
+        "master-changed-before-ready",
+        "master-boundary-not-quiescent",
+        "master-recovery:master-dirty:timeout",
+    ):
+        await settings.set_flag("degraded", reason)
+        await settings.set_flag("degraded_since", str(now_ms))
+        await settings.set_flag("ready", "false")
+        await settings.set_flag("heartbeat_at", str(now_ms))
+        dashboard = await service.dashboard(7)
+        assert dashboard.system_state is SystemState.READY, reason
+
+
+async def test_aged_verification_evidence_does_not_paint_the_status_stale(environment):
+    """Verification *age* is not a fault, and the evidence TTL is one minute.
+
+    A cached triple (read/perp/withdraw) stays the last proven truth; the row
+    carries its age (`Проверка: 13:28`) and the screen re-verifies itself on
+    open. Collapsing the overall verdict for it told a healthy account "data is
+    stale" on every look. An attempted verification that fails is different and
+    must still be reported.
+    """
+    _, runtime, _, clock, service = environment
+    baseline = await service.status(7, refresh=True)
+    assert baseline.state is StatusState.READY
+    assert baseline.permissions_state is PermissionsState.VALID
+
+    # An hour later the evidence TTL (60 s) has long expired while the cached
+    # snapshot stays inside its own bound, exactly as in a real process.
+    async def cached_with_stamp(account_id: str):
+        return {"positions": {}, "open_orders": []}, datetime(2026, 8, 23, 12, 59, 45, tzinfo=UTC)
+
+    runtime.cached_snapshot = cached_with_stamp
+    clock.value = datetime(2026, 8, 23, 13, 0, tzinfo=UTC)
+    aged = await service.status(7)
+    assert aged.permissions_state is PermissionsState.STALE
+    assert aged.state is StatusState.READY
+    assert aged.reason is StatusReason.NONE
+    assert aged.remediation is None
+
+    def failing_refresh(account_id: str):
+        raise ServiceUnavailableError("signed permission read failed")
+
+    runtime.refresh_agent_permission = failing_refresh
+    failed = await service.status(7, refresh=True)
+    assert failed.state is StatusState.STALE
+    assert failed.reason is StatusReason.PERMISSION_STALE
+
+
+async def test_sustained_routine_window_finally_reads_as_degraded(environment):
+    """Churn that does not close stops being churn.
+
+    The same reason that is hidden for seconds must surface once the engine has
+    been fail-closed long enough that it is stuck rather than self-repairing.
+    """
+    db, _, _, _, service = environment
+    settings = SettingsRepo(db)
+    now_ms = int(time.time() * 1000)
+    await settings.set_flag("degraded", "periodic-snapshot")
+    await settings.set_flag("degraded_since", str(now_ms - 30_000))
+    await settings.set_flag("ready", "false")
+    await settings.set_flag("heartbeat_at", str(now_ms))
+
+    dashboard = await service.dashboard(7)
+    assert dashboard.system_state is SystemState.DEGRADED
+    assert dashboard.copy_state is CopyState.DEGRADED
+    assert (await service.status(7)).system_state is SystemState.DEGRADED
+
+
+async def test_degraded_episode_clock_survives_rearming_but_not_recovery(environment):
+    """One episode keeps one start time; a cleared episode starts over."""
+    db, _, _, _, _ = environment
+    settings = SettingsRepo(db)
+    now_ms = int(time.time() * 1000)
+
+    await settings.set_flag("degraded", "periodic-snapshot")
+    assert int(str(await settings.get_flag("degraded_since"))) > now_ms - 5_000
+    # A re-arm inside the same episode (the next boundary, or a stream blip)
+    # must not restart the clock, or a stuck engine could hide forever.
+    await settings.set_flag("degraded_since", str(now_ms - 60_000))
+    await settings.set_flag("degraded", "master-dirty")
+    assert str(await settings.get_flag("degraded_since")) == str(now_ms - 60_000)
+
+    await settings.clear_degraded()
+    assert await settings.get_flag("degraded_since") == ""
+    await settings.set_flag("degraded", "master-dirty")
+    assert int(str(await settings.get_flag("degraded_since"))) > now_ms - 5_000
+
+
 async def test_system_state_handles_stale_bad_heartbeat_and_unknown_runtime(environment):
     db, runtime, _, _, service = environment
     await SettingsRepo(db).set_flag("ready", "true")
@@ -1879,7 +2018,7 @@ async def test_activity_safe_mapping_filters_and_sorts(environment):
     titles = [item.title.splitlines()[0] for item in all_page.items]
     # Newest first by ``occurred_at``: the entry skip is newest, the open oldest.
     assert titles == [
-        "Вход SOLUSDT пропущен: ENTRY_DEVIATION",
+        "Вход SOLUSDT пропущен",
         "Копирование приостановлено. Открытые позиции и защита продолжают работать.",
         "Риск на сделку изменён: 1,0% → 2,0%",
         "Закрыта ETHUSDT · SHORT",
@@ -2015,7 +2154,9 @@ async def test_activity_category_filter_paginates_the_filtered_set(environment):
         facts: dict[str, str] = {"symbol": "BTCUSDT"}
         trade_ref: str | None = "ref-1"
         if kind == "ENTRY_SKIPPED":
-            # Distinct reasons keep every system title unique.
+            # Distinct synthetic reasons stay out of the copy by design: an
+            # unknown code must never reach the user, so these rows share one
+            # title and stay distinct by ``occurred_at``.
             facts["reason"] = f"ENTRY_DEVIATION_{position:02d}"
             trade_ref = None
         else:

@@ -56,7 +56,12 @@ def build_history_worker(app: App) -> HistoryWorker:
             now_ms=int(time.time() * 1000),
         )
 
-    worker = HistoryWorker(discover, synchronizer, capture_job)
+    def publish_change(scope: HistoryScope) -> None:
+        callback = app.history_live_publish
+        if callback is not None:
+            callback(scope.account_id)
+
+    worker = HistoryWorker(discover, synchronizer, capture_job, on_change=publish_change)
     capture.set_on_request(worker.note_snapshot_request)
 
     def mark_dirty(account_id: str, environment: str, symbol: str) -> None:

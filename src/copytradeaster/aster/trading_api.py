@@ -7,6 +7,7 @@ body stays empty (matches the official example). Dry-run never sends HTTP.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
@@ -265,6 +266,34 @@ class AsterClient:
             self._exchange_info = ExchangeInfo.model_validate(body)
             self._exchange_info_at = now
         return self._exchange_info
+
+    async def mark_prices(self, symbols: Iterable[str]) -> dict[str, Decimal]:
+        """Public mark prices for presentation quotes only.
+
+        Unsigned all-symbol read (weight 10); the caller refreshes display PnL
+        from the returned mapping and never feeds it into trading decisions.
+        Unknown symbols and unparsable prices are dropped, not defaulted.
+        """
+        wanted = {str(symbol).strip().upper() for symbol in symbols}
+        wanted.discard("")
+        if not wanted:
+            return {}
+        body = await self._request("GET", "/fapi/v3/premiumIndex", {}, weight=10)
+        rows = body if isinstance(body, list) else [body]
+        prices: dict[str, Decimal] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if symbol not in wanted:
+                continue
+            try:
+                price = Decimal(str(row.get("markPrice") or ""))
+            except (InvalidOperation, ValueError):
+                continue
+            if price.is_finite() and price > 0:
+                prices[symbol] = price
+        return prices
 
     # --- account reads ---------------------------------------------------------
 

@@ -27,6 +27,9 @@ log = get_logger(__name__)
 MAX_SESSION_S = 23 * 3600.0
 BACKOFF_BASE_S = 1.0
 BACKOFF_MAX_S = 30.0
+#: A session must stay up this long before it counts as proof that the
+#: endpoint is healthy and the reconnect backoff may restart at the base.
+STABLE_SESSION_S = 30.0
 
 
 class StreamEvent(NamedTuple):
@@ -50,6 +53,7 @@ class UserStream:
         backoff_base_s: float = BACKOFF_BASE_S,
         backoff_max_s: float = BACKOFF_MAX_S,
         max_session_s: float = MAX_SESSION_S,
+        stable_session_s: float = STABLE_SESSION_S,
     ) -> None:
         self._client = client
         self._account_id = account_id
@@ -63,6 +67,7 @@ class UserStream:
         self._backoff_base = backoff_base_s
         self._backoff_max = backoff_max_s
         self._max_session_s = max_session_s
+        self._stable_session_s = stable_session_s
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = self._backoff_base
@@ -70,11 +75,12 @@ class UserStream:
         while not stop.is_set():
             connected = False
             disconnected_notified = False
+            opened_at: float | None = None
             try:
                 listen_key = await self._client.start_listen_key(self._account_id)
                 url = f"{self._ws_base}/{listen_key}"
                 async with self._ws_factory(url) as ws:
-                    backoff = self._backoff_base
+                    opened_at = time.monotonic()
                     if not first:
                         await self._safe_on_reconnect()
                     first = False
@@ -118,6 +124,13 @@ class UserStream:
             finally:
                 if connected and not disconnected_notified and not stop.is_set():
                     await self._safe_on_disconnected()
+                # Resetting the backoff on the handshake alone let a socket that
+                # dies or expires right after connect buy a fresh one every base
+                # interval, forever: 1s -> 1s -> 1s instead of 1 -> 2 -> 4 -> 30.
+                # Each such accepted reconnect also re-runs the Mini App's
+                # authoritative follower snapshot, so the ladder is the bound.
+                if opened_at is not None and time.monotonic() - opened_at >= self._stable_session_s:
+                    backoff = self._backoff_base
             if stop.is_set():
                 break
             jitter = random.uniform(0, backoff * 0.3)
@@ -137,15 +150,22 @@ class UserStream:
                 timeout = max(deadline - asyncio.get_running_loop().time(), 0.1)
                 recv_task = asyncio.ensure_future(ws.recv())
                 stop_task = asyncio.ensure_future(stop.wait())
-                done, pending = await asyncio.wait(
-                    {recv_task, stop_task},
-                    timeout=timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
+                try:
+                    done, _ = await asyncio.wait(
+                        {recv_task, stop_task},
+                        timeout=timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    # A close can race the stop waiter and complete recv() with
+                    # ConnectionClosedOK after asyncio.wait() wakes. Await every
+                    # child, including already-finished ones, so shutdown never
+                    # leaks an unobserved recv exception.
+                    for task in (recv_task, stop_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(recv_task, stop_task, return_exceptions=True)
                 if stop_task in done:
-                    recv_task.cancel()
                     return
                 if recv_task not in done:
                     log.info("proactive reconnect after max session time")

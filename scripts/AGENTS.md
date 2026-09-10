@@ -18,6 +18,7 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 | `detach_process.py` | Small stdlib launcher used by `dev-up.sh`: starts one command in a new session, redirects its output to a log, and records its PID so the bot/tunnel survive the terminal or Codex command that started them | internal helper; do not run directly |
 | `verify_menu_button.py` | Bot-API convergence check for the Mini App menu button (stdlib only): `getChatMenuButton` for default + every `CT_TELEGRAM_ADMIN_IDS` per-chat override vs expected `.../miniapp/` URL; `--fix` rewrites mismatches via `setChatMenuButton` and re-confirms with retries (read-after-write lag). Token from `CT_TELEGRAM_BOT_TOKEN`/`.botkey`, never printed. Exit 0 all match, 1 otherwise | `.venv/bin/python scripts/verify_menu_button.py --expected-url <url> [--fix]` |
 | `preview_miniapp_engine.py` | Visual Mini App preview on the full engine: point-in-time copy of prod DB via SQLite backup API (`data/copytrade.sqlite3` → `data/miniapp-preview.sqlite3`, prod untouched) → boots a real `App` + `MiniAppServer` → unsigned dev session (`PREVIEW_USER_ID=900_000_001`, bound to `--account`). Fail-closed: testnet URLs only | `python scripts/preview_miniapp_engine.py --account <ID> --confirm-engine-preview [--port 8085]` |
+| `audit_miniapp_browser.mjs` | Real-Chromium acceptance over CDP (Node, no npm deps) against the *running* bot: `smoke` (what the surface shows), `swipe` (dispatched touch pull: indicator phases, the measured gap it opens, Telegram swipe handoff, the `refresh=true` reads it fires, and the scrolled-away guard on a genuinely scrollable page), `series` (four tabs), `nested` (every nested screen: status, risk, account, notifications, closed trades, security, help), `jitter` (records every DOM mutation for N seconds so "the screen stopped moving" is measured), `status` (samples System Status for 30 s after opening: does the app re-prove permissions by itself), `churn` (50 tab switches plus nested navigation while a page-installed counter watches WebSocket opens and leaks), `shot` (PNG of the current surface plus its text, for a human reviewer). `--tab N` and `--closed` watch a specific root tab (including the "Открытые → Закрытые" tap), `--after N` idles on the root tab first so cached evidence is genuinely older than its TTL, and `--out <prefix>` writes phase screenshots during `swipe`. The `noise` field matches only the app's own staleness wording, so real feed copy like "сигнал мастера устарел" is not reported as UI noise. Read-only: uses the Mini App API as the session user. Needs a locally minted signed `window.Telegram` stub (`--init`, a session credential — never commit); `telegram.org/js/telegram-web-app.js` is blocked because outside Telegram it overwrites the stub with an empty initData. Every `Runtime.evaluate` is bounded at 15 s, and a rejected session fails with its own message, so a stale stub cannot look like a hung UI | `node scripts/audit_miniapp_browser.mjs smoke\|swipe\|series\|nested\|jitter\|status\|churn\|shot --init <stub.js> [--seconds 190] [--tab 1] [--closed] [--after 95] [--out data/pull] [--url ...] [--chrome ...]` |
 
 ## Manual testnet operators (change exchange state)
 
@@ -42,8 +43,22 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 | `check_doc_budgets.py` | Offline line-budget gate for agent maps: compares each file against `doc-budgets.json`, exit 1 on excess | `python scripts/check_doc_budgets.py` |
 | `check_doc_facts.py` | Offline facts-gate for standing docs: pins Mini App route / package / screenshot / asset / section counts and claim-vs-truth consistency (probes P-POST…P-SECTIONS); hot suite counters print SKIPPED, suites never run | `python scripts/check_doc_facts.py` |
 
+## Cluster probes (public reads, no credentials)
+
+| Script | Purpose | Run |
+|---|---|---|
+| `check_mark_stream.py` | Pre-mainnet gate for the public mark-price stream: reads the official WS (`subscribe` path, then `raw` for a single symbol) and the unsigned `premiumIndex` fallback, prints per-symbol frame counts/gaps and one verdict, with a frame reader independent of `miniapp/live.py`. Needs no `.env`, database or keys; exit 0 streaming, 1 acknowledged-but-silent, 2 probe failure. Measured 2026-09-10: mainnet STREAMING (~1 s gaps), testnet SILENT → REST fallback carries presentation quotes there | `.venv/bin/python scripts/check_mark_stream.py [--network testnet\|mainnet] [--symbols BTCUSDT,ETHUSDT] [--seconds 30]` |
+
 ## Conventions
 
 - Exchange-touching scripts go through `Settings()` + `Database` + `SqliteCredentials` — secrets only from env/DB, never from argv. `src/` reachability is via `sys.path` insert (`capture_stream`, `manual_master_order`, `benchmark_history`) or the environment (`hybrid_load_test`, `testnet_soak`, `preview_miniapp_engine`); stdlib-only checks (`check_doc_links`, `detach_process`, `verify_menu_button`) and the offline `benchmark_history` probe (temporary SQLite, `Database` only) use neither.
 - Campaigns write JSON reports (`--report`) and never touch prod DB directly: clone it (hybrid/soak) or backup-API-copy it (preview).
 - New ops scripts go here with usage in the docstring (`Usage:`/`Commands:`/`Run:` block); visual previews follow `preview_miniapp_engine.py` (backup copy + dev user + `--confirm-*` flag).
+
+**Tunnel hostname DNS gate (dev-up.sh):** after starting cloudflared, `wait_tunnel_dns`
+waits (a) for the new hostname in public DoH and only then (b) for this machine's own
+resolver. Asking the local resolver first makes macOS cache the NXDOMAIN for the zone's
+1800s SOA minimum, and Telegram WebView then fails with ERR_NAME_NOT_RESOLVED for ~30
+minutes although the tunnel and edge are healthy; the only recovery is `--rotate`, which
+invalidates the Telegram menu button for minutes. The reuse path applies the same check and
+fails loudly instead of serving READY on a locally unresolvable hostname.

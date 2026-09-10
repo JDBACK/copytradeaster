@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import type { AuthContext } from './api'
+import type { LiveSnapshot } from './live'
 import {
   MiniAppResources,
   RESOURCE_TTL_MS,
@@ -10,6 +11,10 @@ import {
 } from './resources'
 
 const RETRY_BACKOFF_MS = 1_000
+
+/** Widening delay for self-healing reads; a real outage must never turn into a
+ * REST storm, and a healthy screen never reaches this path at all. */
+const SELF_HEAL_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 20_000] as const
 
 /** Test/standalone screen adapter. Production passes the App-owned instance. */
 export function useScreenResources(
@@ -45,6 +50,15 @@ export function useResource<K extends ResourceKey>(args: {
   const lastActive = useRef(active)
   const lastForegroundSignal = useRef(args.foregroundSignal ?? 0)
   const lastFailedRetryAt = useRef(0)
+
+  // Hidden keep-alive tabs stay mounted, so subscription alone is not a live
+  // consumer. Only a visible screen registers here; the store uses it to decide
+  // which resources a live event may re-read.
+  useEffect(() => {
+    if (!enabled || !active) return
+    resources.setActive(key, true)
+    return () => resources.setActive(key, false)
+  }, [resources, key, enabled, active])
 
   useEffect(() => {
     const foregroundSignal = args.foregroundSignal ?? 0
@@ -93,5 +107,68 @@ export function useResource<K extends ResourceKey>(args: {
     (nextStrength: ReadStrength = strength) => resources.refresh(key, nextStrength),
     [resources, key, strength],
   )
+
+  // Bounded self-healing. A failed read retries by itself while the screen is
+  // on and in front of the user, which is what lets the whole app drop manual
+  // refresh affordances: a screen that failed comes back without being asked.
+  const failures = useRef(0)
+  const settledAt = useRef(snapshot.receivedAt)
+  useEffect(() => {
+    if (!enabled || !active) return
+    if (snapshot.receivedAt !== settledAt.current) {
+      // Only a read that actually landed may restart the ladder. Starting a
+      // read clears the error slot (startFlight publishes error: null), so a
+      // reset on "error === null" fired on every attempt: the delay stayed at
+      // the first step and a sustained outage retried at ~1 Hz instead of
+      // widening.
+      settledAt.current = snapshot.receivedAt
+      failures.current = 0
+      return
+    }
+    if (snapshot.error === null) return
+    if (snapshot.inflight) return
+    const delay = SELF_HEAL_BACKOFF_MS[Math.min(failures.current, SELF_HEAL_BACKOFF_MS.length - 1)]
+    const timer = setTimeout(() => {
+      failures.current += 1
+      void resources.refresh(key, strength).catch(() => {})
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [
+    resources,
+    key,
+    enabled,
+    active,
+    strength,
+    snapshot.error,
+    snapshot.inflight,
+    snapshot.revision,
+    snapshot.receivedAt,
+  ])
+
   return { snapshot, refresh }
+}
+
+/** Transport health as a user-facing verdict.
+ *
+ * ``snapshot.stale`` is a cache-revision flag: it is true while a live
+ * invalidation is being re-read, which happens on every reconcile and on every
+ * quote tick. Painting that as "data requires attention" made healthy screens
+ * flash several times a minute, so routine background work read as a fault.
+ * What a user needs to know is whether the connection works: a real request
+ * failure, or the live channel's own debounced health (it only reports `stale`
+ * after the stream has been down long enough that automatic recovery failed).
+ * An in-flight refresh is not staleness and must never be shown as one.
+ */
+export function useTransportStale(resources: MiniAppResources, error: string | null): boolean {
+  const live = useLiveSnapshot(resources)
+  return error !== null || live.health === 'stale'
+}
+
+/** Raw live verdict for screens that decide on the rail's own signal. */
+export function useLiveSnapshot(resources: MiniAppResources): LiveSnapshot {
+  return useSyncExternalStore(
+    resources.subscribeLive,
+    resources.getLiveSnapshot,
+    resources.getLiveSnapshot,
+  )
 }

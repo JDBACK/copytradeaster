@@ -47,9 +47,9 @@ export function systemStatusValue(
     case 'stale':
       return { label: 'Данные устарели', tone: 'warning' }
     case 'degraded':
-      return { label: 'Деградация', tone: 'danger' }
+      return { label: 'Требует проверки', tone: 'warning' }
     case 'blocked':
-      return { label: 'Заблокировано', tone: 'danger' }
+      return { label: 'Требует действия', tone: 'danger' }
     default:
       return { label: 'Неизвестно', tone: 'muted' }
   }

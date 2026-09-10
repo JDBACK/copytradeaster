@@ -1,6 +1,7 @@
 /** Shared presentational pieces (part-1 scope). */
 
 import { useEffect, useRef, type ReactNode } from 'react'
+import { TRUST_RAIL_STEPS, TRUST_STEP } from '../trustSteps'
 
 export function Brand({ right }: { right?: ReactNode }) {
   return (
@@ -14,8 +15,6 @@ export function Brand({ right }: { right?: ReactNode }) {
   )
 }
 
-const RAIL_STEPS = ['Wallet', 'Agent', 'Builder', 'Sync'] as const
-
 export function TrustRail({
   active,
   doneCount,
@@ -25,7 +24,8 @@ export function TrustRail({
 }) {
   return (
     <nav className="rail" aria-label="Этапы подключения">
-      {RAIL_STEPS.map((label, index) => {
+      {TRUST_RAIL_STEPS.map((key, index) => {
+        const label = TRUST_STEP[key]
         const isDone = index < doneCount
         const isActive = index === active
         const state = isDone ? 'done' : isActive ? 'active' : ''

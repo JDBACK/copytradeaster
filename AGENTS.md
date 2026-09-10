@@ -74,7 +74,7 @@ copytradeaster/
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services
 │   ├── application/           # UserApplicationService, Stage2Process (engine.py), control.py
 │   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, FSM flows, routers/
-│   ├── miniapp/               # aiohttp server (HMAC initData auth, 26 POST /miniapp/api/*, static host)
+│   ├── miniapp/               # aiohttp server (HMAC initData auth, 27 POST /miniapp/api/*, static host)
 │   └── cli/                   # main.py CLI dispatcher (11 subcommands)
 ├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest); map: miniapp/AGENTS.md
 │   ├── src/screens/           # Home, Positions, TradeList (open/closed), TradeDetail, Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard, BuilderAttemptRecovery, SessionGate, SuccessScreen, InfoScreens (Security/Help)
@@ -199,7 +199,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 |`src/copytradeaster/application/control.py`|Transport-neutral emergency flatten with flat-proof reports|
 |`src/copytradeaster/notifications/router.py`|Structured fan-out into console + SQLite outbox|
 |`src/copytradeaster/notifications/worker.py`|Bounded leased outbox delivery with retry/backoff|
-|`src/copytradeaster/miniapp/server.py`|aiohttp server hosting Mini App API (26 POST `/miniapp/api/*`) & static assets|
+|`src/copytradeaster/miniapp/server.py`|aiohttp server hosting Mini App API (27 POST `/miniapp/api/*`) & static assets|
 |`src/copytradeaster/cli/main.py`|CLI entry point and subcommands|
 |`miniapp/src/App.tsx`|Mini App routing, session gating, 4-tab AppShell, and runtime recovery|
 |`scripts/dev-up.sh`|One-command dev orchestrator: builds bundle, manages tunnel, runs bot|
@@ -208,7 +208,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 |`scripts/testnet_soak.py`|Signed testnet soak runner (requires `CT_TESTNET=1` + `CT_SOAK=1`)|
 |`docs/AGENTS.md`|Docs map: central navigation for all project documentation (what lives where, what is live vs history, reading order)|
 |`docs/ENGINE_TEST_STATUS_2026-08.md`|Single source of truth for test status, counters, and bug registry (#1–27)|
-|`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§§1–19; §19 Footprint Ladder for new capabilities)|
+|`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§§1–20; §19 Footprint Ladder for new capabilities, §20 live presentation)|
 |`docs/reports/STAGE3_PART2_PROGRESS_2026-09.md`|Stage 3 Part 2 execution journal (P2.0–P2.7 CLOSED)|
 
 ---

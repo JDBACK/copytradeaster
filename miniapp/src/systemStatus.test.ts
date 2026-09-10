@@ -10,6 +10,7 @@ import {
   lastCheckRowValue,
   overallValue,
   permissionsRowValue,
+  needsPermissionReproof,
   positionsRowValue,
   reasonCopy,
   remediationOf,
@@ -58,6 +59,9 @@ describe('diagnostic row values', () => {
     expect(asterRowValue('ok')).toEqual({ label: 'Подключён', tone: 'success' })
     expect(asterRowValue('unknown')).toEqual({ label: 'Неизвестно', tone: 'muted' })
     expect(permissionsRowValue('valid')).toEqual({ label: 'Подтверждены', tone: 'success' })
+    // Aged evidence is stated calmly: the screen re-proves it on open and a
+    // failed attempt shows up as the stale reason, so orange here is a nag.
+    expect(permissionsRowValue('stale')).toEqual({ label: 'Проверены ранее', tone: 'muted' })
     expect(permissionsRowValue('blocked')).toEqual({ label: 'Отклонены', tone: 'danger' })
     expect(positionsRowValue(2)).toEqual({ label: '2', tone: 'muted' })
     expect(positionsRowValue(null)).toEqual({ label: '—', tone: 'muted' })
@@ -117,17 +121,17 @@ describe('remediationOf', () => {
 })
 
 describe('statusTrust', () => {
-  it('derives Wallet/Agent/Sync from evidence and keeps Builder neutral', () => {
+  it('derives Кошелёк/Agent/Сверка from evidence and keeps Builder neutral', () => {
     const trust = statusTrust(dto())
     expect(trust).toEqual([
-      { key: 'wallet', label: 'Wallet', done: true },
+      { key: 'wallet', label: 'Кошелёк', done: true },
       { key: 'agent', label: 'Agent', done: true },
       { key: 'builder', label: 'Builder', done: false },
-      { key: 'sync', label: 'Sync', done: true },
+      { key: 'sync', label: 'Сверка', done: true },
     ])
   })
 
-  it('never marks Builder verified and drops Sync without ready', () => {
+  it('never marks Builder verified and drops Сверка without ready', () => {
     const trust = statusTrust(dto({ state: 'stale', signer_masked: null }))
     expect(trust.find((item) => item.key === 'builder')?.done).toBe(false)
     expect(trust.find((item) => item.key === 'sync')?.done).toBe(false)
@@ -135,6 +139,16 @@ describe('statusTrust', () => {
   })
 
   it('exports the transport-stale warning copy', () => {
-    expect(TRANSPORT_STALE_WARNING).toContain('Не удалось обновить')
+    expect(TRANSPORT_STALE_WARNING).toContain('Связь с сервером потеряна')
+    expect(TRANSPORT_STALE_WARNING).not.toMatch(/обнови/i)
+  })
+})
+
+describe('needsPermissionReproof', () => {
+  it('перепроверяет доказательство старше минуты и любое невалидное', () => {
+    expect(needsPermissionReproof({ permissions_state: 'valid', age_seconds: 12 })).toBe(false)
+    expect(needsPermissionReproof({ permissions_state: 'valid', age_seconds: 61 })).toBe(true)
+    expect(needsPermissionReproof({ permissions_state: 'stale', age_seconds: 5 })).toBe(true)
+    expect(needsPermissionReproof({ permissions_state: 'unavailable' })).toBe(true)
   })
 })

@@ -14,6 +14,7 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import secrets
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -29,6 +30,18 @@ from copytradeaster.credentials.service import SqliteCredentials  # noqa: E402
 from copytradeaster.domain.models import PosSide, Side, SymbolFilters  # noqa: E402
 from copytradeaster.storage.database import Database  # noqa: E402
 from copytradeaster.storage.repositories import NonceStore  # noqa: E402
+
+
+def _order_marker() -> str:
+    """Unique per order so a repeated price never reuses a clientOrderId.
+
+    Aster answers a reused clientOrderId with -4015 while the mark price sits
+    still, so the id needs a varying suffix. The old
+    ``int(time.time()) % 100000`` collided for two operations in the same
+    second and repeated the whole suffix after ~27.8h. Random hex keeps the
+    operator-readable prefixes and is unique for the life of the run.
+    """
+    return secrets.token_hex(4)
 
 
 def hedge() -> bool:
@@ -102,7 +115,8 @@ async def _place_protective(
     tick: Decimal,
 ) -> None:
     price_q = price.quantize(tick)
-    coid = f"manual-{kind}-{int(price_q)}"
+    # Same -4015 hazard as the entry: a repeated protective id is rejected.
+    coid = f"manual-{kind}-{int(price_q)}-{_order_marker()}"
     await client.place_order(
         "main",
         PlaceOrderRequest(
@@ -143,7 +157,10 @@ async def cmd_open(
                 quantity=qty,
                 new_order_resp_type="RESULT",
                 position_side=ps,
-                new_client_order_id=f"manual-open-{int(price)}",
+                # Aster rejects a clientOrderId it has already seen with
+                # -4015 while the mark price sits still between runs, so the
+                # id must carry a varying suffix rather than the price alone.
+                new_client_order_id=f"manual-open-{int(price)}-{_order_marker()}",
             ),
         )
         if stop_pct is not None:

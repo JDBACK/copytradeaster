@@ -334,38 +334,34 @@ describe('Settings G2 navigation performance', () => {
 
     act(() => resources.invalidate(['dashboard']))
     await waitFor(() => expect(dashboardRead).toHaveBeenCalledTimes(1))
-    // The cached settings stay usable while the refresh hangs, but the old
-    // ready verdict is transport-stale and must not remain green.
+    // The cached settings stay usable while the refresh hangs, and a routine
+    // re-read is not an outage: nothing flashes, nothing is demanded.
     expect(screen.getByText('Настройки копирования')).toBeInTheDocument()
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
-    expect(screen.queryByText('Всё работает')).toBeNull()
-    expect(screen.getByText('Данные устарели')).toBeInTheDocument()
+    expect(screen.getByText('Всё работает')).toBeInTheDocument()
+    expect(screen.queryByText('Данные устарели')).toBeNull()
 
     await act(async () => {
       refreshGate.reject(new ApiError(500, 'network_error', 'down'))
       await Promise.resolve()
     })
-    // A failed background read keeps the same cached frame amber instead of
-    // replacing it with a skeleton/error-only surface or restoring green.
+    // A genuinely failed background read keeps the same cached frame amber
+    // instead of replacing it with a skeleton/error-only surface.
     expect(screen.getByText('Настройки копирования')).toBeInTheDocument()
     expect(screen.queryByLabelText('Загрузка настроек')).toBeNull()
     expect(screen.queryByText('Всё работает')).toBeNull()
     expect(screen.getByText('Данные устарели')).toBeInTheDocument()
   })
 
-  it('explicit Status refresh is strong while a fresh strong snapshot avoids an implicit read', async () => {
+  it('fresh strong Status avoids an implicit read and exposes no routine refresh action', async () => {
     const resources = new MiniAppResources(AUTH, 'status-refresh')
     resources.publishConfirmed('status', statusDto())
-    const status = vi.spyOn(api, 'status').mockResolvedValue(statusDto({ positions_count: 3 }))
+    const status = vi.spyOn(api, 'status').mockResolvedValue(statusDto())
 
     render(<SystemStatusScreen auth={AUTH} resources={resources} />)
     expect(screen.getByText('Всё работает')).toBeInTheDocument()
     expect(status).not.toHaveBeenCalled()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
-    await waitFor(() => expect(status).toHaveBeenCalledTimes(1))
-    expect(status).toHaveBeenLastCalledWith(AUTH, true, expect.any(Object))
-    await screen.findByText('3')
+    expect(screen.queryByRole('button', { name: 'Обновить' })).toBeNull()
   })
 
   it('AccountBuilder stays weak on cached entry and uses refresh=true only after explicit recheck', async () => {

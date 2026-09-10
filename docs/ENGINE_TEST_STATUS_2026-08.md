@@ -5,6 +5,46 @@
 `codex/stage-3-mini-app-part2` смержена ранее.
 
 > **Примечание (2026-09-10):** вердикт ниже покрывает дерево `f7df60b`; коммиты `58c10f7` / `ffa2848` (поведенческие, `scripts/dev-up.sh`) приземлились позже — повторная квалификация pending; покрытие этих коммитов не утверждается.
+> **Текущая ветка (2026-09-10):** на `codex/miniapp-live-updates` полный offline gate прогонялся уже
+> на актуальном дереве (включая `58c10f7` / `ffa2848`): backend **1549 passed / 2 skipped / 87 deselected**,
+> frontend **34 файла / 400 passed**, ruff/format, doc links/budgets/facts и `git diff --check` чисто;
+> браузерная приёмка Mini App — top-блок ниже и live-план §8. Это не переоценка вердикта по слиянию в
+> `main`: он остаётся привязанным к своему дереву.
+> **Corrective (2026-09-10, позже в тот же день):** закрыты два хвоста live-плана — история
+> `copyc1/BTCUSDT` (один биржевой поток держал обе эпохи position mode, из-за чего окно не
+> публиковалось; replay публикует книгу своего authoritative boundary) и liveness public
+> mark-стрима (SUBSCRIBE-ack больше не считается доказательством котировок). Детали,
+> причина и проверка — live-план §8, «corrective pass».
+> **Merge-review corrective (2026-09-10, вечер):** по результатам полного merge-review ветки
+> `codex/miniapp-live-updates` против `main` закрыты 7 × P1 и 8 × P2: потеря книги истории при
+> смене position mode, глобальный (вместо посимвольного) health/fallback mark-price и вердикт
+> `check_mark_stream.py`, возврат private stream в `live` после смерти сокета, сброс backoff
+> `UserStream` на рукопожатии, невозрастающая лестница self-heal во фронтенде, скрытые
+> keep-alive вкладки как live-потребители, отсутствие L4-coalescing котировок и cadence, а также
+> восемь пунктов P2 (кнопка generic retry, дублирование rail, истечение Agent evidence как
+> «потеря связи», a11y тикающего rail, отчёт pull-to-refresh раньше истины, whitespace-дрейф,
+> docs-факты). Полный offline gate того прохода: backend **1570 passed / 2 skipped / 87
+> deselected**, frontend **35 файлов / 412 passed**; `ruff check`/`format --check` (312 файлов),
+> doc links/budgets/facts и `git diff --check` чисто. Детали каждого пункта — live-план
+> «merge-review corrective».
+> **Live-перепроверка тех же правок (2026-09-10, после merge-review corrective):** ограничение
+> отчёта снято на живых каналах, без изменений в `src/`. Актуальный offline gate: backend
+> **1570 passed / 2 skipped / 92 deselected** (deselected вырос с 87 из-за пяти новых
+> live-тестов), frontend **35 файлов / 412 passed**; ruff/format (316 файлов), doc
+> links/budgets/facts и `git diff --check` — чисто. Testnet: реальная смена
+> HEDGE → ONE_WAY → HEDGE на `copyc2` через production capture
+> (`tests/testnet/test_history_mode_switch_live.py`, A/B: до `9eaddbb` — падение на шаге
+> ONE_WAY, сейчас PASS), health/лестница private stream при убитом сервером сокете
+> (`test_live_stream_health_acceptance.py`, A/B: до `b2fea64` — ложный `live` через 7.95 с),
+> посимвольный mark-фид (`test_live_mark_partial_acceptance.py`, гейт `check_mark_stream.py`:
+> STREAMING exit 0 → PARTIAL exit 3), реальный live-WS работающего инстанса
+> (`test_live_channel_cadence_acceptance.py`: coalescing, догон, single-use тикет). Живой UI в
+> Chromium с реальной позицией: jitter 70 с — 6 текстовых мутаций без предупреждений, pull-to-refresh
+> `ready → refreshing → idle`, все четыре вкладки с живыми данными, `churn` 50 переключений при
+> `liveSockets=1`. После кампании все пять аккаунтов flat / 0 orders. Мобильный WebView
+> закрыт владельцем на iPhone в Telegram iOS (тот же инстанс): индикатор pull-to-refresh не
+> полоса, прокрутка и отрисовка без замечаний. Детали — live-план, «live-перепроверка снятых
+> ограничений».
 
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
@@ -162,6 +202,22 @@
 > S2 frontend current WIP: **27 test files / 316 passed**, oxlint 0/0, TypeScript + Vite production build PASS; main JS **336.56 kB / 96.46 kB gzip**; recorded G2 browser evidence: cold 4 POST, warm root p95 1.0 ms/160, nested p95 1.9 ms/120, 300 ms RTT p95 6.0 ms/160, все warm 0 reads; browser DOM/listeners bounded, long tasks/errors 0. Финальные corrective после этого browser trace затронули transport validation/cancellation/error edges, поэтому latency/DOM числа ниже остаются reference evidence того G2 прогона, а не заявлением о новом CDP rerun.
 > **S3 WIP snapshot (2026-09-07):** backend history/event slice — **59 targeted tests passed**; `tsc -b && vite build` — PASS; oxlint — PASS с 2 предупреждениями; полный frontend Vitest после перехода на новые Home/Positions/Activity/history contracts — **272 passed / 44 failed (27 files)**. Это промежуточный срез, G3 остаётся OPEN; детали и TODO — [MINIAPP_S3_PROGRESS](reports/MINIAPP_S3_PROGRESS_2026-09.md).
 > **S3 verification pass (2026-09-09):** obsolete fixtures переведены на контракты S3 (feed/menu/user-event delivery), offline gate — **1449 passed / 2 skipped / 45 deselected**, frontend — **28 files / 349 passed**, oxlint clean, production build PASS, ruff check/format и doc links clean. N5 закрыт тестами (production factory True/False, два boot >1000 событий, crash до/после atomic commit, toggle-границы, остановка recurring task до DB close, retry sweep, command/user duplicates). N6 закрыт: harness исправлен (cancel по фактическому journal coid, query/order-list отсутствие, cleanup flat + `open_orders=[]`, scheduled captures, durable-boundary проверка capture-окна) и **signed live на testnet PASSED** — реальный `STOP_MARKET` fill доказан как отдельное exchange-исполнение (тик-прижатый ратчет; immediate-trigger отвергается −2021), teardown-утечка aiosqlite закрыта. Свежий S3 §19.7 trace — **PASS** (cold `4` read POST, `160` warm root samples p95 `5,3 ms`, delayed `300 ms` p95 `4,4 ms`, `200` nested samples, long tasks/errors `0`); blocked/throttled matrix `11/11` и alias/split/partial history — **PASS**. Mini App UI дополнительно проверен в Chromium, Telegram Desktop WebView и iPhone Mirroring. Android по решению владельца исключён из согласованного scope; **G3 CLOSED**. Факты собраны в [UI acceptance index](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md), S3 §§19–26.
+> **Mini App live UX de-noising (2026-09-10):** frontend — **34 файла / 400
+> passed**, oxlint clean, production build PASS; backend — **1549 passed / 2
+> skipped / 87 deselected**; ruff и `git diff --check` clean. Убраны все ручные
+> обновления (routine re-read больше не рисуется как staleness, ошибка лечится
+> авто-retry, rail появляется только когда данные реально перестали обновляться),
+> добавлен pull-to-refresh как единственный ручной путь, разрыв транспорта читается
+> одним голосом (rail вместо дублирующих плашек «Проверьте интернет», проверено
+> остановкой бота при открытой странице: `Нет связи · 41 сек назад`, плашек 0,
+> самовосстановление за 21 с), экран говорит один раз (плашка о снимке уступает rail,
+> «Загружаем…» и затемнение кнопки — только по нажатию пользователя: замер Закрытых
+> сделок 15 → 5 мутаций за 95 с и 0 миганий кнопки), а строки пропусков в
+> Активности больше не печатают коды движка (третий проход: `format_user_event`
+> отдаёт русскую причину, неизвестный код не печатается). Живой Chrome-замер
+> (180 s, `scripts/audit_miniapp_browser.mjs`): меняются только числа PnL и
+> минута в подписи свежести. Контракт и остаток —
+> `reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md` §8.
 > Ниже — append-only журнал кампаний; старые секции — снимки момента. Обновлять этот блок при каждом gate.
 
 ## Текущее состояние
@@ -1792,7 +1848,7 @@ risk_to_stop, `TradeUnavailableError`) и методы в `ApplicationProtocol`.
 **1279 passed / 2 skipped / 44 deselected**, 18.33 s. Ruff всего репо clean.
 Остаются остаток S1.4 (risk preview, resume-контекст), S1.5–S1.6; G1 не закрыт.
 
-Примечание (2026-09-10): «стало 25 POST» выше — исторический снимок на момент записи; актуально 26 POST (`grep -c 'add_post("/miniapp/api/' src/copytradeaster/miniapp/server.py` → 26). Историю не переписываем.
+Примечание (2026-09-10): «стало 25 POST» выше — исторический снимок на момент записи; актуально 27 POST (`grep -c 'add_post("/miniapp/api/' src/copytradeaster/miniapp/server.py` → 27). Историю не переписываем.
 
 ## 2026-09-06 — S1.4 остаток: risk preview и resume-контекст
 
@@ -1916,3 +1972,46 @@ mute/re-enable между sweep. Toggle/outbox cursor boundary транзакц�
 recipient/ownership повторно проверяются при commit, cursor монотонный.
 Тестовые прогоны отложены владельцем; ruff check/format изменённых файлов
 проходят. Дополнительные сценарии внесены в S3 testing handoff; G3 OPEN.
+
+## Mini App Live Mode checkpoint — 2026-09-10 (снимок момента)
+
+> Финальный статус: **CLOSED** — ручная приёмка владельца (iPhone, настоящий
+> Telegram WebView) выполнена, живая кампания открытия/закрытия позиций прошла,
+> финальный аудит `FLAT-ALL`. Детали — в хвосте
+> `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`; счётчики ниже — снимок момента.
+
+В ветке `codex/miniapp-live-updates` реализованы L1–L6 live presentation mode:
+process-local follower snapshots, authenticated single-use ticket/WebSocket,
+private follower-stream hints с coalesced authoritative REST refresh, shared
+public mark-price stream, frontend reconnect/stale/auth lifecycle и shell-level
+LiveStatus. Постоянные generic refresh-кнопки убраны из healthy пользовательских
+surface; context recovery и security permission recheck сохранены. Execution
+correctness по-прежнему остаётся за REST confirmation и reconciler.
+
+Lifecycle/backpressure hardening этого среза: server application heartbeat 10s,
+visible-client timeout 30s, hidden WebView без false-stale timeout, duplicate/
+out-of-order revision fence, manual-retry generation fence, ordered `hello`
+baseline и full live-resource reconciliation при revision gap/reconnect gap.
+Dedicated live tests покрывают ticket TTL/single-use, bounded account fan-out,
+Decimal mark-price/REST-age, private-stream burst coalescing и frontend
+heartbeat/auth/reconnect/revision-gap paths.
+
+Финальный corrective перед acceptance: per-process `epoch` в live hub + клиентский
+re-baseline (иначе рестарт backend навсегда залипал в `stale` на более низких
+revision), frame-gated liveness для shared mark-price стрима с bounded unsigned
+REST `premiumIndex` fallback (на testnet-кластере mark-стримы принимают
+подписку и не отдают кадров, тогда как `aggTrade` стримит), и классификация
+неразмеченного серверного сбоя как retryable `service_unavailable` вместо утечки
+имени класса исключения в public code.
+
+Frontend full gate на этом срезе: **30 files / 367 passed**, Oxlint **0 warnings /
+0 errors**, `tsc -b` и Vite production build PASS. Backend full offline gate
+после финальных protocol-hardening изменений: **1540 passed / 2 skipped /
+87 deselected**. `ruff check`/format для изменённого live Python surface и
+`git diff --check` проходят. Полный `ruff check .` в этой ветке отдельно упирается
+в уже существующие lint-ошибки `scripts/check_doc_facts.py` и не считается
+live-regression. REAL Aster Testnet и ручной Telegram Mini App acceptance
+выполнены (LIVE rail, auto-recovery после periodic boundary, stale-retry цикл,
+position без manual refresh, живой PnL, `FLAT-ALL` после закрытия, 53 tab
+transitions без роста sockets, 0 orphan tasks): live mode объявлен
+**ACCEPTED** в объёме §6 live-плана.

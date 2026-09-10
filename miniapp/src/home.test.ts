@@ -84,15 +84,17 @@ describe('home view model', () => {
   })
 
   it('never substitutes account updated_at for a missing exchange snapshot', () => {
-    expect(snapshotLabel(undefined)).toBe('не получен')
-    expect(snapshotLabel(null)).toBe('не получен')
+    // Nothing to show is nothing: the caller must not print "обновлено не получен".
+    expect(snapshotLabel(undefined)).toBeNull()
+    expect(snapshotLabel(null)).toBeNull()
+    expect(snapshotLabel('2026-09-10T11:05:00Z')).toMatch(/\d{2}:\d{2}/)
   })
 })
 
 describe('trust summary', () => {
   it('marks wallet and agent done, but builder remains pending before P2.6', () => {
     const items = trustSummary(dashboard({ snapshot_captured_at: '2026-09-01T12:41:00Z' }))
-    expect(items.map((item) => item.label)).toEqual(['Wallet', 'Agent', 'Builder', 'Sync'])
+    expect(items.map((item) => item.label)).toEqual(['Кошелёк', 'Agent', 'Builder', 'Сверка'])
     expect(items.find((item) => item.key === 'wallet')?.done).toBe(true)
     expect(items.find((item) => item.key === 'agent')?.done).toBe(true)
     expect(items.find((item) => item.key === 'builder')?.done).toBe(false)

@@ -35,6 +35,18 @@ def boundary(row=None):
     )
 
 
+def hedge_boundary(update_time=50):
+    return PositionBoundary.from_positions(
+        "BTCUSDT",
+        [
+            position(positionAmt="0", positionSide="LONG", updateTime=update_time),
+            position(positionAmt="0", positionSide="SHORT", updateTime=update_time),
+        ],
+        request_started=99,
+        response_received=100,
+    )
+
+
 def test_unchanged_position_brackets_history_cutoff():
     before = boundary()
     before.prove_unchanged(replace(before, request_started=2200, response_received=2201), 100)
@@ -79,3 +91,31 @@ def test_duplicate_fill_does_not_change_inferred_start():
         before, Window(0, 100), [trade, trade], placeholder_ref=lambda leg: "x"
     )
     assert seeds[PosSide.BOTH].quantity == 0
+
+
+def test_other_position_mode_book_fills_stay_out_of_the_walk():
+    """One exchange stream keeps both eras; only the ending book's fills walk."""
+    seeds = infer_starting_seeds(
+        hedge_boundary(),
+        Window(0, 100),
+        [
+            fill(1, "BUY", "1"),
+            fill(2, "BUY", "2", leg="LONG"),
+            fill(3, "SELL", "2", "110", "10", leg="LONG"),
+        ],
+        placeholder_ref=lambda leg: "existing",
+    )
+    assert {leg: seed.quantity for leg, seed in seeds.items()} == {
+        PosSide.LONG: D(0),
+        PosSide.SHORT: D(0),
+    }
+
+
+def test_foreign_symbol_fill_still_refuses_the_walk():
+    with pytest.raises(HistoryReconciliationError, match="symbol"):
+        infer_starting_seeds(
+            boundary(),
+            Window(0, 100),
+            [fill(1, "BUY", "1").model_copy(update={"symbol": "ETHUSDT"})],
+            placeholder_ref=lambda leg: "x",
+        )

@@ -1,16 +1,16 @@
 # Каркас плана разработки копитрейд-бота на AsterDex
 
-> **Заморозка (2026-09-10):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живая часть — только §9 «После hardening».
+> **Заморозка (2026-09-10):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живые части — §9 «После hardening» (launch-path и ожидающая повторная квалификация) и §10 «Mini App Live Mode» (ACCEPTED 2026-09-10, журнал `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`).
 
 Статус: Stage 1, Stage 2 и Stage 3 (Part 1 + Part 2, P2.0–P2.7 с corrective)
 закрыты; всё смержено в `main`. Сверх исходного видения сделаны: RAM
 leverage control-plane, notification outbox, captcha-доступ, Builder
-attestation, System Status и 4-табовый follower Mini App (26 POST
+attestation, System Status и 4-табовый follower Mini App (27 POST
 `/miniapp/api/*`). Видение трёх этапов — раздел 4 (исторический план,
 факт — чеклисты ниже). Полный фактологический бэкграунд — в
 [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
 
-Актуальные счётчики — см. `ENGINE_TEST_STATUS_2026-08.md` TL;DR (2026-09-09).
+Актуальные счётчики — только в `ENGINE_TEST_STATUS_2026-08.md`; числа в этом файле не поддерживаются и не дублируются.
 Проверенный merge готов к fast-forward/push в Git `main`; mainnet guard остаётся
 fail-closed.
 ## 1. Стек
@@ -707,3 +707,28 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 - Повторная квалификация движка pending: последняя — `f7df60b` (requalify integrated live gates, 2026-09-09); после неё в launch-path зашли ровно `ffa2848` + `58c10f7` (`9b65312` — только docs/maps/гейты, переквалификации не требует).
 - Дальше — прогоны по `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:6-11` (NO-GO до повторной квалификации); verdict и счётчики — только в `docs/ENGINE_TEST_STATUS_2026-08.md`.
 - Исторический план A–G демотирован из корня `docs/` в `docs/reports/plan_live_test.md` (история — `git log --follow`); старые A–G — история прогонов предыдущего кода (`docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:10-11`).
+
+## 10. Mini App Live Mode — ACCEPTED 2026-09-10 (REAL Aster Testnet)
+
+Исполняемый план и append-only журнал:
+[MINIAPP_LIVE_MODE_PLAN_2026-09.md](reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md).
+
+- [x] Подтверждены текущий snapshot/cache flow и Aster private/public WS
+  контракты; выбрана схема WS-hint → authoritative REST boundary.
+- [x] Общий process-local follower read model с monotonic revision.
+- [x] Authenticated browser WebSocket через short-lived single-use ticket.
+- [x] Private stream pool для REAL followers с coalesced snapshot refresh.
+- [x] Shared public mark-price stream для presentation PnL.
+- [x] Frontend live client, reconnect/stale states и resource fencing.
+- [x] Удалены постоянные generic refresh-кнопки; explicit permission recheck
+  сохранён.
+- [x] Offline live/lifecycle regression coverage и full frontend/backend gates.
+- [x] REAL Aster Testnet и Telegram WebView acceptance: LIVE rail, automatic
+  recovery после periodic master boundary, `LIVE -> reconnecting -> stale ->
+  LIVE`, position без manual refresh, живой PnL и `FLAT-ALL` после закрытия.
+
+Corrective этого среза: per-process `epoch` для client re-baselining после
+рестарта backend, frame-gated mark-price liveness с REST `premiumIndex`
+fallback (testnet-кластер молчит по mark-стримам) и запрет отдавать клиенту имя
+класса исключения как public error code. Детали и evidence — в журнале
+[MINIAPP_LIVE_MODE_PLAN_2026-09.md](reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md) §8.

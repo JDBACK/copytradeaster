@@ -1,7 +1,9 @@
 import type { MiniAppResources } from '../resources'
 import type { NestedScreen } from '../navigation'
 import { useHistory } from '../useHistory'
-import { useResource } from '../useResource'
+import { usePaging } from '../usePaging'
+import { useLiveSnapshot, useResource } from '../useResource'
+import { railSpeaks } from '../live'
 import { ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { formatDateTime, formatDuration, formatPnl, formatPrice, formatQuantity, formatUsdt } from '../format'
@@ -12,11 +14,12 @@ import { PositionCard } from './PositionsScreen'
 export function PositionDetailScreen({ resources, symbol, side, active = true, foregroundSignal = 0 }: { resources: MiniAppResources; symbol: string; side: 'LONG' | 'SHORT'; active?: boolean; foregroundSignal?: number }) {
   const snapshot = useResource({ resources, key: 'positions', active, foregroundSignal })
   const position = snapshot.snapshot.data?.positions.find(p => p.symbol === symbol && p.side === side)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), snapshot.snapshot.data !== null)
+  const snapshotStale = snapshot.snapshot.data?.is_stale === true && !railOwnsOutage
   return <div className="screen"><h1 className="h1">{symbol} · {side}</h1>
-    {snapshot.snapshot.error && <ErrorBox {...describeError(snapshot.snapshot.error)} />}
-    {position ? <><p className="lede num">{formatQuantity(position.qty, position.quantity_asset)}</p><PositionCard position={position} /><p className="info-box">{snapshot.snapshot.data?.is_stale || snapshot.snapshot.stale ? 'Снимок устарел. Защита требует проверки. ' : ''}История этой позиции ещё уточняется. Отображается текущий снимок аккаунта.</p></> : <p className="info-box">{snapshot.snapshot.data ? 'Позиция больше не отображается в текущем снимке. Проверьте закрытые сделки.' : 'Получаем данные позиции'}</p>}
+    {snapshot.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(snapshot.snapshot.error)} />}
+    {position ? <><p className="lede num">{formatQuantity(position.qty, position.quantity_asset)}</p><PositionCard position={position} /><p className="info-box">{snapshotStale ? 'Снимок устарел. Защита требует проверки. ' : ''}История этой позиции ещё уточняется. Отображается текущий снимок аккаунта.</p></> : <p className="info-box">{snapshot.snapshot.data ? 'Позиция больше не отображается в текущем снимке. Проверьте закрытые сделки.' : 'Получаем данные позиции'}</p>}
     <p className="freshness">Снимок: {formatDateTime(snapshot.snapshot.data?.snapshot_captured_at)}</p>
-    <button type="button" className="btn btn-secondary" onClick={() => void snapshot.refresh('strong').catch(() => {})}>Обновить</button>
   </div>
 }
 
@@ -25,24 +28,29 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   const data = detail.data && 'trade' in detail.data ? detail.data : null
   const resolution = detail.data && 'kind' in detail.data ? detail.data : null
   const events = useHistory(resources.history, { kind: 'events', tradeRef }, active && !!data, foregroundSignal)
+  const [pagingEvents, startPagingEvents] = usePaging()
+  const [pagingFills, startPagingFills] = usePaging()
   const positions = useResource({ resources, key: 'positions', enabled: data?.trade.state === 'open', active: active && data?.trade.state === 'open', foregroundSignal })
+  const liveSnapshot = useLiveSnapshot(resources)
+  const railOwnsOutage = railSpeaks(liveSnapshot, positions.snapshot.data !== null)
+  // Reaching the ready branch proves the detail itself has data on screen.
+  const railOwnsDetailOutage = railSpeaks(liveSnapshot, true)
   const trade = data?.trade
   if (resolution) return <div className="screen"><h1 className="h1">История сделки уточнена</h1><p className="info-box">Исходная запись разделена на несколько эпизодов. Выберите эпизод для просмотра.</p>{resolution.targets.map((ref, index) => <button type="button" className="btn btn-secondary" key={ref} onClick={() => onOpen({ kind: 'trade-detail', tradeRef: ref })}>Открыть эпизод {index + 1}</button>)}<button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'closed', period: 'all' })}>Открыть историю</button></div>
-  if (!trade || !data) return <div className="screen"><h1 className="h1">Детали сделки</h1>{detail.error ? <><ErrorBox {...describeError(detail.error)} /><button type="button" className="btn btn-secondary" onClick={() => void detail.refresh()}>Повторить</button><button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all' })}>Мои позиции</button></> : <div className="skeleton" style={{ minHeight: 300 }} />}</div>
+  if (!trade || !data) return <div className="screen"><h1 className="h1">Детали сделки</h1>{detail.error ? <><ErrorBox {...describeError(detail.error)} /><button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all' })}>Мои позиции</button></> : <div className="skeleton" style={{ minHeight: 300 }} />}</div>
   const live = positions.snapshot.data?.positions.find(p => p.trade_ref === trade.trade_ref)
-  const liveStale = !!positions.snapshot.data && (positions.snapshot.data.is_stale || positions.snapshot.stale || !!positions.snapshot.error)
+  const liveStale = positions.snapshot.data?.is_stale === true && !railOwnsOutage
   const net = trade.result_state === 'net_complete' && trade.net_pnl_usdt !== null
   const pnl = formatPnl(trade.state === 'open' ? live?.unrealized_profit : net ? trade.net_pnl_usdt : trade.realized_pnl_gross_usdt)
   return <div className="screen">
     <h1 className="h1">{trade.symbol} · {trade.side ?? 'Направление уточняется'}</h1>
     <p className="lede">{trade.state === 'open' ? 'Открыта' : 'Закрыта'} · {{ copy: 'Копирование', external: 'Внешние операции', mixed: 'Смешанные операции', unknown: 'Источник уточняется' }[trade.source]}</p>
-    {detail.error && <ErrorBox {...describeError(detail.error)} />}
-    {detail.error && <p className="freshness">Показаны ранее полученные данные. Обновите сделку для сверки.</p>}
+    {detail.error && !railOwnsDetailOutage && <ErrorBox {...describeError(detail.error)} />}
+    {detail.error && <p className="freshness">Показаны ранее полученные данные. Сверка продолжится автоматически.</p>}
     {trade.state === 'open' && <>
-      {positions.snapshot.error && <ErrorBox {...describeError(positions.snapshot.error)} />}
-      {liveStale && <p className="position-warning" role="status">Снимок позиции устарел. PnL и статус защиты требуют обновления.</p>}
+      {positions.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(positions.snapshot.error)} />}
+      {liveStale && <p className="position-warning" role="status">Снимок позиции не обновляется. PnL и статус защиты могут быть неточными.</p>}
       <p className="freshness">Снимок позиции: {formatDateTime(positions.snapshot.data?.snapshot_captured_at)}</p>
-      <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Обновить позицию</button>
     </>}
     <section className="panel account-summary"><h2 className="summary-label">{trade.state === 'open' ? 'PnL сейчас' : net ? 'Итог сделки' : 'PnL до комиссий'}</h2><div className={`summary-pnl num pnl-${pnl.tone}`}>{pnl.text}</div>
       <div className="summary-row"><span>Всего на вход</span><strong className="num">{formatQuantity(data.entry_qty, trade.quantity_asset)}</strong></div><div className="summary-row"><span>Всего закрыто</span><strong className="num">{formatQuantity(data.exit_qty, trade.quantity_asset)}</strong></div><div className="summary-row"><span>Остаток</span><strong className="num">{formatQuantity(data.remaining_qty, trade.quantity_asset)}</strong></div>
@@ -62,9 +70,8 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
     {!events.data && !events.error && <p role="status" className="info-box">Получаем события и исполнения сделки…</p>}
     {events.data?.events.length === 0 && <p className="info-box">События пока не восстановлены. Это не означает отсутствие исполнений.</p>}
     {events.error && <ErrorBox {...describeError(events.error)} />}
-    {events.changed && <button type="button" className="btn btn-secondary" onClick={() => { void detail.refresh(); void events.refresh() }}>История изменилась — обновить</button>}
     {events.data?.events.map(event => <TradeEventRow key={event.event_ref} event={event} />)}
-    {events.data?.next_events_cursor && <button type="button" className="btn btn-secondary" disabled={events.loading || events.changed} onClick={() => void events.events()}>Ещё события</button>}
+    {events.data?.next_events_cursor && <button type="button" className="btn btn-secondary" disabled={pagingEvents || events.changed} onClick={() => startPagingEvents(() => events.events())}>Ещё события</button>}
     <h2 className="h2">Исполнения</h2>
     {events.data?.fills.length === 0 && <p className="info-box">Исполнения пока недоступны. Объёмы и результат могут уточняться.</p>}
     {groupTradeFills(events.data?.fills ?? []).map(group => <details className="panel fill-details" key={group.key}>
@@ -74,8 +81,6 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
         <p>PnL доли до комиссий: {formatPnl(fill.allocated_realized_pnl).text}</p>
       </div>)}
     </details>)}
-    {events.data?.next_fills_cursor && <button type="button" className="btn btn-secondary" disabled={events.loading || events.changed} onClick={() => void events.fills()}>Ещё исполнения</button>}
-    {events.error && !events.changed && <button type="button" className="btn btn-secondary" onClick={() => void events.retry()}>Повторить загрузку истории</button>}
-    <button type="button" className="btn btn-secondary" disabled={detail.loading} onClick={() => { void detail.refresh(); void events.refresh() }}>Обновить сделку</button>
+    {events.data?.next_fills_cursor && <button type="button" className="btn btn-secondary" disabled={pagingFills || events.changed} onClick={() => startPagingFills(() => events.fills())}>Ещё исполнения</button>}
   </div>
 }

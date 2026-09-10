@@ -3,16 +3,16 @@
  * Read-only control-plane slice over the authoritative backend StatusDTO:
  * overall health, trust rail, and six diagnostic rows (Система,
  * Копирование, Aster, Разрешения, Позиции, Последняя проверка).  The last
- * successfully received DTO stays on screen in local component state only
- * (no store): a failed manual refresh marks the view transport-stale
- * instead of destroying data, and a late request never overwrites a newer
- * one (sequence guard).  Remediation executes only the closed backend set:
- * ``refresh`` re-runs ``api.status(auth, true)``, ``open_bot`` returns to
- * the Telegram chat via the existing ``closeMiniApp()``.
+ * successfully received DTO stays on screen: a failed read marks the view
+ * transport-stale instead of destroying data, and a late request never
+ * overwrites a newer one (sequence guard).  There is no manual refresh here —
+ * the read heals on its own and the pull-down at the top of the shell forces
+ * it.  The only action is ``open_bot``, which returns to the Telegram chat via
+ * the existing ``closeMiniApp()``.
  */
 
-import { useCallback, useState } from 'react'
-import { ApiError, type AuthContext } from '../api'
+import { useCallback, useEffect, useRef } from 'react'
+import type { AuthContext } from '../api'
 import { Brand, ErrorBox, Row } from '../components/ui'
 import { describeError } from '../errors'
 import {
@@ -22,6 +22,7 @@ import {
   lastCheckRowValue,
   overallValue,
   permissionsRowValue,
+  needsPermissionReproof,
   positionsRowValue,
   reasonCopy,
   remediationOf,
@@ -29,15 +30,17 @@ import {
   systemRowValue,
   TRANSPORT_STALE_WARNING,
 } from '../systemStatus'
-import { closeMiniApp, hapticImpact, hapticNotify } from '../telegram'
+import { closeMiniApp, hapticImpact } from '../telegram'
 import { formatTime } from '../format'
+import { useAgeSeconds } from '../useAge'
 import type { StatusDTO } from '../types'
+import { railSpeaks } from '../live'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useLiveSnapshot, useResource, useScreenResources, useTransportStale } from '../useResource'
 
 type LoadState =
   | { kind: 'loading' }
-  | { kind: 'ready'; dto: StatusDTO; transportStale: boolean }
+  | { kind: 'ready'; dto: StatusDTO; transportStale: boolean; outageNote: boolean }
   | { kind: 'error'; code: string }
 
 export function SystemStatusScreen({
@@ -51,38 +54,46 @@ export function SystemStatusScreen({
   resources?: MiniAppResources
   foregroundSignal?: number
 }) {
-  const [refreshing, setRefreshing] = useState(false)
   const resources = useScreenResources(providedResources, auth)
+  // A healthy live boundary guarantees that the shared follower store was
+  // authoritatively refreshed. Use its cheap cached Status read in steady
+  // state; explicit remediation below remains refresh=true and therefore also
+  // rechecks signed permissions.
+  const liveCacheReady = resources.getLiveSnapshot().health === 'live'
   const resource = useResource({
     resources,
     key: 'status',
     active: true,
-    strength: 'strong',
+    strength: liveCacheReady ? 'weak' : 'strong',
     foregroundSignal,
   })
   const dto = resource.snapshot.data
-  const transportStale =
-    dto !== null &&
-    (resource.snapshot.error !== null || resource.snapshot.stale || resource.snapshot.strength !== 'strong')
+  const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), dto !== null)
+  const transportStale = dto !== null && transportUnhealthy
+  // One fact, one voice: the cached DTO keeps its honest stale verdict, but the
+  // outage itself is not repeated here while the rail is already reporting it.
+  const outageNote = transportStale && !railOwnsOutage
+  // Verification evidence ages out on its own (the backend TTL is a minute), so
+  // opening this screen re-proves it once instead of telling the user to ask
+  // again. Bounded by the DTO itself: as soon as permissions read valid (or the
+  // attempt failed and is described by the row) the effect stops re-firing.
+  // again. Age counts too: a cached DTO can keep a green verdict with a stamp
+  // from an hour ago, and the row would then read "Проверка: … · 25 мин назад".
+  const permissionsUnproven = dto !== null && needsPermissionReproof(dto)
+  const permissionsAutoChecked = useRef(false)
+  useEffect(() => {
+    if (!permissionsUnproven || permissionsAutoChecked.current) return
+    // Once per open: evidence that ages out is re-proven by the app, not by a
+    // button, and a failed attempt must not become a retry loop.
+    permissionsAutoChecked.current = true
+    void resource.refresh('strong').catch(() => {})
+  }, [permissionsUnproven, resource])
   const load: LoadState = dto
-    ? { kind: 'ready', dto, transportStale }
+    ? { kind: 'ready', dto, transportStale, outageNote }
     : resource.snapshot.error
       ? { kind: 'error', code: resource.snapshot.error }
       : { kind: 'loading' }
-
-  const refresh = useCallback(async () => {
-    if (!resource.snapshot.data || refreshing) return
-    hapticImpact('light')
-    setRefreshing(true)
-    try {
-      await resource.refresh('strong')
-    } catch (err) {
-      if (err instanceof ApiError && err.code === 'aborted') return
-      hapticNotify('error')
-    } finally {
-      setRefreshing(false)
-    }
-  }, [refreshing, resource])
 
   const openBot = useCallback(() => {
     hapticImpact('light')
@@ -124,15 +135,6 @@ export function SystemStatusScreen({
           Статус системы
         </h1>
         <ErrorBox title={copy.title} hint={copy.hint} />
-        <div className="btn-stack">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => void resource.refresh('strong').catch(() => {})}
-          >
-            Повторить
-          </button>
-        </div>
       </div>
     )
   }
@@ -141,10 +143,10 @@ export function SystemStatusScreen({
     <SystemStatusView
       dto={load.dto}
       transportStale={load.transportStale}
-      refreshing={refreshing}
+      outageNote={load.outageNote}
       accountMasked={accountMasked}
-      onRefresh={() => void refresh()}
       onOpenBot={openBot}
+      receivedAt={resource.snapshot.receivedAt}
     />
   )
 }
@@ -153,18 +155,22 @@ export function SystemStatusScreen({
 export function SystemStatusView({
   dto,
   transportStale,
-  refreshing,
+  outageNote = transportStale,
   accountMasked,
-  onRefresh,
   onOpenBot,
+  receivedAt = 0,
 }: {
   dto: StatusDTO
   transportStale: boolean
-  refreshing: boolean
+  /** Whether this screen may repeat the outage in its own banner. */
+  outageNote?: boolean
   accountMasked?: string | null
-  onRefresh: () => void
   onOpenBot: () => void
+  /** When this DTO arrived: the backend age is a snapshot, and the row must stay
+   * truthful while the screen is open. */
+  receivedAt?: number
 }) {
+  const ageSeconds = useAgeSeconds(dto.age_seconds ?? null, receivedAt)
   // A transport failure keeps the previous DTO visible but must never let an
   // old ready verdict keep looking like fresh green health.
   const overall = transportStale ? { label: 'Данные устарели', tone: 'warning' as const } : overallValue(dto.state)
@@ -173,17 +179,17 @@ export function SystemStatusView({
   const aster = asterRowValue(dto.aster_state)
   const permissions = permissionsRowValue(dto.permissions_state)
   const positions = positionsRowValue(dto.positions_count ?? null)
-  const lastCheck = lastCheckRowValue(dto.last_check_at ?? null, dto.age_seconds ?? null)
+  const lastCheck = lastCheckRowValue(dto.last_check_at ?? null, ageSeconds)
   const reason = reasonCopy(dto.reason)
   const remediation = remediationOf(dto.remediation)
   const trust = statusTrust(dto)
   const account = dto.account_masked ?? accountMasked ?? null
 
-  const amberNote = transportStale
+  const amberNote = outageNote
     ? TRANSPORT_STALE_WARNING
     : dto.state === 'ready'
       ? null
-      : (reason ?? `Последняя проверка: ${formatTime(dto.last_check_at)} · ${formatAge(dto.age_seconds)}`)
+      : (reason ?? `Последняя проверка: ${formatTime(dto.last_check_at)} · ${formatAge(ageSeconds)}`)
 
   return (
     <div className="screen">
@@ -207,7 +213,7 @@ export function SystemStatusView({
             className={`dot ${overall.tone === 'success' ? 'success' : overall.tone === 'muted' ? '' : overall.tone}`}
             aria-hidden
           />
-          Проверка: {formatTime(dto.last_check_at)} · {formatAge(dto.age_seconds)}
+          Проверка: {formatTime(dto.last_check_at)} · {formatAge(ageSeconds)}
         </div>
       </section>
 
@@ -258,24 +264,9 @@ export function SystemStatusView({
       )}
 
       <div className="btn-stack">
-        {remediation === 'refresh' && (
-          <button type="button" className="btn btn-primary" disabled={refreshing} onClick={onRefresh}>
-            {refreshing ? 'Обновляем…' : 'Обновить'}
-          </button>
-        )}
         {remediation === 'open_bot' && (
           <button type="button" className="btn btn-primary" onClick={onOpenBot}>
             Открыть бота
-          </button>
-        )}
-        {remediation === null && (
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={refreshing}
-            onClick={onRefresh}
-          >
-            {refreshing ? 'Обновляем…' : 'Обновить'}
           </button>
         )}
       </div>

@@ -232,21 +232,35 @@ describe('RiskScreen behavior (tap → dirty → save)', () => {
 
     render(<RiskScreen auth={AUTH} resources={resources} onSaved={onSaved} />)
     expect(screen.getByRole('button', { name: /сохранение/i })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить данные' }))
-    await waitFor(() => expect(reader).toHaveBeenCalledTimes(2))
+    // No button: the failed verification read retries on its own and the
+    // post-boundary authoritative answer clears the retained uncertainty.
+    await waitFor(() => expect(reader).toHaveBeenCalledTimes(2), { timeout: 3000 })
     await waitFor(() => expect(resources.mutationState('risk')).toBeNull())
     expect(setter).toHaveBeenCalledTimes(1)
     expect(onSaved).toHaveBeenCalledTimes(1)
     expect(screen.getByRole('button', { name: /сохранить/i })).toBeDisabled()
   })
 
-  it('keeps cached Risk visibly stale and blocks save until transport truth is refreshed', async () => {
+  it('does not block a save for a routine revalidation, but does during an outage', async () => {
     const resources = new MiniAppResources(AUTH, 'risk-stale-honesty')
     resources.publishConfirmed('risk', dto())
     resources.invalidate(['risk'])
     vi.spyOn(api, 'risk').mockReturnValue(new Promise<RiskDTO>(() => {}))
+    vi.spyOn(resources, 'getLiveSnapshot').mockReturnValue({
+      health: 'live', revision: 1, lastUpdatedAt: Date.now(), retrying: false,
+    })
 
-    render(<RiskScreen auth={AUTH} resources={resources} />)
+    const first = render(<RiskScreen auth={AUTH} resources={resources} />)
+    expect(screen.queryByText(/данные требуют проверки перед сохранением/i)).toBeNull()
+    first.unmount()
+
+    // A transport that is genuinely down still requires verified data first.
+    const offline = new MiniAppResources(AUTH, 'risk-offline-honesty')
+    offline.publishConfirmed('risk', dto())
+    vi.spyOn(offline, 'getLiveSnapshot').mockReturnValue({
+      health: 'stale', revision: 1, lastUpdatedAt: 0, retrying: true,
+    })
+    render(<RiskScreen auth={AUTH} resources={offline} />)
     expect(screen.getByText(/данные требуют проверки перед сохранением/i)).toBeDefined()
     fireEvent.click(screen.getByRole('radio', { name: '2,0%' }))
     expect(screen.getByRole('button', { name: /сохранить 2,0%/i })).toBeDisabled()

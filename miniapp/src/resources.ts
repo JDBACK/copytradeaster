@@ -7,6 +7,7 @@
 
 import { HistoryResources } from './historyResources'
 import { api, ApiError, type AuthContext } from './api'
+import { MiniAppLiveSession, type LiveSnapshot, type LiveUpdate } from './live'
 import type {
   AccountBuilderDTO,
   DashboardDTO,
@@ -38,6 +39,18 @@ export interface ResourceValues {
 
 export type ReadStrength = 'weak' | 'strong'
 
+/** Screens a pull-down refresh re-reads. ``accountBuilder`` is deliberately
+ * absent: re-verifying Agent permissions is a signed security action with its
+ * own explicit control, not a data freshness read. */
+const PULL_REFRESH_KEYS: readonly ResourceKey[] = [
+  'dashboard',
+  'positions',
+  'risk',
+  'riskPreview',
+  'notifications',
+  'status',
+]
+
 export const RESOURCE_TTL_MS: Record<ResourceKey, number> = {
   dashboard: 30_000,
   positions: 30_000,
@@ -57,6 +70,13 @@ export type MutationUnknownReason =
   | 'account-reauthorize'
   | 'account-disconnect'
 
+const IDLE_LIVE_SNAPSHOT: LiveSnapshot = {
+  health: 'connecting',
+  revision: 0,
+  lastUpdatedAt: 0,
+  retrying: false,
+}
+
 type MutationLock =
   | { state: 'active'; token: symbol }
   | { state: 'unknown'; reason: MutationUnknownReason; sinceRevision: number }
@@ -75,19 +95,34 @@ export interface ResourceSnapshot<T> {
 interface Flight<T> {
   token: number
   invalidationAtStart: number
+  stateInvalidationAtStart: number
   strength: ReadStrength
   controller: AbortController
   promise: Promise<T>
+}
+
+interface LiveInvalidationBoundary {
+  invalidationRevision: number
+  source: string | null
+  capturedAt: string | null
 }
 
 interface Entry<T> {
   data: T | null
   receivedAt: number
   invalidationRevision: number
+  /** Revision advanced by state boundaries only: a public quote tick marks the
+   * DTO stale but never discards a read that is already in flight, so a client
+   * slower than the quote cadence still converges on fresh marks. */
+  stateInvalidationRevision: number
   dataInvalidationRevision: number
   generation: number
   barrierGeneration: number
+  /** Latest non-live fence. A matching REST live publication may cover its
+   * own live barrier, but it must never cover mutation/local/scope fences. */
+  hardBarrierGeneration: number
   publishedGeneration: number
+  latestLiveBoundary: LiveInvalidationBoundary | null
   weak: Flight<T> | null
   strong: Flight<T> | null
   error: string | null
@@ -111,10 +146,13 @@ function emptyEntry<T>(): Entry<T> {
     data: null,
     receivedAt: 0,
     invalidationRevision: 0,
+    stateInvalidationRevision: 0,
     dataInvalidationRevision: -1,
     generation: 0,
     barrierGeneration: 0,
+    hardBarrierGeneration: 0,
     publishedGeneration: 0,
+    latestLiveBoundary: null,
     weak: null,
     strong: null,
     error: null,
@@ -132,7 +170,11 @@ export class MiniAppResources {
   private readonly onInvalidSession?: () => void
   private invalidSessionReported = false
   private disposed = false
+  private live: MiniAppLiveSession | null = null
   private readonly locks = new Map<MutationKey, MutationLock>()
+  /** Visible consumers per key: hidden keep-alive tabs stay subscribed but are
+   * not live consumers, so their resources are not re-read on every event. */
+  private readonly activeConsumers = new Map<ResourceKey, number>()
   private readonly entries: { [K in ResourceKey]: Entry<ResourceValues[K]> } = {
     dashboard: emptyEntry<DashboardDTO>(),
     positions: emptyEntry<PositionPageDTO>(),
@@ -150,6 +192,29 @@ export class MiniAppResources {
     this.onInvalidSession = onInvalidSession
   }
 
+  startLive(): void {
+    if (this.disposed || this.live) return
+    this.live = new MiniAppLiveSession(
+      this.auth,
+      (event) => this.applyLiveUpdate(event),
+      (error) => this.handleInvalidSessionError(error),
+    )
+    this.live.start()
+  }
+
+  liveEnabled(): boolean {
+    return this.live !== null
+  }
+
+  getLiveSnapshot = (): LiveSnapshot => this.live?.getSnapshot() ?? IDLE_LIVE_SNAPSHOT
+
+  subscribeLive = (listener: () => void): (() => void) =>
+    this.live?.subscribe(listener) ?? (() => {})
+
+  retryLive(): void {
+    this.live?.retryNow()
+  }
+
   getSnapshot<K extends ResourceKey>(key: K): ResourceSnapshot<ResourceValues[K]> {
     return this.entry(key).snapshot
   }
@@ -160,6 +225,18 @@ export class MiniAppResources {
 
   hasSubscribers(key: ResourceKey): boolean {
     return this.entry(key).listeners.size > 0
+  }
+
+  hasActiveSubscribers(key: ResourceKey): boolean {
+    return (this.activeConsumers.get(key) ?? 0) > 0
+  }
+
+  /** Register or unregister one visible consumer of a key (refcounted). */
+  setActive(key: ResourceKey, active: boolean): void {
+    const current = this.activeConsumers.get(key) ?? 0
+    const next = Math.max(0, current + (active ? 1 : -1))
+    if (next === 0) this.activeConsumers.delete(key)
+    else this.activeConsumers.set(key, next)
   }
 
   subscribe<K extends ResourceKey>(key: K, listener: () => void): () => void {
@@ -206,7 +283,10 @@ export class MiniAppResources {
       // is pending. Keep the data visible, but advance the invalidation fence
       // synchronously before the request starts.
       entry.invalidationRevision += 1
+      entry.stateInvalidationRevision += 1
       entry.barrierGeneration = ++entry.generation
+      entry.hardBarrierGeneration = entry.barrierGeneration
+      entry.latestLiveBoundary = null
       this.publishSnapshot(entry)
     }
     return this.startFlight(key, strength)
@@ -228,7 +308,10 @@ export class MiniAppResources {
     else entry.weak = null
     // Cancellation is also a publication fence: a test double or unusual
     // WebView body implementation may ignore AbortSignal and resolve late.
+    entry.stateInvalidationRevision += 1
     entry.barrierGeneration = ++entry.generation
+    entry.hardBarrierGeneration = entry.barrierGeneration
+    entry.latestLiveBoundary = null
     flight.controller.abort('speculative_cancelled')
     this.publishSnapshot(entry)
     return true
@@ -259,13 +342,40 @@ export class MiniAppResources {
     return data
   }
 
+  /** The one explicit user refresh: pull down at the top of the shell.
+   *
+   * Everything else heals by itself — live invalidations, TTL reads, focus
+   * recovery and bounded retry. This exists for the moment a user wants to
+   * force the truth now: every mounted screen is re-read authoritatively and
+   * the live transport is re-armed if it had stopped retrying. */
+  async pullRefresh(): Promise<void> {
+    if (this.disposed) return
+    const active = PULL_REFRESH_KEYS.filter((key) => this.hasSubscribers(key))
+    this.invalidate(active)
+    this.retryLive()
+    // The timeline is part of what the user just asked for, and a failed read
+    // must not report success: the spinner and the success haptic used to fire
+    // while history was still loading — or after every read had failed, because
+    // allSettled never surfaces a rejection and history was fire-and-forget.
+    const settled = await Promise.allSettled([
+      ...active.map((key) => this.refresh(key, 'strong')),
+      this.history.revalidateActive(),
+    ])
+    if (settled.some((result) => result.status === 'rejected')) {
+      throw new Error('pull refresh incomplete')
+    }
+  }
+
   /** Mark dependent DTOs suspect and fence every read that started before it. */
   invalidate(keys: readonly ResourceKey[]): void {
     if (this.disposed) return
     for (const key of keys) {
       const entry = this.entry(key)
       entry.invalidationRevision += 1
+      entry.stateInvalidationRevision += 1
       entry.barrierGeneration = ++entry.generation
+      entry.hardBarrierGeneration = entry.barrierGeneration
+      entry.latestLiveBoundary = null
       this.publishSnapshot(entry)
     }
   }
@@ -275,9 +385,12 @@ export class MiniAppResources {
     if (this.disposed) return
     const entry = this.entry(key)
     entry.invalidationRevision += 1
+    entry.stateInvalidationRevision += 1
     const generation = ++entry.generation
     entry.barrierGeneration = generation
+    entry.hardBarrierGeneration = generation
     entry.publishedGeneration = generation
+    entry.latestLiveBoundary = null
     entry.dataInvalidationRevision = entry.invalidationRevision
     entry.data = data
     entry.receivedAt = Date.now()
@@ -373,6 +486,8 @@ export class MiniAppResources {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.live?.dispose()
+    this.live = null
     this.history.dispose()
     this.locks.clear()
     for (const key of Object.keys(this.entries) as ResourceKey[]) {
@@ -386,7 +501,10 @@ export class MiniAppResources {
       entry.receivedAt = 0
       entry.strength = null
       entry.invalidationRevision += 1
+      entry.stateInvalidationRevision += 1
       entry.barrierGeneration = ++entry.generation
+      entry.hardBarrierGeneration = entry.barrierGeneration
+      entry.latestLiveBoundary = null
       this.publishSnapshot(entry)
     }
   }
@@ -396,10 +514,12 @@ export class MiniAppResources {
     const controller = new AbortController()
     const token = ++entry.generation
     const invalidationAtStart = entry.invalidationRevision
+    const stateInvalidationAtStart = entry.stateInvalidationRevision
     const promise = this.read(key, strength, controller.signal)
     const flight: Flight<ResourceValues[K]> = {
       token,
       invalidationAtStart,
+      stateInvalidationAtStart,
       strength,
       controller,
       promise,
@@ -427,9 +547,19 @@ export class MiniAppResources {
     if (entry.strong === flight) entry.strong = null
     if (this.disposed) return
 
-    const fenced = flight.token < entry.barrierGeneration
+    const hardFenced = flight.token < entry.hardBarrierGeneration
     const superseded = flight.token < entry.publishedGeneration
     const invalidatedDuringFlight = flight.invalidationAtStart !== entry.invalidationRevision
+    const stateInvalidatedDuringFlight =
+      flight.stateInvalidationAtStart !== entry.stateInvalidationRevision
+    const liveCovered =
+      data !== null &&
+      flight.strength === 'strong' &&
+      invalidatedDuringFlight &&
+      !hardFenced &&
+      this.strongReadCoversLiveBoundary(key, data, entry.latestLiveBoundary)
+    const fenced = flight.token < entry.barrierGeneration && !liveCovered
+    const invalidationBlocksPublication = stateInvalidatedDuringFlight && !liveCovered
 
     if (error !== null) {
       // Authentication loss is a hard scope boundary, not a per-screen
@@ -438,14 +568,14 @@ export class MiniAppResources {
       if (this.handleInvalidSessionError(error)) return
       // A losing/obsolete request cannot poison the error slot after a newer
       // strong read or confirmed mutation has already published.
-      if (!fenced && !superseded && !invalidatedDuringFlight && !(error instanceof ApiError && error.code === 'aborted')) {
+      if (!fenced && !superseded && !invalidationBlocksPublication && !(error instanceof ApiError && error.code === 'aborted')) {
         entry.error = error instanceof ApiError ? error.code : 'network_error'
       }
       this.publishSnapshot(entry)
       return
     }
 
-    if (!fenced && !superseded && !invalidatedDuringFlight && data !== null) {
+    if (!fenced && !superseded && !invalidationBlocksPublication && data !== null) {
       entry.data = data
       entry.receivedAt = Date.now()
       entry.dataInvalidationRevision = entry.invalidationRevision
@@ -458,7 +588,7 @@ export class MiniAppResources {
     // A real dashboard refresh defines a newer server snapshot. Any positions
     // read that predated it must be fenced, and active consumers will perform
     // exactly one follow-up through useResource.
-    if (key === 'dashboard' && flight.strength === 'strong' && !fenced && !superseded && !invalidatedDuringFlight) {
+    if (key === 'dashboard' && flight.strength === 'strong' && !fenced && !superseded && !invalidationBlocksPublication) {
       this.invalidate(['positions'])
     }
   }
@@ -522,5 +652,69 @@ export class MiniAppResources {
       if (this.mutationResourceKey(mutationKey) === key) return true
     }
     return false
+  }
+
+  private strongReadCoversLiveBoundary<K extends ResourceKey>(
+    key: K,
+    data: ResourceValues[K],
+    boundary: LiveInvalidationBoundary | null,
+  ): boolean {
+    if (
+      boundary === null ||
+      boundary.source !== 'rest' ||
+      boundary.capturedAt === null ||
+      boundary.invalidationRevision !== this.entry(key).invalidationRevision
+    ) return false
+    if (key !== 'dashboard' && key !== 'positions' && key !== 'status') return false
+    const snapshotData = data as DashboardDTO | PositionPageDTO | StatusDTO
+    return snapshotData.snapshot_captured_at === boundary.capturedAt
+  }
+
+  private invalidateFromLive(keys: readonly ResourceKey[], event: LiveUpdate): void {
+    // A quote tick only moves display marks: it must mark the DTO stale so the
+    // next read carries fresh marks, but it must not fence the read that is
+    // already in flight. Fencing on quotes starved any client whose read takes
+    // longer than the quote cadence — every response was discarded by the next
+    // tick, so marks stayed frozen while the client kept re-reading.
+    const stateBoundary = event.source !== 'mark-price'
+    for (const key of keys) {
+      const entry = this.entry(key)
+      entry.invalidationRevision += 1
+      if (stateBoundary) {
+        entry.stateInvalidationRevision += 1
+        entry.barrierGeneration = ++entry.generation
+      }
+      entry.latestLiveBoundary = {
+        invalidationRevision: entry.invalidationRevision,
+        source: event.source ?? null,
+        capturedAt: event.capturedAt ?? null,
+      }
+      this.publishSnapshot(entry)
+    }
+  }
+
+  private applyLiveUpdate(event: LiveUpdate): void {
+    if (this.disposed) return
+    const allowed = new Set<ResourceKey>([
+      'dashboard',
+      'positions',
+      'risk',
+      'riskPreview',
+      'notifications',
+      'status',
+      'accountBuilder',
+    ])
+    const keys = [...new Set(event.resources)].filter(
+      (key): key is ResourceKey => allowed.has(key as ResourceKey),
+    )
+    if (keys.length) this.invalidateFromLive(keys, event)
+    if (event.resources.includes('history')) this.history.liveInvalidate()
+    queueMicrotask(() => {
+      if (this.disposed) return
+      for (const key of keys) {
+        if (!this.hasActiveSubscribers(key) || this.resourceMutationProtected(key)) continue
+        void this.ensure(key, { strength: 'weak', force: true, maxAgeMs: 0 }).catch(() => {})
+      }
+    })
   }
 }

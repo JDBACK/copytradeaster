@@ -116,6 +116,9 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `miniapp/test_history_server.py` | History routes: cursor/limit validation, owned trade/events/feed shapes |
 | `miniapp/test_trade_events_c2_server.py` | Split fills/events cursors over HTTP, revision-change signal (C2) |
 | `miniapp/test_activity_feed_snapshot_c7.py` | Snapshot-bound feed: pin high_water, no interleave, banner, 400s (R9/C7) |
+| `miniapp/test_live_transport.py` | Live presentation transport: ticket single-use/TTL + access gate, account-scoped latest-wins hub with process epoch, per-symbol mark quotes with freshness/cadence and the REST fallback, private-stream health races |
+| `test_mark_stream_gate.py` | `scripts/check_mark_stream.py` verdict: streaming only when every requested symbol delivered frames, partial feed is its own exit code |
+| `test_manual_master_order_ids.py` | `scripts/manual_master_order.py` client order ids stay unique for one price at one instant (-4015) |
 | `notifications/test_formatter.py` | Pure formatter: open/close/stop/TP/leverage/cancel copy + price/volume formatting, skip reasons |
 | `notifications/test_notifications.py` | Router+worker on tmp SQLite: account/global/critical-admin routing, dedup, retry-after/network/403, truncation, pacing, lease recovery, burst bound, hourly maintenance tick (C8) |
 | `notifications/test_user_event_delivery_c6.py` | Durable delivery cursor: crash replay, rollout floor, link gate (R6/R7/C6) |
@@ -160,6 +163,13 @@ without `CT_TESTNET=1`, including newly added files. Per-file markers stay expli
 Signed load additionally requires `CT_LOAD=1`; subprocess workers check opt-in.
 A process-wide file lock serializes signed pytest campaigns on shared accounts.
 
+Testnet accounts, balances and position mode are disposable — the faucet refills
+them (1000 test USDT/day) and the exchange holds no real value. A live scenario may
+therefore place real signed orders, switch position mode, cancel protection and end
+in any state it can explain: the standing constraints are `CT_ALLOW_MAINNET=false`,
+flat-with-no-open-orders cleanup in `finally`, and one campaign at a time per account
+(the file lock above). Do not describe these runs as needing separate authorization.
+
 Corrective live package: `test_engine_corrective_live.py` (LC1–LC6), with signed
 evidence and unconditional audited cleanup. Run order and current qualification
 status: `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md`.
@@ -193,6 +203,11 @@ Format per block (parser: `src/copytradeaster/cli/main.py:parse_wallet_file`, ty
 | `test_live_builder_reauthorize.py` | Same-signer reauth: 5d EXPIRING → re-auth → 30d VERIFIED, no orders |
 | `test_history_acceptance_live.py` | §10.9 history acceptance (copyc2/BTCUSDT): executor/journal lifecycle, distant STOP place+cancel, post-send-timeout query-before-retry, REAL file restart, authenticated HTTP on all surfaces. Requires an EXCLUSIVE window: skips unless flat, no open orders, and no fills in the last 5 minutes |
 | `test_history_reads_live.py` | History reads probe (copyc1): existing-follower history contract on tmp storage, no writes |
+| `test_history_mode_switch_live.py` | Merge-review corrective P1-1: REAL HEDGE -> ONE_WAY -> HEDGE switch on copyc2 (`MODE_SWITCH_ACCOUNT` to retarget) through the production capture/import seam; proves each book publishes its own episode, the boundary follows the snapshot's book, dirty is consumed only with a published replay, and no fill is left unallocated. Quiet gaps > import overlap (60 s) are required before each book is accepted, otherwise the retired book's own fill inside the overlap re-triggers the late-fact replay and hides the defect |
+| `test_history_mode_switch_live.py` env | `MODE_SWITCH_ACCOUNT` retargets the account, `MODE_SWITCH_QUIET_MS` relaxes the 5-minute recent-trade preflight for back-to-back harness runs |
+| `test_live_stream_health_acceptance.py` | Merge-review correctives P1-3/P1-4: REAL `MiniAppLiveRuntime` + REAL `UserStream` vs the testnet cluster. Cuts the transport (local CONNECT proxy drop, never `DELETE /fapi/v3/listenKey`: that also kills the socket of any bot streaming the same account) while a deliberately slow (8 s) authoritative boundary is in flight, and asserts health never reads `live` before a genuinely new session; then measures the reconnect ladder on a fresh stream (base 1 s -> >= 3 s). The proxy opens the upstream as plain TCP: wrapping it in TLS breaks the end-to-end handshake with `WRONG_VERSION_NUMBER` |
+| `test_live_mark_partial_acceptance.py` | Merge-review corrective P1-2: per-symbol quote coverage. Testnet half proves the REST fallback covers every whitelisted symbol and only then publishes `live`; mainnet half (opt-in `MARK_PARTIAL_LIVE_MAINNET=1`) streams BTCUSDT and never ZZZUSDT and asserts the fallback keeps asking for the silent symbol only. Public unsigned market data: no credentials, no orders |
+| `test_live_channel_cadence_acceptance.py` | Merge-review correctives P1-5/P1-6, shipped transport: drives the REAL `/miniapp/api/live` WebSocket of a running instance over a minted stub session (`data/make_preview_init.py`). Asserts hello baseline + strictly increasing revisions, coalesced invalidation rate, a silent reader that catches up in a bounded burst instead of a fenced backlog, and single-use tickets. `MINIAPP_LOCAL_URL` retargets; never sends trading commands |
 | `support/app_live.py` | Controlled production-App admission helper for focused signed Mini App acceptance tests that use REST rebuilds instead of the background master WS loop |
 | `support/builder_live.py` | Shared helpers: wallet.txt parsing, testnet guard, signed reads, state snapshot, flatten |
 

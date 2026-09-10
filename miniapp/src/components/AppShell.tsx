@@ -29,6 +29,8 @@ import { PositionsScreen } from '../screens/PositionsScreen'
 import { RiskScreen } from '../screens/RiskScreen'
 import { SettingsScreen } from '../screens/SettingsScreen'
 import { SystemStatusScreen } from '../screens/SystemStatusScreen'
+import { LiveStatus } from './LiveStatus'
+import { PullToRefresh } from './PullToRefresh'
 
 export function AppShell({
   auth,
@@ -56,9 +58,10 @@ export function AppShell({
   const [visited, setVisited] = useState<ReadonlySet<RootTab>>(
     () => new Set<RootTab>([initialRoute().tab]),
   )
-  // Raised once Home reaches ready: its dashboard(true) refresh populates the
-  // cached snapshot, so the other tabs' cheap reads stop returning empty or
-  // stale frames. Until then they fetch on first tap (previous cold path).
+  // Raised once Home reaches ready. Before live is healthy Home performs the
+  // authoritative dashboard(true) boundary; once live is healthy it consumes
+  // the already-authoritative process cache with dashboard(false). Either path
+  // leaves the shared snapshot ready for the other tabs' cheap reads.
   const [warmReady, setWarmReady] = useState(false)
   const handleHomeReady = useCallback(() => setWarmReady(true), [])
   // Activity pagination is intentionally still screen-owned in S2/F2; keep a
@@ -245,6 +248,8 @@ export function AppShell({
   }, [route])
 
   const homeActive = route.tab === 'home' && !nested
+  // The single manual refresh in the app: pull down at the top of the surface.
+  const handlePullRefresh = useCallback(() => resources.pullRefresh(), [resources])
   const positionsActive = route.tab === 'positions' && !nested
   const activityActive = route.tab === 'activity' && !nested
   const settingsActive = route.tab === 'settings' && !nested
@@ -252,6 +257,8 @@ export function AppShell({
   return (
     <div className="shell">
       {banner}
+      <LiveStatus resources={resources} />
+      <PullToRefresh scroller={contentRef} onRefresh={handlePullRefresh} />
       <div className="shell-content" ref={contentRef}>
         <div hidden={!homeActive}>
           <HomeScreen

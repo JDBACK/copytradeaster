@@ -3,8 +3,10 @@ import type { AuthContext } from '../api'
 import type { MiniAppResources } from '../resources'
 import type { NestedScreen } from '../navigation'
 import type { TradePeriod } from '../types'
-import { useResource } from '../useResource'
+import { useLiveSnapshot, useResource } from '../useResource'
+import { railSpeaks } from '../live'
 import { useHistory } from '../useHistory'
+import { usePaging } from '../usePaging'
 import { orderedPositions } from '../tradeView'
 import { PositionSummaryCard } from '../components/PositionSummaryCard'
 import { TradeSummaryCard } from '../components/TradeSummaryCard'
@@ -14,9 +16,11 @@ import { formatDateTime } from '../format'
 
 export function ClosedTrades({ resources, onOpen, active = true, preview = false, initialPeriod = 'all', foregroundSignal = 0 }: { resources: MiniAppResources; onOpen: (route: NestedScreen) => void; active?: boolean; preview?: boolean; initialPeriod?: TradePeriod; foregroundSignal?: number }) {
   const [period, setPeriod] = useState<TradePeriod>(initialPeriod)
+  const [paging, startPaging] = usePaging()
   const [search, setSearch] = useState('')
   const [symbol, setSymbol] = useState('')
   const history = useHistory(resources.history, { kind: 'trades', period, symbol, limit: preview ? 3 : 20 }, active, foregroundSignal)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), history.data !== null)
   return <>
     {!preview && <>
       <div className="history-segments" aria-label="Период истории">{(['7d', '30d', 'all'] as const).map(value => <button key={value} type="button" aria-pressed={period === value} onClick={() => setPeriod(value)}>{value === '7d' ? '7 дней' : value === '30d' ? '30 дней' : 'Вся доступная'}</button>)}</div>
@@ -24,12 +28,11 @@ export function ClosedTrades({ resources, onOpen, active = true, preview = false
     </>}
     {history.data && <p className="freshness">{history.data.coverage_from ? `История доступна с ${formatDateTime(history.data.coverage_from)}` : 'Диапазон истории уточняется'} · {history.data.coverage_complete ? 'сверена' : 'может быть неполной'}</p>}
     {history.data && <p className="freshness">Последняя сверка: {formatDateTime(history.data.as_of)}</p>}
-    {history.error && <><ErrorBox {...describeError(history.error)} /><button type="button" className="btn btn-secondary" onClick={() => void history.retry()}>{history.changed ? 'История изменилась — обновить' : 'Повторить загрузку'}</button></>}
+    {history.error && !railOwnsOutage && <ErrorBox {...describeError(history.error)} />}
     {!history.data && !history.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка истории" />}
     {history.data?.items.map(trade => <TradeSummaryCard key={trade.trade_ref} trade={trade} onOpen={() => onOpen({ kind: 'trade-detail', tradeRef: trade.trade_ref })} />)}
     {history.data?.items.length === 0 && <p className="info-box">{history.data.coverage_from ? 'Закрытых сделок за этот период нет' : 'Загружаем историю. Доступный диапазон пока не подтверждён.'}</p>}
-    {history.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={history.loading || history.changed} onClick={() => preview ? onOpen({ kind: 'trade-list', state: 'closed', period }) : void history.more()}>{history.loading ? 'Загружаем…' : preview ? 'Вся история' : 'Показать ещё 20'}</button>}
-    {history.data && <button type="button" className="btn btn-ghost" disabled={history.loading} onClick={() => void history.refresh()}>Обновить историю</button>}
+    {history.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={paging || history.changed} onClick={() => preview ? onOpen({ kind: 'trade-list', state: 'closed', period }) : startPaging(() => history.more())}>{paging ? 'Загружаем…' : preview ? 'Вся история' : 'Показать ещё 20'}</button>}
   </>
 }
 
@@ -38,15 +41,16 @@ export function TradeListScreen({ resources, route, onOpen, active = true, foreg
   const [attention, setAttention] = useState(route.attention ?? false)
   const positions = useResource({ resources, key: 'positions', active: active && route.state === 'open', enabled: route.state === 'open', foregroundSignal })
   const data = positions.snapshot.data
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), data !== null)
   return <div className="screen"><h1 className="h1">{route.state === 'closed' ? 'Закрытые сделки' : 'Открытые позиции'}</h1>
     {route.state === 'closed' ? <ClosedTrades resources={resources} onOpen={onOpen} active={active} initialPeriod={route.period} foregroundSignal={foregroundSignal} /> : <>
       <label className="history-search">Инструмент<input value={search} onChange={event => setSearch(event.target.value)} placeholder="Поиск по инструменту" maxLength={24} /></label>
       <div className="history-segments"><button type="button" aria-pressed={!attention} onClick={() => setAttention(false)}>Все</button><button type="button" aria-pressed={attention} onClick={() => setAttention(true)}>Требуют внимания</button></div>
-      {positions.snapshot.error && <ErrorBox {...describeError(positions.snapshot.error)} />}
+      {positions.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(positions.snapshot.error)} />}
       {!data && !positions.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} />}
-      {data && orderedPositions(data.positions, attention, search).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} stale={data.is_stale || positions.snapshot.stale || !!positions.snapshot.error} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
+      {data?.is_stale === true && !railOwnsOutage && <p className="position-warning" role="status">Снимок позиций не обновляется. Статус защиты может быть неполным.</p>}
+      {data && orderedPositions(data.positions, attention, search).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
       {data && !orderedPositions(data.positions, attention, search).length && <p className="info-box">{data.snapshot_captured_at ? 'По выбранному фильтру позиций нет' : 'Получаем данные позиций'}</p>}
-      <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Обновить позиции</button>
     </>}
   </div>
 }

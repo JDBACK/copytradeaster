@@ -8,6 +8,7 @@
 
 import { isBuilderVerified } from './accountBuilder'
 import { formatTime } from './format'
+import { TRUST_STEP } from './trustSteps'
 import type {
   AsterState,
   CopyState,
@@ -49,7 +50,10 @@ export function systemRowValue(state: SystemState | undefined): StatusValue {
     case 'stale':
       return { label: 'Данные устарели', tone: 'warning' }
     case 'degraded':
-      return { label: 'Деградация', tone: 'danger' }
+      // "Деградация" is our word, not the user's: the engine is re-proving its
+      // state and needs no action, so the row repeats the one phrase used
+      // everywhere else instead of introducing engineering vocabulary.
+      return { label: 'Требует проверки', tone: 'warning' }
     default:
       return { label: 'Неизвестно', tone: 'muted' }
   }
@@ -90,12 +94,36 @@ export function permissionsRowValue(state: PermissionsState | undefined): Status
     case 'valid':
       return { label: 'Подтверждены', tone: 'success' }
     case 'stale':
-      return { label: 'Устарели', tone: 'warning' }
+      // Aged evidence is not a fault: the engine re-proves it by itself when
+      // this screen opens, and a failed attempt is reported through the reason
+      // row. Painting a healthy account orange for a minute-old stamp was the
+      // nag users read as "the app is unhappy again". Age lives in its own row.
+      return { label: 'Проверены ранее', tone: 'muted' }
     case 'blocked':
       return { label: 'Отклонены', tone: 'danger' }
     default:
       return { label: 'Не проверены', tone: 'muted' }
   }
+}
+
+/** Backend evidence TTL for a signed permission check (service.py). */
+const PERMISSION_EVIDENCE_TTL_S = 60
+
+/** Does the app have to re-prove permissions on open?
+ *
+ * A cached DTO can still say "Подтверждены" with a stamp from half an hour ago,
+ * because the cheap read never performs the signed check. Showing a growing
+ * "Проверка: 16:03 · 25 мин назад" under a green verdict is both noise and a
+ * quietly unsupported claim, so aged evidence is re-proven once per open.
+ */
+export function needsPermissionReproof(dto: {
+  permissions_state: PermissionsState
+  age_seconds?: number | null
+}): boolean {
+  if (dto.permissions_state !== 'valid') return true
+  const age = dto.age_seconds
+  if (typeof age !== 'number' || !Number.isFinite(age)) return true
+  return age > PERMISSION_EVIDENCE_TTL_S
 }
 
 export function positionsRowValue(count: number | null | undefined): StatusValue {
@@ -177,22 +205,29 @@ export interface StatusTrustItem {
   done: boolean
 }
 
-/** Trust rail over StatusDTO evidence (same Wallet → Agent → Builder → Sync
+/** Trust rail over StatusDTO evidence (same Кошелёк → Agent → Builder → Сверка
  * direction as Home).  Builder uses the single shared P2.6 attestation
- * verdict (verified only); Sync requires the authoritative overall
+ * verdict (verified only); Сверка requires the authoritative overall
  * ``ready`` verdict. */
 export function statusTrust(dto: StatusDTO): StatusTrustItem[] {
-  return [
-    { key: 'wallet', label: 'Wallet', done: Boolean(dto.account_masked) },
-    {
-      key: 'agent',
-      label: 'Agent',
-      done: Boolean(dto.signer_masked) && dto.permissions_state === 'valid',
-    },
-    { key: 'builder', label: 'Builder', done: isBuilderVerified(dto) },
-    { key: 'sync', label: 'Sync', done: dto.state === 'ready' },
-  ]
+    return [
+        { key: 'wallet', label: TRUST_STEP.wallet, done: Boolean(dto.account_masked) },
+        {
+            key: 'agent',
+            label: TRUST_STEP.agent,
+            done: Boolean(dto.signer_masked) && dto.permissions_state === 'valid',
+        },
+        { key: 'builder', label: TRUST_STEP.builder, done: isBuilderVerified(dto) },
+        { key: 'sync', label: TRUST_STEP.sync, done: dto.state === 'ready' },
+    ]
 }
 
 /** Marker shown when the transport failed but a previous DTO stays on screen. */
-export const TRANSPORT_STALE_WARNING = 'Не удалось обновить. Показаны последние полученные данные.'
+export const TRANSPORT_STALE_WARNING = 'Связь с сервером потеряна. Показаны последние полученные данные.'
+
+/** Marker for our own verification deadline passing, not a transport failure.
+ *
+ * The Agent attestation carries an expiry; past it the screen stops claiming a
+ * verified Agent and re-proves the evidence once. Saying "связь потеряна" here
+ * blamed the network for a deadline, on a screen whose last read succeeded. */
+export const AGENT_EVIDENCE_EXPIRED_NOTE = 'Срок подтверждения истёк — проверяем заново.'

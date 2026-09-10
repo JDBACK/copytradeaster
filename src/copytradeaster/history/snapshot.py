@@ -89,17 +89,25 @@ def derive_starting_seeds(
     """Walk authoritative ending quantities back over fills to the start.
 
     The caller scopes ``fills`` to the replay range; every fill must belong
-    to ``symbol``. A nonzero start keeps the caller-supplied stable ref so a
-    later correction supplements the same link instead of minting a new one.
-    This does not establish cost coverage or historical order ownership.
+    to ``symbol``. Fills labelled with a position side the ending snapshot
+    does not carry belong to another position-mode era: one exchange fill
+    stream keeps every era, so both books stay interleaved and each one is
+    only explainable inside its own legs. Those fills are skipped here (the
+    projection selects the same book) while a book that fails to close inside
+    its own legs still fails closed. A nonzero start keeps the caller-supplied
+    stable ref so a later correction supplements the same link instead of
+    minting a new one. This does not establish cost coverage or historical
+    order ownership.
     """
     quantities = dict(ending)
     seen = {}
     with localcontext() as context:
         context.prec = 80
         for fill in fills:
-            if fill.symbol != symbol or fill.position_side not in quantities:
-                raise HistoryReconciliationError("fill outside snapshot scope")
+            if fill.symbol != symbol:
+                raise HistoryReconciliationError("fill symbol outside snapshot scope")
+            if fill.position_side not in quantities:
+                continue
             if fill.trade_id in seen:
                 if seen[fill.trade_id] != fill:
                     raise HistoryReconciliationError("conflicting fill identity")

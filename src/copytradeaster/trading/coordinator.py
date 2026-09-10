@@ -212,6 +212,7 @@ class Coordinator:
         operator_max_leverage: int | None = None,
         liquidation_buffer_pct: Decimal | str | int = Decimal("0.005"),
         max_total_risk_pct: Decimal | None = None,
+        snapshot_observer: Callable[[AccountState], None] | None = None,
     ) -> None:
         self._registry = (
             followers if isinstance(followers, FollowerRegistry) else FollowerRegistry(followers)
@@ -241,6 +242,7 @@ class Coordinator:
         self._last_master_state: MasterState | None = None
         self._last_master_state_at: float = 0.0
         self._max_total_risk_pct = max_total_risk_pct
+        self._snapshot_observer = snapshot_observer
         self._last_postfill_recompute: dict[str, float] = {}
         self._postfill_tasks: set[asyncio.Task] = set()
         self._postfill_admission_lock = asyncio.Lock()
@@ -1003,7 +1005,7 @@ class Coordinator:
         }
         if self._leverage is not None and symbol_leverages:
             self._leverage.observe(fr.account_id, symbol_leverages)
-        return AccountState(
+        state = AccountState(
             account_id=fr.account_id,
             available_usdt=available,
             equity_usdt=equity,
@@ -1011,6 +1013,12 @@ class Coordinator:
             symbol_leverages=symbol_leverages,
             open_orders=[o.model_dump() for o in orders],
         )
+        if self._snapshot_observer is not None:
+            try:
+                self._snapshot_observer(state)
+            except Exception:  # noqa: BLE001 - presentation cannot break reconciliation
+                log.exception("follower snapshot observer failed account_id=%s", fr.account_id)
+        return state
 
     async def _targets_for(
         self,

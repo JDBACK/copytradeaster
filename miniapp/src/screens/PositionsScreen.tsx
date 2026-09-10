@@ -7,7 +7,8 @@ import { PROTECTION_WARNING } from '../protectionWarning'
 import type { PositionSummaryDTO } from '../types'
 import type { NestedScreen } from '../navigation'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources } from '../useResource'
+import { useLiveSnapshot, useResource, useScreenResources } from '../useResource'
+import { railSpeaks } from '../live'
 import { PositionSummaryCard } from '../components/PositionSummaryCard'
 import { orderedPositions } from '../tradeView'
 import { ClosedTrades } from './TradeListScreen'
@@ -22,7 +23,10 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
   const [attention, setAttention] = useState(false)
   const resource = useResource({ resources, key: 'positions', enabled: warm, active: active && segment === 'open', foregroundSignal })
   const data = resource.snapshot.data
-  const stale = !!data && (data.is_stale || resource.snapshot.stale || !!resource.snapshot.error)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), data !== null)
+  // The engine's own "this snapshot is stale" verdict is a different fact from
+  // a transport outage, and the rail already carries the latter.
+  const snapshotStale = data?.is_stale === true && !railOwnsOutage
   const positions = orderedPositions(data?.positions ?? [], attention)
   return <div className="screen">
     <Brand right={accountMasked ? <span className="wallet-chip num">{accountMasked}</span> : undefined} />
@@ -30,14 +34,13 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
     <div className="history-segments" role="tablist" aria-label="Состояние позиций"><button type="button" role="tab" aria-selected={segment === 'open'} onClick={() => setSegment('open')}>Открытые {data?.count ?? '—'}</button><button type="button" role="tab" aria-selected={segment === 'closed'} onClick={() => setSegment('closed')}>Закрытые</button></div>
     <div hidden={segment !== 'closed'}><ClosedTrades resources={resources} onOpen={onOpen} active={active && segment === 'closed'} preview foregroundSignal={foregroundSignal} /></div>
     <div hidden={segment !== 'open'} className="history-stack">
-      {resource.snapshot.error && <ErrorBox {...describeError(resource.snapshot.error)} />}
+      {resource.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(resource.snapshot.error)} />}
       {!data && !resource.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка позиций" />}
-      {stale && <p className="position-warning" role="status">Снимок позиций устарел. Статус защиты требует обновления.</p>}
+      {snapshotStale && <p className="position-warning" role="status">Снимок позиций не обновляется. Статус защиты может быть неполным.</p>}
       {data?.positions.some(p => p.protection_state !== 'protected') && <div className="history-segments"><button type="button" aria-pressed={!attention} onClick={() => setAttention(false)}>Все</button><button type="button" aria-pressed={attention} onClick={() => setAttention(true)}>Требуют внимания</button></div>}
-      {positions.slice(0, 3).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} stale={stale} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
+      {positions.slice(0, 3).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
       {data && positions.length === 0 && <p className="info-box">{!data.snapshot_captured_at ? 'Получаем данные аккаунта' : attention ? 'Нет позиций с проблемой защиты' : 'Нет открытых позиций'}</p>}
       {positions.length > 3 && <button type="button" className="btn btn-secondary" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all', attention })}>Показать все {positions.length}</button>}
-      <button type="button" className="btn btn-secondary" disabled={resource.snapshot.inflight} onClick={() => void resource.refresh('strong').then(() => resources.invalidate(['dashboard', 'status'])).catch(() => {})}>{resource.snapshot.error ? 'Повторить' : 'Обновить данные'}</button>
     </div>
   </div>
 }

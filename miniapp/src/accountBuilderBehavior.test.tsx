@@ -21,7 +21,7 @@ import { trustSummary } from './home'
 import { NestedRoute } from './components/AppShell'
 import { SettingsView } from './screens/SettingsScreen'
 import { AccountBuilderScreen } from './screens/AccountBuilderScreen'
-import { TRANSPORT_STALE_WARNING } from './systemStatus'
+import { AGENT_EVIDENCE_EXPIRED_NOTE, TRANSPORT_STALE_WARNING } from './systemStatus'
 import { statusTrust } from './systemStatus'
 import type {
   AccountBuilderDTO,
@@ -137,7 +137,10 @@ describe('AccountBuilderScreen behavior', () => {
         'accountBuilder',
         dto({ agent_expires_at_ms: now + 100 }),
       )
-      const loader = vi.spyOn(api, 'accountBuilder')
+      // The re-proof answers with a renewed Agent: hold it open so the expired
+      // state itself is observable.
+      const renewal = deferred<AccountBuilderDTO>()
+      const loader = vi.spyOn(api, 'accountBuilder').mockReturnValue(renewal.promise)
 
       render(
         <AccountBuilderScreen
@@ -154,9 +157,18 @@ describe('AccountBuilderScreen behavior', () => {
         await vi.advanceTimersByTimeAsync(101)
       })
       expect(screen.queryByText('Builder подтверждён')).toBeNull()
-      expect(screen.getByText('Данные устарели')).toBeDefined()
-      expect(screen.getByText(TRANSPORT_STALE_WARNING)).toBeDefined()
-      expect(loader).not.toHaveBeenCalled()
+      // The deadline is our own evidence ageing out, not a lost connection: the
+      // screen says so and re-proves the Agent once instead of blaming the
+      // network on a screen whose last read succeeded.
+      expect(screen.getByText('Требуется проверка')).toBeDefined()
+      expect(screen.getByText(AGENT_EVIDENCE_EXPIRED_NOTE)).toBeDefined()
+      expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
+      expect(loader).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        renewal.resolve(dto({ agent_expires_at_ms: now + 3_600_000 }))
+      })
+      expect(screen.getByText('Builder подтверждён')).toBeDefined()
     } finally {
       vi.useRealTimers()
     }
@@ -186,12 +198,48 @@ describe('AccountBuilderScreen behavior', () => {
         builder_address_masked: null,
         builder_name: null,
         max_fee_rate: null,
+        verified_at: null,
       }),
     )
     renderScreen()
     await screen.findByText('Прямое подключение')
     expect(screen.getByText('Не используется')).toBeDefined()
+    // Nothing to confirm for a direct account: the old copy said "Нет
+    // подтверждения" right under "Не используется", which reads as a fault.
+    expect(screen.getByText('Не требуется')).toBeDefined()
+    expect(screen.queryByText('Нет подтверждения')).toBeNull()
     expect(screen.queryByText('Переавторизовать')).toBeNull()
+  })
+
+  it('a failed first read heals itself and offers no generic retry button', async () => {
+    vi.spyOn(api, 'accountBuilder').mockRejectedValue(new ApiError(0, 'network_error', 'down'))
+    renderScreen()
+
+    expect(await screen.findByText('Нет связи')).toBeDefined()
+    // The bounded self-healing retry owns recovery; the one explicit control on
+    // this screen re-proves Agent permissions, never generic data.
+    expect(screen.queryByRole('button', { name: 'Попробовать снова' })).toBeNull()
+    expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('does not repeat the rail outage in its own warning', async () => {
+    const resources = new MiniAppResources(AUTH, 'builder-outage-voice')
+    resources.publishConfirmed('accountBuilder', dto())
+    const live = { health: 'stale' as const, revision: 2, lastUpdatedAt: 1, retrying: true }
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
+    render(
+      <AccountBuilderScreen
+        auth={AUTH}
+        resources={resources}
+        accountMasked="0xAAAA…BBBB"
+        onNotConnected={() => {}}
+      />,
+    )
+
+    // The rail already reports the outage: repeating it here is the same fact
+    // in two voices, and this screen's last read did not fail.
+    expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
+    expect(screen.getByText('Builder подтверждён')).toBeDefined()
   })
 
   it('failed refresh keeps data but drops the verified visual until retry succeeds', async () => {

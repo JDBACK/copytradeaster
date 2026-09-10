@@ -31,6 +31,7 @@ class HistoryWorker:
         discover: Callable[[], Awaitable[list[HistoryJob]]],
         synchronizer: Callable[[HistoryScope], HistorySynchronizer],
         capture: Callable[[HistoryScope, str], Awaitable[bool]] | None = None,
+        on_change: Callable[[HistoryScope], None] | None = None,
         *,
         interval: float = 5.0,
         clock_ms: Callable[[], int] | None = None,
@@ -40,6 +41,7 @@ class HistoryWorker:
         self._discover = discover
         self._synchronizer = synchronizer
         self._capture = capture
+        self._on_change = on_change
         self._interval = interval
         self._clock = clock_ms or (lambda: int(time.time() * 1000))
         self._task: asyncio.Task | None = None
@@ -141,6 +143,7 @@ class HistoryWorker:
                         # interval. The rotation bound above keeps this fair.
                         continue
                     self._dirty_capture.discard(key)
+                    self._publish_change(job.scope)
                 else:
                     sync = self._synchronizer(job.scope)
                     window = Window(max(0, now - 7 * 86400000), now)
@@ -160,6 +163,7 @@ class HistoryWorker:
                                 # keep theirs. Mock synchronizers in tests do
                                 # not chain.
                                 self._dirty_capture.add(key)
+                                self._publish_change(job.scope)
             except Exception:
                 count = min(failures + 1, 8)
                 self._failures[job] = (count, now + min(300000, 5000 * 2**count))
@@ -177,6 +181,14 @@ class HistoryWorker:
                 if not job.capture:
                     self._dirty_import.discard(key)
             return  # One real job per tick; skips and backoffs fall through.
+
+    def _publish_change(self, scope: HistoryScope) -> None:
+        if self._on_change is None:
+            return
+        try:
+            self._on_change(scope)
+        except Exception:  # noqa: BLE001 - presentation hint cannot break history
+            log.warning("history live hint failed account_id=%s", scope.account_id)
 
     async def _run(self) -> None:
         while True:

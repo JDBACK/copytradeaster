@@ -3,6 +3,7 @@
 import type { DashboardDTO, ResumeContextDTO } from './types'
 import { isBuilderVerified } from './accountBuilder'
 import { formatTime } from './format'
+import { TRUST_STEP } from './trustSteps'
 
 export type HomeTone = 'active' | 'paused' | 'empty' | 'attention'
 
@@ -40,7 +41,7 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
     case 'degraded':
       return {
         title: 'Требуется проверка',
-        subtitle: 'Обнаружены расхождения — обновите статус',
+        subtitle: 'Обнаружены расхождения — проверка уже идёт',
         tone: 'attention',
         actionLabel: null,
       }
@@ -54,15 +55,20 @@ export function homeViewModel(dashboard: DashboardDTO): HomeViewModel {
     default:
       return {
         title: 'Состояние неизвестно',
-        subtitle: 'Обновите данные или откройте бота',
+        subtitle: 'Проверяем состояние — данные появятся сами',
         tone: 'attention',
         actionLabel: null,
       }
   }
 }
 
-export function snapshotLabel(capturedAt: string | null | undefined): string {
-  return capturedAt ? formatTime(capturedAt) : 'не получен'
+/** Timestamp of the last exchange snapshot, or null while there is none yet.
+ *
+ * Returning text here used to produce "обновлено не получен" on a freshly
+ * connected account, which reads as a defect in the app's own copy. Callers
+ * decide what to say when there is nothing to show. */
+export function snapshotLabel(capturedAt: string | null | undefined): string | null {
+  return capturedAt ? formatTime(capturedAt) : null
 }
 
 export interface TrustItem {
@@ -71,21 +77,21 @@ export interface TrustItem {
   done: boolean
 }
 
-/** Compact verified trust summary (эталон 02-home-active): Wallet → Agent →
- * Builder → Sync.  Every item is derived from backend facts; the Builder item
- * uses the single shared P2.6 attestation verdict (verified only). Sync
+/** Compact verified trust summary (эталон 02-home-active): Кошелёк → Agent →
+ * Builder → Сверка.  Every item is derived from backend facts; the Builder item
+ * uses the single shared P2.6 attestation verdict (verified only). Сверка
  * requires both system_state === 'ready' AND a fresh snapshot timestamp. */
 export function trustSummary(dashboard: DashboardDTO): TrustItem[] {
-  return [
-    { key: 'wallet', label: 'Wallet', done: Boolean(dashboard.account_masked) },
-    { key: 'agent', label: 'Agent', done: Boolean(dashboard.signer_masked) },
-    { key: 'builder', label: 'Builder', done: isBuilderVerified(dashboard) },
-    {
-      key: 'sync',
-      label: 'Sync',
-      done: dashboard.system_state === 'ready' && Boolean(dashboard.snapshot_captured_at),
-    },
-  ]
+    return [
+        { key: 'wallet', label: TRUST_STEP.wallet, done: Boolean(dashboard.account_masked) },
+        { key: 'agent', label: TRUST_STEP.agent, done: Boolean(dashboard.signer_masked) },
+        { key: 'builder', label: TRUST_STEP.builder, done: isBuilderVerified(dashboard) },
+        {
+            key: 'sync',
+            label: TRUST_STEP.sync,
+            done: dashboard.system_state === 'ready' && Boolean(dashboard.snapshot_captured_at),
+        },
+    ]
 }
 
 /** Resume confirmation copy, without inaccurate safety claims. */

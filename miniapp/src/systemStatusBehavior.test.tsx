@@ -9,7 +9,7 @@
 
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { api, ApiError } from './api'
 import { MiniAppResources } from './resources'
@@ -116,23 +116,34 @@ describe('SystemStatusScreen behavior', () => {
     expect(screen.getByText('Подтверждены')).toBeDefined()
   })
 
-  it('manual refresh replaces the DTO atomically and stays fresh', async () => {
-    vi.spyOn(api, 'status').mockResolvedValueOnce(dto()).mockResolvedValueOnce(dto({ positions_count: 3 }))
+  it('healthy status has no routine refresh action', async () => {
+    const loader = vi.spyOn(api, 'status').mockResolvedValue(dto())
     render(<SystemStatusScreen auth={AUTH} />)
     await screen.findByText('Всё работает')
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Обновить' })).toBeNull()
+  })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
-    expect(screen.getByRole('button', { name: /обновляем/i })).toBeDisabled()
-    await screen.findByText('3')
-    expect(screen.getByText('Всё работает')).toBeDefined()
+  it('uses the live authoritative cache for steady reads but keeps explicit verification strong', async () => {
+    const resources = new MiniAppResources(AUTH, 'status-live-cache')
+    vi.spyOn(resources, 'getLiveSnapshot').mockReturnValue({
+      health: 'live',
+      revision: 3,
+      lastUpdatedAt: Date.now(),
+      retrying: false,
+    })
+    const loader = vi.spyOn(api, 'status').mockResolvedValue(dto())
+
+    render(<SystemStatusScreen auth={AUTH} resources={resources} />)
+    await screen.findByText('Всё работает')
+    // Steady state reads the already-authoritative process cache.
+    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, false])
+    expect(screen.queryByRole('button')).toBeNull()
   })
 
   it('backend stale keeps values visible with an amber note, never healthy', async () => {
-    vi.spyOn(api, 'status').mockResolvedValueOnce(dto()).mockResolvedValueOnce(staleDto())
+    vi.spyOn(api, 'status').mockResolvedValue(staleDto())
     render(<SystemStatusScreen auth={AUTH} />)
-    await screen.findByText('Всё работает')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
     await screen.findByLabelText('Состояние: Данные устарели')
     // Last available values stay on screen.
     expect(screen.getByText('2')).toBeDefined()
@@ -140,7 +151,7 @@ describe('SystemStatusScreen behavior', () => {
     expect(screen.getByText('Снимок позиций устарел.')).toBeDefined()
   })
 
-  it('degraded keeps values and offers only refresh', async () => {
+  it('degraded keeps values visible and asks the user for nothing', async () => {
     vi.spyOn(api, 'status').mockResolvedValue(
       dto({ state: 'degraded', reason: 'system_degraded', remediation: 'refresh' }),
     )
@@ -148,7 +159,9 @@ describe('SystemStatusScreen behavior', () => {
 
     await screen.findByText('Требуется проверка')
     expect(screen.getByText('Система требует проверки.')).toBeDefined()
-    expect(screen.getByRole('button', { name: 'Обновить' })).toBeDefined()
+    // Remediation "refresh" is a transport concern: the read heals by itself
+    // (bounded retry) and the pull-down forces it, so no button is offered.
+    expect(screen.queryByRole('button')).toBeNull()
     expect(screen.queryByText('Всё работает')).toBeNull()
   })
 
@@ -174,12 +187,29 @@ describe('SystemStatusScreen behavior', () => {
     render(<SystemStatusScreen auth={AUTH} />)
 
     await screen.findByText('Требуется действие')
-    // Only the screen's own secondary refresh exists; nothing launches.
-    expect(screen.getByRole('button', { name: 'Обновить' })).toBeDefined()
+    expect(screen.queryByRole('button')).toBeNull()
     expect(close).not.toHaveBeenCalled()
   })
 
-  it('initial failure without snapshot is a hard error with retry', async () => {
+  it('re-proves aged verification evidence by itself instead of nagging', async () => {
+    // The permission evidence TTL is a minute, so a healthy account would read
+    // "Разрешения: устарели" on every visit. Opening the screen re-verifies
+    // once; the user is never asked to press anything.
+    const loader = vi
+      .spyOn(api, 'status')
+      .mockResolvedValueOnce(dto({ permissions_state: 'stale', state: 'ready' }))
+      .mockResolvedValue(dto())
+    render(<SystemStatusScreen auth={AUTH} />)
+
+    await waitFor(() => expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2))
+    expect(loader.mock.calls.every((call) => call[1] === true)).toBe(true)
+    await screen.findByText('Подтверждены')
+    // Bounded: the successful re-check does not start a loop.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(loader.mock.calls.length).toBeLessThanOrEqual(3)
+  })
+
+  it('a failed first read heals itself without any manual retry', async () => {
     const loader = vi
       .spyOn(api, 'status')
       .mockRejectedValueOnce(new ApiError(0, 'network_error', 'down'))
@@ -188,52 +218,58 @@ describe('SystemStatusScreen behavior', () => {
 
     await screen.findByText('Нет связи')
     expect(screen.queryByText('Статус системы', { selector: 'h1' })).toBeDefined()
-    fireEvent.click(screen.getByRole('button', { name: 'Повторить' }))
+    expect(screen.queryByRole('button')).toBeNull()
+    // No tap anywhere: the bounded self-healing retry re-reads on its own.
     await screen.findByText('Всё работает')
-    expect(loader).toHaveBeenCalledTimes(2)
+    expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 
   it('network failure keeps the snapshot with a transport-stale warning', async () => {
-    vi.spyOn(api, 'status')
-      .mockResolvedValueOnce(dto())
+    const resources = new MiniAppResources(AUTH, 'status-reconnect')
+    resources.publishConfirmed('status', dto())
+    resources.invalidate(['status'])
+    const loader = vi.spyOn(api, 'status')
       .mockRejectedValueOnce(new ApiError(0, 'network_error', 'down'))
       .mockResolvedValueOnce(dto())
-    render(<SystemStatusScreen auth={AUTH} />)
-    await screen.findByText('Всё работает')
+    const { rerender } = render(
+      <SystemStatusScreen auth={AUTH} resources={resources} foregroundSignal={0} />,
+    )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
     await screen.findByText(TRANSPORT_STALE_WARNING)
+    await waitFor(() => expect(loader.mock.calls.length).toBeGreaterThanOrEqual(1))
     // Previous data survives, but the old ready no longer looks fresh.
     expect(screen.getByText('2')).toBeDefined()
     expect(screen.queryByText('Всё работает')).toBeNull()
     expect(screen.getByText('Данные устарели')).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Обновить' })).toBeNull()
 
-    // The next success clears the transport-stale mark.
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
+    // Foreground recovery replaces the removed routine refresh action.
+    rerender(<SystemStatusScreen auth={AUTH} resources={resources} foregroundSignal={1} />)
     await screen.findByText('Всё работает')
+    expect(loader.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
   })
 
-  it('an aged cached strong status turns amber while its required strong refresh hangs', async () => {
-    const t0 = 1_800_000_000_000
-    const now = vi.spyOn(Date, 'now').mockReturnValue(t0)
-    const resources = new MiniAppResources(AUTH, 'status-aged')
+  it('marks cached Status as stale while the live transport is down and clears on recovery', async () => {
+    const resources = new MiniAppResources(AUTH, 'status-outage')
     resources.publishConfirmed('status', dto())
-    now.mockReturnValue(t0 + 30_001)
-    const gate = deferred<StatusDTO>()
-    const loader = vi.spyOn(api, 'status').mockReturnValue(gate.promise)
+    const live = { health: 'stale' as 'live' | 'stale', revision: 1, lastUpdatedAt: 0, retrying: true }
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => live)
 
-    render(<SystemStatusScreen auth={AUTH} resources={resources} />)
-    await screen.findByText(TRANSPORT_STALE_WARNING)
+    const { rerender } = render(<SystemStatusScreen auth={AUTH} resources={resources} />)
+    // The rail is already reporting the outage, so the screen does not repeat
+    // the same fact in a second banner — but the cached DTO still stops
+    // reading as fresh green health.
+    await screen.findByText('Данные устарели')
     expect(screen.queryByText('Всё работает')).toBeNull()
-    expect(screen.getByText('Данные устарели')).toBeDefined()
-    expect(loader).toHaveBeenCalledTimes(1)
-    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, true])
+    expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
 
-    gate.resolve(dto({ positions_count: 4 }))
+    // The channel recovers: the same cached DTO is trustworthy again and the
+    // warning clears without the user doing anything.
+    live.health = 'live'
+    rerender(<SystemStatusScreen auth={AUTH} resources={resources} />)
     await screen.findByText('Всё работает')
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
-    now.mockRestore()
   })
 
   it('a late request never overwrites a newer refresh result', async () => {
@@ -262,14 +298,11 @@ describe('SystemStatusScreen behavior', () => {
       <SystemStatusView
         dto={dto()}
         transportStale={false}
-        refreshing={false}
-        onRefresh={() => {}}
         onOpenBot={() => {}}
       />,
     )
     expect(html).not.toContain('settings-chevron')
-    // Scope to the diagnostics section only: the screen-level refresh
-    // button lives outside of it.
+    // Scope to the diagnostics section: nothing clickable may hide inside it.
     const diagnostics = (html.split('aria-label="Диагностика"')[1] ?? '').split('</section>')[0]
     expect(diagnostics).not.toContain('<button')
     expect(diagnostics).not.toContain('<a ')

@@ -265,8 +265,10 @@ lease/retry/backoff и изоляцией Telegram 403. Console sink сохра�
 S3 production factory включает durable user-event consumer: per-scope cursor
 и outbox commit атомарны, первый enable записывает rollout floor. Boot и
 периодический sweep используют один consumer; выключенные уведомления не
-останавливают историю. Mini App/menu/push используют `format_user_event`;
-command confirmations в S3 не доставляются как факты позиции. Keyboard строится
+останавливают историю. Mini App/menu/push используют `format_user_event`; строки
+пропуска входа приходят в него кодами движка (`SkipReason`) и рендерятся русской
+копией — неизвестный код не печатается вовсе, а сырьё остаётся в facts.
+Command confirmations в S3 не доставляются как факты позиции. Keyboard строится
 из configured HTTPS Mini App URL и owned opaque trade ref, только private chat при включённом `trade_links_enabled`, action `open_trade` и непустом ref.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.
@@ -539,15 +541,19 @@ entry admission и запрашивают coalesced REST recovery. Не боле
 потоке система остаётся close-only/dirty и повторяет recovery по
 периодическому sweep, не крутя бесконечный REST-loop.
 
-Для followers на первом этапе достаточно:
+Для торговой корректности followers по-прежнему достаточно `REST confirmation +
+reconciliation`: private WebSocket никогда не становится authoritative входом
+planner/executor. Для live presentation Mini App процесс дополнительно держит
+отдельный user-data stream каждого REAL follower. `ACCOUNT_UPDATE`,
+`ORDER_TRADE_UPDATE`, `ACCOUNT_CONFIG_UPDATE` и `MARGIN_CALL` — только
+low-latency hints для coalesced REST snapshot. SHADOW follower внешнего socket не
+создаёт.
 
-```text
-REST confirmation + reconciliation
-```
-
-Не нужно сразу держать отдельный WebSocket на каждого follower.
-
-Follower stream pool добавляется позже только если testnet покажет, что REST confirmation недостаточно быстра для post-fill risk correction.
+На reconnect follower сначала получает новый REST boundary и только после этого
+публикуется как `live`. На disconnect торговый state не переписывается, а Mini App
+сохраняет последний подтверждённый снимок с presentation-status
+`reconnecting/stale`. Public mark-price stream общий для symbol и меняет только
+presentation quote/PnL; он не влияет на entry admission и финансовые команды.
 
 ## 10. Stop / TP и Strategy Orders
 
@@ -703,7 +709,10 @@ notification_outbox
 - `agent_validations` — последняя безопасная signed Agent snapshot;
 - `notification_outbox` — recipient-specific delivery journal без secrets.
 - `follower_fills`, `follower_cash_flows`, `history_sync_state` — факты и
-  coverage импорта account-owned истории;
+  coverage импорта account-owned истории; один биржевой поток исполнений держит
+  обе эпохи position mode (`BOTH` и `LONG`/`SHORT`), поэтому replay публикует
+  только книгу, которую описывает его authoritative boundary, а ярлыки чужой
+  книги пропускает (иначе окно не публикуется в принципе);
 - `follower_episode_*`, `history_scope_state`,
   `history_projection_boundaries` — revisioned projection сделок, stable refs,
   aliases/splits и durable replay boundaries;
@@ -772,7 +781,7 @@ reconcile()
 - Этап 1 — backend/testnet: `domain aster master risk trading storage credentials cli`; master + testnet followers без Telegram.
 - Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; `marginType` этап не меняет.
 - Этап 3 — Aster Code / Builder: + `onboarding/builder`, `history`, `miniapp`
-  (aiohttp-транспорт под `/miniapp/`: 26 POST `/miniapp/api/*` + собранный
+  (aiohttp-транспорт под `/miniapp/`: 27 POST `/miniapp/api/*` + собранный
   Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow
   SessionGate/BuilderWizard/Recovery/Success и account-owned trade history).
   Builder metadata передаётся в Aster requests вместе с ордерами;
@@ -827,3 +836,93 @@ Tree отражает фактическую структуру на уровн�
 3. Новый модуль в существующем пакете — новая обязанность внутри известной границы (§4).
 4. Новый пакет `src/copytradeaster/<name>/` — новая граница с протоколом; карта доков обновляется в том же коммите.
 5. Новый процесс/инфраструктура — только при измеренной причине (§1, §8); текущий масштаб держится на одном процессе.
+
+## 20. Live presentation Mini App
+
+Live mode остаётся внутри существующего asyncio-процесса и состоит из четырёх
+границ:
+
+1. process-local `FollowerSnapshotStore` хранит только последний нормализованный
+   `AccountState`, UTC `captured_at` и monotonic revision на account;
+2. follower private streams дают быстрый сигнал переснять REST state, но никогда
+   не мутируют trading target напрямую;
+3. `MiniAppLiveHub` публикует authenticated browser-клиентам только безопасные
+   resource invalidations/health/revisions через bounded latest-wins queues;
+4. frontend live client перечитывает существующие application DTO слабым запросом
+   из общего cache и сохраняет last-good DTO во время reconnect.
+
+WebSocket handshake не передаёт Telegram `initData` в URL. Сначала
+аутентифицированный POST выдаёт short-lived single-use opaque ticket, затем GET
+upgrade атомарно его поглощает. User/account scope определяется сервером.
+
+Порядок freshness:
+
+```text
+private event -> coalesced REST snapshot -> store revision -> live invalidation
+public mark event -------------------------> quote revision -> live invalidation
+browser reconnect -> REST resnapshot ------> LIVE
+```
+
+Liveness public mark-стрима объявляется только кадром, который несёт mark price:
+SUBSCRIBE-ack — тоже кадр, и если счесть его доказательством, REST fallback
+простаивает, PnL замирает, а health падает на каждом 10-секундном таймауте.
+Backoff переподключения растёт, пока кадр с ценой не пришёл: принятое-и-молчащее
+соединение не покупает новое рукопожатие каждые 11 c. Состояние кластера
+проверяется предполётно: `scripts/check_mark_stream.py`.
+
+HTTP resource generations и live revisions монотонны: duplicate/out-of-order
+события игнорируются, а старый request не может затереть более новую публикацию.
+`hello` всегда отправляется первым и задаёт baseline revision. Bounded latest-wins
+queue может сознательно выбросить промежуточные события под backpressure; поэтому
+любой revision gap (или reconnect `hello` с более новым revision) означает full
+invalidation live-backed DTO, а не попытку угадать потерянные resource keys.
+Server посылает application heartbeat каждые 10 секунд; видимый WebView считает
+канал потерянным после 30 секунд без frame, тогда как hidden WebView heartbeat
+timeout не использует, чтобы background throttling не создавал ложный stale.
+Revision counter живёт в одном процессе, поэтому каждое событие и стартовый
+`hello` штампуются per-process `epoch`: после рестарта backend клиент видит смену
+epoch и пере-baseline'ит watermark с полной reconciliation вместо того, чтобы
+отбросить более низкие revision как out-of-order и залипнуть в `stale`.
+При разрыве UI не очищает данные. Rail сверху существует ровно для одного
+случая — канал молчит дольше своего deadline и данные на экране перестали
+обновляться; тогда показывается `Нет связи · N сек назад`. Пока канал здоров,
+rail не рендерится (`LIVE`, `connecting` и `Восстанавливаем связь…` — это работа
+транспорта, а не информация для пользователя; короткое переподключение чинится в
+фоне и не видно вообще).
+Ручного обновления в продукте не осталось ни одной кнопкой: routine re-read (live
+invalidation, TTL, очередной reconcile) никогда не рисуется как «данные
+устарели», упавшее чтение перечитывается само с расширяющимся backoff, а
+единственный ручной путь — pull-to-refresh вниз с верха скролла, который делает
+сильное чтение и сразу возвращает вертикальный жест Telegram. Сам жест показывается
+нативно: контент съезжает вниз и открывает зазор, а в зазоре стоит одна безмолвная
+дуга-спиннер (`--pull-*` переменные живут на `.shell`, спиннер — в потоке зазора,
+подпись остаётся только для screen reader), а на пороге срабатывает лёгкий haptic;
+полоса во всю ширину поверх заголовка не рисуется, потому что это читается как
+чужой экрану прямоугольник. Один факт — один голос: пока rail сообщает о разрыве и последние
+данные остаются на экране, экраны не повторяют ту же ошибку своей плашкой
+(`railSpeaks`), а предупреждение о снимке показывается только когда сам движок
+помечает снимок устаревшим; ошибка действия и состояние «данных ещё нет» никогда
+не скрываются. Обратная связь по нажатию (`usePaging`) принадлежит нажатию: фоновая
+перечитка не переключает кнопку в «Загружаем…» и не гасит её. Возраст серверного
+вердикта (`useAgeSeconds`) продолжает идти, пока экран открыт, поэтому строка
+«Проверка: HH:MM · N сек назад» не замирает на числе из ответа. Служебные
+fail-closed окна движка (periodic master boundary) пользователю не показываются
+как деградация: presentation-verdict отдаёт их как READY, пока окно короче
+`ROUTINE_DEGRADED_GRACE_MS` (затянувшееся окно снова видно), тогда как admission
+остаётся закрыт собственным рычагом. Давность доказательств (`Разрешения`)
+считается возрастом строки, а не отказом: общий вердикт падает в STALE только
+когда попытка проверки реально сорвалась. Explicit permission recheck
+Agent/Builder остаётся отдельным security use case; экран Статуса один раз при
+открытии перепроверяет права сам — в том числе когда доказательство просто старше
+TTL проверки, а не помечено невалидным.
+
+L4 — один shared presentation-стрим котировок на процесс. На Aster **testnet**
+кластер mark-price поток молчит и через raw path, и через SUBSCRIBE-ack (кадров
+нет; `aggTrade` на том же endpoint стримит), поэтому liveness объявляется только
+после первого реального кадра, а котировки добирает bounded unsigned
+`GET /fapi/v3/premiumIndex` (weight 10, Decimal, whitelist). Fallback простаивает,
+пока стрим отдаёт кадры, и не обновляет REST `captured_at`: mark-тики влияют
+только на presentation PnL, никогда на trading state.
+
+Детальный план и acceptance:
+`docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.

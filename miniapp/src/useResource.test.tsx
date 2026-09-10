@@ -2,9 +2,11 @@
 
 import '@testing-library/jest-dom/vitest'
 import { StrictMode } from 'react'
+import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { api, ApiError } from './api'
+import type { LiveUpdate } from './live'
 import { MiniAppResources } from './resources'
 import type { DashboardDTO, PositionPageDTO } from './types'
 import { useResource } from './useResource'
@@ -59,6 +61,10 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
 })
+
+function liveUpdate(resources: MiniAppResources, event: LiveUpdate): void {
+  ;(resources as unknown as { applyLiveUpdate: (update: LiveUpdate) => void }).applyLiveUpdate(event)
+}
 
 describe('useResource lifecycle', () => {
   it('reaches ready in StrictMode with one shared initial API call', async () => {
@@ -226,6 +232,56 @@ describe('useResource lifecycle', () => {
     expect(await screen.findByText('ready:4')).toBeInTheDocument()
     expect(positions).toHaveBeenCalledTimes(2)
   })
+
+  it('widens the self-heal delay while failures repeat', async () => {
+    vi.useFakeTimers()
+    try {
+      const positions = vi
+        .spyOn(api, 'positions')
+        .mockRejectedValue(new ApiError(0, 'network_error', 'down'))
+      const resources = new MiniAppResources(AUTH, 'scope-self-heal-ladder')
+      render(<Probe resources={resources} name="probe" active />)
+
+      await act(async () => {})
+      expect(positions).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(positions).toHaveBeenCalledTimes(2)
+
+      // The second failure must wait the widened 2s step: reseting the ladder
+      // whenever the error slot cleared kept every retry at 1s, which turned a
+      // sustained outage into a ~1 Hz re-read loop instead of a backoff.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(positions).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(positions).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a hidden keep-alive consumer is not re-read by a live invalidation', async () => {
+    const positions = vi.spyOn(api, 'positions').mockResolvedValue(positionPage(5))
+    const resources = new MiniAppResources(AUTH, 'scope-hidden-live')
+    const { rerender } = render(<Probe resources={resources} name="probe" active={false} />)
+    await waitFor(() => expect(positions).toHaveBeenCalledTimes(1))
+
+    liveUpdate(resources, { resources: ['positions'], revision: 1, source: 'rest' })
+    await act(async () => {})
+    // Still hidden: the live event must not spend a read on an invisible tab,
+    // and activation is what revalidates it.
+    expect(positions).toHaveBeenCalledTimes(1)
+
+    rerender(<Probe resources={resources} name="probe" active />)
+    await waitFor(() => expect(positions).toHaveBeenCalledTimes(2))
+  })
+
 
   it('backs off repeated activation retries after consecutive failures', async () => {
     let now = 10_000

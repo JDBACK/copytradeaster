@@ -45,13 +45,28 @@ describe('NotificationsScreen hard session boundary', () => {
     expect(screen.queryByText(/настройка не изменилась/i)).toBeNull()
   })
 
-  it('keeps cached Notifications visibly stale and disables mutation until refresh', () => {
+  it('does not disable the toggle for a routine revalidation, but does during an outage', () => {
     const resources = new MiniAppResources(AUTH, 'notifications-stale-honesty')
     resources.publishConfirmed('notifications', dto())
     resources.invalidate(['notifications'])
     vi.spyOn(api, 'notifications').mockReturnValue(new Promise<NotificationSettingsDTO>(() => {}))
+    vi.spyOn(resources, 'getLiveSnapshot').mockReturnValue({
+      health: 'live', revision: 1, lastUpdatedAt: Date.now(), retrying: false,
+    })
 
-    render(<NotificationsScreen auth={AUTH} resources={resources} />)
+    const first = render(<NotificationsScreen auth={AUTH} resources={resources} />)
+    expect(screen.queryByText(/данные требуют проверки перед изменением/i)).toBeNull()
+    expect(screen.getByRole('switch', { name: 'Уведомления о сделках' })).not.toBeDisabled()
+    first.unmount()
+
+    // A transport that is genuinely down still marks the cached value and
+    // holds the write.
+    const offline = new MiniAppResources(AUTH, 'notifications-offline-honesty')
+    offline.publishConfirmed('notifications', dto())
+    vi.spyOn(offline, 'getLiveSnapshot').mockReturnValue({
+      health: 'stale', revision: 1, lastUpdatedAt: 0, retrying: true,
+    })
+    render(<NotificationsScreen auth={AUTH} resources={offline} />)
     expect(screen.getByText(/данные требуют проверки перед изменением/i)).toBeDefined()
     expect(screen.getByRole('switch', { name: 'Уведомления о сделках' })).toBeDisabled()
   })
@@ -75,8 +90,8 @@ describe('NotificationsScreen hard session boundary', () => {
 
     render(<NotificationsScreen auth={AUTH} resources={resources} />)
     expect(screen.getByRole('switch', { name: 'Уведомления о сделках' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить данные' }))
-    await waitFor(() => expect(reader).toHaveBeenCalledTimes(2))
+    // Self-healing: the failed verification read retries without being asked.
+    await waitFor(() => expect(reader).toHaveBeenCalledTimes(2), { timeout: 3000 })
     await waitFor(() => expect(resources.mutationState('notifications')).toBeNull())
     expect(setter).toHaveBeenCalledTimes(1)
     expect(screen.getByRole('switch', { name: 'Уведомления о сделках' })).toBeEnabled()

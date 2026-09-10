@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from './api'
+import type { LiveUpdate } from './live'
 import { MiniAppResources } from './resources'
 import type { PositionPageDTO } from './types'
 
@@ -31,6 +32,45 @@ async function flush(): Promise<void> {
 
 afterEach(() => {
   vi.restoreAllMocks()
+})
+
+function liveUpdate(resources: MiniAppResources, event: LiveUpdate): void {
+  ;(resources as unknown as { applyLiveUpdate: (update: LiveUpdate) => void }).applyLiveUpdate(event)
+}
+
+describe('MiniAppResources live quote cadence', () => {
+  it('publishes the read a quote tick raced instead of starving it', async () => {
+    const resources = new MiniAppResources(AUTH, 'quote-cadence')
+    const gate = deferred<PositionPageDTO>()
+    const spy = vi.spyOn(api, 'positions').mockReturnValue(gate.promise)
+    const read = resources.ensure('positions', { strength: 'weak', maxAgeMs: 0, force: true })
+
+    // The quote lands while the read is in flight, exactly as it does for a
+    // client slower than the publication cadence.
+    liveUpdate(resources, { resources: ['positions'], revision: 1, source: 'mark-price' })
+    gate.resolve(positionPage(7))
+    await read
+    await flush()
+
+    expect(resources.getSnapshot('positions').data?.count).toBe(7)
+    expect(resources.getSnapshot('positions').stale).toBe(false)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('still fences the read a state boundary raced', async () => {
+    const resources = new MiniAppResources(AUTH, 'state-fence')
+    const gate = deferred<PositionPageDTO>()
+    vi.spyOn(api, 'positions').mockReturnValue(gate.promise)
+    const read = resources.ensure('positions', { strength: 'weak', maxAgeMs: 0, force: true })
+
+    liveUpdate(resources, { resources: ['positions'], revision: 1, source: 'rest' })
+    gate.resolve(positionPage(9))
+    await read
+    await flush()
+
+    expect(resources.getSnapshot('positions').data).toBeNull()
+    expect(resources.getSnapshot('positions').stale).toBe(true)
+  })
 })
 
 describe('MiniAppResources read generations', () => {

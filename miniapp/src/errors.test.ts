@@ -20,4 +20,18 @@ describe('describeError', () => {
   it('keeps the generic outage copy for plain service_unavailable', () => {
     expect(describeError('service_unavailable').title).toBe('Сервис недоступен')
   })
+
+  it('reads a not-ready engine as "wait a moment", never as "start over"', () => {
+    const copy = describeError('not_ready')
+    expect(copy.title).toMatch(/запуск/i)
+    expect(copy.hint).toMatch(/секунд/i)
+    expect(copy.hint).not.toMatch(/заново/i)
+  })
+
+  it('reads a dropped live transport as a degraded hint, not a failure', () => {
+    const copy = describeError('live_unavailable')
+    expect(copy.title).toMatch(/недоступны/i)
+    expect(copy.hint).toMatch(/обновляются сами/i)
+    expect(copy.hint).not.toMatch(/заново/i)
+  })
 })
