@@ -1085,10 +1085,11 @@ exit 0, на текущем дереве — `VERDICT: PARTIAL` exit 3.
 **P1-3/P1-4 — health мёртвого private stream и лестница reconnect.**
 Новый `tests/testnet/test_live_stream_health_acceptance.py` поднимает production
 `MiniAppLiveRuntime` с настоящим `UserStream` и медленным (8 с) authoritative
-boundary, убивает сокет серверной стороной (`DELETE /fapi/v3/listenKey`) во время
-этого boundary и требует, чтобы health не прочитался `live` до реально новой
-сессии; отдельно измеряется лестница на свежем потоке (base 1 s → ≥ 3 s за четыре
-быстрые смерти). **PASS на текущем дереве.**
+boundary, обрывает транспорт во время этого boundary (локальный CONNECT-прокси,
+upstream — plain TCP; `DELETE /fapi/v3/listenKey` сознательно не используется: он
+убивает сокет любого бота, стримящего тот же аккаунт) и требует, чтобы health не
+прочитался `live` до реально новой сессии; отдельно измеряется лестница на свежем
+потоке (base 1 s → ≥ 3 s за четыре быстрых обрыва). **PASS** на текущем дереве.
 **Гейт A/B:** на коде до `b2fea64` тот же сценарий падает — `live` публикуется
 через 7.95 с после смерти сокета, которым владел boundary.
 

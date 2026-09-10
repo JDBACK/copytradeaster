@@ -1,24 +1,27 @@
 """Live acceptance: a dead follower socket must never read as live.
 
-Merge-review correctives P1-3/P1-4. The Mini App derived its health from a
-REST boundary that can outlive the socket which started it: a successful
-snapshot re-asserted "live" after the stream had already died (P1-3). And the
-reconnect backoff reset on the handshake alone, so a socket that dies right
-after connect bought a fresh listenKey every base interval forever (P1-4).
+Merge-review correctives P1-3/P1-4. The Mini App derived its health from a REST
+boundary that can outlive the socket which started it: a successful snapshot
+re-asserted "live" after the stream had already died (P1-3). And the reconnect
+backoff reset on the handshake alone, so a socket that dies right after connect
+bought a fresh listenKey every base interval forever (P1-4).
 
-This scenario runs the REAL MiniAppLiveRuntime with the REAL UserStream
-against the REAL testnet cluster on a disposable follower account:
+This scenario runs the REAL MiniAppLiveRuntime with the REAL UserStream against
+the REAL testnet cluster on a disposable follower account:
 
-  * the socket is killed server-side (DELETE /fapi/v3/listenKey) while the
-    slow authoritative boundary is still in flight; health must stay
-    "reconnecting" until a genuinely new session starts,
-  * four sessions are killed right after they connect; the measured
-    reconnect ladder must grow instead of repeating the base interval.
+  * the transport is cut (TCP drop) while the slow authoritative boundary is
+    still in flight; health must stay "reconnecting" until a genuinely new
+    session starts,
+  * four sessions are cut right after they connect; the measured reconnect
+    ladder must grow instead of repeating the base interval.
 
-The REST snapshot is deliberately slow (BOUNDARY_DELAY_S), which is the shape
-that let the late boundary re-publish "live" in production.
+The cut goes through a local CONNECT proxy instead of DELETE /fapi/v3/listenKey
+on purpose: deleting the account's key also kills the socket of any other
+process streaming that account (a running bot), so the harness must not use it.
+A cut connection is the production failure it reproduces, and the abandoned
+listenKeys simply expire.
 
-Run: CT_TESTNET=1 pytest tests/testnet/test_miniapp_stream_health_live.py -v
+Run: CT_TESTNET=1 pytest tests/testnet/test_live_stream_health_acceptance.py -v
 
 STREAM_HEALTH_ACCOUNT selects the signed account (default copyc2).
 """
@@ -30,9 +33,11 @@ import contextlib
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+from websockets.asyncio.client import connect as ws_connect
 
 from copytradeaster.aster.rate_limits import RateLimits
 from copytradeaster.aster.trading_api import AsterClient
@@ -53,10 +58,103 @@ ACCOUNT = os.environ.get("STREAM_HEALTH_ACCOUNT", "copyc2")
 BOUNDARY_DELAY_S = 8.0
 CONNECT_TIMEOUT_S = 45.0
 LADDER_ROUNDS = 4
+LADDER_TIMEOUT_S = 90.0
 
 
 async def _noop() -> None:
     """Awaitable placeholder for callbacks this scenario does not assert."""
+
+
+class _Pipe:
+    """One tunnelled connection with both of its endpoints."""
+
+    def __init__(self, client: asyncio.StreamWriter) -> None:
+        self.client = client
+        self.upstream: asyncio.StreamWriter | None = None
+
+    def close(self) -> None:
+        for writer in (self.client, self.upstream):
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.close()
+
+
+class _ConnectProxy:
+    """Minimal CONNECT tunnel whose live connections can be cut on demand.
+
+    The client's TLS stays end to end with the exchange: the proxy only pipes
+    bytes, so dropping a pipe is exactly the transport failure of a dead socket.
+    """
+
+    def __init__(self) -> None:
+        self._server: asyncio.Server | None = None
+        self._pipes: set[_Pipe] = set()
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+
+    @property
+    def url(self) -> str:
+        assert self._server is not None and self._server.sockets
+        port = self._server.sockets[0].getsockname()[1]
+        return f"http://127.0.0.1:{port}"
+
+    async def stop(self) -> None:
+        self.drop()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+
+    def drop(self) -> int:
+        pipes = list(self._pipes)
+        self._pipes.clear()
+        for pipe in pipes:
+            pipe.close()
+        return len(pipes)
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        pipe = _Pipe(writer)
+        self._pipes.add(pipe)
+        try:
+            request = await asyncio.wait_for(reader.readline(), timeout=10.0)
+            parts = request.decode("latin-1").split()
+            if len(parts) < 2 or parts[0].upper() != "CONNECT":
+                return
+            host, _, port_text = parts[1].rpartition(":")
+            # Consume the remaining request headers. The tunnel carries raw
+            # TLS afterwards, so the header block is the only HTTP here.
+            while await asyncio.wait_for(reader.readline(), timeout=10.0) not in (
+                b"\r\n",
+                b"",
+            ):
+                pass
+            upstream_reader, upstream_writer = await asyncio.open_connection(
+                host,
+                int(port_text),
+            )
+            pipe.upstream = upstream_writer
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await writer.drain()
+            await asyncio.gather(
+                self._pump(reader, upstream_writer),
+                self._pump(upstream_reader, writer),
+                return_exceptions=True,
+            )
+        except Exception:  # noqa: BLE001 - a failed tunnel is a dropped socket
+            pass
+        finally:
+            self._pipes.discard(pipe)
+            pipe.close()
+
+    @staticmethod
+    async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    return
+                writer.write(chunk)
+                await writer.drain()
 
 
 class _Registry:
@@ -111,7 +209,11 @@ class _App:
 
 
 class _RecordingClient:
-    """Delegate everything; timestamp every listenKey handout."""
+    """Delegate reads; count listenKeys and stay out of the cluster's keys.
+
+    close_listen_key is deliberately inert: the harness must not delete an
+    account-level key another process is streaming.
+    """
 
     def __init__(self, inner: AsterClient) -> None:
         self._inner = inner
@@ -124,6 +226,9 @@ class _RecordingClient:
         key = await self._inner.start_listen_key(account_id)
         self.listen_keys.append(time.monotonic())
         return key
+
+    async def close_listen_key(self, account_id: str) -> None:
+        del account_id
 
 
 @pytest.fixture
@@ -161,12 +266,21 @@ async def live(tmp_path: Path):
 
 async def test_dead_socket_never_reads_live_and_backoff_grows(live):
     settings, client, scratch = live
+    proxy = _ConnectProxy()
+    await proxy.start()
     recorder = _RecordingClient(client)
     runtime = FollowerRuntime(account_id=ACCOUNT, client=recorder, identity=None)
     coordinator = _Coordinator(BOUNDARY_DELAY_S)
     snapshots = _Snapshots()
     app = _App(settings, scratch, _Registry(runtime), coordinator, snapshots, recorder)
-    hub_runtime = MiniAppLiveRuntime(app)
+
+    def tunneled_user_stream(**kwargs: Any) -> UserStream:
+        return UserStream(
+            **kwargs,
+            ws_factory=lambda url: ws_connect(url, proxy=proxy.url, open_timeout=20.0),
+        )
+
+    hub_runtime = MiniAppLiveRuntime(app, user_stream_factory=tunneled_user_stream)
     queue, _hello = hub_runtime.hub.subscribe(ACCOUNT)
 
     events: list[tuple[float, dict]] = []
@@ -217,25 +331,22 @@ async def test_dead_socket_never_reads_live_and_backoff_grows(live):
             await asyncio.sleep(0.1)
         raise TimeoutError(f"only {len(coordinator.started)} boundaries started")
 
-    async def kill_socket() -> None:
-        # Server-side close: the cluster drops the socket holding this key.
-        await client.close_listen_key(ACCOUNT)
-
     await hub_runtime.start()
     try:
-        # The socket must come up, and quotes must be covered (the testnet
-        # mark feed is silent, so the REST fallback owns presentation quotes).
+        # The socket must come up and quotes must be covered (the testnet mark
+        # feed is silent, so the REST fallback owns presentation quotes).
         await wait_health("live", CONNECT_TIMEOUT_S)
         assert snapshots.marks, "the REST quote fallback never published a mark"
         assert coordinator.started, "the connected boundary never ran"
 
-        # --- P1-3: kill the socket while a slow boundary is in flight -------- #
-        await kill_socket()
+        # --- P1-3: cut the transport while a slow boundary is in flight ------ #
+        proxy.drop()
         await wait_health("reconnecting", 20.0)
         await wait_boundaries(len(coordinator.started) + 1, 25.0)
         keys_before = len(recorder.listen_keys)
         kill_at = time.monotonic()
-        await kill_socket()
+        await asyncio.sleep(0.5)
+        proxy.drop()
         await asyncio.sleep(BOUNDARY_DELAY_S + 8.0)
         next_key_at = next(
             (stamp for stamp in recorder.listen_keys[keys_before:] if stamp > kill_at),
@@ -246,21 +357,21 @@ async def test_dead_socket_never_reads_live_and_backoff_grows(live):
         false_live = [stamp for stamp in false_live if stamp < next_key_at + BOUNDARY_DELAY_S]
         assert not false_live, (
             "health read live while the socket that owned the boundary was dead: "
-            f"live at {[round(stamp - kill_at, 2) for stamp in false_live]}s after the kill"
+            f"live at {[round(stamp - kill_at, 2) for stamp in false_live]}s after the cut"
         )
         assert health_events("live"), "the stream never reported live at all"
 
         # The honest end state is a visible outage, not a stale "live".
-        await kill_socket()
+        proxy.drop()
         await wait_health("reconnecting", 20.0)
         last_health = [event for _, event in events if event.get("type") == "health"][-1]
         assert last_health["health"] == "reconnecting", last_health
 
         # --- P1-4: fast death must grow the ladder, never repeat the base ---- #
-        # The ladder is measured on a fresh UserStream: the hub's stream above
-        # has already climbed the ladder (by design), so its next interval
-        # would be the tail of that climb rather than the documented 1-2-4.
-        # Stopping the hub first also keeps one account-level listenKey owner.
+        # Measured on a fresh UserStream: the hub's stream has already climbed
+        # the ladder (by design), so its next interval would be the tail of that
+        # climb instead of the documented base. Stopping the hub first also
+        # keeps a single account-level listenKey owner among our own processes.
         await hub_runtime.stop()
         recorder.listen_keys.clear()
         stream = UserStream(
@@ -270,16 +381,19 @@ async def test_dead_socket_never_reads_live_and_backoff_grows(live):
             keepalive_min=settings.listenkey_keepalive_min,
             on_event=lambda _event: _noop(),
             on_reconnect=lambda: _noop(),
+            ws_factory=lambda url: ws_connect(url, proxy=proxy.url, open_timeout=20.0),
         )
         stream_stop = asyncio.Event()
         stream_task = asyncio.create_task(stream.run(stream_stop))
         try:
             ladder: list[float] = []
+            deadline = time.monotonic() + LADDER_TIMEOUT_S
             for _round in range(LADDER_ROUNDS):
-                await wait_listen_keys(len(recorder.listen_keys) + 1, CONNECT_TIMEOUT_S)
+                remaining = max(deadline - time.monotonic(), 1.0)
+                await wait_listen_keys(len(recorder.listen_keys) + 1, remaining)
                 ladder.append(recorder.listen_keys[-1])
                 await asyncio.sleep(0.8)
-                await kill_socket()
+                proxy.drop()
             spans = [later - earlier for earlier, later in zip(ladder, ladder[1:], strict=False)]
             assert len(spans) == LADDER_ROUNDS - 1, spans
             assert spans[-1] >= 3.0, f"reconnect backoff stayed near the base interval: {spans}"
@@ -294,5 +408,4 @@ async def test_dead_socket_never_reads_live_and_backoff_grows(live):
         await asyncio.gather(reader_task, return_exceptions=True)
         with contextlib.suppress(Exception):
             await hub_runtime.stop()
-        with contextlib.suppress(Exception):
-            await client.close_listen_key(ACCOUNT)
+        await proxy.stop()
