@@ -29,7 +29,6 @@ export function ClosedTrades({ resources, onOpen, active = true, preview = false
     {history.data?.items.map(trade => <TradeSummaryCard key={trade.trade_ref} trade={trade} onOpen={() => onOpen({ kind: 'trade-detail', tradeRef: trade.trade_ref })} />)}
     {history.data?.items.length === 0 && <p className="info-box">{history.data.coverage_from ? 'Закрытых сделок за этот период нет' : 'Загружаем историю. Доступный диапазон пока не подтверждён.'}</p>}
     {history.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={history.loading || history.changed} onClick={() => preview ? onOpen({ kind: 'trade-list', state: 'closed', period }) : void history.more()}>{history.loading ? 'Загружаем…' : preview ? 'Вся история' : 'Показать ещё 20'}</button>}
-    {history.data && <button type="button" className="btn btn-ghost" disabled={history.loading} onClick={() => void history.refresh()}>Обновить историю</button>}
   </>
 }
 
@@ -46,7 +45,7 @@ export function TradeListScreen({ resources, route, onOpen, active = true, foreg
       {!data && !positions.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} />}
       {data && orderedPositions(data.positions, attention, search).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} stale={data.is_stale || positions.snapshot.stale || !!positions.snapshot.error} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
       {data && !orderedPositions(data.positions, attention, search).length && <p className="info-box">{data.snapshot_captured_at ? 'По выбранному фильтру позиций нет' : 'Получаем данные позиций'}</p>}
-      <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Обновить позиции</button>
+      {positions.snapshot.error && <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Повторить</button>}
     </>}
   </div>
 }

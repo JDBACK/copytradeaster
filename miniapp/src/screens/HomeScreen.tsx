@@ -386,18 +386,20 @@ export function HomeScreen({
               </>
             )}
           </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => void refresh(true)}
-            disabled={acting || ownerActive}
-          >
-            Обновить данные
-          </button>
+          {(transportStale || ownerMutationState === 'unknown') && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => void refresh(true)}
+              disabled={acting || ownerActive}
+            >
+              Проверить состояние
+            </button>
+          )}
         </div>
       )}
 
-      {view.actionLabel === null && (
+      {view.actionLabel === null && (transportStale || ownerMutationState === 'unknown') && (
         <div className="btn-stack">
           <button
             type="button"
@@ -405,7 +407,7 @@ export function HomeScreen({
             disabled={acting || ownerActive}
             onClick={() => void refresh(true)}
           >
-            {acting ? 'Обновляем…' : 'Обновить данные'}
+            {acting ? 'Проверяем…' : 'Проверить состояние'}
           </button>
         </div>
       )}

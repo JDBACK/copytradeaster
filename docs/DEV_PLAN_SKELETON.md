@@ -715,11 +715,12 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 
 - [x] Подтверждены текущий snapshot/cache flow и Aster private/public WS
   контракты; выбрана схема WS-hint → authoritative REST boundary.
-- [ ] Общий process-local follower read model с monotonic revision.
-- [ ] Authenticated browser WebSocket через short-lived single-use ticket.
-- [ ] Private stream pool для REAL followers с coalesced snapshot refresh.
-- [ ] Shared public mark-price stream для presentation PnL.
-- [ ] Frontend live client, reconnect/stale states и resource fencing.
-- [ ] Удалены постоянные generic refresh-кнопки; explicit permission recheck
+- [x] Общий process-local follower read model с monotonic revision.
+- [x] Authenticated browser WebSocket через short-lived single-use ticket.
+- [x] Private stream pool для REAL followers с coalesced snapshot refresh.
+- [x] Shared public mark-price stream для presentation PnL.
+- [x] Frontend live client, reconnect/stale states и resource fencing.
+- [x] Удалены постоянные generic refresh-кнопки; explicit permission recheck
   сохранён.
-- [ ] Offline, REAL Aster Testnet, Telegram WebView и lifecycle acceptance.
+- [x] Offline live/lifecycle regression coverage и full frontend/backend gates.
+- [ ] REAL Aster Testnet и Telegram WebView acceptance.

@@ -1919,21 +1919,27 @@ recipient/ownership повторно проверяются при commit, curso
 
 ## Mini App Live Mode checkpoint — 2026-09-10
 
-В ветке `codex/miniapp-live-updates` добавлен незавершённый фундамент live
-presentation mode: process-local follower snapshots, authenticated Mini App
-ticket/WebSocket hub, private follower-stream hints с coalesced REST refresh,
-общий public mark-price stream, а также frontend live session с reconnect,
-stale/auth states и resource invalidation. History worker теперь может публиковать
-изменение activity как presentation hint; execution correctness по-прежнему
-остаётся за REST confirmation и reconciler.
+В ветке `codex/miniapp-live-updates` реализованы L1–L6 live presentation mode:
+process-local follower snapshots, authenticated single-use ticket/WebSocket,
+private follower-stream hints с coalesced authoritative REST refresh, shared
+public mark-price stream, frontend reconnect/stale/auth lifecycle и shell-level
+LiveStatus. Постоянные generic refresh-кнопки убраны из healthy пользовательских
+surface; context recovery и security permission recheck сохранены. Execution
+correctness по-прежнему остаётся за REST confirmation и reconciler.
 
-Проверено на текущем срезе: frontend `28 files / 349 passed`, Oxlint, TypeScript
-build и Vite build; backend targeted suites `77 passed` и adapter contract
-suite `20 passed`; ruff для изменённых backend-файлов и `git diff --check`
-чистые. Эти проверки не являются REAL testnet или ручным Telegram acceptance
-live mode.
+Lifecycle/backpressure hardening этого среза: server application heartbeat 10s,
+visible-client timeout 30s, hidden WebView без false-stale timeout, duplicate/
+out-of-order revision fence, manual-retry generation fence, ordered `hello`
+baseline и full live-resource reconciliation при revision gap/reconnect gap.
+Dedicated live tests покрывают ticket TTL/single-use, bounded account fan-out,
+Decimal mark-price/REST-age, private-stream burst coalescing и frontend
+heartbeat/auth/reconnect/revision-gap paths.
 
-Осталось: live status UI и замена общих refresh-кнопок на contextual
-reconnect/stale affordances; dedicated live unit/integration tests; REAL Aster
-Testnet и ручной Mini App прогон; затем lifecycle/backoff/rate-limit hardening
-и финальная проверка регрессий.
+Текущий frontend full gate: **30 files / 358 passed**, Oxlint **0 warnings /
+0 errors**, `tsc -b` и Vite production build PASS. Backend full offline gate
+после финальных protocol-hardening изменений: **1530 passed / 2 skipped /
+87 deselected**. `ruff check`/format для изменённого live Python surface и
+`git diff --check` проходят. Полный `ruff check .` в этой ветке отдельно упирается
+в уже существующие lint-ошибки `scripts/check_doc_facts.py` и не считается
+live-regression. До REAL Aster Testnet и ручного Telegram Mini App acceptance
+live mode остаётся **IN PROGRESS**.

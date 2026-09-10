@@ -860,6 +860,13 @@ browser reconnect -> REST resnapshot ------> LIVE
 
 HTTP resource generations и live revisions монотонны: duplicate/out-of-order
 события игнорируются, а старый request не может затереть более новую публикацию.
+`hello` всегда отправляется первым и задаёт baseline revision. Bounded latest-wins
+queue может сознательно выбросить промежуточные события под backpressure; поэтому
+любой revision gap (или reconnect `hello` с более новым revision) означает full
+invalidation live-backed DTO, а не попытку угадать потерянные resource keys.
+Server посылает application heartbeat каждые 10 секунд; видимый WebView считает
+канал потерянным после 30 секунд без frame, тогда как hidden WebView heartbeat
+timeout не использует, чтобы background throttling не создавал ложный stale.
 При разрыве UI не очищает данные; после истечения freshness budget показывает
 `Данные устарели`. Постоянной общей кнопки refresh в healthy UI нет; manual retry
 появляется только как контекстное восстановление после ошибки. Explicit

@@ -585,6 +585,47 @@ body {
   padding-bottom: 24px;
 }
 
+.live-status {
+  flex: none;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--canvas);
+  font-size: 12px;
+}
+
+.live-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.live-status-live {
+  color: var(--success);
+}
+
+.live-status-reconnecting,
+.live-status-stale {
+  color: var(--warning);
+}
+
+.live-status-retry {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--champagne);
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
 .bottom-nav {
   flex: none;
   display: flex;

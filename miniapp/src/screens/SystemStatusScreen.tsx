@@ -268,16 +268,6 @@ export function SystemStatusView({
             Открыть бота
           </button>
         )}
-        {remediation === null && (
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={refreshing}
-            onClick={onRefresh}
-          >
-            {refreshing ? 'Обновляем…' : 'Обновить'}
-          </button>
-        )}
       </div>
     </div>
   )

@@ -212,25 +212,39 @@ def create_miniapp_app(
         queue, initial = live.hub.subscribe(grant.account_id)
 
         async def send_updates() -> None:
+            last_revision = int(initial.get("revision", 0))
             try:
                 while not socket.closed:
-                    await socket.send_json(await queue.get(), dumps=_json_dumps)
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=10.0)
+                    except TimeoutError:
+                        await socket.send_json(
+                            {"type": "heartbeat", "revision": last_revision},
+                            dumps=_json_dumps,
+                        )
+                        continue
+                    last_revision = int(event.get("revision", last_revision))
+                    await socket.send_json(event, dumps=_json_dumps)
             except (ConnectionError, RuntimeError):
                 pass
             finally:
                 if not socket.closed:
                     await socket.close()
 
-        sender = asyncio.create_task(send_updates())
+        sender: asyncio.Task[None] | None = None
         try:
+            # Hello is the revision baseline. Do not let a queued update race
+            # ahead of it on a newly upgraded socket.
             await socket.send_json(initial, dumps=_json_dumps)
+            sender = asyncio.create_task(send_updates())
             async for message in socket:
                 if message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
                     break
         finally:
-            sender.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sender
+            if sender is not None:
+                sender.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sender
             live.hub.unsubscribe(grant.account_id, queue)
         return socket
 

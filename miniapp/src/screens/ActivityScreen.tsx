@@ -42,6 +42,5 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
     {feed.data?.items.length === 0 && <p className="info-box">{filter === 'trade' ? 'Сделок пока нет' : filter === 'system' ? 'Системных событий пока нет' : 'Событий пока нет'}</p>}
     {groups.filter(group => group.items.length).map(group => <section key={group.bucket} aria-label={ACTIVITY_TIME_LABELS[group.bucket]}><h2 className="activity-day-label">{ACTIVITY_TIME_LABELS[group.bucket]}</h2>{group.items.map(event => <TradeEventRow key={event.event_ref} event={event} onOpen={tradeRef => onOpen({ kind: 'trade-detail', tradeRef })} />)}</section>)}
     {feed.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={feed.loading} onClick={() => void feed.more()}>{feed.loading ? 'Загружаем…' : 'Показать ещё'}</button>}
-    {feed.data && <button type="button" className="btn btn-ghost" disabled={feed.loading} onClick={() => void feed.refresh()}>Обновить события</button>}
   </div>
 }

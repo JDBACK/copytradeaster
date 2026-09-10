@@ -218,3 +218,26 @@ all-market варианты.
 Коммит этого checkpoint фиксирует архитектурный фундамент, но не объявляет
 live mode production-ready: следующий шаг — довести L6 и acceptance-gates,
 после чего отдельно проверить lifecycle/backoff/rate-limit edge cases.
+
+### 2026-09-10 — L6 + offline hardening checkpoint
+
+- [x] L6 UI: в `AppShell` добавлен один компактный live rail (`LIVE` /
+  connecting / reconnecting / stale); last-good DTO остаются на экране, а
+  `Повторить` появляется только после подтверждённого stale.
+- [x] Удалены постоянные generic refresh-кнопки из Positions, Activity,
+  history/trade detail и healthy System Status. Контекстные error/unknown
+  recovery-действия и `Перепроверить разрешения` в Account Builder сохранены.
+- [x] Frontend live lifecycle hardened: heartbeat timeout учитывает hidden
+  WebView, focus/visibility запускают восстановление, duplicate/out-of-order
+  revision не применяются, ручной retry fenced от старого `onclose`.
+- [x] Bounded queue loss закрыт через revision-gap reconciliation: если клиент
+  видит пропуск revision или reconnect `hello` с более новым revision, он
+  инвалидирует весь live-backed resource set и перечитывает активные DTO.
+- [x] WebSocket `hello` отправляется до sender task и задаёт baseline revision;
+  server application heartbeat не меняет freshness DTO.
+- [x] Dedicated offline live tests добавлены для ticket TTL/single-use,
+  account-scoped bounded fan-out, Decimal mark-price, сохранения REST-age,
+  follower burst coalescing, heartbeat/auth/reconnect/revision-gap client paths.
+
+Live mode всё ещё **IN PROGRESS**: REAL Aster Testnet и ручной Telegram Mini App
+acceptance из §6 не выполнены и не считаются закрытыми этим checkpoint.

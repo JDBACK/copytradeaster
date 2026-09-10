@@ -37,7 +37,7 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
       {positions.slice(0, 3).map(position => <PositionSummaryCard key={`${position.symbol}:${position.side}`} position={position} stale={stale} onOpen={() => onOpen(position.trade_ref ? { kind: 'trade-detail', tradeRef: position.trade_ref } : { kind: 'position-detail', symbol: position.symbol, side: position.side })} />)}
       {data && positions.length === 0 && <p className="info-box">{!data.snapshot_captured_at ? 'Получаем данные аккаунта' : attention ? 'Нет позиций с проблемой защиты' : 'Нет открытых позиций'}</p>}
       {positions.length > 3 && <button type="button" className="btn btn-secondary" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all', attention })}>Показать все {positions.length}</button>}
-      <button type="button" className="btn btn-secondary" disabled={resource.snapshot.inflight} onClick={() => void resource.refresh('strong').then(() => resources.invalidate(['dashboard', 'status'])).catch(() => {})}>{resource.snapshot.error ? 'Повторить' : 'Обновить данные'}</button>
+      {resource.snapshot.error && <button type="button" className="btn btn-secondary" disabled={resource.snapshot.inflight} onClick={() => void resource.refresh('strong').then(() => resources.invalidate(['dashboard', 'status'])).catch(() => {})}>Повторить</button>}
     </div>
   </div>
 }

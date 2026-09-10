@@ -9,7 +9,7 @@
 
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { api, ApiError } from './api'
 import { MiniAppResources } from './resources'
@@ -116,23 +116,17 @@ describe('SystemStatusScreen behavior', () => {
     expect(screen.getByText('Подтверждены')).toBeDefined()
   })
 
-  it('manual refresh replaces the DTO atomically and stays fresh', async () => {
-    vi.spyOn(api, 'status').mockResolvedValueOnce(dto()).mockResolvedValueOnce(dto({ positions_count: 3 }))
+  it('healthy status has no routine refresh action', async () => {
+    const loader = vi.spyOn(api, 'status').mockResolvedValue(dto())
     render(<SystemStatusScreen auth={AUTH} />)
     await screen.findByText('Всё работает')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
-    expect(screen.getByRole('button', { name: /обновляем/i })).toBeDisabled()
-    await screen.findByText('3')
-    expect(screen.getByText('Всё работает')).toBeDefined()
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Обновить' })).toBeNull()
   })
 
   it('backend stale keeps values visible with an amber note, never healthy', async () => {
-    vi.spyOn(api, 'status').mockResolvedValueOnce(dto()).mockResolvedValueOnce(staleDto())
+    vi.spyOn(api, 'status').mockResolvedValue(staleDto())
     render(<SystemStatusScreen auth={AUTH} />)
-    await screen.findByText('Всё работает')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
     await screen.findByLabelText('Состояние: Данные устарели')
     // Last available values stay on screen.
     expect(screen.getByText('2')).toBeDefined()
@@ -174,8 +168,7 @@ describe('SystemStatusScreen behavior', () => {
     render(<SystemStatusScreen auth={AUTH} />)
 
     await screen.findByText('Требуется действие')
-    // Only the screen's own secondary refresh exists; nothing launches.
-    expect(screen.getByRole('button', { name: 'Обновить' })).toBeDefined()
+    expect(screen.queryByRole('button')).toBeNull()
     expect(close).not.toHaveBeenCalled()
   })
 
@@ -194,23 +187,28 @@ describe('SystemStatusScreen behavior', () => {
   })
 
   it('network failure keeps the snapshot with a transport-stale warning', async () => {
-    vi.spyOn(api, 'status')
-      .mockResolvedValueOnce(dto())
+    const resources = new MiniAppResources(AUTH, 'status-reconnect')
+    resources.publishConfirmed('status', dto())
+    resources.invalidate(['status'])
+    const loader = vi.spyOn(api, 'status')
       .mockRejectedValueOnce(new ApiError(0, 'network_error', 'down'))
       .mockResolvedValueOnce(dto())
-    render(<SystemStatusScreen auth={AUTH} />)
-    await screen.findByText('Всё работает')
+    const { rerender } = render(
+      <SystemStatusScreen auth={AUTH} resources={resources} foregroundSignal={0} />,
+    )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
     await screen.findByText(TRANSPORT_STALE_WARNING)
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(1))
     // Previous data survives, but the old ready no longer looks fresh.
     expect(screen.getByText('2')).toBeDefined()
     expect(screen.queryByText('Всё работает')).toBeNull()
     expect(screen.getByText('Данные устарели')).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Обновить' })).toBeNull()
 
-    // The next success clears the transport-stale mark.
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
+    // Foreground recovery replaces the removed routine refresh action.
+    rerender(<SystemStatusScreen auth={AUTH} resources={resources} foregroundSignal={1} />)
     await screen.findByText('Всё работает')
+    expect(loader).toHaveBeenCalledTimes(2)
     expect(screen.queryByText(TRANSPORT_STALE_WARNING)).toBeNull()
   })
 

@@ -194,7 +194,7 @@ describe('AppShell keep-alive', () => {
     await screen.findByRole('heading', { name: 'PnL открытых позиций' })
     // Shell warmup settles: settings and activity prefetched while hidden.
     await screen.findByText('Настройки копирования')
-    await screen.findByText('Обновить события')
+    await screen.findByText('Открыта позиция BTCUSDT')
     // S2 resource sharing: Settings joins Home's dashboard and Positions joins
     // Home's preview resource instead of starting duplicate reads.
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
@@ -204,7 +204,7 @@ describe('AppShell keep-alive', () => {
     // Full second round over all four tabs: zero new requests, no skeletons.
     for (const [tab, marker] of [
       ['Позиции', 'Открытые 1'],
-      ['Активность', 'Обновить события'],
+      ['Активность', 'Открыта позиция BTCUSDT'],
       ['Настройки', 'Настройки копирования'],
       ['Главная', 'PnL открытых позиций'],
     ] as const) {
@@ -378,7 +378,7 @@ describe('AppShell keep-alive', () => {
     )
 
     await screen.findByText('Настройки копирования')
-    await screen.findByText('Обновить события')
+    await screen.findByText('Открыта позиция BTCUSDT')
     expect(screen.queryByLabelText('Загрузка состояния')).toBeNull()
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
     expect(positionsSpy).toHaveBeenCalledTimes(1)
@@ -1024,7 +1024,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
     render(<App />)
 
     await screen.findByText('Настройки копирования')
-    await screen.findByText('Обновить события')
+    await screen.findByText('Открыта позиция BTCUSDT')
     expect(sessionSpy).toHaveBeenCalledTimes(1)
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
     expect(positionsSpy).toHaveBeenCalledTimes(1)
@@ -1170,7 +1170,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
       .spyOn(api, 'activityFeed')
       .mockResolvedValue(activityPage({ items: [], has_next: false }))
     const { rerender } = render(<ActivityScreen auth={AUTH} />)
-    await screen.findByText('Обновить события')
+    await screen.findByText('Событий пока нет')
     expect(activitySpy).toHaveBeenCalledTimes(1)
 
     const bounce = async (ageMs: number) => {
@@ -1178,7 +1178,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
       const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0 + ageMs)
       rerender(<ActivityScreen auth={AUTH} active={true} />)
       nowSpy.mockRestore()
-      await screen.findByText('Обновить события')
+      await screen.findByText('Событий пока нет')
     }
     await bounce(35_000)
     expect(activitySpy).toHaveBeenCalledTimes(1)
@@ -1196,7 +1196,7 @@ describe('Part 2A: shell warmup and activation revalidation', () => {
       .mockResolvedValue(activityPage({ items: [], has_next: false }))
 
     render(<AppShell auth={AUTH} onNotConnected={noop} />)
-    await screen.findByText('Обновить события')
+    await screen.findByText('Событий пока нет')
     expect(activitySpy).toHaveBeenCalledTimes(1)
 
     // Activity is still a hidden keep-alive root. Foreground must not make it
@@ -1403,7 +1403,7 @@ describe('Corrective: mutation-driven invalidation', () => {
     expect(dashboardSpy).toHaveBeenCalledTimes(1)
 
     fireEvent.click(tabButton('Активность'))
-    await screen.findByText('Обновить события')
+    await screen.findByText('Событий пока нет')
     await act(async () => {})
     expect(activitySpy).toHaveBeenCalledTimes(2)
   })

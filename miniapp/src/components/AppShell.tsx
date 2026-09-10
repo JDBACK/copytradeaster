@@ -29,6 +29,7 @@ import { PositionsScreen } from '../screens/PositionsScreen'
 import { RiskScreen } from '../screens/RiskScreen'
 import { SettingsScreen } from '../screens/SettingsScreen'
 import { SystemStatusScreen } from '../screens/SystemStatusScreen'
+import { LiveStatus } from './LiveStatus'
 
 export function AppShell({
   auth,
@@ -252,6 +253,7 @@ export function AppShell({
   return (
     <div className="shell">
       {banner}
+      <LiveStatus resources={resources} />
       <div className="shell-content" ref={contentRef}>
         <div hidden={!homeActive}>
           <HomeScreen

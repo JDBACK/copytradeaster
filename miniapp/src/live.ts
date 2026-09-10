@@ -16,6 +16,17 @@ export interface LiveUpdate {
 
 const STALE_AFTER_MS = 12_000
 const RECONNECT_MAX_MS = 15_000
+const HEARTBEAT_TIMEOUT_MS = 30_000
+const FULL_RECONCILE_RESOURCES = [
+  'dashboard',
+  'positions',
+  'risk',
+  'riskPreview',
+  'notifications',
+  'status',
+  'accountBuilder',
+  'history',
+] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -30,9 +41,12 @@ export class MiniAppLiveSession {
   private ticketAbort: AbortController | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private staleTimer: ReturnType<typeof setTimeout> | null = null
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null
+  private lifecycleAttached = false
   private disposed = false
   private generation = 0
   private reconnectAttempt = 0
+  private established = false
   private snapshot: LiveSnapshot = {
     health: 'connecting',
     revision: 0,
@@ -59,12 +73,18 @@ export class MiniAppLiveSession {
 
   start(): void {
     if (this.disposed || this.socket || this.ticketAbort) return
+    this.attachLifecycle()
     void this.connect()
   }
 
   retryNow(): void {
     if (this.disposed) return
     this.clearReconnectTimer()
+    this.clearStaleTimer()
+    this.clearHeartbeatTimer()
+    // Fence callbacks from the connection being replaced. Otherwise an old
+    // onclose can schedule a second reconnect and later create a duplicate WS.
+    this.generation += 1
     this.ticketAbort?.abort()
     this.ticketAbort = null
     this.socket?.close()
@@ -80,6 +100,8 @@ export class MiniAppLiveSession {
     this.generation += 1
     this.clearReconnectTimer()
     this.clearStaleTimer()
+    this.clearHeartbeatTimer()
+    this.detachLifecycle()
     this.ticketAbort?.abort()
     this.ticketAbort = null
     this.socket?.close()
@@ -102,6 +124,7 @@ export class MiniAppLiveSession {
       if (this.disposed || generation !== this.generation) return
       const socket = new WebSocket(this.socketUrl(grant.ticket))
       this.socket = socket
+      this.armHeartbeatTimer(generation)
       socket.onmessage = (message) => this.onMessage(generation, message.data)
       socket.onerror = () => socket.close()
       socket.onclose = () => this.onClose(generation)
@@ -126,23 +149,31 @@ export class MiniAppLiveSession {
       return
     }
     if (!isRecord(value) || typeof value.revision !== 'number' || !Number.isFinite(value.revision)) return
+    this.armHeartbeatTimer(generation)
     const revision = value.revision
-    if (revision < this.snapshot.revision) return
+    if (value.type === 'heartbeat') return
+    if (revision < this.snapshot.revision || (revision === this.snapshot.revision && value.type !== 'hello')) return
+    const previousRevision = this.snapshot.revision
+    const revisionGap = revision > previousRevision + 1
+    const reconnectGap = value.type === 'hello' && this.established && revision > previousRevision
     const health = value.health
     const nextHealth: LiveHealth | null =
       health === 'live' || health === 'connecting' || health === 'reconnecting' ? health : null
-    const updatedAt = typeof value.updated_at === 'string' ? Date.parse(value.updated_at) : Date.now()
+    const updatedAt = typeof value.updated_at === 'string' ? Date.parse(value.updated_at) : Number.NaN
     this.reconnectAttempt = 0
     this.clearReconnectTimer()
     if (nextHealth === 'live') this.clearStaleTimer()
     else if (nextHealth) this.armStaleTimer()
     this.publish({
       revision,
-      lastUpdatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+      ...(Number.isFinite(updatedAt) ? { lastUpdatedAt: updatedAt } : {}),
       retrying: false,
       ...(nextHealth ? { health: nextHealth } : {}),
     })
-    if (
+    if (value.type === 'hello') this.established = true
+    if (revisionGap || reconnectGap) {
+      this.onUpdate({ resources: FULL_RECONCILE_RESOURCES, revision })
+    } else if (
       value.type === 'update' &&
       Array.isArray(value.resources) &&
       value.resources.every((item) => typeof item === 'string')
@@ -154,6 +185,7 @@ export class MiniAppLiveSession {
   private onClose(generation: number): void {
     if (this.disposed || generation !== this.generation) return
     this.socket = null
+    this.clearHeartbeatTimer()
     this.publish({ health: 'reconnecting', retrying: true })
     this.armStaleTimer()
     this.scheduleReconnect()
@@ -189,6 +221,68 @@ export class MiniAppLiveSession {
   private clearStaleTimer(): void {
     if (this.staleTimer) clearTimeout(this.staleTimer)
     this.staleTimer = null
+  }
+
+  private armHeartbeatTimer(generation: number): void {
+    this.clearHeartbeatTimer()
+    if (
+      this.disposed ||
+      (typeof document !== 'undefined' && document.visibilityState === 'hidden')
+    ) return
+    this.heartbeatTimer = setTimeout(() => {
+      this.heartbeatTimer = null
+      if (this.disposed || generation !== this.generation) return
+      this.publish({ health: 'stale', retrying: true })
+      this.socket?.close()
+    }, HEARTBEAT_TIMEOUT_MS)
+  }
+
+  private clearHeartbeatTimer(): void {
+    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer)
+    this.heartbeatTimer = null
+  }
+
+  private readonly handleForeground = (): void => {
+    if (
+      this.disposed ||
+      typeof document === 'undefined' ||
+      document.visibilityState !== 'visible'
+    ) return
+    if (this.socket) {
+      this.armHeartbeatTimer(this.generation)
+      return
+    }
+    if (!this.ticketAbort) this.retryNow()
+  }
+
+  private readonly handleVisibility = (): void => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      this.clearHeartbeatTimer()
+      return
+    }
+    this.handleForeground()
+  }
+
+  private attachLifecycle(): void {
+    if (
+      this.lifecycleAttached ||
+      typeof window === 'undefined' ||
+      typeof document === 'undefined'
+    ) return
+    this.lifecycleAttached = true
+    window.addEventListener('focus', this.handleForeground)
+    document.addEventListener('visibilitychange', this.handleVisibility)
+  }
+
+  private detachLifecycle(): void {
+    if (
+      !this.lifecycleAttached ||
+      typeof window === 'undefined' ||
+      typeof document === 'undefined'
+    ) return
+    this.lifecycleAttached = false
+    window.removeEventListener('focus', this.handleForeground)
+    document.removeEventListener('visibilitychange', this.handleVisibility)
   }
 
   private socketUrl(ticket: string): string {

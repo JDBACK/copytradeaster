@@ -16,7 +16,7 @@ export function PositionDetailScreen({ resources, symbol, side, active = true, f
     {snapshot.snapshot.error && <ErrorBox {...describeError(snapshot.snapshot.error)} />}
     {position ? <><p className="lede num">{formatQuantity(position.qty, position.quantity_asset)}</p><PositionCard position={position} /><p className="info-box">{snapshot.snapshot.data?.is_stale || snapshot.snapshot.stale ? 'Снимок устарел. Защита требует проверки. ' : ''}История этой позиции ещё уточняется. Отображается текущий снимок аккаунта.</p></> : <p className="info-box">{snapshot.snapshot.data ? 'Позиция больше не отображается в текущем снимке. Проверьте закрытые сделки.' : 'Получаем данные позиции'}</p>}
     <p className="freshness">Снимок: {formatDateTime(snapshot.snapshot.data?.snapshot_captured_at)}</p>
-    <button type="button" className="btn btn-secondary" onClick={() => void snapshot.refresh('strong').catch(() => {})}>Обновить</button>
+    {snapshot.snapshot.error && <button type="button" className="btn btn-secondary" onClick={() => void snapshot.refresh('strong').catch(() => {})}>Повторить</button>}
   </div>
 }
 
@@ -42,7 +42,7 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
       {positions.snapshot.error && <ErrorBox {...describeError(positions.snapshot.error)} />}
       {liveStale && <p className="position-warning" role="status">Снимок позиции устарел. PnL и статус защиты требуют обновления.</p>}
       <p className="freshness">Снимок позиции: {formatDateTime(positions.snapshot.data?.snapshot_captured_at)}</p>
-      <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Обновить позицию</button>
+      {positions.snapshot.error && <button type="button" className="btn btn-secondary" disabled={positions.snapshot.inflight} onClick={() => void positions.refresh('strong').catch(() => {})}>Повторить проверку позиции</button>}
     </>}
     <section className="panel account-summary"><h2 className="summary-label">{trade.state === 'open' ? 'PnL сейчас' : net ? 'Итог сделки' : 'PnL до комиссий'}</h2><div className={`summary-pnl num pnl-${pnl.tone}`}>{pnl.text}</div>
       <div className="summary-row"><span>Всего на вход</span><strong className="num">{formatQuantity(data.entry_qty, trade.quantity_asset)}</strong></div><div className="summary-row"><span>Всего закрыто</span><strong className="num">{formatQuantity(data.exit_qty, trade.quantity_asset)}</strong></div><div className="summary-row"><span>Остаток</span><strong className="num">{formatQuantity(data.remaining_qty, trade.quantity_asset)}</strong></div>
@@ -76,6 +76,5 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
     </details>)}
     {events.data?.next_fills_cursor && <button type="button" className="btn btn-secondary" disabled={events.loading || events.changed} onClick={() => void events.fills()}>Ещё исполнения</button>}
     {events.error && !events.changed && <button type="button" className="btn btn-secondary" onClick={() => void events.retry()}>Повторить загрузку истории</button>}
-    <button type="button" className="btn btn-secondary" disabled={detail.loading} onClick={() => { void detail.refresh(); void events.refresh() }}>Обновить сделку</button>
   </div>
 }
