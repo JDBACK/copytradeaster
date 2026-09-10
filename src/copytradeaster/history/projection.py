@@ -134,25 +134,33 @@ class HistoryProjection:
         if decision.from_origin and decision.refresh_origin_seed and origin is not None:
             # The first inference may have missed this late fact, so walk
             # the authoritative ending back over everything retained.
-            origin_refs = {
-                leg: seed.public_ref
-                for leg, seed in origin.seed_map().items()
-                if seed.public_ref is not None
-            }
-            replay_fills = await self._history.fills(
-                scope, symbol, Span(origin.cutoff_ms, window.end)
-            )
             correction = (
                 origin.cutoff_ms,
-                derive_starting_seeds(
-                    symbol,
-                    ending,
-                    replay_fills,
-                    placeholder_ref=lambda leg: origin_refs.get(
-                        leg, f"seed:{origin.cutoff_ms}:{leg.value}"
-                    ),
+                await self._derived_seeds(
+                    scope, symbol, origin.cutoff_ms, window, ending, origin.seed_map()
                 ),
             )
+        elif set(ending) != set(latest.seed_map()):
+            # Position-mode switch (HEDGE <-> ONE_WAY): the stored boundary
+            # describes the retired book, so resuming after its cutoff would
+            # drop every fill of the book the authoritative snapshot now
+            # reports — and still advance the boundary and consume the dirty
+            # range. Replay the new book from the accepted origin with seeds
+            # walked back over the retained stream, and re-anchor the origin
+            # there: the retired book keeps its published episodes untouched.
+            switch_start = origin.cutoff_ms if origin is not None else window.start
+            correction = (
+                switch_start,
+                await self._derived_seeds(
+                    scope,
+                    symbol,
+                    switch_start,
+                    window,
+                    ending,
+                    origin.seed_map() if origin is not None else dict(seeds),
+                ),
+            )
+            replay_start = switch_start
         if replay_start > window.end:
             # The proven frontier already covers the requested range: there is
             # nothing new to project, so return what the range already shows.
@@ -285,9 +293,13 @@ class HistoryProjection:
                 for transition in projection.transitions
             ),
         )
+        # Only the book this replay produces can be superseded or continued by
+        # it: episodes of another position-mode era inside the range belong to
+        # a book that is neither rewritten nor guessed at.
         affected = {
             stored.episode.public_ref: stored.episode
             for stored in await self._episodes.list_range(scope, symbol, replay_start_ms, cutoff_ms)
+            if stored.episode.position_side in seeds
         }
         resolutions = self._corrections(scope, symbol, resolved, affected)
         # A correction continues an already announced episode under its
@@ -375,6 +387,34 @@ class HistoryProjection:
         # (no fills in the added range): report what the replayed range
         # already shows instead of an empty publication.
         return tuple(await self._episodes.list_range(scope, symbol, replay_start_ms, cutoff_ms))
+
+    async def _derived_seeds(
+        self,
+        scope: HistoryScope,
+        symbol: str,
+        start_ms: int,
+        window: Window | Span,
+        ending: Mapping[PosSide, Decimal],
+        anchors: Mapping[PosSide, PositionSeed],
+    ) -> dict[PosSide, PositionSeed]:
+        """Walk the authoritative ending back over the retained fills.
+
+        Used whenever the accepted boundary stops describing the book the
+        ending reports (a late fact, or a position-mode switch): the replay
+        then restarts with seeds inferred from the authoritative snapshot.
+        Legs that already hold a stable placeholder ref keep it, so a
+        repeated correction supplements the same public link.
+        """
+        refs = {
+            leg: seed.public_ref for leg, seed in anchors.items() if seed.public_ref is not None
+        }
+        replay_fills = await self._history.fills(scope, symbol, Span(start_ms, window.end))
+        return derive_starting_seeds(
+            symbol,
+            ending,
+            replay_fills,
+            placeholder_ref=lambda leg: refs.get(leg, f"seed:{start_ms}:{leg.value}"),
+        )
 
     async def _existing_events(
         self, scope: HistoryScope, trade_refs: Sequence[str]

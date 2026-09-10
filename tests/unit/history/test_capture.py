@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from decimal import Decimal as D
 from unittest.mock import AsyncMock
@@ -222,6 +223,128 @@ async def test_concurrent_captures_serialize_to_one_result(storage):
         capture.publish_reconciled(**kwargs), capture.publish_reconciled(**kwargs)
     )
     assert first == second
+
+
+async def test_position_mode_switch_replays_the_new_book(storage):
+    """An accepted HEDGE boundary must not swallow a later ONE_WAY round trip."""
+    db, history, scope = storage
+    hedge_window = Window(0, 100)
+    await commit(
+        history,
+        scope,
+        [fill(10, "BUY", "2", leg="LONG"), fill(20, "SELL", "2", "110", "5", leg="LONG")],
+        hedge_window,
+    )
+    capture = capture_for(db, history)
+    before = hedge_boundary()
+    after = replace(before, request_started=2200, response_received=2300)
+    (hedge,) = await capture.publish_reconciled(
+        scope, "BTCUSDT", hedge_window, before=before, after=after, cutoff=100
+    )
+    assert hedge.episode.position_side is PosSide.LONG
+
+    mode_window = Window(101, 300)
+    await commit(
+        history,
+        scope,
+        [fill(150, "BUY", "3"), fill(250, "SELL", "3", "120", "30")],
+        mode_window,
+    )
+    one_way_before = boundary(position(positionAmt="0", updateTime=50), started=0, received=100)
+    one_way_after = boundary(position(positionAmt="0", updateTime=50), started=2400, received=2500)
+    stored = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        mode_window,
+        before=one_way_before,
+        after=one_way_after,
+        cutoff=300,
+    )
+    by_side = {row.episode.position_side: row.episode for row in stored}
+    assert set(by_side) == {PosSide.BOTH}
+    one_way = by_side[PosSide.BOTH]
+    assert one_way.quality == "complete" and one_way.realized_pnl_gross == D(30)
+    assert {allocation.trade_id for allocation in one_way.allocations} == {150, 250}
+    # The retired HEDGE book keeps its published episode: it is neither
+    # rewritten nor recorded as a superseded duplicate of the new book.
+    assert await EpisodeRepository(db).get(scope, hedge.episode.public_ref) == hedge
+    assert await db.fetchall("SELECT * FROM follower_episode_resolutions") == []
+    boundary_row = await db.fetchone(
+        "SELECT cutoff_ms,seeds_json FROM history_projection_boundaries"
+        " WHERE account_id=? AND environment=? AND symbol=? AND kind='latest'",
+        (scope.account_id, scope.environment, "BTCUSDT"),
+    )
+    assert boundary_row["cutoff_ms"] == 300
+    assert [seed["leg"] for seed in json.loads(boundary_row["seeds_json"])] == ["BOTH"]
+    assert (await history.projection_state(scope, "BTCUSDT"))[1] is None
+
+
+async def test_mode_switch_origin_replays_the_new_book_after_a_late_fact(storage):
+    """A late fact after a switch rolls back to the new book's own origin."""
+    db, history, scope = storage
+    hedge_window = Window(0, 100)
+    await commit(
+        history,
+        scope,
+        [fill(10, "BUY", "2", leg="LONG"), fill(20, "SELL", "2", "110", "5", leg="LONG")],
+        hedge_window,
+    )
+    capture = capture_for(db, history)
+    before = hedge_boundary()
+    (hedge,) = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        hedge_window,
+        before=before,
+        after=replace(before, request_started=2200, response_received=2300),
+        cutoff=100,
+    )
+    mode_window = Window(101, 300)
+    await commit(
+        history,
+        scope,
+        [fill(150, "BUY", "3"), fill(250, "SELL", "3", "120", "30")],
+        mode_window,
+    )
+    flat = position(positionAmt="0", updateTime=50)
+    one_way_before = boundary(flat, started=0, received=100)
+    one_way_after = boundary(flat, started=2400, received=2500)
+    (one_way,) = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        mode_window,
+        before=one_way_before,
+        after=one_way_after,
+        cutoff=300,
+    )
+    # A second round trip that lands inside the published range arrives late.
+    await commit(
+        history,
+        scope,
+        [fill(280, "BUY", "1"), fill(290, "SELL", "1", "130", "3")],
+        Window(270, 300),
+    )
+    stored = await capture.publish_reconciled(
+        scope,
+        "BTCUSDT",
+        Span(270, 300),
+        before=one_way_before,
+        after=one_way_after,
+        cutoff=300,
+    )
+    refs = {row.episode.public_ref: row.episode for row in stored}
+    assert one_way.episode.public_ref in refs
+    assert refs[one_way.episode.public_ref] == one_way.episode
+    assert await EpisodeRepository(db).get(scope, hedge.episode.public_ref) == hedge
+    assert await db.fetchall("SELECT * FROM follower_episode_resolutions") == []
+    assert {
+        allocation.trade_id for episode in refs.values() for allocation in episode.allocations
+    } == {
+        150,
+        250,
+        280,
+        290,
+    }
 
 
 async def test_episode_is_owned_by_account_and_environment(storage):
