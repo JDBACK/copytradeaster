@@ -867,10 +867,22 @@ invalidation live-backed DTO, а не попытку угадать потеря
 Server посылает application heartbeat каждые 10 секунд; видимый WebView считает
 канал потерянным после 30 секунд без frame, тогда как hidden WebView heartbeat
 timeout не использует, чтобы background throttling не создавал ложный stale.
+Revision counter живёт в одном процессе, поэтому каждое событие и стартовый
+`hello` штампуются per-process `epoch`: после рестарта backend клиент видит смену
+epoch и пере-baseline'ит watermark с полной reconciliation вместо того, чтобы
+отбросить более низкие revision как out-of-order и залипнуть в `stale`.
 При разрыве UI не очищает данные; после истечения freshness budget показывает
 `Данные устарели`. Постоянной общей кнопки refresh в healthy UI нет; manual retry
 появляется только как контекстное восстановление после ошибки. Explicit
 permission recheck Agent/Builder остаётся отдельным security use case.
+
+L4 — один shared presentation-стрим котировок на процесс. На Aster **testnet**
+кластер mark-price поток молчит и через raw path, и через SUBSCRIBE-ack (кадров
+нет; `aggTrade` на том же endpoint стримит), поэтому liveness объявляется только
+после первого реального кадра, а котировки добирает bounded unsigned
+`GET /fapi/v3/premiumIndex` (weight 10, Decimal, whitelist). Fallback простаивает,
+пока стрим отдаёт кадры, и не обновляет REST `captured_at`: mark-тики влияют
+только на presentation PnL, никогда на trading state.
 
 Детальный план и acceptance:
 `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.

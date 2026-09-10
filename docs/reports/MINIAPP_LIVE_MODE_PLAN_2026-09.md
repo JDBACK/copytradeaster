@@ -2,7 +2,7 @@
 
 Дата старта: 2026-09-10
 Ветка: `codex/miniapp-live-updates`
-Статус: **IN PROGRESS**
+Статус: **ACCEPTED (REAL Aster Testnet)** — см. финальную запись §8
 
 ## 1. Цель
 
@@ -292,31 +292,78 @@ acceptance выявил несколько transport/causal/lifecycle дефек
 - [x] Targeted corrective regressions, changed-surface Ruff и
   `git diff --check` проходят на текущем checkpoint.
 
-Что ещё **не закрыто** и поэтому весь live mode остаётся `IN PROGRESS`:
+### 2026-09-10 — финальный corrective + REAL acceptance PASS
 
-- [ ] Перезапустить production/Testnet bot process с последним backend
-  `system-state` corrective (Cloudflare URL сохранить) и подтвердить в уже
-  открытом real Telegram WebView, что periodic master boundary больше не
-  оставляет `Требуется проверка` после возврата backend в READY.
-- [ ] На самом новом bundle вручную подтвердить полный transport цикл
-  `LIVE -> reconnecting -> stale -> LIVE`, stale примерно после 12 секунд,
-  сохранение last-good cards и отсутствие нового recv-task leak при restart.
-- [ ] После нового direct flat/zero-orders audit выполнить минимальный REAL
-  Aster Testnet master open; в уже открытом Mini App визуально подтвердить, что
-  follower position появляется без manual refresh.
-- [ ] Пока position открыта, визуально подтвердить изменение PnL от public
-  mark-price stream без private follower event и без изменения REST
-  `captured_at`.
-- [ ] Немедленно закрыть smoke position и повторно доказать FLAT + zero open
-  orders для всех Testnet accounts; mainnet writes должны остаться нулевыми.
-- [ ] Реально проверить 50 tab/nested transitions, focus/visibility/retry и
-  доказать отсутствие duplicate browser WebSocket sessions и REST storm.
-- [ ] Подтвердить lifecycle/max-followers v1 evidence: follower private streams,
-  один shared mark stream, отсутствие orphan listenKeys/tasks и приемлемый
-  socket/task count.
-- [ ] После последнего corrective выполнить полный frontend gate и полный
-  backend `pytest -q -m "not testnet"`; глобальный `ruff check .` не является
-  текущим gate из-за известного несвязанного `scripts/check_doc_facts.py`.
+Список выше закрыт полностью; ниже — что именно было найдено и доказано.
 
-До выполнения этих пунктов REAL Telegram position/PnL/reconnect acceptance не
-объявляется PASS, а §6 остаётся открытым.
+**Найдено и исправлено в этой сессии.**
+
+- [x] **Restart backend занимал rail в `stale` навсегда.** Live hub нумерует
+  события с `revision=0` в каждом процессе, поэтому клиент с прежним watermark
+  отбрасывал `hello` и все последующие события как out-of-order, хотя HTTP
+  данные обновлялись. Hub теперь штампует каждое событие и `hello`
+  per-process `epoch` (`secrets.token_hex(8)`), а `miniapp/src/live.ts` при
+  смене epoch пере-baseline'ит watermark (`previousRevision = -1`) и делает
+  полную reconciliation вместо удержания `stale`.
+- [x] **Public mark-price stream на testnet-кластере молчит** — и через
+  документированный raw path (`<ws>/<symbol>@markPrice@1s`), и через SUBSCRIBE:
+  сокет открывается, ack `{"id":1,"result":null}` приходит, дальше **ни одного
+  кадра** (проверено изолированной пробой: `aggTrade` на том же endpoint
+  стримит, любые `@markPrice`/`!markPrice@arr` — нет). Прежняя реализация
+  ставила `_market_live = True` уже на connect, поэтому health врал `live`, а
+  PnL не двигался. Теперь L4 работает так: primary — shared SUBSCRIBE-стрим,
+  liveness объявляется **только после первого реального кадра** (тишина дольше
+  `LIVE_MARK_ACK_TIMEOUT_S=10` уходит в backoff и публикует `reconnecting`), а
+  presentation-котировки добирает bounded unsigned REST fallback
+  `GET /fapi/v3/premiumIndex` (`AsterClient.mark_prices`, weight 10, Decimal,
+  whitelist, мусор отбрасывается) с интервалом 3s. Fallback простаивает, пока
+  стрим реально отдаёт кадры, не трогает trading state и не обновляет REST
+  `captured_at` (`FollowerSnapshotStore.apply_mark_prices` сохраняет прежний
+  `captured_at`) — это ровно тот `REST marks остаются fallback`, который
+  предусматривает L4.
+- [x] **Сервер отдавал клиенту имя класса исключения как public code.**
+  Неизвестный код не находится в copy map фронтенда, поэтому транзиентный
+  upstream-сбой рисовал пугающий generic-баннер «начните подключение заново».
+  `_error_code()` теперь классифицирует неразмеченный сбой как retryable
+  `service_unavailable`, а `errors.ts` получил честные копии для `not_ready`,
+  `stale_operation`, `application_error`, `live_unavailable`,
+  `live_scope_unavailable`.
+
+**Чем это подтверждено (REAL Aster Testnet + real Telegram Desktop WebView).**
+
+- [x] Стек поднят заново после перезагрузки ПК: tunnel
+  `https://dawn-greene-organize-waves…` переиспользован, оба menu button
+  (`default` и `chat 203493943`) `MATCH`.
+- [x] Periodic master boundary: `degraded_active=true/reason=periodic-snapshot`
+  держится ~8s каждые ~75s, и UI в это время честно показывает
+  `Данные требуют проверки`, **сам возвращается** в healthy сразу после READY —
+  наблюдено 4+ полных цикла в открытом WebView. Заявленный баг закрыт.
+- [x] Transport-цикл: `LIVE -> Восстанавливаем связь -> Данные устарели · N сек
+  назад + Повторить -> LIVE`. Last-good карточки переживают разрыв, фоновые
+  авто-reconnect не сбрасывают `stale` обратно, `Повторить` работает.
+- [x] Минимальный REAL Testnet open (`manual_master_order.py open BTCUSDT 0.002`):
+  follower-позиция появилась в **уже открытом** Mini App без ручного refresh,
+  PnL менялся между замерами (`+4,94 -> +2,58 -> ...`), плашка обновления
+  отражала REST-возраст, а не тики котировок.
+- [x] Позиция закрыта, повторный direct audit — `AUDIT: FLAT-ALL` (main, copyc1,
+  copyc2, copyc3, tg-8264892202: positions=0, open_orders=0). Mainnet writes — 0.
+- [x] 53 переключения tab/nested: число server-side соединений не выросло
+  (9 -> 9), новых browser WebSocket sessions и REST storm нет.
+- [x] Lifecycle: `Task exception was never retrieved` после финального рестарта —
+  0 (все 10 в логе старше правок), `mark-price stream failed` — 0 (fallback
+  закрывает котировки), orphan listenKeys нет, один shared mark stream.
+- [x] Полный frontend gate: `pnpm lint && pnpm test && pnpm build` — 367 тестов,
+  30 файлов, build OK. Полный backend: `pytest -q -m "not testnet"` —
+  `1540 passed, 2 skipped, 87 deselected`. Changed-surface Ruff и
+  `git diff --check` — чисто.
+
+**Остаётся открытым (не блокирует live mode, вынесено отдельно).**
+
+- Silent mark-price stream на testnet — свойство кластера, не наш дефект;
+  перед mainnet стоит перепроверить, что production-кластер отдаёт кадры и
+  fallback остаётся холодным.
+- Известный несвязанный провал глобального `ruff check .` в
+  `scripts/check_doc_facts.py` (и ruff-дрейф форматирования в 4 файлах на HEAD)
+  не входит в этот gate и не трогался.
+
+Live mode в объёме §6 объявляется **PASS** для REAL Aster Testnet.

@@ -1935,11 +1935,22 @@ Dedicated live tests покрывают ticket TTL/single-use, bounded account f
 Decimal mark-price/REST-age, private-stream burst coalescing и frontend
 heartbeat/auth/reconnect/revision-gap paths.
 
-Текущий frontend full gate: **30 files / 358 passed**, Oxlint **0 warnings /
+Финальный corrective перед acceptance: per-process `epoch` в live hub + клиентский
+re-baseline (иначе рестарт backend навсегда залипал в `stale` на более низких
+revision), frame-gated liveness для shared mark-price стрима с bounded unsigned
+REST `premiumIndex` fallback (на testnet-кластере mark-стримы принимают
+подписку и не отдают кадров, тогда как `aggTrade` стримит), и классификация
+неразмеченного серверного сбоя как retryable `service_unavailable` вместо утечки
+имени класса исключения в public code.
+
+Текущий frontend full gate: **30 files / 367 passed**, Oxlint **0 warnings /
 0 errors**, `tsc -b` и Vite production build PASS. Backend full offline gate
-после финальных protocol-hardening изменений: **1530 passed / 2 skipped /
+после финальных protocol-hardening изменений: **1540 passed / 2 skipped /
 87 deselected**. `ruff check`/format для изменённого live Python surface и
 `git diff --check` проходят. Полный `ruff check .` в этой ветке отдельно упирается
 в уже существующие lint-ошибки `scripts/check_doc_facts.py` и не считается
-live-regression. До REAL Aster Testnet и ручного Telegram Mini App acceptance
-live mode остаётся **IN PROGRESS**.
+live-regression. REAL Aster Testnet и ручной Telegram Mini App acceptance
+выполнены (LIVE rail, auto-recovery после periodic boundary, stale-retry цикл,
+position без manual refresh, живой PnL, `FLAT-ALL` после закрытия, 53 tab
+transitions без роста sockets, 0 orphan tasks): live mode объявлен
+**ACCEPTED** в объёме §6 live-плана.

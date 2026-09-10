@@ -431,7 +431,10 @@ async def test_builder_submit_unclassified_error_is_503(client, fake_app):
     )
     assert resp.status == 503
     body = await resp.json()
-    assert body["error"] == "RuntimeError"
+    # The client copy map only knows public codes; leaking the exception class
+    # name here would render the alarming generic "start over" banner for what
+    # is usually a transient upstream failure.
+    assert body["error"] == "service_unavailable"
 
 
 async def test_builder_submit_success_returns_dto(client, fake_app):

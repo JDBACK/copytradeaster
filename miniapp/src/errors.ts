@@ -86,6 +86,30 @@ const COPY: Record<string, ErrorCopy> = {
     title: 'Проверьте данные',
     hint: 'Формат запроса неверен. Начните заново.',
   },
+  // Readiness and live-transport classification. These reach the UI while the
+  // engine is still starting, re-snapshotting or briefly unreachable, so the
+  // copy has to read as "wait a moment" — the generic fallback would tell the
+  // user to start the whole connection over for a self-healing condition.
+  not_ready: {
+    title: 'Сервис завершает запуск',
+    hint: 'Данные появятся через несколько секунд. Подождите и обновите.',
+  },
+  stale_operation: {
+    title: 'Состояние изменилось',
+    hint: 'Обновите данные и повторите действие.',
+  },
+  application_error: {
+    title: 'Действие не выполнено',
+    hint: 'Повторите попытку через несколько секунд.',
+  },
+  live_unavailable: {
+    title: 'Живые обновления недоступны',
+    hint: 'Данные подтягиваются запросами. Повторите через несколько секунд.',
+  },
+  live_scope_unavailable: {
+    title: 'Аккаунт ещё не в живом контуре',
+    hint: 'Откройте мини-ап заново, чтобы переподключить обновления.',
+  },
   invalid_session: {
     title: 'Сессия недействительна',
     hint: 'Откройте мини-ап заново из чата с ботом.',

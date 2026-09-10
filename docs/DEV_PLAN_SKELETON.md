@@ -708,7 +708,7 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 - Дальше — прогоны по `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:6-11` (NO-GO до повторной квалификации); verdict и счётчики — только в `docs/ENGINE_TEST_STATUS_2026-08.md`.
 - Исторический план A–G демотирован из корня `docs/` в `docs/reports/plan_live_test.md` (история — `git log --follow`); старые A–G — история прогонов предыдущего кода (`docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:10-11`).
 
-## 10. Mini App Live Mode — STARTED 2026-09-10
+## 10. Mini App Live Mode — ACCEPTED 2026-09-10 (REAL Aster Testnet)
 
 Исполняемый план и append-only журнал:
 [MINIAPP_LIVE_MODE_PLAN_2026-09.md](reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md).
@@ -723,4 +723,12 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 - [x] Удалены постоянные generic refresh-кнопки; explicit permission recheck
   сохранён.
 - [x] Offline live/lifecycle regression coverage и full frontend/backend gates.
-- [ ] REAL Aster Testnet и Telegram WebView acceptance.
+- [x] REAL Aster Testnet и Telegram WebView acceptance: LIVE rail, automatic
+  recovery после periodic master boundary, `LIVE -> reconnecting -> stale ->
+  LIVE`, position без manual refresh, живой PnL и `FLAT-ALL` после закрытия.
+
+Corrective этого среза: per-process `epoch` для client re-baselining после
+рестарта backend, frame-gated mark-price liveness с REST `premiumIndex`
+fallback (testnet-кластер молчит по mark-стримам) и запрет отдавать клиенту имя
+класса исключения как public error code. Детали и evidence — в журнале
+[MINIAPP_LIVE_MODE_PLAN_2026-09.md](reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md) §8.

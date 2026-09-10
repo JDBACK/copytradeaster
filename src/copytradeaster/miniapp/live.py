@@ -31,6 +31,9 @@ LIVE_QUEUE_MAX = 8
 FOLLOWER_SYNC_INTERVAL_S = 1.0
 FOLLOWER_EVENT_DEBOUNCE_S = 0.2
 MARKET_BACKOFF_MAX_S = 30.0
+LIVE_MARK_ACK_TIMEOUT_S = 10.0
+MARK_FALLBACK_INTERVAL_S = 3.0
+MARK_FALLBACK_FRESH_S = 12.0
 FOLLOWER_EVENT_TYPES = frozenset(
     {"ACCOUNT_UPDATE", "ORDER_TRADE_UPDATE", "ACCOUNT_CONFIG_UPDATE", "MARGIN_CALL"}
 )
@@ -110,12 +113,19 @@ class MiniAppLiveHub:
         self._revisions: dict[str, int] = {}
         self._health: dict[str, str] = {}
         self._last_update_at: dict[str, str] = {}
+        # A per-process epoch makes the revision counter interpretable across a
+        # backend restart: revisions restart at 0, so a client holding a higher
+        # watermark from the previous process would otherwise reject every new
+        # event as stale/out-of-order and latch "stale" until the counter caught
+        # up. Opaque and secret-free; only used for client re-baselining.
+        self._epoch = secrets.token_hex(8)
 
     def subscribe(self, account_id: str) -> tuple[asyncio.Queue[dict[str, Any]], dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self._queue_max)
         self._queues.setdefault(account_id, set()).add(queue)
         initial = {
             "type": "hello",
+            "epoch": self._epoch,
             "revision": self._revisions.get(account_id, 0),
             "health": self._health.get(account_id, "connecting"),
             "updated_at": self._last_update_at.get(account_id),
@@ -157,7 +167,7 @@ class MiniAppLiveHub:
     def _publish(self, account_id: str, payload: dict[str, Any]) -> None:
         revision = self._revisions.get(account_id, 0) + 1
         self._revisions[account_id] = revision
-        event = {**payload, "revision": revision}
+        event = {**payload, "revision": revision, "epoch": self._epoch}
         for queue in tuple(self._queues.get(account_id, ())):
             if queue.full():
                 while not queue.empty():
@@ -223,9 +233,12 @@ class MiniAppLiveRuntime:
         self._stop = asyncio.Event()
         self._supervisor_task: asyncio.Task[None] | None = None
         self._market_task: asyncio.Task[None] | None = None
+        self._fallback_task: asyncio.Task[None] | None = None
         self._followers: dict[str, _FollowerHandle] = {}
         self._private_health: dict[str, bool] = {}
         self._market_live = False
+        self._mark_fallback_at = 0.0
+        self._quotes_live = False
         self._unsubscribe = app.follower_snapshots.subscribe(self.hub.publish_snapshot)
 
     async def start(self) -> None:
@@ -238,12 +251,20 @@ class MiniAppLiveRuntime:
         self._market_task = asyncio.create_task(
             self._run_market_stream(), name="miniapp-mark-price-stream"
         )
+        self._fallback_task = asyncio.create_task(
+            self._run_mark_fallback(), name="miniapp-mark-price-fallback"
+        )
 
     async def stop(self) -> None:
         self._stop.set()
-        tasks = [task for task in (self._supervisor_task, self._market_task) if task is not None]
+        tasks = [
+            task
+            for task in (self._supervisor_task, self._market_task, self._fallback_task)
+            if task is not None
+        ]
         self._supervisor_task = None
         self._market_task = None
+        self._fallback_task = None
         for task in tasks:
             task.cancel()
         if tasks:
@@ -254,11 +275,7 @@ class MiniAppLiveRuntime:
 
     async def issue_ticket(self, user_id: int) -> dict[str, Any] | None:
         row = await self._users.get(user_id)
-        if (
-            row is None
-            or not int(row["access_enabled"])
-            or row["account_id"] is None
-        ):
+        if row is None or not int(row["access_enabled"]) or row["account_id"] is None:
             return None
         account_id = str(row["account_id"])
         if self.app.follower_registry.get(account_id) is None:
@@ -411,19 +428,31 @@ class MiniAppLiveRuntime:
 
     async def _run_market_stream(self) -> None:
         backoff = 1.0
-        url = f"{self.app.cfg.ws_user_base.rstrip('/')}/!markPrice@arr@1s"
+        # The documented raw path (<ws>/<stream>) is not served by the Aster
+        # testnet cluster: the socket opens and then stays silent forever, so
+        # the stream is established through the SUBSCRIBE protocol, which the
+        # same endpoint acknowledges. Liveness is only claimed once the
+        # exchange actually produced a frame, so a silent half-open socket
+        # cannot masquerade as a healthy presentation stream.
+        url = self.app.cfg.ws_user_base.rstrip("/")
+        params = [f"{symbol.lower()}@markPrice@1s" for symbol in self.app.cfg.symbol_whitelist]
         while not self._stop.is_set():
             try:
                 async with self._market_ws_factory(url) as ws:
                     backoff = 1.0
-                    self._market_live = True
-                    self._publish_all_health()
+                    await ws.send(json.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}))
+                    deadline = time.monotonic() + LIVE_MARK_ACK_TIMEOUT_S
                     while not self._stop.is_set():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("mark-price stream produced no frame")
                         receive = asyncio.create_task(ws.recv())
                         stopping = asyncio.create_task(self._stop.wait())
                         try:
                             done, _ = await asyncio.wait(
-                                {receive, stopping}, return_when=asyncio.FIRST_COMPLETED
+                                {receive, stopping},
+                                timeout=remaining,
+                                return_when=asyncio.FIRST_COMPLETED,
                             )
                         finally:
                             # Always consume both child tasks. During shutdown the
@@ -437,15 +466,27 @@ class MiniAppLiveRuntime:
                             await asyncio.gather(receive, stopping, return_exceptions=True)
                         if stopping in done:
                             return
+                        if receive not in done:
+                            raise TimeoutError("mark-price stream produced no frame")
+                        if not self._market_live:
+                            self._market_live = True
+                            self._refresh_health()
                         prices = _mark_prices(receive.result(), set(self.app.cfg.symbol_whitelist))
-                        self.app.follower_snapshots.apply_mark_prices(prices)
+                        if prices:
+                            self.app.follower_snapshots.apply_mark_prices(prices)
+                        deadline = time.monotonic() + LIVE_MARK_ACK_TIMEOUT_S
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning("mark-price stream failed class=%s", type(exc).__name__)
+                # While quotes are still covered elsewhere the reconnect is a
+                # background detail; only a real quote outage is worth a warning.
+                if self._quotes_live:
+                    log.debug("mark-price stream failed class=%s", type(exc).__name__)
+                else:
+                    log.warning("mark-price stream failed class=%s", type(exc).__name__)
             finally:
                 self._market_live = False
-                self._publish_all_health()
+                self._refresh_health()
             if self._stop.is_set():
                 break
             try:
@@ -455,13 +496,62 @@ class MiniAppLiveRuntime:
                 pass
             backoff = min(backoff * 2, MARKET_BACKOFF_MAX_S)
 
+    async def _run_mark_fallback(self) -> None:
+        """Keep presentation quotes alive when the cluster pushes no mark frames.
+
+        The shared mark-price stream stays primary: while it delivers frames
+        this loop only sleeps. The Aster testnet cluster accepts the mark
+        subscription and then stays silent, so a bounded unsigned REST read
+        fills the same presentation-only quote path. Quotes never touch trading
+        state and never refresh the REST ``captured_at`` age.
+        """
+        while not self._stop.is_set():
+            if not self._market_live:
+                try:
+                    prices = await self._fetch_mark_prices()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if self._quotes_live:
+                        log.debug("mark-price fallback failed class=%s", type(exc).__name__)
+                    else:
+                        log.warning("mark-price fallback failed class=%s", type(exc).__name__)
+                else:
+                    if prices:
+                        self._mark_fallback_at = time.monotonic()
+                        self.app.follower_snapshots.apply_mark_prices(prices)
+                # Re-evaluate on every silent iteration so a fallback outage
+                # demotes health once the last accepted quote ages out.
+                self._refresh_health()
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=MARK_FALLBACK_INTERVAL_S)
+                return
+            except TimeoutError:
+                pass
+
+    async def _fetch_mark_prices(self) -> dict[str, Decimal]:
+        client = getattr(self.app, "master_client", None)
+        fetch = getattr(client, "mark_prices", None)
+        if fetch is None:
+            return {}
+        return await fetch(list(self.app.cfg.symbol_whitelist))
+
+    def _refresh_health(self) -> None:
+        """Publish ``live`` only while exchange quotes are actually flowing."""
+        fresh = time.monotonic() - self._mark_fallback_at <= MARK_FALLBACK_FRESH_S
+        live = self._market_live or fresh
+        if live == self._quotes_live:
+            return
+        self._quotes_live = live
+        self._publish_all_health()
+
     def _publish_all_health(self) -> None:
         for account_id in self._private_health:
             self._publish_health(account_id)
 
     def _publish_health(self, account_id: str) -> None:
         health = (
-            "live" if self._private_health.get(account_id) and self._market_live else "reconnecting"
+            "live" if self._private_health.get(account_id) and self._quotes_live else "reconnecting"
         )
         self.hub.publish_health(account_id, health)
 

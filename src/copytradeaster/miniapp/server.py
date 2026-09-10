@@ -103,11 +103,18 @@ def _json_error(status: int, code: str, message: str) -> web.Response:
 
 
 def _error_code(exc: BaseException) -> str:
-    """Typed public code: onboarding enum codes win over the generic class tag."""
+    """Typed public code: onboarding enum codes win over the generic class tag.
+
+    An untyped failure (transport timeout, unexpected exception inside a use
+    case) is reported as the retryable ``service_unavailable`` classification.
+    Leaking the exception class name instead would hand the client a code its
+    copy map does not know, which renders the alarming generic "start over"
+    banner for what is normally a transient upstream read failure.
+    """
     code = getattr(exc, "code", None)
     if isinstance(code, OnboardingErrorCode):
         return code.value
-    return str(getattr(exc, "public_code", None) or type(exc).__name__)
+    return str(getattr(exc, "public_code", None) or "service_unavailable")
 
 
 def _error_status(exc: BaseException) -> int:

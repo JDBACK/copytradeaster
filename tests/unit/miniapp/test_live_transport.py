@@ -77,6 +77,28 @@ def test_live_hub_is_account_scoped_and_latest_wins_when_client_is_slow() -> Non
     assert account_b.empty()
 
 
+def test_live_hub_stamps_events_with_the_process_epoch() -> None:
+    """A restarted process must be distinguishable from out-of-order delivery.
+
+    Revisions restart at 0 with the process, so the epoch is what tells a
+    client that its watermark belongs to a previous run and must be reset
+    instead of discarding every new event as stale.
+    """
+    hub = MiniAppLiveHub()
+    queue, initial = hub.subscribe("a")
+    assert initial["epoch"]
+
+    hub.publish_health("a", "live")
+    published = queue.get_nowait()
+    assert published["epoch"] == initial["epoch"]
+    assert published["revision"] == 1
+
+    restarted = MiniAppLiveHub()
+    _, restarted_initial = restarted.subscribe("a")
+    assert restarted_initial["epoch"] != initial["epoch"]
+    assert restarted_initial["revision"] == 0
+
+
 def test_mark_price_parser_is_decimal_whitelisted_and_secret_free() -> None:
     payload = '[{"s":"BTCUSDT","p":"65432.10"},{"s":"ETHUSDT","p":"0"},{"s":"OTHER","p":"9"}]'
     assert _mark_prices(payload, {"BTCUSDT", "ETHUSDT"}) == {"BTCUSDT": Decimal("65432.10")}
@@ -163,6 +185,8 @@ async def test_follower_live_burst_coalesces_to_one_post_boundary_rest_refresh()
     live._user_stream_factory = BurstStream
     live._private_health = {}
     live._market_live = True
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
 
     stop = asyncio.Event()
     await live._run_follower(runtime, stop)
@@ -183,12 +207,16 @@ async def test_market_stream_parent_cancellation_cleans_recv_child() -> None:
     class HangingWS:
         def __init__(self) -> None:
             self.recv_task: asyncio.Task | None = None
+            self.subscriptions: list[str] = []
 
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *exc):
             return False
+
+        async def send(self, payload: str) -> None:
+            self.subscriptions.append(payload)
 
         async def recv(self):
             self.recv_task = asyncio.current_task()
@@ -199,6 +227,8 @@ async def test_market_stream_parent_cancellation_cleans_recv_child() -> None:
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
     live._market_live = False
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
     live._private_health = {}
     live.app = SimpleNamespace(
         cfg=SimpleNamespace(
@@ -217,3 +247,166 @@ async def test_market_stream_parent_cancellation_cleans_recv_child() -> None:
 
     assert ws.recv_task is not None
     assert ws.recv_task.cancelled()
+    # The stream is established through the SUBSCRIBE protocol: the documented
+    # raw path is silent on the Aster testnet cluster.
+    assert ws.subscriptions and '"method": "SUBSCRIBE"' in ws.subscriptions[0]
+    assert "btcusdt@markPrice@1s" in ws.subscriptions[0]
+
+
+async def test_silent_mark_stream_is_not_claimed_live() -> None:
+    """A socket that opens but never produces a frame must not read as live."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    class SilentWS:
+        def __init__(self) -> None:
+            self.closes = 0
+            self.sent = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            self.closes += 1
+            return False
+
+        async def send(self, payload: str) -> None:
+            self.sent += 1
+
+        async def recv(self):
+            await asyncio.sleep(3600)
+
+    ws = SilentWS()
+    hub = MiniAppLiveHub()
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = False
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
+    live._private_health = {"a": True}
+    live.hub = hub
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=lambda prices: None),
+    )
+    live._market_ws_factory = lambda url: ws
+
+    import copytradeaster.miniapp.live as live_module
+
+    original = live_module.LIVE_MARK_ACK_TIMEOUT_S
+    live_module.LIVE_MARK_ACK_TIMEOUT_S = 0.05
+    try:
+        task = asyncio.create_task(live._run_market_stream())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        live_module.LIVE_MARK_ACK_TIMEOUT_S = original
+
+    assert live._market_live is False
+    assert live._quotes_live is False
+    assert ws.closes >= 1
+    # No frame means no claim of liveness: the rail must never read `live`
+    # off a socket that only acknowledged the subscription.
+    assert hub._health.get("a") != "live"
+
+
+async def test_rest_mark_fallback_keeps_quotes_live_without_frames() -> None:
+    """The silent-cluster case: REST marks fill the presentation quote path."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    applied: list[dict[str, Decimal]] = []
+    requested: list[list[str]] = []
+
+    async def mark_prices(symbols: list[str]) -> dict[str, Decimal]:
+        requested.append(list(symbols))
+        return {"BTCUSDT": Decimal("70000.5")}
+
+    hub = MiniAppLiveHub()
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = False  # the mark socket opened but stays silent
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
+    live._private_health = {"a": True}
+    live.hub = hub
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=applied.append),
+        master_client=SimpleNamespace(mark_prices=mark_prices),
+    )
+
+    import copytradeaster.miniapp.live as live_module
+
+    original = live_module.MARK_FALLBACK_INTERVAL_S
+    live_module.MARK_FALLBACK_INTERVAL_S = 0.05
+    try:
+        task = asyncio.create_task(live._run_mark_fallback())
+        await asyncio.sleep(0.25)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        live_module.MARK_FALLBACK_INTERVAL_S = original
+
+    assert requested and requested[0] == ["BTCUSDT"]
+    assert applied and applied[0] == {"BTCUSDT": Decimal("70000.5")}
+    assert live._quotes_live is True
+    assert hub._health.get("a") == "live"
+
+
+async def test_mark_fallback_stands_down_while_stream_frames_flow() -> None:
+    """The shared stream stays primary: no extra REST while frames arrive."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    calls: list[list[str]] = []
+
+    async def mark_prices(symbols: list[str]) -> dict[str, Decimal]:
+        calls.append(list(symbols))
+        return {"BTCUSDT": Decimal("70001")}
+
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = True
+    live._quotes_live = True
+    live._mark_fallback_at = 0.0
+    live._private_health = {}
+    live.hub = MiniAppLiveHub()
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=lambda prices: None),
+        master_client=SimpleNamespace(mark_prices=mark_prices),
+    )
+
+    import copytradeaster.miniapp.live as live_module
+
+    original = live_module.MARK_FALLBACK_INTERVAL_S
+    live_module.MARK_FALLBACK_INTERVAL_S = 0.05
+    try:
+        task = asyncio.create_task(live._run_mark_fallback())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        live_module.MARK_FALLBACK_INTERVAL_S = original
+
+    assert calls == []

@@ -51,6 +51,10 @@ export class MiniAppLiveSession {
   private generation = 0
   private reconnectAttempt = 0
   private established = false
+  /** Server-process epoch. A change means the backend restarted and its
+   * revision counter restarted too, so the watermark must be re-baselined
+   * instead of rejecting every new event as out-of-order. */
+  private epoch: string | null = null
   private snapshot: LiveSnapshot = {
     health: 'connecting',
     revision: 0,
@@ -156,10 +160,22 @@ export class MiniAppLiveSession {
     this.armHeartbeatTimer(generation)
     const revision = value.revision
     if (value.type === 'heartbeat') return
-    if (revision < this.snapshot.revision || (revision === this.snapshot.revision && value.type !== 'hello')) return
-    const previousRevision = this.snapshot.revision
-    const revisionGap = revision > previousRevision + 1
-    const reconnectGap = value.type === 'hello' && this.established && revision > previousRevision
+    const epoch = typeof value.epoch === 'string' && value.epoch ? value.epoch : null
+    const epochChanged = epoch !== null && this.epoch !== null && epoch !== this.epoch
+    if (epoch !== null) this.epoch = epoch
+    if (
+      !epochChanged &&
+      (revision < this.snapshot.revision ||
+        (revision === this.snapshot.revision && value.type !== 'hello'))
+    ) {
+      return
+    }
+    // A restarted process re-baselines from its (lower) counter: treat it as a
+    // full reconciliation boundary rather than a stale/out-of-order message.
+    const previousRevision = epochChanged ? -1 : this.snapshot.revision
+    const revisionGap = epochChanged || revision > previousRevision + 1
+    const reconnectGap =
+      value.type === 'hello' && this.established && (epochChanged || revision > previousRevision)
     const health = value.health
     const nextHealth: LiveHealth | null =
       health === 'live' || health === 'connecting' || health === 'reconnecting' ? health : null

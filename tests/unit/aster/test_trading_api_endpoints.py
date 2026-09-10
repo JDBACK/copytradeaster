@@ -1,6 +1,8 @@
 """Endpoint coverage for AsterClient: leverage, margin type, position mode,
 listenKey lifecycle, exchangeInfo caching, query by orderId."""
 
+from decimal import Decimal
+
 import httpx
 import pytest
 import respx
@@ -233,3 +235,23 @@ async def test_position_risk_and_open_orders_weights():
     client = make_client()
     await client.position_risk("copyc1")
     await client.open_orders("copyc1")  # no symbol -> weight 40 path
+
+
+@respx.mock
+async def test_mark_prices_are_decimal_whitelisted_and_drop_junk():
+    body = [
+        {"symbol": "BTCUSDT", "markPrice": "77977.64630626"},
+        {"symbol": "ETHUSDT", "markPrice": "0"},
+        {"symbol": "SOLUSDT", "markPrice": "not-a-number"},
+        {"symbol": "OTHERUSDT", "markPrice": "12.5"},
+        "not-a-row",
+    ]
+    route = respx.get(f"{BASE}/fapi/v3/premiumIndex").respond(json=body)
+    client = make_client()
+
+    prices = await client.mark_prices(["btcusdt", "ETHUSDT", "SOLUSDT"])
+
+    assert prices == {"BTCUSDT": Decimal("77977.64630626")}
+    assert isinstance(next(iter(prices.values())), Decimal)
+    assert route.called
+    assert await client.mark_prices([]) == {}

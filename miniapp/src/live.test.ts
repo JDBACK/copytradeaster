@@ -178,6 +178,40 @@ describe('MiniAppLiveSession', () => {
     session.dispose()
   })
 
+  it('re-baselines on a restarted backend epoch instead of latching stale on lower revisions', async () => {
+    const updates = vi.fn()
+    const session = new MiniAppLiveSession({ initData: 'signed' }, updates, vi.fn())
+    session.start()
+    await flush()
+    const first = FakeWebSocket.instances[0]
+    first.message({
+      type: 'hello', epoch: 'run-1', revision: 20, health: 'live',
+      updated_at: '2026-09-10T03:00:00Z',
+    })
+    first.message({ type: 'health', epoch: 'run-1', revision: 21, health: 'reconnecting' })
+    await vi.advanceTimersByTimeAsync(12_100)
+    expect(session.getSnapshot().health).toBe('stale')
+
+    // The backend restarts: a new process epoch whose revision counter starts
+    // over. Its (lower) revisions must not be discarded as out-of-order, or
+    // the rail stays "stale" although the transport recovered.
+    session.retryNow()
+    await flush()
+    const second = FakeWebSocket.instances[1]
+    second.message({
+      type: 'hello', epoch: 'run-2', revision: 1, health: 'reconnecting',
+      updated_at: '2026-09-10T03:05:00Z',
+    })
+    second.message({ type: 'health', epoch: 'run-2', revision: 2, health: 'live' })
+
+    expect(session.getSnapshot().health).toBe('live')
+    expect(session.getSnapshot().revision).toBe(2)
+    const resources = updates.mock.calls[0]?.[0]?.resources as readonly string[]
+    expect(resources).toContain('dashboard')
+    expect(resources).toContain('positions')
+    session.dispose()
+  })
+
   it('becomes stale after the deadline even while automatic reconnect attempts keep failing', async () => {
     const session = new MiniAppLiveSession({ initData: 'signed' }, vi.fn(), vi.fn())
     session.start()
