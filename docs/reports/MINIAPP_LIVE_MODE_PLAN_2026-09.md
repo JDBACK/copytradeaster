@@ -235,6 +235,10 @@ all-market варианты.
 live mode production-ready: следующий шаг — довести L6 и acceptance-gates,
 после чего отдельно проверить lifecycle/backoff/rate-limit edge cases.
 
+> Этот раздел — снимок момента. Два оставшихся `[ ]` (L6 UI и dedicated live
+> tests/REAL acceptance) закрыты последующими проходами; итоговое состояние
+> чеклиста — в kickoff-разделе выше, финальный вердикт — в хвосте журнала.
+
 ### 2026-09-10 — L6 + offline hardening checkpoint
 
 - [x] L6 UI: в `AppShell` добавлен один компактный live rail (`LIVE` /
