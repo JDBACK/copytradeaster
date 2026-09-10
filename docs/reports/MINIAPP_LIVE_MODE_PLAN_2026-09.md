@@ -2,11 +2,12 @@
 
 Дата старта: 2026-09-10
 Ветка: `codex/miniapp-live-updates`
-Статус: **ACCEPTED (REAL Aster Testnet)** — см. §8. UX de-noising pass
-(ручных обновлений нет; единственный ручной путь — свайп вниз) проверен в реальном
-Chrome и по публичному адресу туннеля: замеры дёрготни, разрыва/самовосстановления,
-свайпа, churn сокетов и кэша бандла. Финальный проход пальцем в реальном Telegram
-WebView остаётся за владельцем.
+Статус: **CLOSED (REAL Aster Testnet + ручная приёмка владельца)** — см. §8.
+UX de-noising pass (ручных обновлений нет; единственный ручной путь — свайп вниз)
+проверен в реальном Chrome, по публичному адресу туннеля и пальцем на iPhone в
+настоящем Telegram WebView: замеры дёрготни, разрыва/самовосстановления, свайпа,
+churn сокетов и кэша бандла. Найденный владельцем дефект индикатора свайпа
+исправлен отдельным коммитом `9aa4424`, живая кампания закрыта `FLAT-ALL`.
 
 ## 1. Цель
 
@@ -202,13 +203,13 @@ all-market варианты.
 - [x] Разобран текущий resource/cache/lifecycle flow frontend и backend.
 - [x] Подтверждены Aster user-stream и mark-price контракты.
 - [x] Зафиксирована целевая архитектура и acceptance matrix.
-- [ ] L1 process-local read model.
-- [ ] L2 authenticated Mini App live transport.
-- [ ] L3 follower private stream pool.
-- [ ] L4 public mark-price stream.
-- [ ] L5 frontend live session client.
-- [ ] L6 live UX и удаление штатных refresh-кнопок.
-- [ ] Offline/full/testnet/manual acceptance.
+- [x] L1 process-local read model.
+- [x] L2 authenticated Mini App live transport.
+- [x] L3 follower private stream pool.
+- [x] L4 public mark-price stream.
+- [x] L5 frontend live session client.
+- [x] L6 live UX и удаление штатных refresh-кнопок.
+- [x] Offline/full/testnet/manual acceptance.
 
 ### 2026-09-10 — checkpoint перед передачей в следующую сессию
 
@@ -843,3 +844,52 @@ DTO как есть. Экран перепроверял права только
 
 **Осталось.** Новая сборка дожимается до телефона сама: `index.html` отдаётся
 `no-cache`, ассеты хешированы, поэтому достаточно открыть мини-апп заново.
+
+### 2026-09-10 — финальная приёмка: живая кампания и CLOSED
+
+План закрыт. Ручной проход владельца и живая пара сделок закрыли последние
+пункты, которые до этого держались на прошлых прогонах.
+
+**Ручная приёмка (владелец, iPhone, настоящий Telegram).**
+
+- Свайп вниз работает, вибрация приходит, перечитка запускается.
+- Замечание владельца к индикатору («вылезает прямоугольником и перекрывает»)
+  закрыто коммитом `9aa4424`: спиннер живёт в зазоре, контент едет вниз, машинный
+  замер в харнессе (`coversContent: false`) и скриншот фаз это подтверждают.
+- Плашек и rail в здоровом состоянии нет — подтверждено и на телефоне, и
+  замером мутаций.
+
+**Живая кампания (REAL Aster Testnet).**
+
+- Мастер открыл две позиции (`BTCUSDT` LONG, `ETHUSDT` SHORT); движок
+  реплицировал их на четырёх подписчиков: `SET_LEVERAGE`/`MARKET_OPEN`/
+  `PLACE_STOP` — все `CONFIRMED`. Размеры посчитаны от риска на стоп
+  (copyc* 1 %, tg 5 %) с учётом общего риск-бюджета аккаунта.
+- Частичное сокращение на tg сверено с биржей до копейки по `userTrades`
+  (`SELL 0.008 @ 77290.7`, realized `1.4056`), и ровно эта же строка показана
+  в ленте Активности.
+- **Закрытия приехали в уже открытый мини-апп без ручного обновления**: экран сам
+  показал `Открытые позиции 0`, `Стоп подтверждён 0 из 0` и пустое состояние.
+- Финальный аудит: `AUDIT: FLAT-ALL` — все пять аккаунтов `positions=0`,
+  `open_orders=0`; в журнале закрытия `CONFIRMED` по всем подписчикам.
+
+**Гейты на финальном дереве.**
+
+- Backend: `pytest -q -m "not testnet"` — **1549 passed, 2 skipped**.
+- Frontend: **35 files / 401 passed**, Oxlint clean, build PASS.
+- `ruff check`, `git diff --check`, doc links/budgets/facts — PASS.
+- Новый бандл против публичного адреса: `smoke` без шума и кнопок, `jitter`
+  100 s — 13 текстовых мутаций без предупреждений, `churn` — 50 переключений и
+  один WebSocket, `series`/`nested` — `noise: []`.
+
+**Открыто за пределами плана (не блокирует live mode).**
+
+- `history sync failed account_id=copyc1 stream=capture:BTCUSDT` — ругается раз в
+  ~5 минут. Категория из durable checkpoint: `HistoryReconciliationError`, то есть
+  движок истории сознательно не публикует недоказуемое окно и уходит в backoff
+  (данные не портятся, история просто остаётся прежней). Это отдельная задача
+  истории, вне объёма live-плана.
+- Silent mark-price stream на testnet — свойство кластера; перед mainnet стоит
+  перепроверить, что production-кластер отдаёт кадры и fallback остаётся холодным.
+- Известный пре-существующий дрейф `ruff check .` в `scripts/check_doc_facts.py`
+  не входит в объём этого плана.

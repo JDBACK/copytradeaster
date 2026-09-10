@@ -1940,6 +1940,11 @@ recipient/ownership повторно проверяются при commit, curso
 
 ## Mini App Live Mode checkpoint — 2026-09-10 (снимок момента)
 
+> Финальный статус: **CLOSED** — ручная приёмка владельца (iPhone, настоящий
+> Telegram WebView) выполнена, живая кампания открытия/закрытия позиций прошла,
+> финальный аудит `FLAT-ALL`. Детали — в хвосте
+> `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`; счётчики ниже — снимок момента.
+
 В ветке `codex/miniapp-live-updates` реализованы L1–L6 live presentation mode:
 process-local follower snapshots, authenticated single-use ticket/WebSocket,
 private follower-stream hints с coalesced authoritative REST refresh, shared
