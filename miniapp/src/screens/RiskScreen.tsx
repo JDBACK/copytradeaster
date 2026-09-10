@@ -328,8 +328,8 @@ export function RiskScreen({
         <h2 className="h2">Что это значит</h2>
         {preview.snapshot.data?.available_usdt != null && preview.snapshot.data.steps.some(step => !isRiskDirty(step.risk_percent, active)) ? <>
           <p className="lede">При доступных {formatUsdt(preview.snapshot.data.available_usdt)} расчётный бюджет на сделку — около {formatUsdt(preview.snapshot.data.steps.find(step => !isRiskDirty(step.risk_percent, active))?.budget_usdt)}.</p>
-          <p className="freshness">{preview.snapshot.data.freshness !== 'fresh' || previewUnhealthy ? 'Пример по прежнему снимку' : 'Снимок'}: {formatDateTime(preview.snapshot.data.snapshot_captured_at)}</p>
-        </> : <p className="lede">Денежный пример появится после обновления баланса.</p>}
+          <p className="freshness">{preview.snapshot.data.freshness !== 'fresh' || previewUnhealthy ? 'Пример по последнему снимку' : 'Снимок'}: {formatDateTime(preview.snapshot.data.snapshot_captured_at)}</p>
+        </> : <p className="lede">Денежный пример появится, когда баланс обновится.</p>}
         <p className="footer-note">Это бюджет расчёта объёма, а не гарантированный предел убытка: цена исполнения стопа и доступная сумма могут измениться.</p>
         <p className="footer-note">Новое значение используется в последующих расчётах. При проверке открытой позиции её объём может быть сокращён.</p>
       </section>
