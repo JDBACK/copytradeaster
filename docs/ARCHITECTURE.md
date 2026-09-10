@@ -863,6 +863,10 @@ public mark event -------------------------> quote revision -> live invalidation
 browser reconnect -> REST resnapshot ------> LIVE
 ```
 
+Liveness public mark-стрима объявляется только кадром, который несёт mark price:
+SUBSCRIBE-ack — тоже кадр, и если счесть его доказательством, REST fallback
+простаивает, PnL замирает, а health падает на каждом 10-секундном таймауте.
+
 HTTP resource generations и live revisions монотонны: duplicate/out-of-order
 события игнорируются, а старый request не может затереть более новую публикацию.
 `hello` всегда отправляется первым и задаёт baseline revision. Bounded latest-wins

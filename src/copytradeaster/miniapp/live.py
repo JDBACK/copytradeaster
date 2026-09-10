@@ -470,12 +470,17 @@ class MiniAppLiveRuntime:
                             return
                         if receive not in done:
                             raise TimeoutError("mark-price stream produced no frame")
-                        if not self._market_live:
-                            self._market_live = True
-                            self._refresh_health()
                         prices = _mark_prices(receive.result(), set(self.app.cfg.symbol_whitelist))
                         if prices:
                             self.app.follower_snapshots.apply_mark_prices(prices)
+                            # Only a frame that actually carries a mark price
+                            # proves the stream delivers quotes. The SUBSCRIBE
+                            # acknowledgement is a frame too, so claiming
+                            # liveness on it idles the REST fallback while PnL
+                            # freezes, then drops health on every 10s timeout.
+                            if not self._market_live:
+                                self._market_live = True
+                                self._refresh_health()
                         deadline = time.monotonic() + LIVE_MARK_ACK_TIMEOUT_S
             except asyncio.CancelledError:
                 raise

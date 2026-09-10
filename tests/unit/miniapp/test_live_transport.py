@@ -318,6 +318,80 @@ async def test_silent_mark_stream_is_not_claimed_live() -> None:
     assert hub._health.get("a") != "live"
 
 
+async def test_subscription_ack_alone_never_claims_live_quotes() -> None:
+    """The ack is a frame too; only a mark price may claim stream liveness."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    import pytest
+
+    class AckOnlyWS:
+        def __init__(self) -> None:
+            self.acks = 0
+            self.closes = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            self.closes += 1
+            return False
+
+        async def send(self, payload: str) -> None:
+            pass
+
+        async def recv(self):
+            if self.acks == 0:
+                self.acks += 1
+                return json.dumps({"id": 1, "result": None})
+            await asyncio.sleep(3600)
+
+    ws = AckOnlyWS()
+    hub = MiniAppLiveHub()
+    queue, _ = hub.subscribe("a")
+    applied: list[dict[str, Decimal]] = []
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = False
+    live._quotes_live = False
+    live._mark_fallback_at = 0.0
+    live._private_health = {"a": True}
+    live.hub = hub
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=lambda prices: applied.append(prices)),
+    )
+    live._market_ws_factory = lambda url: ws
+
+    import copytradeaster.miniapp.live as live_module
+
+    original = live_module.LIVE_MARK_ACK_TIMEOUT_S
+    live_module.LIVE_MARK_ACK_TIMEOUT_S = 0.05
+    try:
+        task = asyncio.create_task(live._run_market_stream())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        live_module.LIVE_MARK_ACK_TIMEOUT_S = original
+
+    events = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+    assert ws.acks == 1
+    assert applied == []
+    assert live._market_live is False
+    assert live._quotes_live is False
+    # The acknowledgement must not be published as a live verdict: the rail
+    # would otherwise claim flowing quotes while PnL stands still.
+    assert [event for event in events if event.get("health") == "live"] == []
+
+
 async def test_rest_mark_fallback_keeps_quotes_live_without_frames() -> None:
     """The silent-cluster case: REST marks fill the presentation quote path."""
     import asyncio
