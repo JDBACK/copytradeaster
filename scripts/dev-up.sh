@@ -81,6 +81,53 @@ current_public_url() {
   grep -E '^CT_MINIAPP_PUBLIC_URL=' .env 2>/dev/null | cut -d= -f2- || true
 }
 
+host_of() {
+  printf '%s' "$1" | sed -E 's|^https?://([^/:]+).*|\1|'
+}
+
+doh_a_record() {
+  # Publication probe only: asks the public DoH resolver, never this machine's
+  # resolver, so a not-yet-published name cannot poison the local cache.
+  curl -sk --max-time 10 "https://1.1.1.1/dns-query?name=$1&type=A" \
+    -H 'accept: application/dns-json' 2>/dev/null \
+    | grep -oE '"data":"[0-9]{1,3}(\.[0-9]{1,3}){3}"' | head -1 | cut -d'"' -f4 || true
+}
+
+system_resolves() {
+  # True when THIS machine resolves the host. Only call it after the name is
+  # published (doh_a_record answers): a premature lookup makes macOS cache the
+  # NXDOMAIN for the zone's 1800s SOA minimum, and Telegram's WebView then
+  # fails with ERR_NAME_NOT_RESOLVED for the next half hour although the
+  # tunnel itself is healthy. Recovery needs --rotate, which invalidates the
+  # Telegram menu button for minutes.
+  .venv/bin/python - "$1" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+socket.gethostbyname(sys.argv[1])
+PY
+}
+
+wait_tunnel_dns() {
+  # Publication first (DoH), local resolver second, so the local resolver
+  # never sees an unpublished hostname.
+  local host="$1" i
+  for i in $(seq 1 30); do
+    [ -n "$(doh_a_record "$host")" ] && break
+    if [ "$i" -eq 30 ]; then
+      echo "ERROR: $host did not appear in public DNS after ~150s." >&2
+      return 1
+    fi
+    sleep 5
+  done
+  for i in $(seq 1 12); do
+    system_resolves "$host" && return 0
+    sleep 5
+  done
+  echo "ERROR: this machine still cannot resolve a published $host." >&2
+  return 1
+}
+
 tunnel_process_alive() {
   local pid command
   if [ -f "$TUNNEL_PID_FILE" ]; then
@@ -154,6 +201,12 @@ if [ "$MODE" = "reuse" ] && stack_alive; then
     echo "  Tunnel and bot were left running; retry without --rotate." >&2
     exit 1
   fi
+  if ! system_resolves "$(host_of "$(current_public_url)")"; then
+    echo "ERROR: the edge serves the Mini App, but this machine cannot resolve" >&2
+    echo "  $(host_of "$(current_public_url)") — Telegram WebView would fail." >&2
+    echo "  The name is poisoned locally; publish a fresh one: scripts/dev-up.sh --rotate" >&2
+    exit 1
+  fi
   if wait_button "$(current_public_url)"; then
     echo "READY — live stack already converged (nothing restarted)."
     echo "  Telegram:  open the bot chat -> menu button ASTER COPY"
@@ -213,6 +266,8 @@ else
     exit 1
   fi
   echo "    public URL: ${TUNNEL_URL}"
+  echo "==> Waiting for the hostname in public DNS (before this machine asks its own resolver)"
+  wait_tunnel_dns "$(host_of "$TUNNEL_URL")" || exit 1
 
   echo "==> Writing CT_MINIAPP_PUBLIC_URL to .env"
   sed -i '' "s|^CT_MINIAPP_PUBLIC_URL=.*|CT_MINIAPP_PUBLIC_URL=${TUNNEL_URL}|" .env

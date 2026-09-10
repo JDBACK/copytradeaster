@@ -47,3 +47,11 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 - Exchange-touching scripts go through `Settings()` + `Database` + `SqliteCredentials` — secrets only from env/DB, never from argv. `src/` reachability is via `sys.path` insert (`capture_stream`, `manual_master_order`, `benchmark_history`) or the environment (`hybrid_load_test`, `testnet_soak`, `preview_miniapp_engine`); stdlib-only checks (`check_doc_links`, `detach_process`, `verify_menu_button`) and the offline `benchmark_history` probe (temporary SQLite, `Database` only) use neither.
 - Campaigns write JSON reports (`--report`) and never touch prod DB directly: clone it (hybrid/soak) or backup-API-copy it (preview).
 - New ops scripts go here with usage in the docstring (`Usage:`/`Commands:`/`Run:` block); visual previews follow `preview_miniapp_engine.py` (backup copy + dev user + `--confirm-*` flag).
+
+**Tunnel hostname DNS gate (dev-up.sh):** after starting cloudflared, `wait_tunnel_dns`
+waits (a) for the new hostname in public DoH and only then (b) for this machine's own
+resolver. Asking the local resolver first makes macOS cache the NXDOMAIN for the zone's
+1800s SOA minimum, and Telegram WebView then fails with ERR_NAME_NOT_RESOLVED for ~30
+minutes although the tunnel and edge are healthy; the only recovery is `--rotate`, which
+invalidates the Telegram menu button for minutes. The reuse path applies the same check and
+fails loudly instead of serving READY on a locally unresolvable hostname.
