@@ -13,10 +13,20 @@
 > **Corrective (2026-09-10, позже в тот же день):** закрыты два хвоста live-плана — история
 > `copyc1/BTCUSDT` (один биржевой поток держал обе эпохи position mode, из-за чего окно не
 > публиковалось; replay публикует книгу своего authoritative boundary) и liveness public
-> mark-стрима (SUBSCRIBE-ack больше не считается доказательством котировок). Актуальный полный
-> offline gate: backend **1556 passed / 2 skipped / 87 deselected**, frontend **35 файлов / 401
-> passed**; ruff check/format, doc links/budgets/facts и `git diff --check` чисто. Детали,
+> mark-стрима (SUBSCRIBE-ack больше не считается доказательством котировок). Детали,
 > причина и проверка — live-план §8, «corrective pass».
+> **Merge-review corrective (2026-09-10, вечер):** по результатам полного merge-review ветки
+> `codex/miniapp-live-updates` против `main` закрыты 7 × P1 и 8 × P2: потеря книги истории при
+> смене position mode, глобальный (вместо посимвольного) health/fallback mark-price и вердикт
+> `check_mark_stream.py`, возврат private stream в `live` после смерти сокета, сброс backoff
+> `UserStream` на рукопожатии, невозрастающая лестница self-heal во фронтенде, скрытые
+> keep-alive вкладки как live-потребители, отсутствие L4-coalescing котировок и cadence, а также
+> восемь пунктов P2 (кнопка generic retry, дублирование rail, истечение Agent evidence как
+> «потеря связи», a11y тикающего rail, отчёт pull-to-refresh раньше истины, whitespace-дрейф,
+> docs-факты). Актуальный полный offline gate: backend **1570 passed / 2 skipped / 87
+> deselected**, frontend **35 файлов / 412 passed**; `ruff check`/`format --check` (312 файлов),
+> doc links/budgets/facts и `git diff --check` чисто. Детали каждого пункта — live-план
+> «merge-review corrective».
 
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
@@ -1820,7 +1830,7 @@ risk_to_stop, `TradeUnavailableError`) и методы в `ApplicationProtocol`.
 **1279 passed / 2 skipped / 44 deselected**, 18.33 s. Ruff всего репо clean.
 Остаются остаток S1.4 (risk preview, resume-контекст), S1.5–S1.6; G1 не закрыт.
 
-Примечание (2026-09-10): «стало 25 POST» выше — исторический снимок на момент записи; актуально 26 POST (`grep -c 'add_post("/miniapp/api/' src/copytradeaster/miniapp/server.py` → 26). Историю не переписываем.
+Примечание (2026-09-10): «стало 25 POST» выше — исторический снимок на момент записи; актуально 27 POST (`grep -c 'add_post("/miniapp/api/' src/copytradeaster/miniapp/server.py` → 27). Историю не переписываем.
 
 ## 2026-09-06 — S1.4 остаток: risk preview и resume-контекст
 

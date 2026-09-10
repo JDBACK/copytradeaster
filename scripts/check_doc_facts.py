@@ -38,11 +38,13 @@ local://docs_verify_top.md, M1-M6 in local://docs_verify_map.md):
   P-SECTIONS .. `## N.` section count in docs/ARCHITECTURE.md (pinned 20) vs
                 the `§§1–20` range claimed in root AGENTS.md.
 
-Out of scope (printed as SKIPPED, never run): hot suite-run facts such as
-offline 1525 passed / frontend 349 passed need pytest/vitest executions; this
-static gate never runs suites. Their home is docs/ENGINE_TEST_STATUS_2026-08.md.
-Same exemption covers append-only snapshots (ENGINE "стало 25 POST"): only
-standing-docs claims with the `/miniapp/api/*` glob are checked by P-POST.
+Out of scope (printed as SKIPPED, never run): hot suite-run facts (passed /
+skipped counters, formatted-file counts) need pytest/vitest executions; this
+static gate never runs suites, and it deliberately does not quote numbers it
+cannot verify. Their home is docs/ENGINE_TEST_STATUS_2026-08.md. Same exemption
+covers append-only snapshots: only standing-docs claims with the
+`/miniapp/api/*` glob are checked by P-POST, so a journal row may keep the
+count of the day it was written.
 """
 
 from __future__ import annotations
@@ -374,9 +376,8 @@ def main() -> int:
             passed.append(name)
             print(f"PASS {name}")
     skipped.append(
-        "SKIPPED suite-counters (offline 1525 passed / frontend 349 passed): hot suite-run "
-        "facts need pytest/vitest executions, which this static gate never runs;"
-        f" home is {ENGINE.name}."
+        "SKIPPED suite-counters: hot suite-run facts need pytest/vitest executions, which "
+        f"this static gate never runs and never quotes; home is {ENGINE.name}."
     )
     for line in skipped:
         print(line)

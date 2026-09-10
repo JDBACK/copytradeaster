@@ -956,8 +956,92 @@ SILENT (то есть fallback там обязателен). Вторая пол
 `_market_live`, которая теперь включается только по кадру с ценой.
 
 **3. `ruff check .` / дрейф форматирования — снято.** На текущем дереве
-`.venv/bin/ruff check .` и `ruff format --check .` чисто (309 файлов).
+`.venv/bin/ruff check .` и `ruff format --check .` чисто (309 файлов; число на
+момент записи — актуальное см. в предыдущем разделе и в «merge-review corrective»
+ниже).
 
 Гейты после правок: backend `pytest -q -m "not testnet"` — **1556 passed, 2
 skipped**; frontend — **35 files / 401 passed**; ruff, `git diff --check`, doc
+links/budgets/facts — PASS.
+
+### 2026-09-10 — merge-review corrective: 7 × P1 и 8 × P2 закрыты
+
+Полный merge-style review ветки `codex/miniapp-live-updates` (`fb06825`) против
+`main` (`af757d0`) дал MERGE BLOCKED: семь независимых P1 и восемь P2. Ниже —
+что именно было не так и что сделано; каждый P1 закрыт регресс-тестом, который без
+фикса падает. Торговые write-endpoint'ы при правках не запускались.
+
+**P1-1. Смена position mode теряла целую книгу.** `HistoryProjection.publish_window`
+возобновлял replay от seeds принятого boundary, поэтому после принятого HEDGE
+boundary полный round-trip ONE_WAY (`BOTH`) отбрасывался целиком, boundary уезжал
+вперёд, а dirty консьюмился: сделка и её PnL исчезали. Теперь расхождение набора ног
+authoritative ending и boundary распознаётся как смена книги: replay идёт от
+accepted origin с seeds, выведенными walk-back'ом из ending, origin переанкоривается
+на новую книгу, а чужая книга не переписывается и не помечается split'ом
+(`affected` ограничен книгой replay). Регрессы:
+`test_position_mode_switch_replays_the_new_book`,
+`test_mode_switch_origin_replays_the_new_book_after_a_late_fact`.
+
+**P1-2. Health и REST-fallback mark-price считались глобально.** Один живой символ
+скрывал смерть другого: общий `_market_live` не давал fallback'у включиться для
+замолчавшего символа, а health оставался `live`. Теперь кадры, freshness, fallback
+и health — per symbol (`_market_frames` / `_fallback_quotes_at`,
+`_silent_symbols()`), REST-запрос идёт только за замолчавшими символами. Гейт
+`check_mark_stream.py` судит по каждому символу: `STREAMING` только когда кадры
+пришли по **всем** запрошенным, частичный поток — собственный exit 3 `PARTIAL`.
+
+**P1-3. Private stream возвращался в `live` после смерти сокета.** Authoritative
+REST boundary, запущенный на connect, переживал сокет (disconnect callback
+вызывается раньше его завершения) и безусловно ставил `_private_health=True`.
+Теперь успех boundary пишется только пока сокет, породивший это чтение, жив.
+
+**P1-4. Backoff `UserStream` сбрасывался на handshake.** Соединение, сразу
+отдающее `listenKeyExpired`, покупало новое рукопожатие каждые base-интервала
+вместо лестницы 1→2→4…→30 c; каждый accepted reconnect дополнительно тянул
+authoritative snapshot Mini App (~50 weight). Сброс — только после сессии, прожившей
+`STABLE_SESSION_S` (30 c).
+
+**P1-5. Лестница self-heal во фронтенде не росла.** Повтор очищает `error`, а
+счётчик сбрасывался ровно на `error === null`, поэтому каждая попытка снова ждала
+1 c: при устойчивом outage это ~1 Hz на живой ресурс вместо widening backoff.
+Сброс — только на реально завершившееся чтение (`receivedAt`), в `useResource` и
+`useHistory`.
+
+**P1-6. Скрытые keep-alive экраны оставались live-потребителями.** Подписка не
+снимается, а live-инвалидация делала forced read для каждого подписчика, включая
+невидимые вкладки. Добавлен refcount видимых потребителей (`setActive` /
+`hasActiveSubscribers`, для истории — `setActive` / `hasActiveConsumers`):
+live-чтения идут только к активным, скрытые помечаются stale и обновляются на
+активации.
+
+**P1-7. L4 coalescing/render cadence не был реализован.** Каждый mark-кадр
+инвалидировал DTO немедленно; при 2 символах × ~1 кадр/с это быстрее измеренного
+weak-чтения через туннель (~0.9 c), поэтому ответ фенсился следующим кадром, DTO и
+PnL замирали, а клиент крутил HTTP-loop. Теперь котировки coalesce'ятся по символу и
+публикуются не чаще `MARK_RENDER_CADENCE_S` (1 c), а quote-инвалидация помечает DTO
+stale, не фенся чтение, которое уже в полёте; state-публикации фенсят как раньше
+(`stateInvalidationRevision`). Контрольный случай «state boundary по-прежнему
+фенсит» остался зелёным.
+
+**P2 (8–15).** Уникальный `clientOrderId` в `manual_master_order.py`
+(`secrets.token_hex(4)` вместо `int(time.time()) % 100000`); снята generic-кнопка
+«Попробовать снова» на экране Account Builder (упавшее чтение лечит bounded retry,
+explicit-путь — «Перепроверить разрешения»); System Status и Account Builder больше
+не повторяют transport warning, который уже произносит rail (`railSpeaks`);
+истечение Agent evidence перестало изображаться как потеря транспорта (своя копия +
+однократный авто-reproof вместо «Нет связи»); возраст в rail вынесен из
+`role="status"`, чтобы screen reader не читал тикающую строку каждую секунду;
+`pullRefresh()` дожидается видимой истории и падает, если чтение не удалось (раньше
+`allSettled` + fire-and-forget давали success-haptic при полном провале); снят
+whitespace-дрейф (`git diff --check` падал на `pagingFeedback.test.tsx`,
+`trustSteps.ts`, `usePaging.ts`); приведены в порядок docs-факты: три
+противоречивых строки `audit_miniapp_browser.mjs` в `scripts/AGENTS.md` → одна,
+usage самого скрипта дополнен `status/churn/shot` и флагами, дубль
+`TYPE_CHECKING` в `miniapp/server.py`, §10 в «заморозке»
+`DEV_PLAN_SKELETON.md`, 27 POST вместо 26, `check_doc_facts.py` больше не печатает
+устаревшие suite-числа.
+
+**Гейты после правок.** backend `pytest -q -m "not testnet"` — **1570 passed, 2
+skipped, 87 deselected**; frontend — **35 files / 412 passed**, Oxlint и build PASS;
+`ruff check .`, `ruff format --check .` (312 файлов), `git diff --check`, doc
 links/budgets/facts — PASS.

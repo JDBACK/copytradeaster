@@ -116,6 +116,9 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `miniapp/test_history_server.py` | History routes: cursor/limit validation, owned trade/events/feed shapes |
 | `miniapp/test_trade_events_c2_server.py` | Split fills/events cursors over HTTP, revision-change signal (C2) |
 | `miniapp/test_activity_feed_snapshot_c7.py` | Snapshot-bound feed: pin high_water, no interleave, banner, 400s (R9/C7) |
+| `miniapp/test_live_transport.py` | Live presentation transport: ticket single-use/TTL + access gate, account-scoped latest-wins hub with process epoch, per-symbol mark quotes with freshness/cadence and the REST fallback, private-stream health races |
+| `test_mark_stream_gate.py` | `scripts/check_mark_stream.py` verdict: streaming only when every requested symbol delivered frames, partial feed is its own exit code |
+| `test_manual_master_order_ids.py` | `scripts/manual_master_order.py` client order ids stay unique for one price at one instant (-4015) |
 | `notifications/test_formatter.py` | Pure formatter: open/close/stop/TP/leverage/cancel copy + price/volume formatting, skip reasons |
 | `notifications/test_notifications.py` | Router+worker on tmp SQLite: account/global/critical-admin routing, dedup, retry-after/network/403, truncation, pacing, lease recovery, burst bound, hourly maintenance tick (C8) |
 | `notifications/test_user_event_delivery_c6.py` | Durable delivery cursor: crash replay, rollout floor, link gate (R6/R7/C6) |

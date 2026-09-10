@@ -1,6 +1,6 @@
 # Каркас плана разработки копитрейд-бота на AsterDex
 
-> **Заморозка (2026-09-10):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живая часть — только §9 «После hardening».
+> **Заморозка (2026-09-10):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живые части — §9 «После hardening» (launch-path и ожидающая повторная квалификация) и §10 «Mini App Live Mode» (ACCEPTED 2026-09-10, журнал `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`).
 
 Статус: Stage 1, Stage 2 и Stage 3 (Part 1 + Part 2, P2.0–P2.7 с corrective)
 закрыты; всё смержено в `main`. Сверх исходного видения сделаны: RAM
@@ -10,7 +10,7 @@ attestation, System Status и 4-табовый follower Mini App (27 POST
 факт — чеклисты ниже). Полный фактологический бэкграунд — в
 [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
 
-Актуальные счётчики — см. `ENGINE_TEST_STATUS_2026-08.md` TL;DR (2026-09-09).
+Актуальные счётчики — только в `ENGINE_TEST_STATUS_2026-08.md`; числа в этом файле не поддерживаются и не дублируются.
 Проверенный merge готов к fast-forward/push в Git `main`; mainnet guard остаётся
 fail-closed.
 ## 1. Стек

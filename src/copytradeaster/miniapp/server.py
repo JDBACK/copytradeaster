@@ -52,9 +52,6 @@ from copytradeaster.onboarding.errors import OnboardingErrorCode
 if TYPE_CHECKING:
     from copytradeaster.miniapp.live import MiniAppLiveRuntime
 
-if TYPE_CHECKING:
-    from copytradeaster.miniapp.live import MiniAppLiveRuntime
-
 log = get_logger(__name__)
 
 MAX_BODY_BYTES = 64 * 1024

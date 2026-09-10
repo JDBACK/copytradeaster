@@ -18,13 +18,24 @@
  * overwrite the stub with an empty initData and silently audit the wrong state.
  *
  * Usage:
- *   node scripts/audit_miniapp_browser.mjs smoke  --init <file>
- *   node scripts/audit_miniapp_browser.mjs swipe  --init <file>
- *   node scripts/audit_miniapp_browser.mjs series --init <file>
- *   node scripts/audit_miniapp_browser.mjs nested --init <file>
+ *   node scripts/audit_miniapp_browser.mjs smoke|series|nested  --init <file>
+ *   node scripts/audit_miniapp_browser.mjs swipe --init <file> [--out data/pull]
  *   node scripts/audit_miniapp_browser.mjs jitter --init <file> --seconds 190
+ *   node scripts/audit_miniapp_browser.mjs status --init <file> [--after 95]
+ *   node scripts/audit_miniapp_browser.mjs churn  --init <file>
+ *   node scripts/audit_miniapp_browser.mjs shot   --init <file> [--out data/shot.png]
+ *
+ * Modes: smoke (what the surface shows), swipe (dispatched touch pull: indicator
+ * phases, gap, Telegram swipe handoff, the refresh=true reads it fires, the
+ * scrolled-away guard), series (four tabs), nested (every nested screen),
+ * jitter (every DOM mutation for --seconds), status (samples System Status for
+ * 30 s after opening: does the app re-prove permissions by itself), churn (50
+ * tab switches plus nested navigation with a counter over WebSocket opens),
+ * shot (PNG plus text of the current surface).
  *
  * Options: --url (default http://127.0.0.1:8080/miniapp/), --port 9333,
+ * --seconds N (jitter window), --tab N and --closed (root tab to watch),
+ * --after N (idle on the root tab first), --out <prefix> (swipe/shot output),
  * --chrome (default /Applications/Google Chrome.app/...; Chrome/Chromium only).
  */
 
