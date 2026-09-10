@@ -2,6 +2,7 @@
 .env
 .botkey
 __pycache__/
+*.egg-info/
 .venv/
 *.pyc
 wallet.txt

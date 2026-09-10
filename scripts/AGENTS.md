@@ -51,6 +51,7 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 
 ## Conventions
 
+- The venv is `uv`-managed: `uv sync` provisions interpreter + deps and `uv run <tool>` is the canonical invocation. Rows below keep `.venv/bin/python ...` — the interpreter still lives at that path, so both forms work.
 - Exchange-touching scripts go through `Settings()` + `Database` + `SqliteCredentials` — secrets only from env/DB, never from argv. `src/` reachability is via `sys.path` insert (`capture_stream`, `manual_master_order`, `benchmark_history`) or the environment (`hybrid_load_test`, `testnet_soak`, `preview_miniapp_engine`); stdlib-only checks (`check_doc_links`, `detach_process`, `verify_menu_button`) and the offline `benchmark_history` probe (temporary SQLite, `Database` only) use neither.
 - Campaigns write JSON reports (`--report`) and never touch prod DB directly: clone it (hybrid/soak) or backup-API-copy it (preview).
 - New ops scripts go here with usage in the docstring (`Usage:`/`Commands:`/`Run:` block); visual previews follow `preview_miniapp_engine.py` (backup copy + dev user + `--confirm-*` flag).

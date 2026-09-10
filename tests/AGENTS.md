@@ -11,10 +11,11 @@ Suite counters live only in `docs/ENGINE_TEST_STATUS_2026-08.md` — never copy 
 - `testnet/` — live files (count lives only in `docs/ENGINE_TEST_STATUS_2026-08.md`) + `support/builder_live.py`: signed runs against `fapi.asterdex-testnet.com`, double-gated by `pytest.mark.testnet` + `CT_TESTNET=1`.
 
 ```bash
-pytest -q -m "not testnet"                              # offline (unit + integration + replay)
-pytest -q -m "not testnet" --cov=src/copytradeaster     # + coverage (>= 87% by eye, no fail_under)
-CT_TESTNET=1 pytest tests/testnet/ -v                   # signed live (needs wallet.txt, leave flat behind)
-CT_LOAD=1 pytest tests/integration/test_shadow_scale.py # scale preflight 30x100 + 100x20 (load marker unused)
+uv sync                                                 # env + dev group (see tests/AGENTS.md conventions)
+uv run pytest -q -m "not testnet"                       # offline (unit + integration + replay)
+uv run pytest -q -m "not testnet" --cov=src/copytradeaster # + coverage (>= 87% by eye, no fail_under)
+CT_TESTNET=1 uv run pytest tests/testnet/ -v             # signed live (needs wallet.txt, leave flat behind)
+CT_LOAD=1 uv run pytest tests/integration/test_shadow_scale.py # scale preflight 30x100 + 100x20 (load marker unused)
 cd miniapp && pnpm test                                 # frontend Vitest; counters live in docs/ENGINE_TEST_STATUS_2026-08.md
 ```
 

@@ -21,11 +21,14 @@ authenticated live-каналу, единственный ручной жест 
 ## Быстрый старт для разработки
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q -m "not testnet"
-.venv/bin/ruff check src tests scripts
+uv sync                                    # .venv + dev-группа; Python 3.12 uv ставит сам
+uv run pytest -q -m "not testnet"
+uv run ruff check src tests scripts
 ```
+
+`uv.lock` лежит в репозитории: окружение воспроизводится из него, а не из
+текущего состояния PyPI. Dev-инструменты (pytest, ruff, respx, coverage) — в
+PEP 735 группе `dev`, поэтому обычный `uv sync` без флагов ставит и их.
 
 Signed testnet-сценарии требуют локальных testnet credentials и явного
 `CT_TESTNET=1`. Приватные ключи, `.env`, `wallet.txt` и run-БД не должны
@@ -34,8 +37,11 @@ Signed testnet-сценарии требуют локальных testnet creden
 Запуск общего engine + Telegram polling process:
 
 ```bash
-.venv/bin/python -m copytradeaster run-bot
+uv run python -m copytradeaster run-bot
 ```
+
+Пересобрать окружение после изменения зависимостей: `uv sync` (или `uv add`
+/`uv remove` для правки `pyproject.toml` и lockfile в одном шаге).
 
 Начальная точка документации — [docs/AGENTS.md](docs/AGENTS.md). Текущий
 статус торгового ядра ведётся только в
