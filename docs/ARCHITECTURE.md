@@ -866,6 +866,9 @@ browser reconnect -> REST resnapshot ------> LIVE
 Liveness public mark-стрима объявляется только кадром, который несёт mark price:
 SUBSCRIBE-ack — тоже кадр, и если счесть его доказательством, REST fallback
 простаивает, PnL замирает, а health падает на каждом 10-секундном таймауте.
+Backoff переподключения растёт, пока кадр с ценой не пришёл: принятое-и-молчащее
+соединение не покупает новое рукопожатие каждые 11 c. Состояние кластера
+проверяется предполётно: `scripts/check_mark_stream.py`.
 
 HTTP resource generations и live revisions монотонны: duplicate/out-of-order
 события игнорируются, а старый request не может затереть более новую публикацию.

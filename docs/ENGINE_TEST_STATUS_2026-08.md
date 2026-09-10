@@ -14,7 +14,7 @@
 > `copyc1/BTCUSDT` (один биржевой поток держал обе эпохи position mode, из-за чего окно не
 > публиковалось; replay публикует книгу своего authoritative boundary) и liveness public
 > mark-стрима (SUBSCRIBE-ack больше не считается доказательством котировок). Актуальный полный
-> offline gate: backend **1554 passed / 2 skipped / 87 deselected**, frontend **35 файлов / 401
+> offline gate: backend **1556 passed / 2 skipped / 87 deselected**, frontend **35 файлов / 401
 > passed**; ruff check/format, doc links/budgets/facts и `git diff --check` чисто. Детали,
 > причина и проверка — live-план §8, «corrective pass».
 

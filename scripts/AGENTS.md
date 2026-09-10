@@ -45,6 +45,12 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 | `check_doc_budgets.py` | Offline line-budget gate for agent maps: compares each file against `doc-budgets.json`, exit 1 on excess | `python scripts/check_doc_budgets.py` |
 | `check_doc_facts.py` | Offline facts-gate for standing docs: pins Mini App route / package / screenshot / asset / section counts and claim-vs-truth consistency (probes P-POST…P-SECTIONS); hot suite counters print SKIPPED, suites never run | `python scripts/check_doc_facts.py` |
 
+## Cluster probes (public reads, no credentials)
+
+| Script | Purpose | Run |
+|---|---|---|
+| `check_mark_stream.py` | Pre-mainnet gate for the public mark-price stream: reads the official WS (`subscribe` path, then `raw` for a single symbol) and the unsigned `premiumIndex` fallback, prints per-symbol frame counts/gaps and one verdict, with a frame reader independent of `miniapp/live.py`. Needs no `.env`, database or keys; exit 0 streaming, 1 acknowledged-but-silent, 2 probe failure. Measured 2026-09-10: mainnet STREAMING (~1 s gaps), testnet SILENT → REST fallback carries presentation quotes there | `.venv/bin/python scripts/check_mark_stream.py [--network testnet\|mainnet] [--symbols BTCUSDT,ETHUSDT] [--seconds 30]` |
+
 ## Conventions
 
 - Exchange-touching scripts go through `Settings()` + `Database` + `SqliteCredentials` — secrets only from env/DB, never from argv. `src/` reachability is via `sys.path` insert (`capture_stream`, `manual_master_order`, `benchmark_history`) or the environment (`hybrid_load_test`, `testnet_soak`, `preview_miniapp_engine`); stdlib-only checks (`check_doc_links`, `detach_process`, `verify_menu_button`) and the offline `benchmark_history` probe (temporary SQLite, `Database` only) use neither.
