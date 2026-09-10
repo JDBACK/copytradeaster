@@ -22,6 +22,7 @@ import {
   lastCheckRowValue,
   overallValue,
   permissionsRowValue,
+  needsPermissionReproof,
   positionsRowValue,
   reasonCopy,
   remediationOf,
@@ -31,6 +32,7 @@ import {
 } from '../systemStatus'
 import { closeMiniApp, hapticImpact } from '../telegram'
 import { formatTime } from '../format'
+import { useAgeSeconds } from '../useAge'
 import type { StatusDTO } from '../types'
 import { MiniAppResources } from '../resources'
 import { useResource, useScreenResources, useTransportStale } from '../useResource'
@@ -71,7 +73,9 @@ export function SystemStatusScreen({
   // opening this screen re-proves it once instead of telling the user to ask
   // again. Bounded by the DTO itself: as soon as permissions read valid (or the
   // attempt failed and is described by the row) the effect stops re-firing.
-  const permissionsUnproven = dto !== null && dto.permissions_state !== 'valid'
+  // again. Age counts too: a cached DTO can keep a green verdict with a stamp
+  // from an hour ago, and the row would then read "Проверка: … · 25 мин назад".
+  const permissionsUnproven = dto !== null && needsPermissionReproof(dto)
   const permissionsAutoChecked = useRef(false)
   useEffect(() => {
     if (!permissionsUnproven || permissionsAutoChecked.current) return
@@ -136,6 +140,7 @@ export function SystemStatusScreen({
       transportStale={load.transportStale}
       accountMasked={accountMasked}
       onOpenBot={openBot}
+      receivedAt={resource.snapshot.receivedAt}
     />
   )
 }
@@ -146,12 +151,17 @@ export function SystemStatusView({
   transportStale,
   accountMasked,
   onOpenBot,
+  receivedAt = 0,
 }: {
   dto: StatusDTO
   transportStale: boolean
   accountMasked?: string | null
   onOpenBot: () => void
+  /** When this DTO arrived: the backend age is a snapshot, and the row must stay
+   * truthful while the screen is open. */
+  receivedAt?: number
 }) {
+  const ageSeconds = useAgeSeconds(dto.age_seconds ?? null, receivedAt)
   // A transport failure keeps the previous DTO visible but must never let an
   // old ready verdict keep looking like fresh green health.
   const overall = transportStale ? { label: 'Данные устарели', tone: 'warning' as const } : overallValue(dto.state)
@@ -160,7 +170,7 @@ export function SystemStatusView({
   const aster = asterRowValue(dto.aster_state)
   const permissions = permissionsRowValue(dto.permissions_state)
   const positions = positionsRowValue(dto.positions_count ?? null)
-  const lastCheck = lastCheckRowValue(dto.last_check_at ?? null, dto.age_seconds ?? null)
+  const lastCheck = lastCheckRowValue(dto.last_check_at ?? null, ageSeconds)
   const reason = reasonCopy(dto.reason)
   const remediation = remediationOf(dto.remediation)
   const trust = statusTrust(dto)
@@ -170,7 +180,7 @@ export function SystemStatusView({
     ? TRANSPORT_STALE_WARNING
     : dto.state === 'ready'
       ? null
-      : (reason ?? `Последняя проверка: ${formatTime(dto.last_check_at)} · ${formatAge(dto.age_seconds)}`)
+      : (reason ?? `Последняя проверка: ${formatTime(dto.last_check_at)} · ${formatAge(ageSeconds)}`)
 
   return (
     <div className="screen">
@@ -194,7 +204,7 @@ export function SystemStatusView({
             className={`dot ${overall.tone === 'success' ? 'success' : overall.tone === 'muted' ? '' : overall.tone}`}
             aria-hidden
           />
-          Проверка: {formatTime(dto.last_check_at)} · {formatAge(dto.age_seconds)}
+          Проверка: {formatTime(dto.last_check_at)} · {formatAge(ageSeconds)}
         </div>
       </section>
 

@@ -106,6 +106,26 @@ export function permissionsRowValue(state: PermissionsState | undefined): Status
   }
 }
 
+/** Backend evidence TTL for a signed permission check (service.py). */
+const PERMISSION_EVIDENCE_TTL_S = 60
+
+/** Does the app have to re-prove permissions on open?
+ *
+ * A cached DTO can still say "Подтверждены" with a stamp from half an hour ago,
+ * because the cheap read never performs the signed check. Showing a growing
+ * "Проверка: 16:03 · 25 мин назад" under a green verdict is both noise and a
+ * quietly unsupported claim, so aged evidence is re-proven once per open.
+ */
+export function needsPermissionReproof(dto: {
+  permissions_state: PermissionsState
+  age_seconds?: number | null
+}): boolean {
+  if (dto.permissions_state !== 'valid') return true
+  const age = dto.age_seconds
+  if (typeof age !== 'number' || !Number.isFinite(age)) return true
+  return age > PERMISSION_EVIDENCE_TTL_S
+}
+
 export function positionsRowValue(count: number | null | undefined): StatusValue {
   if (typeof count !== 'number' || !Number.isFinite(count)) {
     return { label: '—', tone: 'muted' }

@@ -40,6 +40,7 @@ function parseArgs(argv) {
     seconds: 60,
     tab: 0,
     closed: false,
+    after: 0,
     chrome: process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     init: null,
   }
@@ -51,6 +52,7 @@ function parseArgs(argv) {
     else if (flag === '--seconds') options.seconds = Number(value)
     else if (flag === '--tab') options.tab = Number(value)
     else if (flag === '--closed') options.closed = true
+    else if (flag === '--after') options.after = Number(value)
     else if (flag === '--chrome') options.chrome = value
     else if (flag === '--init') options.init = value
   }
@@ -410,9 +412,12 @@ async function main() {
     // Opening Статус must re-prove permissions by itself: the evidence TTL is a
     // minute, and a healthy account that reads "Разрешения: Устарели" is the nag
     // this mode exists to catch. Sampled, not assumed.
+    // `--after N` idles on the root tab first, so the cached DTO is genuinely
+    // older than the TTL when the screen opens.
+    if (options.after) await delay(options.after * 1000)
     await evaluate("(() => { document.querySelector('.summary-status').click(); return true })()")
     const samples = []
-    for (let step = 0; step <= 12; step += 1) {
+    for (let step = 0; step <= 15; step += 1) {
       await delay(2000)
       samples.push(JSON.parse(await evaluate(`JSON.stringify({
         overall: (document.querySelector('.status-text') || {}).innerText || null,
@@ -439,7 +444,10 @@ async function browserEndpoint(port) {
   throw new Error('Chrome did not expose a debugging endpoint')
 }
 
-const budgetMs = (options.mode === 'jitter' ? options.seconds * 1000 : 0) + 120_000
+const budgetMs =
+  (options.mode === 'jitter' ? options.seconds * 1000 : 0) +
+  options.after * 1000 +
+  120_000
 let watchdog
 try {
   await Promise.race([

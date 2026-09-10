@@ -10,6 +10,7 @@ import {
   lastCheckRowValue,
   overallValue,
   permissionsRowValue,
+  needsPermissionReproof,
   positionsRowValue,
   reasonCopy,
   remediationOf,
@@ -140,5 +141,14 @@ describe('statusTrust', () => {
   it('exports the transport-stale warning copy', () => {
     expect(TRANSPORT_STALE_WARNING).toContain('Связь с сервером потеряна')
     expect(TRANSPORT_STALE_WARNING).not.toMatch(/обнови/i)
+  })
+})
+
+describe('needsPermissionReproof', () => {
+  it('перепроверяет доказательство старше минуты и любое невалидное', () => {
+    expect(needsPermissionReproof({ permissions_state: 'valid', age_seconds: 12 })).toBe(false)
+    expect(needsPermissionReproof({ permissions_state: 'valid', age_seconds: 61 })).toBe(true)
+    expect(needsPermissionReproof({ permissions_state: 'stale', age_seconds: 5 })).toBe(true)
+    expect(needsPermissionReproof({ permissions_state: 'unavailable' })).toBe(true)
   })
 })
