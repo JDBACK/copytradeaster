@@ -265,8 +265,10 @@ lease/retry/backoff и изоляцией Telegram 403. Console sink сохра�
 S3 production factory включает durable user-event consumer: per-scope cursor
 и outbox commit атомарны, первый enable записывает rollout floor. Boot и
 периодический sweep используют один consumer; выключенные уведомления не
-останавливают историю. Mini App/menu/push используют `format_user_event`;
-command confirmations в S3 не доставляются как факты позиции. Keyboard строится
+останавливают историю. Mini App/menu/push используют `format_user_event`; строки
+пропуска входа приходят в него кодами движка (`SkipReason`) и рендерятся русской
+копией — неизвестный код не печатается вовсе, а сырьё остаётся в facts.
+Command confirmations в S3 не доставляются как факты позиции. Keyboard строится
 из configured HTTPS Mini App URL и owned opaque trade ref, только private chat при включённом `trade_links_enabled`, action `open_trade` и непустом ref.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.

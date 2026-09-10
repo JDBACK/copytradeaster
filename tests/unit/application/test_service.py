@@ -2018,7 +2018,7 @@ async def test_activity_safe_mapping_filters_and_sorts(environment):
     titles = [item.title.splitlines()[0] for item in all_page.items]
     # Newest first by ``occurred_at``: the entry skip is newest, the open oldest.
     assert titles == [
-        "Вход SOLUSDT пропущен: ENTRY_DEVIATION",
+        "Вход SOLUSDT пропущен",
         "Копирование приостановлено. Открытые позиции и защита продолжают работать.",
         "Риск на сделку изменён: 1,0% → 2,0%",
         "Закрыта ETHUSDT · SHORT",
@@ -2154,7 +2154,9 @@ async def test_activity_category_filter_paginates_the_filtered_set(environment):
         facts: dict[str, str] = {"symbol": "BTCUSDT"}
         trade_ref: str | None = "ref-1"
         if kind == "ENTRY_SKIPPED":
-            # Distinct reasons keep every system title unique.
+            # Distinct synthetic reasons stay out of the copy by design: an
+            # unknown code must never reach the user, so these rows share one
+            # title and stay distinct by ``occurred_at``.
             facts["reason"] = f"ENTRY_DEVIATION_{position:02d}"
             trade_ref = None
         else:

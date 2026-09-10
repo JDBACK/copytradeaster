@@ -126,9 +126,20 @@ async function main() {
   await send('Page.addScriptToEvaluateOnNewDocument',
     { source: readFileSync(options.init, 'utf8') }, sessionId)
 
+  // A wedged renderer used to hang every mode until the outer watchdog fired,
+  // which read as "audit did not finish" instead of the real cause. Bound each
+  // evaluate and say which expression stalled.
+  const EVALUATE_TIMEOUT_MS = 15_000
   const evaluate = async (expression) => {
-    const result = await send('Runtime.evaluate',
-      { expression, returnByValue: true, awaitPromise: true }, sessionId)
+    const outcome = await Promise.race([
+      send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId)
+        .then((result) => ({ result })),
+      delay(EVALUATE_TIMEOUT_MS).then(() => ({ timedOut: true })),
+    ])
+    if (outcome.timedOut) {
+      throw new Error(`evaluate stalled for ${EVALUATE_TIMEOUT_MS} ms: ${expression.slice(0, 90)}`)
+    }
+    const { result } = outcome
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails).slice(0, 400))
     return result.result.value
   }
@@ -150,6 +161,11 @@ async function main() {
   await delay(4000)
   const shellReady = await evaluate(`new Promise((done) => { const t = setInterval(() => { if (document.querySelector('.shell-content')) { clearInterval(t); done(true) } }, 200); setTimeout(() => { clearInterval(t); done(false) }, 20000) })`)
   if (!shellReady) throw new Error('Mini App shell never mounted (session rejected?)')
+  // An expired or unverifiable initData stub renders the gate instead of the
+  // shell, and every later click would fail with an unrelated TypeError.
+  if (await evaluate("document.body.innerText.includes('Откройте из бота')")) {
+    throw new Error('Mini App rejected the signed session: re-mint data/preview-init.js before auditing')
+  }
 
   if (options.mode === 'smoke') {
     const text = await evaluate('document.body.innerText')
@@ -303,8 +319,15 @@ async function main() {
     console.log(`recording ${options.seconds}s of DOM mutations on the visible surface...`)
     await delay(options.seconds * 1000)
     const log = JSON.parse(await evaluate('JSON.stringify(window.__mutations)'))
-    const warnings = log.filter((item) =>
-      JSON.stringify(item).match(/обнов|требует проверки|Нет связи|устарел|Восстанавлива|Подключаем/i))
+    // The freshness line stamps the wall clock (" · обновлено 15:41"), and a
+    // minute rolling over is not jitter. Everything else that asks the user to
+    // update, reconnect or distrust the data is.
+    const warnings = log.filter((item) => {
+      if (/^\s*·?\s*обновлено \d{2}:\d{2}\s*$/.test(item.value ?? '')) return false
+      return /обнов|требует проверки|Нет связи|устарел|Восстанавлива|Подключаем/i.test(
+        JSON.stringify(item),
+      )
+    })
     console.log(JSON.stringify({
       total: log.length,
       userVisibleWarnings: warnings,

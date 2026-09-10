@@ -96,7 +96,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 |---|---|---|
 | `HomeScreen.tsx` (+`home.ts`) | MUTATES pause/resume (+ confirm Sheet); account overview, freshness, compact copy state and contextual navigation | `dashboard`, `pause`, `resume`, `confirmation/begin` |
 | `PositionsScreen.tsx` | READ-ONLY list + exported `PositionCard` (entry/now/stop/TP/risk-to-stop/leverage); refresh-only | `positions` |
-| `ActivityScreen.tsx` (+`activityView.ts`) | READ-ONLY user-event feed, pending operations, pinned cursor pages and trade links | `activity/feed` |
+| `ActivityScreen.tsx` (+`activityView.ts`) | READ-ONLY user-event feed, pending operations, pinned cursor pages and trade links. Row copy arrives ready-made from the backend presenter (`notifications/trade_cards.format_user_event`); the frontend never renders engine codes | `activity/feed` |
 | `RiskScreen.tsx` (+`riskView.ts`) | MUTATES risk-on-Stop: draft/confirmed/save integration, exact 1e-5 integer math; ruler control lives in `components/RiskRuler.tsx` | `risk`, `risk/preview`, `risk/percent` |
 | `SettingsScreen.tsx` (+`settingsView.ts`) | READ-ONLY capability list; bounded Settings prefetch (weak, max-2); navigation only | — (routes to nested) |
 | `NotificationsScreen.tsx` (+`notificationsView.ts`) | MUTATES single toggle (`role=switch`), server-confirmed flip + double-tap gate | `notifications`, `notifications/enabled` |

@@ -138,6 +138,53 @@ def test_protection_and_system_kinds():
     )
 
 
+def test_entry_skip_reads_as_copy_never_as_an_engine_code():
+    text = format_user_event(
+        _event(
+            "ENTRY_SKIPPED",
+            {"symbol": "BTCUSDT", "reason": "STALE_MASTER", "pos_side": "LONG"},
+        )
+    )
+    assert text == "Вход BTCUSDT (LONG) пропущен\nПричина: сигнал мастера устарел"
+    assert "STALE_MASTER" not in text
+
+
+def test_entry_skip_copy_covers_every_engine_reason():
+    from copytradeaster.domain.models import SkipReason
+    from copytradeaster.notifications.trade_cards import _SKIP_REASON_COPY
+
+    covered = {reason.value for reason in SkipReason} - {"INTENTIONAL_FLAT"}
+    assert covered == set(_SKIP_REASON_COPY)
+    for reason in SkipReason:
+        text = format_user_event(
+            _event("ENTRY_SKIPPED", {"symbol": "BTCUSDT", "reason": reason.value})
+        )
+        assert reason.value not in text
+        assert "пропущен" in text or reason is SkipReason.INTENTIONAL_FLAT
+
+
+def test_entry_skip_without_known_reason_prints_no_code():
+    assert (
+        format_user_event(_event("ENTRY_SKIPPED", {"symbol": "BTCUSDT"})) == "Вход BTCUSDT пропущен"
+    )
+    assert (
+        format_user_event(_event("ENTRY_SKIPPED", {"symbol": "BTCUSDT", "reason": "WEIRD_CODE"}))
+        == "Вход BTCUSDT пропущен"
+    )
+
+
+def test_intentional_flat_is_not_phrased_as_a_skip():
+    assert (
+        format_user_event(
+            _event(
+                "ENTRY_SKIPPED",
+                {"symbol": "BTCUSDT", "reason": "INTENTIONAL_FLAT", "pos_side": "SHORT"},
+            )
+        )
+        == "Фиксация позиции BTCUSDT (SHORT)"
+    )
+
+
 def test_unknown_kind_is_rejected():
     with pytest.raises(ValueError):
         format_user_event(_event("NOPE", {}))

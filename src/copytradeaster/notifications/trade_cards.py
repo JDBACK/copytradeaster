@@ -15,6 +15,24 @@ from copytradeaster.storage.events import UserEvent
 
 _OPEN_TRADE_ACTION = "open_trade"
 
+# Engine skip codes turn into plain copy here: the feed is read by the owner, and
+# a raw enum (``STALE_MASTER``) means nothing outside the code.  ``INTENTIONAL_FLAT``
+# is deliberately absent - a dust flat inside an open episode is not a skip.
+_SKIP_REASON_COPY: dict[str, str] = {
+    "NO_STOP": "защитный стоп ещё не рассчитан",
+    "BELOW_MIN_QTY": "объём меньше минимального лота биржи",
+    "BELOW_MIN_NOTIONAL": "объём меньше минимальной суммы ордера",
+    "INSUFFICIENT_MARGIN": "недостаточно свободной маржи",
+    "ENTRY_DEVIATION": "цена входа слишком далеко ушла от мастера",
+    "DISABLED": "аккаунт отключён",
+    "PAUSED": "копирование приостановлено",
+    "STALE_MASTER": "сигнал мастера устарел",
+    "OWN_PROTECTIVE_FILLED": "защитный стоп в этой сделке уже исполнен",
+    "LEVERAGE_NOT_READY": "плечо для символа ещё не подготовлено",
+}
+
+_SKIP_FLAT_REASON = "INTENTIONAL_FLAT"
+
 
 def _num(value: Any) -> str | None:
     """Canonical fact string with thousands grouping; None stays missing."""
@@ -45,6 +63,12 @@ def _side_suffix(facts: dict[str, Any]) -> str:
     if side in ("LONG", "SHORT"):
         return f" · {side}"
     return ""
+
+
+def _paren_side(facts: dict[str, Any]) -> str:
+    """`` (LONG)`` for skip facts, which carry the side as ``pos_side``."""
+    side = str(facts.get("side") or facts.get("pos_side") or "").upper()
+    return f" ({side})" if side in ("LONG", "SHORT") else ""
 
 
 def _with_asset(qty: str | None, asset: str | None) -> str | None:
@@ -175,9 +199,13 @@ def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) ->
         return "История сделки уточнена. Откройте детали для актуального результата."
     if kind == "ENTRY_SKIPPED":
         reason = str(facts.get("reason") or "").strip()
-        if reason:
-            return f"Вход {symbol} пропущен: {reason}"
-        return f"Вход {symbol} пропущен"
+        if reason == _SKIP_FLAT_REASON:
+            return f"Фиксация позиции {symbol}{_paren_side(facts)}"
+        lines = [f"Вход {symbol}{_paren_side(facts)} пропущен"]
+        reason_copy = _SKIP_REASON_COPY.get(reason)
+        if reason_copy is not None:
+            lines.append(f"Причина: {reason_copy}")
+        return "\n".join(lines)
     raise ValueError(f"unsupported user event kind: {kind!r}")
 
 
