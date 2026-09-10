@@ -15,9 +15,14 @@ Usage:
         [--symbols BTCUSDT,ETHUSDT] [--seconds 30]
 
 Exit codes:
-    0 — at least one symbol delivered mark-price frames (stream works)
+    0 — every requested symbol delivered mark-price frames (stream works)
     1 — the subscription was acknowledged but no frame arrived (silent)
     2 — the socket or the REST fallback failed
+    3 — only some requested symbols delivered frames (partial feed)
+
+The verdict is per symbol on purpose: one healthy symbol must never pass the
+gate for a whitelist whose other symbol has gone silent, because the runtime
+keeps that symbol's quotes on the REST fallback.
 """
 
 from __future__ import annotations
@@ -145,6 +150,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def verdict(
+    symbols: list[str],
+    frames: dict[str, list[float]],
+    prices: dict[str, Decimal],
+) -> tuple[int, list[str]]:
+    """Per-symbol gate verdict and its report lines.
+
+    Streaming is claimed only when every requested symbol delivered frames:
+    one healthy symbol must not pass the gate for a whitelist whose other
+    symbol is silent, because the runtime keeps the silent symbol on the REST
+    fallback and its PnL would freeze there.
+    """
+    streamed = [symbol for symbol in symbols if frames.get(symbol)]
+    missing = [symbol for symbol in symbols if not frames.get(symbol)]
+    covered = [symbol for symbol in missing if symbol in prices]
+    if not missing:
+        return 0, ["VERDICT: STREAMING — the cluster pushes mark-price frames."]
+    coverage = (
+        ", ".join(covered)
+        if covered
+        else ("none of the silent symbols" if streamed else "none of the symbols")
+    )
+    if streamed:
+        return 3, [
+            f"VERDICT: PARTIAL — {len(streamed)}/{len(symbols)} symbols streamed "
+            f"({', '.join(streamed)}); no frames for {', '.join(missing)}.",
+            f"  REST fallback covers: {coverage}",
+        ]
+    return 1, [
+        "VERDICT: SILENT — presentation quotes depend on the REST fallback here.",
+        f"  REST fallback covers: {coverage}",
+    ]
+
+
 async def main() -> int:
     args = parse_args()
     profile = (
@@ -175,11 +214,10 @@ async def main() -> int:
 
     shown = ", ".join(f"{symbol}={price}" for symbol, price in sorted(prices.items())) or "none"
     print(f"rest fallback: {latency * 1000:.0f} ms  marks={shown}")
-    if frames:
-        print("VERDICT: STREAMING — the cluster pushes mark-price frames.")
-        return 0
-    print("VERDICT: SILENT — presentation quotes depend on the REST fallback here.")
-    return 1
+    code, lines = verdict(symbols, frames, prices)
+    for line in lines:
+        print(line)
+    return code
 
 
 if __name__ == "__main__":
