@@ -329,6 +329,15 @@ async function main() {
   }
 
   if (options.mode === 'jitter') {
+    // Recording must start on a *loaded* surface: over the public tunnel the
+    // first paint arrives in stages, and counting that as movement would blame
+    // the app for drawing its own content once.
+    await evaluate(`new Promise((done) => { const t = setInterval(() => {
+      const stamp = document.querySelector('.freshness');
+      if (stamp && stamp.innerText.trim()) { clearInterval(t); done(true) }
+    }, 200); setTimeout(() => { clearInterval(t); done(false) }, 20000) })`, 25000)
+    await delay(2000)
+
     await evaluate(`(() => {
       window.__mutations = [];
       const describe = (node) => {

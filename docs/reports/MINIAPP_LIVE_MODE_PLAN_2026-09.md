@@ -742,3 +742,20 @@ DTO как есть. Экран перепроверял права только
 
 **Тесты:** frontend **34 файла / 400 passed** (+3 на `agedSeconds`, +1 на
 `needsPermissionReproof`), oxlint clean, build PASS.
+
+**Проверка по публичному адресу (тот же путь, которым идёт Telegram).** До этого все
+замеры шли на `127.0.0.1`; ниже — прогоны против
+`https://dawn-greene-organize-wages.trycloudflare.com/miniapp/`.
+
+- `smoke`: `updateButtons: []`, `demands: []`, rail не отрисован, на экране только
+  данные аккаунта.
+- `series`: все четыре вкладки — `noise: []`.
+- `jitter --seconds 70`: 6 текстовых мутаций, все — числа баланса и минута в
+  «обновлено HH:MM», предупреждений ноль.
+- `swipe`: `ready` (74,88 px) → `refreshing` → `idle`, гаптика medium, передача
+  жеста `disable` → `enable`, сильные чтения `dashboard`/`positions` с `refresh:true`.
+- Кэш отдаётся правильно: `index.html` — `cache-control: no-cache`, хешированные
+  ассеты — `public, max-age=31536000, immutable`. Возвращающийся WebView не может
+  застрять на старом бандле.
+- Харнесс теперь начинает запись мутаций только после загрузки поверхности: первая
+  отрисовка контента по сети успевала попасть в замер и выглядела «движением».
