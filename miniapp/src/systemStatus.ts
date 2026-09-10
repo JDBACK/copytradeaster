@@ -91,7 +91,11 @@ export function permissionsRowValue(state: PermissionsState | undefined): Status
     case 'valid':
       return { label: 'Подтверждены', tone: 'success' }
     case 'stale':
-      return { label: 'Устарели', tone: 'warning' }
+      // Aged evidence is not a fault: the engine re-proves it by itself when
+      // this screen opens, and a failed attempt is reported through the reason
+      // row. Painting a healthy account orange for a minute-old stamp was the
+      // nag users read as "the app is unhappy again". Age lives in its own row.
+      return { label: 'Проверены ранее', tone: 'muted' }
     case 'blocked':
       return { label: 'Отклонены', tone: 'danger' }
     default:

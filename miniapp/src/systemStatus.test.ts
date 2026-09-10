@@ -58,6 +58,9 @@ describe('diagnostic row values', () => {
     expect(asterRowValue('ok')).toEqual({ label: 'Подключён', tone: 'success' })
     expect(asterRowValue('unknown')).toEqual({ label: 'Неизвестно', tone: 'muted' })
     expect(permissionsRowValue('valid')).toEqual({ label: 'Подтверждены', tone: 'success' })
+    // Aged evidence is stated calmly: the screen re-proves it on open and a
+    // failed attempt shows up as the stale reason, so orange here is a nag.
+    expect(permissionsRowValue('stale')).toEqual({ label: 'Проверены ранее', tone: 'muted' })
     expect(permissionsRowValue('blocked')).toEqual({ label: 'Отклонены', tone: 'danger' })
     expect(positionsRowValue(2)).toEqual({ label: '2', tone: 'muted' })
     expect(positionsRowValue(null)).toEqual({ label: '—', tone: 'muted' })

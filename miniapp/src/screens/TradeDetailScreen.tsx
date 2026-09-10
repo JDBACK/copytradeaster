@@ -1,7 +1,8 @@
 import type { MiniAppResources } from '../resources'
 import type { NestedScreen } from '../navigation'
 import { useHistory } from '../useHistory'
-import { useLiveSnapshot, useResource, useTransportStale } from '../useResource'
+import { usePaging } from '../usePaging'
+import { useLiveSnapshot, useResource } from '../useResource'
 import { railSpeaks } from '../live'
 import { ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
@@ -12,12 +13,12 @@ import { PositionCard } from './PositionsScreen'
 
 export function PositionDetailScreen({ resources, symbol, side, active = true, foregroundSignal = 0 }: { resources: MiniAppResources; symbol: string; side: 'LONG' | 'SHORT'; active?: boolean; foregroundSignal?: number }) {
   const snapshot = useResource({ resources, key: 'positions', active, foregroundSignal })
-  const transportStale = useTransportStale(resources, snapshot.snapshot.error)
   const position = snapshot.snapshot.data?.positions.find(p => p.symbol === symbol && p.side === side)
   const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), snapshot.snapshot.data !== null)
+  const snapshotStale = snapshot.snapshot.data?.is_stale === true && !railOwnsOutage
   return <div className="screen"><h1 className="h1">{symbol} · {side}</h1>
     {snapshot.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(snapshot.snapshot.error)} />}
-    {position ? <><p className="lede num">{formatQuantity(position.qty, position.quantity_asset)}</p><PositionCard position={position} /><p className="info-box">{snapshot.snapshot.data?.is_stale || transportStale ? 'Снимок устарел. Защита требует проверки. ' : ''}История этой позиции ещё уточняется. Отображается текущий снимок аккаунта.</p></> : <p className="info-box">{snapshot.snapshot.data ? 'Позиция больше не отображается в текущем снимке. Проверьте закрытые сделки.' : 'Получаем данные позиции'}</p>}
+    {position ? <><p className="lede num">{formatQuantity(position.qty, position.quantity_asset)}</p><PositionCard position={position} /><p className="info-box">{snapshotStale ? 'Снимок устарел. Защита требует проверки. ' : ''}История этой позиции ещё уточняется. Отображается текущий снимок аккаунта.</p></> : <p className="info-box">{snapshot.snapshot.data ? 'Позиция больше не отображается в текущем снимке. Проверьте закрытые сделки.' : 'Получаем данные позиции'}</p>}
     <p className="freshness">Снимок: {formatDateTime(snapshot.snapshot.data?.snapshot_captured_at)}</p>
   </div>
 }
@@ -27,8 +28,9 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   const data = detail.data && 'trade' in detail.data ? detail.data : null
   const resolution = detail.data && 'kind' in detail.data ? detail.data : null
   const events = useHistory(resources.history, { kind: 'events', tradeRef }, active && !!data, foregroundSignal)
+  const [pagingEvents, startPagingEvents] = usePaging()
+  const [pagingFills, startPagingFills] = usePaging()
   const positions = useResource({ resources, key: 'positions', enabled: data?.trade.state === 'open', active: active && data?.trade.state === 'open', foregroundSignal })
-  const transportStale = useTransportStale(resources, positions.snapshot.error)
   const liveSnapshot = useLiveSnapshot(resources)
   const railOwnsOutage = railSpeaks(liveSnapshot, positions.snapshot.data !== null)
   // Reaching the ready branch proves the detail itself has data on screen.
@@ -37,7 +39,7 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   if (resolution) return <div className="screen"><h1 className="h1">История сделки уточнена</h1><p className="info-box">Исходная запись разделена на несколько эпизодов. Выберите эпизод для просмотра.</p>{resolution.targets.map((ref, index) => <button type="button" className="btn btn-secondary" key={ref} onClick={() => onOpen({ kind: 'trade-detail', tradeRef: ref })}>Открыть эпизод {index + 1}</button>)}<button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'closed', period: 'all' })}>Открыть историю</button></div>
   if (!trade || !data) return <div className="screen"><h1 className="h1">Детали сделки</h1>{detail.error ? <><ErrorBox {...describeError(detail.error)} /><button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all' })}>Мои позиции</button></> : <div className="skeleton" style={{ minHeight: 300 }} />}</div>
   const live = positions.snapshot.data?.positions.find(p => p.trade_ref === trade.trade_ref)
-  const liveStale = !!positions.snapshot.data && (positions.snapshot.data.is_stale || transportStale)
+  const liveStale = positions.snapshot.data?.is_stale === true && !railOwnsOutage
   const net = trade.result_state === 'net_complete' && trade.net_pnl_usdt !== null
   const pnl = formatPnl(trade.state === 'open' ? live?.unrealized_profit : net ? trade.net_pnl_usdt : trade.realized_pnl_gross_usdt)
   return <div className="screen">
@@ -69,7 +71,7 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
     {events.data?.events.length === 0 && <p className="info-box">События пока не восстановлены. Это не означает отсутствие исполнений.</p>}
     {events.error && <ErrorBox {...describeError(events.error)} />}
     {events.data?.events.map(event => <TradeEventRow key={event.event_ref} event={event} />)}
-    {events.data?.next_events_cursor && <button type="button" className="btn btn-secondary" disabled={events.loading || events.changed} onClick={() => void events.events()}>Ещё события</button>}
+    {events.data?.next_events_cursor && <button type="button" className="btn btn-secondary" disabled={pagingEvents || events.changed} onClick={() => startPagingEvents(() => events.events())}>Ещё события</button>}
     <h2 className="h2">Исполнения</h2>
     {events.data?.fills.length === 0 && <p className="info-box">Исполнения пока недоступны. Объёмы и результат могут уточняться.</p>}
     {groupTradeFills(events.data?.fills ?? []).map(group => <details className="panel fill-details" key={group.key}>
@@ -79,6 +81,6 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
         <p>PnL доли до комиссий: {formatPnl(fill.allocated_realized_pnl).text}</p>
       </div>)}
     </details>)}
-    {events.data?.next_fills_cursor && <button type="button" className="btn btn-secondary" disabled={events.loading || events.changed} onClick={() => void events.fills()}>Ещё исполнения</button>}
+    {events.data?.next_fills_cursor && <button type="button" className="btn btn-secondary" disabled={pagingFills || events.changed} onClick={() => startPagingFills(() => events.fills())}>Ещё исполнения</button>}
   </div>
 }

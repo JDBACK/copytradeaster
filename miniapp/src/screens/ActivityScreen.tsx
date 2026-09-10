@@ -6,6 +6,7 @@ import { useLiveSnapshot, useScreenResources } from '../useResource'
 import { railSpeaks } from '../live'
 import { useResourceScope } from '../resourceScopeContext'
 import { useHistory } from '../useHistory'
+import { usePaging } from '../usePaging'
 import type { ActivityFilter } from '../types'
 import type { NestedScreen } from '../navigation'
 import { ACTIVITY_TIME_LABELS, dayBucket } from '../activityView'
@@ -18,6 +19,7 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
   const scope = useResourceScope()
   const resources = useScreenResources(providedResources ?? scope ?? undefined, auth)
   const [filter, setFilter] = useState<ActivityFilter>('all')
+  const [paging, startPaging] = usePaging()
   const [calendar, setCalendar] = useState(() => new Date())
   const calendarDay = calendar.toDateString()
   const feed = useHistory(resources.history, { kind: 'feed', filter }, active || (warm && !resources.history.get({ kind: 'feed', filter }).data), foregroundSignal + invalidateSignal)
@@ -42,6 +44,6 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
     {!feed.data && !feed.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка журнала" />}
     {feed.data?.items.length === 0 && <p className="info-box">{filter === 'trade' ? 'Сделок пока нет' : filter === 'system' ? 'Системных событий пока нет' : 'Событий пока нет'}</p>}
     {groups.filter(group => group.items.length).map(group => <section key={group.bucket} aria-label={ACTIVITY_TIME_LABELS[group.bucket]}><h2 className="activity-day-label">{ACTIVITY_TIME_LABELS[group.bucket]}</h2>{group.items.map(event => <TradeEventRow key={event.event_ref} event={event} onOpen={tradeRef => onOpen({ kind: 'trade-detail', tradeRef })} />)}</section>)}
-    {feed.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={feed.loading} onClick={() => void feed.more()}>{feed.loading ? 'Загружаем…' : 'Показать ещё'}</button>}
+    {feed.data?.next_cursor && <button type="button" className="btn btn-secondary" disabled={paging} onClick={() => startPaging(() => feed.more())}>{paging ? 'Загружаем…' : 'Показать ещё'}</button>}
   </div>
 }

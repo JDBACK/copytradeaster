@@ -98,3 +98,28 @@ describe('railSpeaks', () => {
     expect(railSpeaks(STALE, true)).toBe(true)
   })
 })
+
+describe('предупреждение о снимке не повторяет rail', () => {
+  it('при разрыве говорит только rail, карточка не скрывает реальный стоп', async () => {
+    const resources = outageResources('stale')
+    resources.publishConfirmed('positions', positionPage())
+    render(<PositionsScreen auth={AUTH} resources={resources} />)
+    expect(screen.queryByText(/Снимок позиций не обновляется/i)).toBeNull()
+    expect(screen.queryByText('Статус стопа не обновлён')).toBeNull()
+    expect(screen.getByText(/подтверждён/)).toBeInTheDocument()
+  })
+
+  it('снимок, признанный устаревшим движком, говорит сам', async () => {
+    const resources = outageResources('live')
+    resources.publishConfirmed('positions', { ...positionPage(), is_stale: true })
+    render(<PositionsScreen auth={AUTH} resources={resources} />)
+    expect(screen.getByText(/Снимок позиций не обновляется/i)).toBeInTheDocument()
+  })
+
+  it('во время разрыва движковый флаг уступает место rail', async () => {
+    const resources = outageResources('stale')
+    resources.publishConfirmed('positions', { ...positionPage(), is_stale: true })
+    render(<PositionsScreen auth={AUTH} resources={resources} />)
+    expect(screen.queryByText(/Снимок позиций не обновляется/i)).toBeNull()
+  })
+})

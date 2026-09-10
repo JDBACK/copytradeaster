@@ -38,6 +38,8 @@ function parseArgs(argv) {
     url: 'http://127.0.0.1:8080/miniapp/',
     port: 9333,
     seconds: 60,
+    tab: 0,
+    closed: false,
     chrome: process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     init: null,
   }
@@ -47,6 +49,8 @@ function parseArgs(argv) {
     if (flag === '--url') options.url = value
     else if (flag === '--port') options.port = Number(value)
     else if (flag === '--seconds') options.seconds = Number(value)
+    else if (flag === '--tab') options.tab = Number(value)
+    else if (flag === '--closed') options.closed = true
     else if (flag === '--chrome') options.chrome = value
     else if (flag === '--init') options.init = value
   }
@@ -165,6 +169,18 @@ async function main() {
   // shell, and every later click would fail with an unrelated TypeError.
   if (await evaluate("document.body.innerText.includes('Откройте из бота')")) {
     throw new Error('Mini App rejected the signed session: re-mint data/preview-init.js before auditing')
+  }
+  // Measurement is per surface: the root tab complaint was about Позиции and
+  // Активность, which the earlier runs never observed directly.
+  if (options.tab) {
+    await evaluate(`(() => { [...document.querySelectorAll('.nav-item')][${options.tab}].click(); return true })()`)
+    await delay(2500)
+  }
+  // "Открытые -> Закрытые" is the exact tap a follower reported as "история
+  // изменилась — обновите список", so it has to be observable, not assumed.
+  if (options.closed) {
+    await evaluate("(() => { const b = [...document.querySelectorAll('[role=tab]')].find((t) => /Закрытые/.test(t.innerText)); if (!b) throw new Error('no Закрытые tab'); b.click(); return true })()")
+    await delay(3000)
   }
 
   if (options.mode === 'smoke') {
@@ -335,6 +351,22 @@ async function main() {
       kinds: log.reduce((acc, item) => ({ ...acc, [item.kind]: (acc[item.kind] ?? 0) + 1 }), {}),
       sample: log.slice(0, 25),
     }, null, 1))
+  }
+
+  if (options.mode === 'status') {
+    // Opening Статус must re-prove permissions by itself: the evidence TTL is a
+    // minute, and a healthy account that reads "Разрешения: Устарели" is the nag
+    // this mode exists to catch. Sampled, not assumed.
+    await evaluate("(() => { document.querySelector('.summary-status').click(); return true })()")
+    const samples = []
+    for (let step = 0; step <= 12; step += 1) {
+      await delay(2000)
+      samples.push(JSON.parse(await evaluate(`JSON.stringify({
+        overall: (document.querySelector('.status-text') || {}).innerText || null,
+        rows: [...document.querySelectorAll('.row')].map((r) => r.innerText.replace(/\\n/g, ': ')),
+      })`)))
+    }
+    console.log(JSON.stringify(samples, null, 1))
   }
 
   socket.close()
