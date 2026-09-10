@@ -215,7 +215,8 @@ async function main() {
     console.log(JSON.stringify({
       scrolledContext: scrolled,
       duringScroll,
-      requestsWhileScrolled: posts().slice(scrolledBefore).length,
+      // Names, not just the count: a background TTL read is not the gesture.
+      requestsWhileScrolled: posts().slice(scrolledBefore),
       swipes: JSON.parse(await evaluate(`JSON.stringify(window.__audit.swipes.map((s) => s[0]))`)),
     }, null, 1))
   }
