@@ -163,6 +163,13 @@ without `CT_TESTNET=1`, including newly added files. Per-file markers stay expli
 Signed load additionally requires `CT_LOAD=1`; subprocess workers check opt-in.
 A process-wide file lock serializes signed pytest campaigns on shared accounts.
 
+Testnet accounts, balances and position mode are disposable — the faucet refills
+them (1000 test USDT/day) and the exchange holds no real value. A live scenario may
+therefore place real signed orders, switch position mode, cancel protection and end
+in any state it can explain: the standing constraints are `CT_ALLOW_MAINNET=false`,
+flat-with-no-open-orders cleanup in `finally`, and one campaign at a time per account
+(the file lock above). Do not describe these runs as needing separate authorization.
+
 Corrective live package: `test_engine_corrective_live.py` (LC1–LC6), with signed
 evidence and unconditional audited cleanup. Run order and current qualification
 status: `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md`.
