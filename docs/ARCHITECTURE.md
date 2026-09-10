@@ -791,7 +791,7 @@ copytradeaster/
 ├── miniapp/                        # Mini App frontend (Vite+React+TS, Stage 3: 4-tab shell)
 ├── scripts/                        # operational scripts + doc-budgets.json (карта: scripts/AGENTS.md)
 ├── docs/                           # документация; карта — docs/AGENTS.md
-├── src/copytradeaster/             # backend: app.py / config.py + 16 пакетов
+├── src/copytradeaster/             # backend: app.py / config.py + 14 пакетов
 │                                   # (domain, aster, master, risk, trading, history,
 │                                   #  storage, credentials, notifications, onboarding,
 │                                   #  application, telegram, miniapp, cli)
@@ -822,7 +822,7 @@ Tree отражает фактическую структуру на уровн�
 
 Новая capability кладётся на высшую подходящую ступень — выбирай первую сверху, которая корректно решает задачу:
 
-1. Расширь существующий код — вариация имеющегося, ноль новой поверхности.
+1. Расширь существующий код/модуль — вариация имеющегося, без новых границ и протоколов.
 2. Новый скрипт в `scripts/` — операция, выражаемая процедурой (карта: `scripts/AGENTS.md`).
 3. Новый модуль в существующем пакете — новая обязанность внутри известной границы (§4).
 4. Новый пакет `src/copytradeaster/<name>/` — новая граница с протоколом; карта доков обновляется в том же коммите.

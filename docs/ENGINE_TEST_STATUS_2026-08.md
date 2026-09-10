@@ -4,6 +4,8 @@
 кампания зафиксирована в `feature/frontend`; ветка Stage 3 части 2
 `codex/stage-3-mini-app-part2` смержена ранее.
 
+> **Примечание (2026-09-10):** вердикт ниже покрывает дерево `f7df60b`; коммиты `58c10f7` / `ffa2848` (поведенческие, `scripts/dev-up.sh`) приземлились позже — повторная квалификация pending; покрытие этих коммитов не утверждается.
+
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
 > `feature/frontend` `d6d5791`; merge diff просмотрен, конфликтные границы
@@ -931,7 +933,7 @@
 | 24 | **Сырые системные логи в Telegram-уведомлениях** | движок слал внутренние имена RPC-команд (`MARKET_OPEN`, `PLACE_STOP`, `CANCEL_ORDER`, `NO_STOP`) напрямую в пользовательский чат | выделен модуль `notifications/formatter.py` (`format_confirmed_action`, `format_skip_reason`); уведомления форматируются в чистые трейдерские карточки (🟢 Открыта позиция, 🛡 Защитный стоп, 🎯 Тейк-профит, 🔴 Закрыта позиция, 🗑 Снят ордер, ⏳ Ожидание стопа), технический шум убран |
 | 25 | **FAILED `SET_LEVERAGE` не блокировал `MARKET_OPEN`** | priority в плане — только порядок, а не зависимость: исполнитель продолжал план после FAILED prerequisite и отправлял вход с неподтверждённым плечом (fail-closed для плеча фактически отсутствовал) | generic dependency-модель плана: `ExecutionAction.action_id` / `depends_on_action_id`; planner связывает SET_LEVERAGE → вход/защиту, executor блокирует (`BLOCKED`) зависимые действия при FAILED/UNKNOWN prerequisite; закрытия/отмены зависимости не получают |
 | 26 | **Движок терял известное плечо flat-symbol** | `_snapshot()` выбрасывал строки positionRisk с `positionAmt==0`, а planner трактовал «нет позиции» как «плечо неизвестно» — каждая новая сделка платила холодный `SET_LEVERAGE` (+TTL bracket GET) даже при годами стоящих на бирже 200x | `AccountState.symbol_leverages` из всех строк positionRisk (включая flat; неоднозначные per-side значения → unknown/fail-closed); planner сравнивает known vs target и эмитит SET только при расхождении; hot path сделки — ноль leverage REST-запросов |
-| 27 | **Liquidation guard и HEDGE geometry** | Котировка 25.5M вызывала churn; последующий guard относительно entry пропускал допустимую liquidation между entry и mark | Corrective: adverse direction относительно текущего mark (равенство считается опасным), регрессии LONG/SHORT и signed LC4; новая live-квалификация ожидается |
+| 27 | **Liquidation guard и HEDGE geometry** | Котировка 25.5M вызывала churn; последующий guard относительно entry пропускал допустимую liquidation между entry и mark | Corrective: adverse direction относительно текущего mark (равенство считается опасным), регрессии LONG/SHORT и signed LC4; новая live-квалификация ожидается; квалифицировано 2026-09-05: Package G 7/7 CLOSED — wrong-side guard в `Coordinator._liquidation_violated` (см. раздел Package G ниже) |
 
 ## Известные ограничения (осознанные решения этапа 1)
 
@@ -1789,6 +1791,8 @@ risk_to_stop, `TradeUnavailableError`) и методы в `ApplicationProtocol`.
 (стало 25 POST). Тесты: trade_views +9, service +12, HTTP +9. Full offline
 **1279 passed / 2 skipped / 44 deselected**, 18.33 s. Ruff всего репо clean.
 Остаются остаток S1.4 (risk preview, resume-контекст), S1.5–S1.6; G1 не закрыт.
+
+Примечание (2026-09-10): «стало 25 POST» выше — исторический снимок на момент записи; актуально 26 POST (`grep -c 'add_post("/miniapp/api/' src/copytradeaster/miniapp/server.py` → 26). Историю не переписываем.
 
 ## 2026-09-06 — S1.4 остаток: risk preview и resume-контекст
 

@@ -1,4 +1,5 @@
 # Aster DEX API: пригодность для копитрейдинга
+> FREEZE 2026-09-10: исторический API fact-book. Как продуктовый план — superseded: актуальная граница продукта — `ARCHITECTURE.md` §4 + application service boundary (`only risk_percent can be changed`); §§5/8 не читать как инструкции (§5 follower controls и §8 OTOCO — out of scope для v1).
 
 Статус исследования на 20 августа 2026 года. Версия включает глубокий разбор Aster Code / Builder (AsterCode, «билдер») и его сравнение с прямым Agent/API-wallet-путём.
 

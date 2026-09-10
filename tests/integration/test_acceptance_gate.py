@@ -1,4 +1,4 @@
-"""Adversarial acceptance-gate scenarios (review_stage1.md §acceptance gate).
+"""Adversarial acceptance-gate scenarios (reviews/review_stage1_acceptance.md §acceptance gate).
 
 Hermetic end-to-end runs over FakeAster with the REAL
 projector -> coordinator -> planner -> executor stack and a real SQLite journal.

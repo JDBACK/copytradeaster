@@ -42,7 +42,7 @@ Packages A–F запрещены.
 2. `/Users/jd_ebash/.codex/attachments/4c783ff4-2f1d-4bba-a422-3a40fbb07370/pasted-text-1.txt`
    - Исходный owner-provided Pre-Mainnet Hardening Plan.
    - Это первичный contract по PM-B1…PM-B8, TESTNET PROOF и Packages A…F.
-3. `/Users/jd_ebash/copytradeaster/docs/plan_live_test.md`
+3. `/Users/jd_ebash/copytradeaster/docs/reports/plan_live_test.md`
    - Рабочая копия owner plan.
    - Содержит актуальные `[x]`, `[~]`, `[ ]` для каждого обязательного
      REAL Aster Testnet-сценария.
@@ -231,7 +231,7 @@ Packages A–F запрещены.
 6. В `finally` каждого теста отменить bot-owned/master orders, flatten
    master/followers и затем выполнить независимый signed audit.
 7. После каждого green/red live-результа сразу обновлять:
-   `/Users/jd_ebash/copytradeaster/docs/plan_live_test.md`,
+   `/Users/jd_ebash/copytradeaster/docs/reports/plan_live_test.md`,
    `/Users/jd_ebash/copytradeaster/docs/reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`
    и при изменении счётчиков
    `/Users/jd_ebash/copytradeaster/docs/ENGINE_TEST_STATUS_2026-08.md`.

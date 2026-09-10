@@ -82,8 +82,8 @@ copytradeaster/
 │   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
 │   └── src/api.ts             # Typed API client with 15s AbortController timeout
 ├── tests/                     # unit/, integration/, replay/, testnet/; map: tests/AGENTS.md
-├── scripts/                   # dev-up.sh, detach_process.py, preview_miniapp_engine.py, verify_menu_button.py, check_doc_links.py, check_doc_budgets.py, doc-budgets.json, benchmark_history.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py; map: scripts/AGENTS.md
-├── docs/                      # AGENTS.md (docs map), ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md, plan_live_test.md, reports/ (stage journals + acceptance-s3/ + acceptance-p27/), reviews/, history/, ASTER_API_RESEARCH_2026-08.md
+├── scripts/                   # dev-up.sh, detach_process.py, preview_miniapp_engine.py, verify_menu_button.py, check_doc_links.py, check_doc_budgets.py, doc-budgets.json, benchmark_history.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py, check_doc_facts.py; map: scripts/AGENTS.md
+├── docs/                      # AGENTS.md (docs map), ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md, reports/ (plan_live_test.md, stage journals + acceptance-s3/ + acceptance-p27/), reviews/, history/, ASTER_API_RESEARCH_2026-08.md
 └── data/                      # Local SQLite databases, logs, test artifacts (git-ignored)
 ```
 

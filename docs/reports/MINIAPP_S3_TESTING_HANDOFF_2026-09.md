@@ -180,3 +180,7 @@ slice — **PASS**. Android по решению владельца исключ�
 G3 — **CLOSED в согласованном scope** (Chromium + Telegram Desktop + iPhone
 Mirroring). Финальный frontend/backend/ruff/doc-links gate зелёный; итоговая карта —
 [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
+
+## Дополнение (2026-09-10): счёт скриншотов acceptance-s3
+
+Примечание: «17 скриншотов» в разделе «Прогресс приёмки (2026-09-09, частичный проход)» выше — снимок на момент прохода; историю не переписываем. На диске сейчас 20 файлов: 17 базовых + 3 history из S3 §25 (`g3-history-alias.png`, `g3-history-split.png`, `g3-history-partial.png`).

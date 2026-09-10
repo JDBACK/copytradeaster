@@ -1,16 +1,16 @@
 # Каркас плана разработки копитрейд-бота на AsterDex
 
+> **Заморозка (2026-09-10):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живая часть — только §9 «После hardening».
+
 Статус: Stage 1, Stage 2 и Stage 3 (Part 1 + Part 2, P2.0–P2.7 с corrective)
 закрыты; всё смержено в `main`. Сверх исходного видения сделаны: RAM
 leverage control-plane, notification outbox, captcha-доступ, Builder
-attestation, System Status и 4-табовый follower Mini App (21 POST
+attestation, System Status и 4-табовый follower Mini App (26 POST
 `/miniapp/api/*`). Видение трёх этапов — раздел 4 (исторический план,
 факт — чеклисты ниже). Полный фактологический бэкграунд — в
 [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md).
 
-Актуальная requalification integrated tree (2026-09-09): live leverage **4/4**,
-ONE_WAY **2/2**, Mini App **4/4**, HEDGE **7/7**, hybrid load 0.3 **1/1**;
-offline **1525 passed**, frontend **349 passed**, shadow scale **2 passed**.
+Актуальные счётчики — см. `ENGINE_TEST_STATUS_2026-08.md` TL;DR (2026-09-09).
 Проверенный merge готов к fast-forward/push в Git `main`; mainnet guard остаётся
 fail-closed.
 ## 1. Стек
@@ -510,7 +510,7 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 
 ### Финальный gate по внешнему код-ревью (2026-08-23)
 
-Два пункта последнего независимого ревью (см. `REVIEW_STAGE1_FINAL_2026-08.md`):
+Два пункта последнего независимого ревью (см. `reviews/review_stage1_final.md`):
 
 - [x] **P1 — защитная конвергенция.** Инвариант «одна нога = один bot-owned
   Stop + один TP»: снапшот координатора отдаёт дубликатные условные ордера
@@ -699,3 +699,11 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 Интеграционный verdict и полный список оставшихся live-harness assumptions
 зафиксированы append-only в `ENGINE_TEST_STATUS_2026-08.md`; до закрытия этих
 отклонений общий pre-mainnet verdict остаётся **NO-GO**.
+
+## 9. После hardening — живая часть (2026-09-10)
+
+- Builder fee сделан только на тестнете (P2.7, CLOSED 2026-09-04); вывод комиссий на mainnet через Builder Center открыт — статус в §4 «Этап 3», механика в `docs/ASTER_API_RESEARCH_2026-08.md:682`.
+- Tunnel keepalive и ready-gate приземлены 2026-09-09: `ffa2848` (keep mini app tunnel alive: `scripts/dev-up.sh` + `scripts/detach_process.py`) и `58c10f7` (withhold ready until public mini app is live: `scripts/dev-up.sh`).
+- Повторная квалификация движка pending: последняя — `f7df60b` (requalify integrated live gates, 2026-09-09); после неё в launch-path зашли ровно `ffa2848` + `58c10f7` (`9b65312` — только docs/maps/гейты, переквалификации не требует).
+- Дальше — прогоны по `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:6-11` (NO-GO до повторной квалификации); verdict и счётчики — только в `docs/ENGINE_TEST_STATUS_2026-08.md`.
+- Исторический план A–G демотирован из корня `docs/` в `docs/reports/plan_live_test.md` (история — `git log --follow`); старые A–G — история прогонов предыдущего кода (`docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:10-11`).

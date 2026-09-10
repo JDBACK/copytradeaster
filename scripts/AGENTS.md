@@ -40,6 +40,7 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 | `check_doc_links.py` | Verifies every relative `.md` link in root/test/scripts/miniapp `AGENTS.md`, `PRODUCT.md`, `README.md`, `docs/**/*.md` resolves to an existing file (`--strict` also checks `#fragment` anchors). Run before docs commits per `docs/AGENTS.md` conventions | `python scripts/check_doc_links.py [--strict]` |
 | `benchmark_history.py` | Offline synthetic capacity/commit probe over a temporary SQLite database; no Settings, credentials or network | `PYTHONPATH=src .venv/bin/python scripts/benchmark_history.py [--accounts N]` |
 | `check_doc_budgets.py` | Offline line-budget gate for agent maps: compares each file against `doc-budgets.json`, exit 1 on excess | `python scripts/check_doc_budgets.py` |
+| `check_doc_facts.py` | Offline facts-gate for standing docs: pins Mini App route / package / screenshot / asset / section counts and claim-vs-truth consistency (probes P-POST…P-SECTIONS); hot suite counters print SKIPPED, suites never run | `python scripts/check_doc_facts.py` |
 
 ## Conventions
 

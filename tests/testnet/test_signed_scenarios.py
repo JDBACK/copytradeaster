@@ -1,7 +1,7 @@
 """Signed testnet scenarios (marker `testnet`). Skipped unless CT_TESTNET=1.
 
 Covers the §8 research checklist subset automatable here, PLUS the
-review_stage1.md acceptance-gate scenarios that need REAL signed API keys:
+reviews/review_stage1_acceptance.md acceptance-gate scenarios that need REAL signed API keys:
 server time drift, account reads, listenKey lifecycle, master open/partial/stop
 replace cycle, insufficient margin - and the engine-level live proofs:
 double identical close (transition idempotency), one-tick stop replace,

@@ -3,7 +3,7 @@
 **Актуализация после ревью:** исправления движка и live-тесты готовы;
 повторные прогоны ещё не выполнены. Прежний GO ниже относится к старому дереву.
 Текущий verdict — NO-GO до квалификации. Исполнять
-[corrective-план](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md): прогоны,
+[corrective-план](ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md): прогоны,
 разбор failures/skips, исправления по evidence.
 
 Проект: `JDBACK/copytradeaster`

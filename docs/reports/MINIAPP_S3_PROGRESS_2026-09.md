@@ -732,3 +732,7 @@ verdict. iPhone slice — **PASS**; G3 — **CLOSED в согласованно�
 `open_orders=[]`, `allow_new_entries=1`, `risk_percent=0.02`,
 `notifications_enabled=0`; production bot/tunnel продолжают работать на `:8080`,
 одноразовый preview после завершения приёмки остановлен.
+
+### 27. Дополнение (2026-09-10): счёт скриншотов acceptance-s3
+
+Примечание: «17 PNG» в §19 выше — снимок на момент прохода (HEAD 09bd528); историю не переписываем. На диске сейчас 20 файлов: 17 базовых + 3 history из §25 (`g3-history-alias.png`, `g3-history-split.png`, `g3-history-partial.png`).
