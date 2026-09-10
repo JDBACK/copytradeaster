@@ -55,7 +55,13 @@ describe('systemStatusValue', () => {
   it('keeps stale honest even when a snapshot exists', () => {
     const stale = systemStatusValue('stale', SNAPSHOT)
     expect(stale).toEqual({ label: 'Данные устарели', tone: 'warning' })
-    expect(systemStatusValue('degraded', SNAPSHOT).tone).toBe('danger')
+    // Real degradation (routine windows are filtered out before presentation)
+    // reads in the same words as everywhere else; danger stays for blocked,
+    // which is the state that actually needs the user.
+    expect(systemStatusValue('degraded', SNAPSHOT)).toEqual({
+      label: 'Требует проверки',
+      tone: 'warning',
+    })
     expect(systemStatusValue('blocked', SNAPSHOT).tone).toBe('danger')
     expect(systemStatusValue('unknown', SNAPSHOT).tone).toBe('muted')
   })

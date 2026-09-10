@@ -50,7 +50,10 @@ export function systemRowValue(state: SystemState | undefined): StatusValue {
     case 'stale':
       return { label: 'Данные устарели', tone: 'warning' }
     case 'degraded':
-      return { label: 'Деградация', tone: 'danger' }
+      // "Деградация" is our word, not the user's: the engine is re-proving its
+      // state and needs no action, so the row repeats the one phrase used
+      // everywhere else instead of introducing engineering vocabulary.
+      return { label: 'Требует проверки', tone: 'warning' }
     default:
       return { label: 'Неизвестно', tone: 'muted' }
   }

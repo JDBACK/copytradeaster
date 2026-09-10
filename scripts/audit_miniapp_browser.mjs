@@ -129,6 +129,23 @@ async function main() {
   await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 }, sessionId)
   await send('Page.addScriptToEvaluateOnNewDocument',
     { source: readFileSync(options.init, 'utf8') }, sessionId)
+  // Count client sockets from the page itself: the plan forbids a tab walk
+  // from multiplying live WebSocket sessions, and only the page can see how
+  // many it opened or left open.
+  await send('Page.addScriptToEvaluateOnNewDocument',
+    { source: `window.__ws = { opened: 0, closed: 0, live: 0 };
+      const OriginalWebSocket = window.WebSocket;
+      window.WebSocket = function (...args) {
+        const socket = new OriginalWebSocket(...args);
+        window.__ws.opened += 1;
+        window.__ws.live += 1;
+        const close = socket.close.bind(socket);
+        socket.close = (...closeArgs) => { if (socket.readyState !== 3) window.__ws.live -= 1; window.__ws.closed += 1; return close(...closeArgs); };
+        socket.addEventListener('close', () => { if (!socket.__counted) { socket.__counted = true; window.__ws.live -= 1; window.__ws.closed += 1; } });
+        return socket;
+      };
+      window.WebSocket.prototype = OriginalWebSocket.prototype;
+    ` }, sessionId)
 
   // A wedged renderer used to hang every mode until the outer watchdog fired,
   // which read as "audit did not finish" instead of the real cause. Bound each
@@ -350,6 +367,42 @@ async function main() {
       userVisibleWarnings: warnings,
       kinds: log.reduce((acc, item) => ({ ...acc, [item.kind]: (acc[item.kind] ?? 0) + 1 }), {}),
       sample: log.slice(0, 25),
+    }, null, 1))
+  }
+
+  if (options.mode === 'churn') {
+    // "50 переходов по вкладкам не создают несколько WebSocket sessions" (§6).
+    // The counter is installed in the page, so both opens and leaks are seen.
+    const before = JSON.parse(await evaluate('JSON.stringify(window.__ws)'))
+    const labels = ['Главная', 'Позиции', 'Активность', 'Настройки']
+    for (let index = 0; index < 50; index += 1) {
+      await evaluate(`(() => { [...document.querySelectorAll('.nav-item')][${index % 4}].click(); return true })()`)
+      await delay(120)
+    }
+    await delay(2500)
+    const after = JSON.parse(await evaluate('JSON.stringify(window.__ws)'))
+    const nested = []
+    for (const [label, expression] of [
+      ['Статус', "document.querySelector('.summary-status').click()"],
+      ['назад', "[...document.querySelectorAll('.nav-item')][0].click()"],
+      ['Риск', "[...document.querySelectorAll('.summary-row')].find((r) => /Риск на сделку/.test(r.innerText)).click()"],
+      ['назад', "[...document.querySelectorAll('.nav-item')][0].click()"],
+      ['Подключение', "document.querySelector('.wallet-chip').click()"],
+      ['назад', "[...document.querySelectorAll('.nav-item')][0].click()"],
+    ]) {
+      await evaluate(`(() => { ${expression}; return true })()`)
+      await delay(400)
+    }
+    await delay(1500)
+    const final = JSON.parse(await evaluate('JSON.stringify(window.__ws)'))
+    console.log(JSON.stringify({
+      tabs: labels.length,
+      switches: 50,
+      before,
+      after,
+      final,
+      liveSockets: posts().filter((p) => p.includes('live-ticket')).length,
+      requests: posts().length,
     }, null, 1))
   }
 
