@@ -7,12 +7,16 @@
  * scrolling and Telegram's sheet drag keep working everywhere else.
  */
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { PULL_IDLE, createPullTracker, type PullState } from '../pullToRefresh'
+import { useEffect, useRef, useState } from 'react'
+import { PULL_IDLE, PULL_THRESHOLD_PX, createPullTracker, type PullState } from '../pullToRefresh'
 import { hapticImpact, hapticNotify, setVerticalSwipes } from '../telegram'
 
 /** How long the finished indicator stays before folding away. */
 const SETTLE_MS = 320
+/** Height the gap rests at while the refresh is in flight: enough for the
+ *  spinner, not the whole distance the finger travelled. A phone-sized screen
+ *  should not stay pushed down by a 90 px pull for a second. */
+const REFRESH_REST_PX = 44
 
 export function PullToRefresh({
   scroller,
@@ -30,17 +34,34 @@ export function PullToRefresh({
     refresh.current = onRefresh
   }, [onRefresh])
 
+  // The shell carries the pull variables, not the indicator: the content rides
+  // down with the finger and opens a real gap, and the indicator sits inside
+  // that gap. Before this, a full-width band slid over the heading it had
+  // nothing to do with, which read as an alien rectangle on the screen.
+  useEffect(() => {
+    const shell = scroller.current?.closest<HTMLElement>('.shell')
+    if (!shell) return
+    const dragging = state.phase === 'pulling' || state.phase === 'ready'
+    const gap =
+      state.phase === 'refreshing' ? Math.min(state.distance, REFRESH_REST_PX) : state.distance
+    shell.style.setProperty('--pull-distance', `${gap}px`)
+    shell.style.setProperty('--pull-progress', `${Math.min(1, state.distance / PULL_THRESHOLD_PX)}`)
+    shell.style.setProperty('--pull-ease', dragging ? '0ms' : '260ms')
+  }, [state, scroller])
+
   useEffect(() => {
     const element = scroller.current
     if (!element) return
     const tracker = createPullTracker()
     let busy = false
+    let lastPhase = 'idle'
     // Telegram owns the vertical drag unless this gesture actually took it.
     let swipesHeld = false
     let settle: ReturnType<typeof setTimeout> | null = null
 
     const begin = (x: number, y: number) => {
       if (busy) return
+      lastPhase = 'idle'
       const atTop = element.scrollTop <= 0
       tracker.start(x, y, atTop)
       // Telegram drags the whole mini app sheet down with the same gesture.
@@ -62,6 +83,11 @@ export function PullToRefresh({
       const gesture = tracker.move(x, y)
       if (!gesture.owned) return
       claim?.()
+      // One light tap the moment the pull becomes enough to refresh, the way a
+      // native list tells the finger it has arrived. It replaces the words the
+      // screen used to print over the content.
+      if (gesture.phase === 'ready' && lastPhase !== 'ready') hapticImpact('light')
+      lastPhase = gesture.phase
       setState({ phase: gesture.phase, distance: gesture.distance })
     }
 
@@ -137,19 +163,18 @@ export function PullToRefresh({
     }
   }, [scroller])
 
-  const style = { '--pull-distance': `${state.distance}px` } as CSSProperties
   return (
-    <div className="pull-refresh" data-phase={state.phase} style={style} aria-hidden={state.phase === 'idle'}>
-      <span className="pull-refresh-icon" aria-hidden>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="8.5" />
-          <path d="M12 8v5.5" />
-          <path d="m9.6 11.3 2.4 2.4 2.4-2.4" />
+    <div className="pull-refresh" data-phase={state.phase}>
+      <span className="pull-refresh-spinner" aria-hidden>
+        {/* One 270° arc that turns with the finger: the shape a native list
+            shows, not a clock face standing in for a spinner. */}
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+          <path d="M12 3.4a8.6 8.6 0 1 0 8.6 8.6" />
         </svg>
       </span>
-      {/* The gesture teaches itself: no instruction while pulling, one short
-          confirmation at the moment releasing would actually refresh. */}
-      <span className="pull-refresh-label" role="status" aria-live="polite">
+      {/* Spoken, not printed: the surface stays quiet while the spinner and
+          the haptic tap carry the same news to the eye and the finger. */}
+      <span className="visually-hidden" role="status" aria-live="polite">
         {state.phase === 'ready' ? 'Отпустите для обновления' : state.phase === 'refreshing' ? 'Обновляем…' : ''}
       </span>
     </div>

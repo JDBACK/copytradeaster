@@ -30,6 +30,7 @@
 
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 
 function parseArgs(argv) {
@@ -40,6 +41,7 @@ function parseArgs(argv) {
     seconds: 60,
     tab: 0,
     closed: false,
+    out: null,
     after: 0,
     chrome: process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     init: null,
@@ -52,6 +54,7 @@ function parseArgs(argv) {
     else if (flag === '--seconds') options.seconds = Number(value)
     else if (flag === '--tab') options.tab = Number(value)
     else if (flag === '--closed') options.closed = true
+    else if (flag === '--out') options.out = value
     else if (flag === '--after') options.after = Number(value)
     else if (flag === '--chrome') options.chrome = value
     else if (flag === '--init') options.init = value
@@ -61,6 +64,12 @@ function parseArgs(argv) {
 }
 
 const options = parseArgs(process.argv.slice(2))
+
+// The app's own staleness complaints. A bare «устарел» is not enough: the
+// activity feed legitimately reports «сигнал мастера устарел» for a master
+// entry that was skipped, and matching it would flag real content as UI noise.
+const NOISE_SOURCE =
+  "Обновить|обновите|Проверить состояние|требует проверки|Нет связи|Данные устарели|Снимок устарел|Проверка прав устарела"
 
 async function main() {
   const chrome = spawn(
@@ -178,6 +187,28 @@ async function main() {
       await delay(60)
     }
   }
+  const snapshot = async (path) => {
+    const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, sessionId)
+    writeFileSync(path, Buffer.from(shot.data, 'base64'))
+  }
+  // Pull geometry, measured against the shell rather than the viewport: the
+  // indicator is only acceptable while it sits inside the gap the content
+  // opens, and "it looks fine on my screenshot" is not a measurement.
+  const PULL_GAP = `(() => {
+    const shell = document.querySelector('.shell').getBoundingClientRect()
+    const spinner = document.querySelector('.pull-refresh-spinner')
+    const badge = spinner && spinner.getBoundingClientRect()
+    const content = document.querySelector('.shell-content').getBoundingClientRect()
+    const first = document.querySelector('.shell-content .screen > *')
+    const row = first && first.getBoundingClientRect()
+    return {
+      shift: Math.round(content.top - shell.top),
+      spinnerTop: badge ? Math.round(badge.top - shell.top) : null,
+      spinnerSize: badge ? Math.round(badge.height) : null,
+      firstRowTop: row ? Math.round(row.top - shell.top) : null,
+      coversContent: Boolean(badge && row && badge.bottom > row.top),
+    }
+  })()`
 
   await send('Page.navigate', { url: options.url }, sessionId)
   await waitEvent('Page.loadEventFired', sessionId)
@@ -207,7 +238,7 @@ async function main() {
     const state = await evaluate(`JSON.stringify({
       initLen: (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData || '').length,
       railVisible: !!document.querySelector('.live-status'),
-      demands: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+      demands: (document.body.innerText.match(new RegExp(${JSON.stringify(NOISE_SOURCE)}, 'gi')) || []),
       updateButtons: [...document.querySelectorAll('button')].map((b) => b.innerText.trim()).filter((t) => /обнов|повтор/i.test(t)),
     })`)
     console.log(JSON.stringify({ text: text.slice(0, 700), ...JSON.parse(state), posts: posts().slice(-8) }, null, 1))
@@ -219,18 +250,22 @@ async function main() {
     await pull(box.x, box.y, [12, 26, 44, 62, 80, 96])
     const mid = JSON.parse(await evaluate(`JSON.stringify({
       phase: document.querySelector('.pull-refresh').dataset.phase,
-      distance: document.querySelector('.pull-refresh').style.getPropertyValue('--pull-distance'),
+      distance: document.querySelector('.shell').style.getPropertyValue('--pull-distance'),
       label: document.querySelector('.pull-refresh').innerText.trim(),
+      gap: ${PULL_GAP},
       swipes: window.__audit.swipes.map((s) => s[0]),
     })`))
+    if (options.out) await snapshot(`${options.out}.pulling.png`)
     await touch('touchEnd', [])
     await delay(300)
     const released = JSON.parse(await evaluate(`JSON.stringify({
       phase: document.querySelector('.pull-refresh').dataset.phase,
       label: document.querySelector('.pull-refresh').innerText.trim(),
+      gap: ${PULL_GAP},
       swipes: window.__audit.swipes.map((s) => s[0]),
       haptics: window.__audit.haptics.map((h) => h[0] + ':' + h[1]),
     })`))
+    if (options.out) await snapshot(`${options.out}.refreshing.png`)
     await delay(4000)
     const settled = JSON.parse(await evaluate(`JSON.stringify({ phase: document.querySelector('.pull-refresh').dataset.phase })`))
     console.log(JSON.stringify({ mid, released, settled, requests: posts().slice(before) }, null, 1))
@@ -264,7 +299,7 @@ async function main() {
       await delay(2500)
       report[label] = JSON.parse(await evaluate(`JSON.stringify({
         text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 700),
-        noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+        noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|Данные устарели|Снимок устарел|Проверка прав устарела/gi) || []),
         rail: (document.querySelector('.live-status') || {}).innerText || null,
       })`))
     }
@@ -286,7 +321,7 @@ async function main() {
       report[label] = JSON.parse(await evaluate(`JSON.stringify({
         heading: (document.querySelector('.screen h1') || {}).innerText || null,
         text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 900),
-        noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+        noise: (document.body.innerText.match(new RegExp(${JSON.stringify(NOISE_SOURCE)}, 'gi')) || []),
         buttons: [...document.querySelectorAll('button')].map((b) => b.innerText.trim()).filter(Boolean).slice(0, 14),
       })`))
     }
@@ -303,7 +338,7 @@ async function main() {
     await delay(2600)
     report['Экран уведомлений'] = JSON.parse(await evaluate(`JSON.stringify({
       text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 700),
-      noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+      noise: (document.body.innerText.match(new RegExp(${JSON.stringify(NOISE_SOURCE)}, 'gi')) || []),
     })`))
     await openHome()
     await evaluate("(() => { [...document.querySelectorAll('.nav-item')][1].click(); return true })()")
@@ -312,7 +347,7 @@ async function main() {
     await delay(2600)
     report['Закрытые сделки'] = JSON.parse(await evaluate(`JSON.stringify({
       text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 900),
-      noise: (document.body.innerText.match(/Обновить|обновите|Проверить состояние|требует проверки|Нет связи|устарел/gi) || []),
+      noise: (document.body.innerText.match(new RegExp(${JSON.stringify(NOISE_SOURCE)}, 'gi')) || []),
     })`))
     await openHome()
     for (const [label, needle] of [['Безопасность', 'Безопасность'], ['Помощь', 'Как работает копирование']]) {
@@ -322,7 +357,7 @@ async function main() {
       await delay(2200)
       report[label] = JSON.parse(await evaluate(`JSON.stringify({
         text: document.body.innerText.replace(/\\n{2,}/g, '\\n').slice(0, 500),
-        noise: (document.body.innerText.match(/Обновить|обновите|требует проверки|Нет связи|устарел/gi) || []),
+        noise: (document.body.innerText.match(new RegExp(${JSON.stringify(NOISE_SOURCE)}, 'gi')) || []),
       })`))
     }
     console.log(JSON.stringify(report, null, 1))
@@ -434,6 +469,15 @@ async function main() {
       })`)))
     }
     console.log(JSON.stringify(samples, null, 1))
+  }
+
+  if (options.mode === 'shot') {
+    // Visual evidence for a human: the same read-only session the other modes
+    // use, written to a PNG so a reviewer can see what the surface showed.
+    const path = options.out ?? `/tmp/miniapp-${options.tab}-${Date.now()}.png`
+    await snapshot(path)
+    const text = await evaluate('document.body.innerText.replace(/\\n{2,}/g, "\\n")')
+    console.log(JSON.stringify({ path, text }, null, 1))
   }
 
   socket.close()

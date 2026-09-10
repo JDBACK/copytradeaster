@@ -67,23 +67,55 @@ describe('pull-to-refresh behavior', () => {
   it('stays invisible until the surface is actually pulled', () => {
     const { container } = render(<Harness onRefresh={async () => {}} />)
     const indicator = container.querySelector('.pull-refresh')
+    const shell = container.querySelector('.shell') as HTMLElement
     expect(indicator?.getAttribute('data-phase')).toBe('idle')
-    expect((indicator as HTMLElement).style.getPropertyValue('--pull-distance')).toBe('0px')
+    // The shell owns the pull variables: they open the gap the indicator sits
+    // in, so a full-width band never slides over the content it belongs to.
+    expect(shell.style.getPropertyValue('--pull-distance')).toBe('0px')
+    expect(shell.style.getPropertyValue('--pull-progress')).toBe('0')
   })
 
   it('teaches the gesture: distance follows the finger, ready only at the threshold', () => {
     const { container } = render(<Harness onRefresh={async () => {}} />)
     const scroller = container.querySelector('.shell-content') as HTMLElement
     const indicator = container.querySelector('.pull-refresh') as HTMLElement
+    const shell = container.querySelector('.shell') as HTMLElement
 
     pull(scroller, 30)
     expect(indicator.getAttribute('data-phase')).toBe('pulling')
-    expect(indicator.style.getPropertyValue('--pull-distance')).toBe('30px')
+    expect(shell.style.getPropertyValue('--pull-distance')).toBe('30px')
+    expect(shell.style.getPropertyValue('--pull-progress')).toBe('0.46875')
+    expect(shell.style.getPropertyValue('--pull-ease')).toBe('0ms')
     expect(screen.queryByText('Отпустите для обновления')).toBeNull()
 
     fireEvent.touchMove(scroller, { touches: [{ clientX: 10, clientY: 180 }] })
     expect(indicator.getAttribute('data-phase')).toBe('ready')
     expect(screen.getByText('Отпустите для обновления')).toBeDefined()
+  })
+
+  it('taps the finger once at the threshold and eases the gap shut afterwards', () => {
+    const impact = vi.fn()
+    ;(window as unknown as { Telegram?: unknown }).Telegram = {
+      WebApp: { initData: 't', HapticFeedback: { impactOccurred: impact } },
+    }
+    const onRefresh = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(<Harness onRefresh={onRefresh} />)
+    const scroller = container.querySelector('.shell-content') as HTMLElement
+    const shell = container.querySelector('.shell') as HTMLElement
+
+    pull(scroller, 80)
+    expect(impact).toHaveBeenCalledTimes(1)
+    expect(impact).toHaveBeenCalledWith('light')
+    // The arc holds its full turn while the finger rests at the threshold.
+    expect(shell.style.getPropertyValue('--pull-progress')).toBe('1')
+    expect(shell.style.getPropertyValue('--pull-ease')).toBe('0ms')
+
+    fireEvent.touchEnd(scroller)
+    // Releasing switches the gap to its easing curve so it folds shut smoothly.
+    expect(shell.style.getPropertyValue('--pull-ease')).toBe('260ms')
+    // The gap rests at the spinner's own height while the read is in flight
+    // instead of keeping the whole travel on screen.
+    expect(shell.style.getPropertyValue('--pull-distance')).toBe('44px')
   })
 
   it('refreshes once on release past the threshold and folds back afterwards', async () => {

@@ -107,7 +107,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `components/ui.tsx` | Shared `Brand/TrustRail/Sheet/Row/ErrorBox` (+ inline SVG icons) | — |
 | `components/RiskRuler.tsx` | Snap-strip control: native touch/trackpad inertia, mouse drag w/ pointer capture, gated wheel, interruptible settle animator, scrollend+fallback settle, rate-limited selection haptics, save freeze | — |
 | `components/LiveStatus.tsx` | Transport rail; renders only for the `stale` verdict (channel silent past its deadline). Healthy, connecting and reconnecting states render nothing | — |
-| `components/PullToRefresh.tsx` | Shell-bound pull gesture over `.shell-content`: arms only at scroll top, claims the vertical drag from Telegram while armed, triggers one authoritative `resources.pullRefresh()` | — |
+| `components/PullToRefresh.tsx` | Shell-bound pull gesture over `.shell-content`: arms only at scroll top, claims the vertical drag from Telegram while armed, opens a gap the content rides down into and places one wordless arc spinner in it (variables live on `.shell`, the caption is screen-reader only, a light tap lands at the threshold), then triggers one authoritative `resources.pullRefresh()`; the gap rests at 44 px while the read is in flight and eases shut afterwards | — |
 | `riskRuler.ts` | Pure ruler decisions: wheel deltaMode normalization + `wheelIntent` gating, ease-out/duration, clamp, haptic rate limit | — |
 | `protectionWarning.ts` | Protection-state → Russian warning copy map | — |
 | `format.ts` | USDT/fee/date/pnl formatting | — |
