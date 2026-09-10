@@ -31,6 +31,8 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `trading/test_builder_stale_corrective.py` | Only −5026 triggers invalidation + DIRECT retry of reductions; entries fail closed; restart durability; emergency fallback |
 | `trading/test_follower_registry.py` | Copy-on-write snapshot/publish/replace/unpublish/`load_at_boot` + mutation idle-barrier + postfill-drain bound |
 | `trading/test_reconciler_idempotent.py` | Steady state → 0 commands ×3; drift → 1 batch → 0 (reuses coordinator fakes) |
+| `trading/test_corrective_invariants.py` | Cross-component regressions from the independent pre-mainnet review over planner/executor/coordinator seams |
+| `trading/test_journal_audit.py` | P8a healing acceptance: deterministic-failure classification + intent match over journal rows |
 | `risk/test_engine_sizing.py` | Pure math: `floor_to_step`, `entry_quantity` (0.019 from 1000×1%), clamps/skips, `post_fill_cap`, `scaled_reduce`, `margin_check`, `deviation_exceeded` |
 | `domain/test_models_invariants.py` | `QtyDecision` exactly-one-field, `PositionKey` hash/eq, Decimal-only (float forbidden) |
 | `master/test_projector_payloads.py` | `MasterProjector`: ORDER_TRADE_UPDATE lifecycle, dedup vs out-of-order TRADE, informational-only AU, margin-call/calculated triggers, `rebuild_full`, hedge legs |
@@ -44,6 +46,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `aster/test_trading_api_endpoints.py` | Endpoint coverage: leverage, margin, position mode, listenKey, exchangeInfo, order query |
 | `aster/test_agent_api.py` | Signed `GET /fapi/v3/agent` contract → typed `AgentDTO` |
 | `aster/test_builder_api.py` | Signed `GET /fapi/v3/builder` contract → typed `BuilderDTO` (P2.6) |
+| `aster/test_history_api.py` | Signed history reads (fills/income): exact decimal facts, weighted signed requests, a malformed page is rejected whole without echoing its payload |
 | `aster/test_management_api.py` | `approveAgent`/`approveBuilder` EIP-712 registration requests |
 | `aster/test_signing.py` | Pure EIP-712 primitives: query string, trading/registration signatures, nonce |
 | `aster/test_user_stream_protocol.py` | `UserStream` protocol: events, listenKey rotation, backoff, stop, keepalive |
@@ -67,6 +70,10 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `history/test_capture.py` | Serial boundary capture: bracket proof, live-edge cutoff, partial (not refused), no-op republish |
 | `history/test_replay.py` | Stable identity (R2/C1): rolling windows keep one ref, late-fill origin rollback, alias/split corrections, silent rebuild |
 | `history/test_projector.py` | Pure quantity projection: seeds, flips, HEDGE legs, complete/partial quality |
+| `history/test_snapshot.py` | Snapshot certification (bracket/cutoff/update-time) + start-seed walk-back; fills of the other position-mode book stay out of the walk, a foreign symbol still refuses it |
+| `history/test_reader.py` | `read_windows` coverage proof: inclusive split without holes or duplicate boundaries, restart-safe unread windows, saturated millisecond is a gap, empty window is verified coverage |
+| `history/test_reconcile.py` | Contiguous coverage + signed-snapshot agreement; a flat snapshot never certifies an unknown remainder, hedge legs are verified independently |
+| `history/test_events.py` | User activity events: immutable owned facts with stable feed cursors |
 | `history/test_event_builder.py` | One event per semantic allocation; batch == sequential publication (R3/C3) |
 | `history/test_transition_events.py` | Publish-level transition events incl. legacy upgrade + silent correction (C3) |
 | `history/test_episode_events.py` | Atomic episode+event publication, first-wins dedup |
@@ -120,6 +127,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `test_mark_stream_gate.py` | `scripts/check_mark_stream.py` verdict: streaming only when every requested symbol delivered frames, partial feed is its own exit code |
 | `test_manual_master_order_ids.py` | `scripts/manual_master_order.py` client order ids stay unique for one price at one instant (-4015) |
 | `notifications/test_formatter.py` | Pure formatter: open/close/stop/TP/leverage/cancel copy + price/volume formatting, skip reasons |
+| `notifications/test_trade_cards.py` | Shared `format_user_event` presenter (push/menu/Mini App): trade/protection/system cards without guessed numbers, copy covers every `SkipReason`, unknown codes never print, keyboard action only for trade kinds |
 | `notifications/test_notifications.py` | Router+worker on tmp SQLite: account/global/critical-admin routing, dedup, retry-after/network/403, truncation, pacing, lease recovery, burst bound, hourly maintenance tick (C8) |
 | `notifications/test_user_event_delivery_c6.py` | Durable delivery cursor: crash replay, rollout floor, link gate (R6/R7/C6) |
 | `cli/test_cli_commands.py` | Light CLI on tmp DB: init-db/status/pause, close-plan math, idempotent import, telegram-user add/list/block/unblock |
@@ -128,6 +136,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `cli/test_wallet_parser.py` | wallet.txt parser: typo tolerance (`evm adress`/`privte`), main-prefix roles, dupe-free upsert |
 | `test_app_lifecycle.py` | App lifecycle/REAL-SHADOW routing: shadow boot gate, client selection, stop ordering, paused admission, unpublish, notifier isolation, stream fallback |
 | `test_coverage_gaps.py` | Targeted coverage gaps: dispatch/run, logging utils, config validation, DB guards, stream robustness |
+| `test_corrective_boot.py` | Production network guards and test-collection boundaries (mainnet fail-closed, testnet marker gating) |
 | `test_telegram_config.py` | `Settings`: `.botkey` compat (`BOT_KEY=`), redaction, admin IDs/egress IP normalization |
 
 ## integration — engine stacks over a faked exchange

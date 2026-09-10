@@ -103,6 +103,14 @@ ASTER MASTER
 
 Telegram и Builder не находятся внутри этого потока. Они только управляют настройками, onboarding и уведомлениями.
 
+Рядом с торговым потоком живёт presentation-слой Mini App (§20): `App`
+публикует каждый собранный follower snapshot в process-local
+`FollowerSnapshotStore` (revision + REST `captured_at`), а
+`MiniAppLiveRuntime` раздаёт браузерным сессиям только безопасные инвалидации
+через authenticated WebSocket. Private-стримы дают лишь сигнал переснять REST
+state, mark-price котировки меняют только presentation PnL — ни то, ни другое не
+участвует в admission, planner или sizing.
+
 ## 4. Границы модулей
 
 ### `aster/`
@@ -151,11 +159,11 @@ Risk engine должен возвращать целевое состояние/
 Runtime leverage follower управляется `LeverageManager`: catalog из signed
 `leverageBracket` задаёт ceiling, authoritative `positionRisk` — текущую
 конфигурацию. Любое положительное подтверждённое плечо не выше catalog/operator
-ceilings (≤) считается готовым для текущего поколения.
-до записи и не повышает stop-driven downshift обратно до максимума, в том
-числе после рестарта. Нечитаемая конфигурация блокирует подготовку. Записи при
-необходимом понижении ограничены semaphore/pacing; детерминированный отказ
-допускает account-bracket fallback в пределах ceilings.
+ceilings (≤) считается готовым для текущего поколения. Maintenance-воркер
+читает конфигурацию до записи и не повышает stop-driven downshift обратно до
+максимума, в том числе после рестарта. Нечитаемая конфигурация блокирует
+подготовку. Записи при необходимом понижении ограничены semaphore/pacing;
+детерминированный отказ допускает account-bracket fallback в пределах ceilings.
 
 Coordinator держит account mutation lock от восстановления in-flight и снимка
 до исполнения и post-fill convergence; тот же lock использует maintenance.
@@ -226,7 +234,7 @@ restart и late backfill без отдельного accumulator-сервиса.
 `APPROVAL_SENT` является fail-closed состоянием неизвестного результата
 удалённого `approveAgent`: transport/5xx/unknown exchange response не откатывает
 его в `PREPARED` и не разрешает слепой повтор user-signed POST; исключение — истечение `approval_deadline_ms`: неподтверждённый Agent возвращает просроченный `APPROVAL_SENT` в `PREPARED`.
-проверяет Agent идемпотентным signed GET. Mini App может продолжить без второй
+Recovery сначала проверяет Agent идемпотентным signed GET. Mini App может продолжить без второй
 wallet signature только server-owned `APPROVAL_SENT`/`APPROVED`; `PREPARED`
 всегда требует подпись. После paused account commit attempt переводится в
 `COMMITTED`, а затем очищается после runtime activation либо лениво при
@@ -239,7 +247,7 @@ Durable account identity (P2.6): `accounts` несут `identity_source`
 только последовательными signed `GET /agent` (current signer, допустимые
 permissions) + exact-match `GET /builder` (`userAddress`, `builderAddress`,
 `maxFeeRate` == cap) с race-check по `account_version` перед commit.
-`identity_source=builder` + snapshot); direct/replacement/disconnect
+Commit Builder-атомарен (credentials + validation + `identity_source=builder` + snapshot); direct/replacement/disconnect
 атомарно чистят proof (`identity_source=direct`, поля NULL). Race в reauthorization исключён
 `account_version` (mismatch → `IDENTITY_CHANGED` без commit); первичный submit защищён конфликтом владельца. Disconnect —
 local-only: remote Agent/Builder revoke не выполняется и не заявляется.
@@ -278,7 +286,25 @@ Direct onboarding остаётся двухфазным: signed preflight обя
 account. `UserApplicationService` не сворачивает `OnboardingError` в общий
 `ValidationError`: наружу передаётся только typed
 `OnboardingApplicationError.code` (`OnboardingErrorCode`); инварианты результата/контекста
-дополнительно охраняются `ValidationError`. Exchange status,
+дополнительно охраняются `ValidationError`. Exchange status, адреса и private
+key не переходят через application boundary: Telegram и Mini App сами маппят
+enum в безопасный actionable copy.
+
+### `miniapp/`
+
+Транспорт Mini App. `miniapp/server.py` — aiohttp на `/miniapp/`: 27 POST
+`/miniapp/api/*` с HMAC-проверкой Telegram initData, dev-сессия только при
+`CT_MINIAPP_DEV_UNSIGNED` и явном `CT_MINIAPP_DEV_USER_ID` (и то и другое
+проверяется fail-closed), статика собранного Vite-бандла и security-заголовки.
+`miniapp/live.py` — live-презентация: single-use ticket (TTL 20 c), GET
+`/miniapp/api/live` WebSocket, account-scoped bounded latest-wins hub с
+per-process `epoch`, private-стрим на каждый published REAL follower
+(coalesced REST re-snapshot) и один общий public mark-price стрим с
+посимвольным REST-fallback'ом (`premiumIndex`, weight 10). Бизнес-логики здесь
+нет: хендлеры знают только `UserApplicationService` и typed public codes.
+Frontend (`miniapp/`, карта — `miniapp/AGENTS.md`) держит session-scoped
+live-клиент, читает инвалидации тем же weak/strong-контрактом ресурсов и никогда
+не считает live-событие authoritative источником торгового состояния.
 
 ### `application/` и `telegram/`
 
@@ -639,12 +665,16 @@ Stage 2 process (`application/engine.py`) продолжает этот поря
 ```text
 connect/migrate → bootstrap configured admins/recovery floor
 → compose durable notifier + App → App READY
+→ (miniapp) compose MiniAppLiveRuntime + history live-publish seam
+→ start history worker + user-event sweep
+→ start MiniApp live runtime + aiohttp server
 → start outbox worker → Telegram long polling
 ```
 
 Shutdown идёт в обратной зависимости: закрыть admission/drain Telegram
 handlers → остановить user-event sweep → осушить outbox при живых Bot/DB
-→ остановить Mini App/history worker → `App.stop()` → закрыть Bot session.
+→ остановить Mini App aiohttp → остановить `MiniAppLiveRuntime` (private и
+mark-стримы, hub) → остановить history worker → `App.stop()` → закрыть Bot session.
 S3 production восстанавливает user events после отдельного rollout floor и
 запускает recurring sweep раз в 2 секунды. Explicit delivery=False seam
 сохраняет прежний command recovery без user-event scan/cursor advance.
@@ -923,6 +953,19 @@ L4 — один shared presentation-стрим котировок на проц�
 `GET /fapi/v3/premiumIndex` (weight 10, Decimal, whitelist). Fallback простаивает,
 пока стрим отдаёт кадры, и не обновляет REST `captured_at`: mark-тики влияют
 только на presentation PnL, никогда на trading state.
+
+Freshness, fallback и health считаются **по символу**: кадр по BTCUSDT не делает
+живым молчащий ETHUSDT, REST-запрос уходит только за молчащими символами, а
+health публикует `live` лишь при отсутствии молчащих. Котировки коалесятся по
+символу и публикуются не чаще `MARK_RENDER_CADENCE_S` (1 c). Live-инвалидация
+доходит только до видимых потребителей: скрытые keep-alive вкладки помечаются
+stale и обновляются на активации, а не тянут сеть в фоне. Quote-инвалидация
+помечает DTO stale, не фенся уже летящее weak-чтение — иначе клиент, который
+медленнее каденции, запирал бы собственную перечитку; state-публикации (снимок,
+health, revision gap) фенсят как раньше. Предполётный гейт
+`scripts/check_mark_stream.py` судит по каждому символу: `STREAMING` (exit 0)
+только когда кадры пришли по всем запрошенным, частичный поток — `PARTIAL`
+(exit 3), полная тишина — `SILENT` (exit 1).
 
 Детальный план и acceptance:
 `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.

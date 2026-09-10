@@ -2,15 +2,21 @@
 
 Небольшой асинхронный copy-trade bot для AsterDex Futures V3: один master,
 10–30 пользователей в первом запуске и максимум около 100 follower accounts.
-Stage 1 trading core и Stage 2 Telegram-контур работают как один modular
-monolith на Python 3.12, asyncio, aiogram 3.30.0 и SQLite WAL.
+Stage 1 trading core, Stage 2 Telegram-контур и Stage 3 (Builder onboarding +
+follower Mini App) работают как один modular monolith на Python 3.12, asyncio,
+aiogram 3.30.0 и SQLite WAL.
 
 Stage 2 включает private inline Telegram UI, captcha + admin approval, direct
 V3 onboarding, риск на Stop, pause/resume, account lifecycle, админку и
 Telegram notification outbox. Trading core Stage 1 при этом не переписан.
 
-> Проект работает только с Aster testnet. Mainnet, реальные средства, Builder,
-> Mini App UI и принудительный Isolated margin mode в текущий scope не входят.
+Stage 3 добавляет комбинированный ApproveAgent (Builder), account attestation и
+follower Mini App: 4-табавая оболочка, история сделок, activity feed и live-
+обновление позиций/PnL без штатной кнопки обновления (данные приходят по
+authenticated live-каналу, единственный ручной жест — pull-to-refresh).
+
+> Проект работает только с Aster testnet. Mainnet, реальные средства и
+> принудительный Isolated margin mode в текущий scope не входят.
 
 ## Быстрый старт для разработки
 

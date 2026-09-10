@@ -6,7 +6,8 @@
 
 Private Telegram bot (current); Telegram Mini App (current, Stage 3 S1–S3
 CLOSED 2026-09-09: 4-tab follower AppShell, история сделок и activity feed
-поверх того же application layer).
+поверх того же application layer; live-презентация ACCEPTED 2026-09-10:
+позиции, PnL, история и статус обновляются сами, без штатной кнопки обновления).
 
 ## Users
 
@@ -45,6 +46,10 @@ reconciliation восстанавливают правильное состоя�
 - slash-команды остаются только входом, recovery и shortcut-механизмом;
 - Telegram Mini App предоставляет те же пользовательские возможности
   через общий application layer, а не отдельную бизнес-реализацию;
+- Mini App не просит пользователя обновлять экран: движок присылает изменения
+  по live-каналу, данные прошлого снимка остаются на экране при разрыве, а
+  единственный ручной жест — pull-to-refresh; плашка о разрыве появляется
+  только когда данные действительно перестали обновляться;
 - Stage 2 работает только с Aster futures testnet;
 - один Python/asyncio process и SQLite WAL обслуживают bot и trading core.
 
@@ -94,6 +99,8 @@ reconciliation восстанавливают правильное состоя�
   `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md`;
 - актуальное исследование aiogram:
   `docs/reports/STAGE2_AIOGRAM_RESEARCH_2026-08.md`.
+- live-презентация Mini App (границы, отказ от ручного обновления, evidence
+  REAL Testnet и мобильного WebView): `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.
 
 Визуальная система Mini App утверждена и реализована: Aster dark theme,
 `miniapp/src/index.css` токены, UX-план и owner acceptance скриншоты

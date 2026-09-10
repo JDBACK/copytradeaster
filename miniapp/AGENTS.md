@@ -11,7 +11,10 @@ Follower Mini App (Stage 3 Part 2, CLOSED): 4-tab shell (`Главная`, `По
 `Активность`, `Настройки`) with nested Risk/Notifications/SystemStatus/
 AccountBuilder/Security/Help plus TradeList/TradeDetail/PositionDetail screens,
 plus an out-of-shell onboarding flow (session gate → builder wizard |
-attempt recovery → success receipt → home shell).
+attempt recovery → success receipt → home shell). Live mode (ACCEPTED
+2026-09-10) keeps those screens current over an authenticated WebSocket: no
+manual refresh button anywhere, the rail speaks only for a silent channel, and
+pull-down at the top of the shell is the single manual path.
 
 ```bash
 cd miniapp && pnpm install && pnpm dev        # HMR dev, /miniapp/api proxied to 127.0.0.1:8080
@@ -26,6 +29,8 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
   -> onboarding onConnected or session->home opens one MiniAppResources owner per session generation; success reuses it, home mounts AppShell with it
   -> AppShell (navigation.ts RouteState tab + nested[] stack) shares that owner
   -> screens/resources -> api.ts -> 27 POST /miniapp/api/* -> UserApplicationService
+  -> live.ts (one client per owner) -> POST /miniapp/api/live-ticket -> GET /miniapp/api/live (WebSocket)
+     -> resource invalidation -> weak cache read of the active screen -> resources.ts -> api.ts
 ```
 
 - Gate/Wizard/Recovery/Success render standalone (no bottom nav); only `home`
@@ -44,6 +49,9 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
   Weak/strong reads, generations, invalidation and write barriers prevent stale
   responses overwriting confirmed mutations. `401`/`invalid_session` hard-disposes
   the owner and returns the application to the session gate.
+- Live invalidations never carry DTOs: the hub publishes resource keys, revision,
+  `captured_at` and health, and the client re-reads the same application use cases
+  as before (weak by default, strong only for explicit verification and pull-down).
 - `telegram.ts` is the sole `window.Telegram` touchpoint (initData, setup,
   haptics, close, BackButton). Transport handlers know only application use
   cases + typed public codes — zero `aster`/`storage` imports server-side.
@@ -58,7 +66,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `main.tsx` | Bootstrap: StrictMode `createRoot` + `index.css`; no exports |
 | `navigation.ts` | Pure typed nav: `ROOT_TABS` (home/positions/activity/settings, RU labels), `NestedScreen` (risk/notifications/system-status/account-builder/security/help + trade-list/trade-detail/position-detail), `initialRoute/selectTab/pushNested/popNested/currentNested` |
 | `session.ts` | Server→UI router: `sessionDestination()` over `MiniAppSessionDTO` (approved: recovery_required → runtime_recovery beats account_connected/connected → home; onboarding + APPROVAL_SENT/APPROVED → attempt_recovery, else wizard incl. PREPARED; pending/rejected/invalid pass through) |
-| `components/AppShell.tsx` | Shell: mount-all four tabs in `hidden` wrappers + `NestedRoute`; Back/Sheet ordering, one foreground signal, warm-gated tabs, root + nested scroll/focus slots; shared resource owner passed to resource-backed screens |
+| `components/AppShell.tsx` | Shell: mount-all four tabs in `hidden` wrappers + `NestedRoute`; Back/Sheet ordering, one foreground signal, warm-gated tabs, root + nested scroll/focus slots; shared resource owner passed to resource-backed screens; hosts the stale-only `LiveStatus` rail and the shell-wide `PullToRefresh` gesture |
 | `screens/SessionGate.tsx` | Read-only access gate (loading/pending/rejected/invalid/error/recovery_required) |
 | `screens/SuccessScreen.tsx` | Post-onboarding receipt (`BuilderOnboardedDTO` rows; copying paused) |
 | `screens/BuilderAttemptRecovery.tsx` | Durable-attempt resync without wallet re-prompt (`builder/resume-attempt` + `client-log`) |
@@ -71,10 +79,11 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `api.ts` | Typed POST client mirroring all 27 routes; initData headers (+ dev-only `X-Dev-User-Id`), 15s AbortController timeout covering headers + body, external-abort cleanup, safe `invalid_response`, `ApiError` |
 | `resources.ts` | Fixed session-scoped DTO owner: TTL, weak/strong singleflight, read/write/invalidation fences, confirmed mutation publication, hard scope disposal, owner mutation locks. A live **quote** tick marks DTOs stale without fencing the read that is already in flight (fencing on every quote starved any client slower than the publication cadence); state publications still fence. Live re-reads go only to visible consumers (`setActive` refcount), so hidden keep-alive tabs cost nothing. `pullRefresh()` awaits the visible history re-read and rejects when a read failed |
 | `historyResources.ts` / `historyResources.test.ts` | Session history cache and invalidation revision fence; regressions for late responses, coalesced follow-up and inactive reads |
+| `historyValidation.ts` | Runtime shape checks for the additive history/risk-preview contracts behind `api.ts` (money stays string, cursors nullable); a malformed payload becomes `invalid_response`, never a rendered half-object |
 | `useHistory.ts` | External-store subscription for history list/feed/detail/events + bounded self-heal retry of failed slices |
 | `screens/TradeListScreen.tsx` / `screens/TradeDetailScreen.tsx` | S3 history lists, independent fills/events pagination, grouped executions, owned split choice and stale/partial detail states |
 | `components/PositionSummaryCard.tsx` / `TradeSummaryCard.tsx` / `TradeEventRow.tsx` | S3 position, trade and event presentation |
-| `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL + bounded self-heal retry (the ladder restarts only when a read actually landed: a retry clears the error slot, and resetting on that pinned every attempt at 1 s) + `useTransportStale` (error or live-stale, never a routine re-read) |
+| `useResource.ts` | `useSyncExternalStore` subscription/activation bridge over `MiniAppResources`; StrictMode-safe shared reads + foreground/TTL + bounded self-heal retry (the ladder restarts only when a read actually landed: a retry clears the error slot, and resetting on that pinned every attempt at 1 s) + `useLiveSnapshot` (rail state for screens) + `useTransportStale` (error or live-stale, never a routine re-read) |
 | `live.ts` | Session-scoped live client: ticket → WebSocket, epoch-aware revision watermark, gap reconciliation, backoff reconnect with a silence grace before anything is shown, heartbeat/stale deadline, resource invalidation |
 | `liveStatus.ts` | Pure rail copy: `LIVE`/`Подключаем`/`Восстанавливаем связь…`/`Нет связи · N сек назад` |
 | `pullToRefresh.ts` | Pure damped pull tracker: slop, threshold, ownership rules, release/cancel semantics. The app's only manual refresh path |
@@ -175,6 +184,6 @@ matrix are indexed in
 `../docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md`. The tests use three
 styles:
 
-- **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format/riskRuler/useAge` tests — import helpers directly.
+- **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format/riskRuler/useAge/liveStatus/pullToRefresh/historyValidation` tests — import helpers directly; `live.test.ts` covers the rail rule, watermark and stale verdict without a socket.
 - **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
 - **Behavior** (jsdom + testing-library, mocked `api.*`): `resources`/`useResource` (singleflight, fencing, invalidation, scope disposal), `settingsNavigationPerformance` (weak prefetch/join/cached nested), `activityInvalidSession` + `notificationsBehavior` (direct hard-session boundary), `riskBehavior` (draft/save/unknown/auth), `riskRulerBehavior`, `systemStatusBehavior`, `pullToRefreshBehavior` (indicator, threshold, scrolled-away guard, swipe handoff, shell-wide strong read), `accountBuilderBehavior` (expiry/reauth/disconnect/unknown outcomes), `outageVoice` (one voice per fact: rail suppresses the duplicate read box and snapshot warning; never a failed action, never the empty-data case), `pagingFeedback` ("Загружаем…" belongs to the tap, not to a background re-read), `appShellKeepAlive` (startup four-read budget, StrictMode, early tap, TTL/foreground, scroll/focus/Sheet lifecycle, cross-remount locks, 50 cycles).

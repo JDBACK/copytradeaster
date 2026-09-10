@@ -1,7 +1,7 @@
 # Mini App Live Mode — implementation plan
 
 Дата старта: 2026-09-10
-Ветка: `codex/miniapp-live-updates`
+Ветка: `codex/miniapp-live-updates` (слита в `main` merge-коммитом `c4a8eba`)
 Статус: **CLOSED (REAL Aster Testnet + ручная приёмка владельца)** — см. §8.
 UX de-noising pass (ручных обновлений нет; единственный ручной путь — свайп вниз)
 проверен в реальном Chrome, по публичному адресу туннеля и пальцем на iPhone в
@@ -1126,12 +1126,6 @@ files / 412 passed**. Числа 309/312 и «87 deselected» выше — сн�
 mainnet-trading (только публичные котировки mainnet при
 `MARK_PARTIAL_LIVE_MAINNET=1`), протокольные сбои вне уже перечисленных сценариев
 и Android-клиент (живой UI проверен в Telegram Desktop и Telegram iOS).
-
-**Мобильный WebView (iPhone, проверка владельца, 2026-09-10).** Тот же инстанс
-открыт с телефона в Telegram iOS: индикатор pull-to-refresh больше не выглядит
-полосой/прямоугольником (дефект «индикатор свайпа перестал быть полосой»),
-содержимое тянется за пальцем, отрисовка и прокрутка — без замечаний. Пункт
-«мобильный WebView не покрыт» этим закрыт.
 
 ### 2026-09-10 — merge в `main` по итогам merge-review
 

@@ -47,7 +47,7 @@ does not require starting the trading stack. `__pycache__/` is noise, ignore it.
 
 | Script | Purpose | Run |
 |---|---|---|
-| `check_mark_stream.py` | Pre-mainnet gate for the public mark-price stream: reads the official WS (`subscribe` path, then `raw` for a single symbol) and the unsigned `premiumIndex` fallback, prints per-symbol frame counts/gaps and one verdict, with a frame reader independent of `miniapp/live.py`. Needs no `.env`, database or keys; exit 0 streaming, 1 acknowledged-but-silent, 2 probe failure. Measured 2026-09-10: mainnet STREAMING (~1 s gaps), testnet SILENT → REST fallback carries presentation quotes there | `.venv/bin/python scripts/check_mark_stream.py [--network testnet\|mainnet] [--symbols BTCUSDT,ETHUSDT] [--seconds 30]` |
+| `check_mark_stream.py` | Pre-mainnet gate for the public mark-price stream: reads the official WS (`subscribe` path, then `raw` for a single symbol) and the unsigned `premiumIndex` fallback, prints per-symbol frame counts/gaps and one verdict, with a frame reader independent of `miniapp/live.py`. The verdict is per symbol, so one healthy symbol cannot pass for a silent sibling: exit 0 `STREAMING` only when every requested symbol delivered frames, 3 `PARTIAL` when only some did, 1 acknowledged-but-silent, 2 probe failure. Needs no `.env`, database or keys. Measured 2026-09-10: mainnet STREAMING (~1 s gaps), testnet SILENT → REST fallback carries presentation quotes there | `.venv/bin/python scripts/check_mark_stream.py [--network testnet\|mainnet] [--symbols BTCUSDT,ETHUSDT] [--seconds 30]` |
 
 ## Conventions
 

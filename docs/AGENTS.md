@@ -1,7 +1,7 @@
 # Карта документации
 
 Что где лежит, что из этого живое, а что история, и что читать в каком порядке.
-Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-09-09.
+Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-09-10 (live-презентация Mini App и якорные карты после слияния в `main`).
 
 ## Быстрый старт (что читать в новом сеансе)
 
@@ -28,12 +28,14 @@ Handoff и сохранённые промпты — контекст своей
    Stage 3 Part 2: P2.0–P2.7 + post-closure corrective, все CLOSED (2026-09-04).
    Текущая правда по Part 2 (исходный план — только в таблице reports ниже).
 7. `docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` — центральная карта
-   фактических UI-проверок Mini App в Telegram WebView, Chromium/CDP и frontend.
+   фактических UI-проверок Mini App в Telegram WebView, Chromium/CDP и frontend;
+   живая презентация (streams, rail, pull-to-refresh) — `MINIAPP_LIVE_MODE_PLAN_2026-09.md`.
 8. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — design-only источник:
    IA, восемь Aster-style screen-эталонов (один Operate-концепт) и исходные screen states.
 9. `docs/reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` —
    закрытый corrective gate Part 1 и фактическое acceptance evidence.
-10. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
+10. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process; §20 —
+   live presentation Mini App (streams, hub, rail, ручное обновление).
 11. `docs/reports/STAGE2_IMPLEMENTATION_PLAN_2026-08.md` — исходный полный
   план Telegram/direct-V3 этапа и append-only журнал исполнения. Его старые
   sections/checklists — история планирования; текущую правду брать из пункта 4.
@@ -59,7 +61,7 @@ Handoff и сохранённые промпты — контекст своей
 | Файл | Что это | Когда читать/менять |
 |---|---|---|
 | `PRODUCT.md` (корень) | Пользователи, purpose, позиционирование, operating context и durable product principles | Читать перед проектированием пользовательских поверхностей; менять только при изменении product truth |
-| `docs/ARCHITECTURE.md` | Архитектура системы: стили, модули, planner/reconciliation, journal, конкурентность, recovery, этапы | Читать затронутые разделы перед работой с кодом. **Не перемещать**: докстринги `src/copytradeaster/` ссылаются на её секции по номерам (`ARCHITECTURE.md §6/§7/§12`). Менять при изменении дизайна |
+| `docs/ARCHITECTURE.md` | Архитектура системы: стили, модули, planner/reconciliation, journal, конкурентность, recovery, этапы; §20 — live presentation Mini App | Читать затронутые разделы перед работой с кодом. **Не перемещать**: докстринги `src/copytradeaster/` ссылаются на её секции по номерам (`ARCHITECTURE.md §6/§7/§12`). Менять при изменении дизайна |
 | `docs/DEV_PLAN_SKELETON.md` | Видение трёх этапов + актуальные Stage 1/2/3 чеклисты (включая Mini App S1–S3) | Читать для понимания «что дальше». Обновлять по факту выполнения пунктов |
 | `docs/reports/plan_live_test.md` | Живой owner-provided pre-mainnet hardening plan; статусы Packages A–G и acceptance-критерии | Читать перед продолжением hardening; помечать только фактически подтверждённое |
 | `docs/ENGINE_TEST_STATUS_2026-08.md` | **Единая точка истины** о текущем состоянии: актуальные счётчики suite, таблица багов #1–27, разделы тестовых кампаний | Обновлять после каждого значимого изменения кода/тестов. Не дублировать его счётчики в других файлах |
@@ -109,8 +111,8 @@ Handoff и сохранённые промпты — контекст своей
 | `assets/stage3-mini-app/` | 18 файлов: `reference-templates/` (8 screen-эталонов `01–08` + 8 `.prompt.txt`) и `current-head-a9d67a6/` (2 current-HEAD скрина: recovery + wallet) |
 | `MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` | Центральная карта принятой UI-кампании: Chromium/CDP, Telegram Desktop, iPhone Mirroring, frontend tests и screenshots; G3 ACCEPTED в согласованном scope |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
-| `MINIAPP_LIVE_MODE_PLAN_2026-09.md` | **ACCEPTED (REAL Aster Testnet):** live positions/PnL/history без штатной refresh-кнопки; follower/private + mark-price streams, authenticated Mini App WebSocket, stale/reconnect UX и acceptance matrix. §8 ведёт журнал проходов de-noising (коды движка → русская копия, один голос на факт, обратная связь по нажатию, честный возраст доказательств, churn сокетов) |
-| `MINIAPP_LIVE_MERGE_REVIEW_RESPONSE_2026-09.md` | Пофайловый ответ ревьюеру на merge-review ветки `codex/miniapp-live-updates`: все 7 × P1 и 8 × P2 — что изменено, чем доказано (unit + A/B на живых каналах), гейты итогового дерева `6d50fe7`, остаточные ограничения и просьба о снятии `MERGE BLOCKED`. Дословный текст самого ревью — во внешнем handoff, здесь только ответ |
+| `MINIAPP_LIVE_MODE_PLAN_2026-09.md` | **ACCEPTED (REAL Aster Testnet), смержено в `main`:** live positions/PnL/history без штатной refresh-кнопки; follower/private + mark-price streams, authenticated Mini App WebSocket, stale/reconnect UX и acceptance matrix. §8 ведёт журнал проходов de-noising (коды движка → русская копия, один голос на факт, обратная связь по нажатию, честный возраст доказательств, churn сокетов) и merge-review corrective с live-перепроверкой |
+| `MINIAPP_LIVE_MERGE_REVIEW_RESPONSE_2026-09.md` | Пофайловый ответ ревьюеру на merge-review ветки `codex/miniapp-live-updates`: все 7 × P1 и 8 × P2 — что изменено, чем доказано (unit + A/B на живых каналах), гейты итогового дерева `6d50fe7`, остаточные ограничения. Ревьюер вернул **GO**, ветка слита в `main` (`c4a8eba`). Дословный текст самого ревью — во внешнем handoff, здесь только ответ |
 | `MINIAPP_S2_REVIEW_HANDOFF_2026-09.md` | Handoff независимому reviewer по закрытому S2/G2: три архитектурных слоя, инварианты §19/§20, критические race/lifecycle точки и команды gate (2026-09-07) |
 | `MINIAPP_S2_TESTING_HANDOFF_2026-09.md` | Handoff тестировщику S2/G2: browser/manual матрица cold/warm, Settings prefetch, mutation unknown/recovery, Back/Sheet/scroll/focus, 50-cycle memory и граница G3 (2026-09-07) |
 | `MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md` | Исходный план последовательности S1/G1 → S2/G2 → S3/G3; все три gate закрыты к 2026-09-09. Backend B1–B10, §19 — скорость F0–F6, §20 — review. Фактические итоги: MINIAPP_FUNCTIONAL_PROGRESS, MINIAPP_S2_PROGRESS и MINIAPP_S3_PROGRESS |

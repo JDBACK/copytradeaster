@@ -19,6 +19,7 @@
 - **Control Plane**: Telegram bot (aiogram 3.30) with captcha-gated access requests and admin approvals.
 - **Onboarding**: Direct V3 credentials or Telegram Mini App (Vite 8 + React 19 + TypeScript) with combined EIP-712 `ApproveAgent` (ApproveBuilder fields included) on chain 56 (configured `CT_MAX_FEE_RATE=0.0001`, absolute Futures cap `0.001` fail-closed; `approveBuilder` endpoint is legacy-CLI only).
 - **Follower Mini App**: 4-tab AppShell (`Главная`, `Позиции`, `Активность`, `Настройки`), read-only positions with SL coverage/risk USDT, redacted activity timeline, honest settings, notifications double-tap toggle gate (`createToggleGate`), native BackButton/Haptics. Execution journal: `docs/reports/STAGE3_PART2_PROGRESS_2026-09.md`.
+- **Live presentation**: engine snapshots publish into a process-local store, per-follower private streams re-snapshot through coalesced REST, and a shared public mark-price stream drives quotes; the browser gets resource invalidations over an authenticated Mini App WebSocket (single-use ticket). No manual refresh button exists anywhere — the rail appears only while the channel is silent, and pull-down is the single manual path. Evidence: `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.
 - **Outbox & Shadow Engine**: Async SQLite notification delivery (`TelegramOutboxWorker`); in-memory `ShadowExchange` for load tests. App gate `CT_SHADOW_ACCOUNTS_ENABLED=true` ≠ test gate `CT_LOAD=1` — do not conflate.
 
 ---
@@ -30,9 +31,13 @@ Master WS (ORDER_TRADE_UPDATE/ACCOUNT_UPDATE/ACCOUNT_CONFIG_UPDATE, MARGIN_CALL)
   -> Coordinator (FollowerRegistry) -> [LeverageManager gate + RiskEngine sizing]
   -> Planner (diff -> ExecutionPlan DAG) -> Executor (journal -> AsterClient / ShadowExchange)
   -> Followers -> Reconciler (REST sweep every `reconcile_interval_s`, default 15s)
+
+Presentation (never a trading input): follower snapshot -> FollowerSnapshotStore (revision + captured_at)
+  -> MiniAppLiveHub -> authenticated `/miniapp/api/live` WebSocket -> resource invalidation -> weak cache read
+  follower private stream (REAL accounts only) -> coalesced REST re-snapshot; public mark stream (or REST fallback) -> quotes only
 ```
 
-Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` → `registry.load_at_boot` → clock-drift check (max 2000ms) → `resolve_boot_unknowns` (fail-closed on any in-flight UNKNOWN/SENDING/SUBMITTED) → mainnet preflight (mainnet only) → position-mode bootstrap → exchangeInfo filters → `projector.rebuild_full` (authoritative REST) → `leverage.refresh_catalog` (best-effort, worker retries) → startup reconcile → ingest + stream + stream-ready wait (30s; timeout stays close-only, not READY) + periodic sweep → READY via post-connect master boundary. `Stage2Process` wraps App + NotificationRouter/SQLite outbox + TelegramOutboxWorker + TelegramRuntime + MiniApp aiohttp + HistoryWorker.
+Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` → `registry.load_at_boot` → clock-drift check (max 2000ms) → `resolve_boot_unknowns` (fail-closed on any in-flight UNKNOWN/SENDING/SUBMITTED) → mainnet preflight (mainnet only) → position-mode bootstrap → exchangeInfo filters → `projector.rebuild_full` (authoritative REST) → `leverage.refresh_catalog` (best-effort, worker retries) → startup reconcile → ingest + stream + stream-ready wait (30s; timeout stays close-only, not READY) + periodic sweep → READY via post-connect master boundary. `Stage2Process` wraps App + NotificationRouter/SQLite outbox + TelegramOutboxWorker + TelegramRuntime + `MiniAppLiveRuntime` + MiniApp aiohttp + HistoryWorker; teardown stops the live runtime before the history worker.
 
 ### Key Invariants
 1. **State Replication, Not Command Mirroring**: WebSocket is a low-latency trigger; REST snapshots and reconciliations are authoritative. Consistent state → reconciler emits 0 commands.
@@ -47,9 +52,10 @@ Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` �
    - Builder onboarding 4-state lifecycle (`PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`) in `builder_onboarding_attempts`, purged on commit.
    - Uncommitted credentials in memory isolated via `EphemeralIdentityProvider` / `EphemeralKeyProvider`.
 4. **Concurrency & Storage**:
-  - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, MiniApp, HistoryWorker.
+   - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, MiniApp, HistoryWorker.
    - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **60 migrations (indices 0..59)**.
    - Per-account `asyncio.Lock` serializes order/nonce/leverage pipelines; `FollowerRegistry` is copy-on-write (lock-free reads, CAS publish under mutation lock).
+5. **Presentation Is Not Authority**: `FollowerSnapshotStore` revisions, private-stream hints and mark-price quotes only invalidate Mini App DTOs — they never mutate trading target, admission or `captured_at` freshness. Mark ticks change presentation quotes/PnL only; REST snapshots and reconciliation stay authoritative.
 
 ---
 
@@ -66,7 +72,7 @@ copytradeaster/
 │   ├── aster/                 # REST (trading/management), WS user_stream, EIP-712 signing, ShadowExchange
 │   ├── master/                # MasterProjector: WS -> normalized state deltas & copy_trades
 │   ├── risk/                  # RiskEngine: pure sizing math, 80% margin cap (MARGIN_SAFETY=0.8)
-│   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution
+│   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution, FollowerSnapshotStore (snapshots.py)
 │   ├── history/               # Durable fill import, trade episodes/events, reconciliation and replay
 │   ├── storage/               # SQLite Database, MIGRATIONS (0..59), async repositories
 │   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
@@ -74,15 +80,16 @@ copytradeaster/
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services
 │   ├── application/           # UserApplicationService, Stage2Process (engine.py), control.py
 │   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, FSM flows, routers/
-│   ├── miniapp/               # aiohttp server (HMAC initData auth, 27 POST /miniapp/api/*, static host)
+│   ├── miniapp/               # aiohttp server (HMAC initData auth, 27 POST /miniapp/api/*, single-use-ticket live WebSocket, static host)
 │   └── cli/                   # main.py CLI dispatcher (11 subcommands)
 ├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest); map: miniapp/AGENTS.md
 │   ├── src/screens/           # Home, Positions, TradeList (open/closed), TradeDetail, Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard, BuilderAttemptRecovery, SessionGate, SuccessScreen, InfoScreens (Security/Help)
-│   ├── src/components/        # AppShell.tsx + ui.tsx (Brand/TrustRail/Sheet/Row/ErrorBox; SVG icons inline) + PositionSummaryCard.tsx, TradeSummaryCard.tsx, TradeEventRow.tsx, RiskRuler.tsx
+│   ├── src/components/        # AppShell.tsx + ui.tsx (Brand/TrustRail/Sheet/Row/ErrorBox; SVG icons inline) + PositionSummaryCard.tsx, TradeSummaryCard.tsx, TradeEventRow.tsx, RiskRuler.tsx, LiveStatus.tsx (stale rail), PullToRefresh.tsx
+│   ├── src/live.ts            # Session-scoped live client: ticket -> WebSocket, epoch/revision watermark, reconnect, staleness
 │   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
 │   └── src/api.ts             # Typed API client with 15s AbortController timeout
 ├── tests/                     # unit/, integration/, replay/, testnet/; map: tests/AGENTS.md
-├── scripts/                   # dev-up.sh, detach_process.py, preview_miniapp_engine.py, verify_menu_button.py, check_doc_links.py, check_doc_budgets.py, doc-budgets.json, benchmark_history.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py, check_doc_facts.py; map: scripts/AGENTS.md
+├── scripts/                   # dev-up.sh, detach_process.py, preview_miniapp_engine.py, verify_menu_button.py, audit_miniapp_browser.mjs, check_mark_stream.py, check_doc_links.py, check_doc_budgets.py, doc-budgets.json, check_doc_facts.py, benchmark_history.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py; map: scripts/AGENTS.md
 ├── docs/                      # AGENTS.md (docs map), ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md, reports/ (plan_live_test.md, stage journals + acceptance-s3/ + acceptance-p27/), reviews/, history/, ASTER_API_RESEARCH_2026-08.md
 └── data/                      # Local SQLite databases, logs, test artifacts (git-ignored)
 ```
@@ -152,6 +159,8 @@ ruff check . && ruff format --check .                    # Python lint and forma
 cd miniapp && pnpm lint && pnpm test && pnpm build && cd .. # frontend Oxlint + Vitest + build
 CT_TESTNET=1 pytest tests/testnet/ -v                    # signed Aster Testnet suite (needs wallet.txt, flat positions after)
 CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shadow scale preflight (load marker itself unused)
+.venv/bin/python scripts/check_mark_stream.py [--network mainnet|testnet]  # public mark-stream gate: 0 STREAMING, 3 PARTIAL, 1 SILENT, 2 probe failure
+node scripts/audit_miniapp_browser.mjs smoke|series|nested|jitter|churn|swipe|status|shot --init <stub.js>  # real-Chromium acceptance against a running bot
 ```
 
 ---
@@ -200,10 +209,15 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 |`src/copytradeaster/notifications/router.py`|Structured fan-out into console + SQLite outbox|
 |`src/copytradeaster/notifications/worker.py`|Bounded leased outbox delivery with retry/backoff|
 |`src/copytradeaster/miniapp/server.py`|aiohttp server hosting Mini App API (27 POST `/miniapp/api/*`) & static assets|
+|`src/copytradeaster/miniapp/live.py`|Live presentation runtime: single-use ticket store, account-scoped latest-wins hub, per-REAL-follower private streams with coalesced REST re-snapshot, shared mark-price stream + per-symbol REST fallback|
+|`src/copytradeaster/trading/snapshots.py`|Process-local `FollowerSnapshotStore` (snapshot + `captured_at` + monotonic revision, mark-price overlay, `republish`) that backs `refresh=false` reads and live invalidations|
 |`src/copytradeaster/cli/main.py`|CLI entry point and subcommands|
 |`miniapp/src/App.tsx`|Mini App routing, session gating, 4-tab AppShell, and runtime recovery|
+|`miniapp/src/live.ts`|Session-scoped live client (ticket -> WebSocket), epoch/revision watermark, gap reconciliation, bounded reconnect, stale deadline and `railSpeaks`|
 |`scripts/dev-up.sh`|One-command dev orchestrator: builds bundle, manages tunnel, runs bot|
 |`scripts/preview_miniapp_engine.py`|Visual preview running full engine on point-in-time SQLite backup copy|
+|`scripts/check_mark_stream.py`|Pre-mainnet gate for the public mark-price stream: per-symbol coverage, exit 0 `STREAMING` / 3 `PARTIAL` / 1 `SILENT` / 2 probe failure|
+|`scripts/audit_miniapp_browser.mjs`|Read-only Chromium/CDP acceptance over the running Mini App (smoke/series/nested/jitter/churn/swipe/status/shot)|
 |`scripts/hybrid_load_test.py`|Hybrid signed-testnet + ShadowExchange load campaign|
 |`scripts/testnet_soak.py`|Signed testnet soak runner (requires `CT_TESTNET=1` + `CT_SOAK=1`)|
 |`docs/AGENTS.md`|Docs map: central navigation for all project documentation (what lives where, what is live vs history, reading order)|
@@ -229,7 +243,7 @@ CT_LOAD=1 pytest tests/integration/test_shadow_scale.py  # 30x100 + 100x20 shado
 - **Coverage Requirement**: $\ge 87\%$ statement coverage across `src/copytradeaster` — documentary convention (no `fail_under` / `--cov-fail-under` enforcement; eyeball `--cov` output).
 - **Test Status**: counters and bug registry live only in `docs/ENGINE_TEST_STATUS_2026-08.md` (bugs #1–27 closed; баг #27: мусорный liq 25.5M → wrong-side guard) — never copy numbers here.
 - **Naming & Isolation**: `test_<module>_<behavior>.py`. Default `pytest -q -m "not testnet"` must run hermetically without network or private keys (per-test `tmp_path` SQLite + `migrate()`, `respx` HTTP mocks, `FakeAster`/`ShadowExchange`, synthetic `0x..` keys). `load` marker is registered but unused — real scale gate is `CT_LOAD=1` on the explicit path.
-- **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` (`copyc2`/`builder` sections) with testnet faucet accounts. Always ensure clean flat positions after tests.
+- **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` (sections `main`/`copyc1`/`copyc2`/`copyc3`/`builder`) with testnet faucet accounts. Cleanup is flat-with-no-open-orders in `finally`; testnet accounts are disposable, but every signed campaign on a shared account is serialized by the file lock and must leave a state it can explain — see `tests/AGENTS.md`.
 - **Living Documentation**: Update `docs/ENGINE_TEST_STATUS_2026-08.md` after any test suite change. Do not duplicate counters across files.
 
 ---

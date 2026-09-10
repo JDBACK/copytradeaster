@@ -712,6 +712,9 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 
 Исполняемый план и append-only журнал:
 [MINIAPP_LIVE_MODE_PLAN_2026-09.md](reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md).
+Смержено в `main` merge-коммитом `c4a8eba` (2026-09-10) после того, как
+merge-review ветки закрылся: 7 × P1 и 8 × P2 сняты, ответ ревьюеру —
+[MINIAPP_LIVE_MERGE_REVIEW_RESPONSE_2026-09.md](reports/MINIAPP_LIVE_MERGE_REVIEW_RESPONSE_2026-09.md).
 
 - [x] Подтверждены текущий snapshot/cache flow и Aster private/public WS
   контракты; выбрана схема WS-hint → authoritative REST boundary.
