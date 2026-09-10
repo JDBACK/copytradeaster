@@ -19,8 +19,15 @@ Backend, engine и signed Aster testnet suites сюда не включаютс�
   пройденным сценариям; G3 — **ACCEPTED в согласованном scope** (Chromium,
   Telegram Desktop и iPhone Mirroring). Android по решению владельца исключён
   из scope и verdict.
-- Последний frontend gate: `28` test files, `349` passed, lint clean,
-  `tsc -b && vite build` PASS.
+- Live-презентация (Mini App Live Mode, 2026-09-10) — **ACCEPTED**: позиции/PnL
+  обновляются сами, ручных refresh-кнопок нет, rail и pull-to-refresh проверены
+  в Chromium/CDP, Telegram Desktop и на iPhone; записано в
+  `MINIAPP_LIVE_MODE_PLAN_2026-09.md` §8.
+
+Счётчики suite намеренно не дублируются в этом указателе: актуальные числа —
+в [ENGINE_TEST_STATUS_2026-08.md](../ENGINE_TEST_STATUS_2026-08.md). Ниже по
+тексту остаются запуски момента (S3: `28` test files, `349` passed), это
+исторические снимки, а не текущий гейт.
 
 ## С чего начинать
 
@@ -39,6 +46,9 @@ Backend, engine и signed Aster testnet suites сюда не включаютс�
    исторический owner Telegram acceptance P2.0–P2.7, включая `9/9 PASS`.
 7. [ENGINE_TEST_STATUS_2026-08.md](../ENGINE_TEST_STATUS_2026-08.md) — единая
    точка актуальных автоматических счётчиков и общий verdict.
+8. [MINIAPP_LIVE_MODE_PLAN_2026-09.md](MINIAPP_LIVE_MODE_PLAN_2026-09.md) —
+   live-презентация: streams/rail/pull-to-refresh, журнал de-noising и evidence
+   проходов (Chromium, Telegram Desktop, iPhone), §8.
 
 ## Матрица ручных UI-проверок
 
@@ -54,6 +64,7 @@ Backend, engine и signed Aster testnet suites сюда не включаютс�
 | S3 §19.7, Chromium/CDP, 2026-09-09, 390×844 | Cold root, 160 warm root samples, 200 nested samples, 300 ms delayed API, 5-page/493-event feed, Risk trace, deep link, DOM/listener/timer bounds | `MINIAPP_S3_PROGRESS_2026-09.md` §24; `data/miniapp-perf/g3-cdp-trace-2026-09-09.json` | PASS: cold `4`; warm root p95 `5,3 ms`; delayed p95 `4,4 ms`; no long tasks/errors |
 | S3 errors/history, Chromium/CDP, 2026-09-09, 390×844 | 11 blocked/throttled list/feed/detail/events cases; alias, split choice and partial-history warning through real Mini App route | `MINIAPP_S3_PROGRESS_2026-09.md` §25; `docs/reports/acceptance-s3/g3-history-*.png` | PASS; no production DB mutation |
 | S3 device, Telegram Desktop + iPhone Mirroring, 2026-09-09 | Clean bundle reopen, iPhone portrait WebView, Positions/closed detail/events/fills, scroll, native Back, Activity filters/owned link, Risk tap + keyboard | `MINIAPP_S3_PROGRESS_2026-09.md` §26; owner history §§21–22 | PASS for Desktop+iPhone; Android remains unavailable |
+| Live mode, Chromium/CDP + Telegram Desktop + iPhone, 2026-09-10 | Позиция приходит без ручного обновления, PnL тикает, rail только при разрыве, pull-to-refresh (фазы, гаптика, сильные чтения, guard прокрутки), 50 переключений при одном WebSocket, jitter без предупреждений, phone WebView владельца | `MINIAPP_LIVE_MODE_PLAN_2026-09.md` §8 | ACCEPTED; Android не проверялся |
 
 Последний Telegram-проход завершился в безопасном подключённом состоянии:
 Home показывал `Копирование включено`, открытых позиций `0`, риск `2%`;
@@ -97,7 +108,8 @@ Status/Builder flows в iPhone Telegram WebView. Текущий Telegram Desktop
 | Behavior и mutation paths | `activityInvalidSession.test.tsx`, `accountBuilderBehavior.test.tsx`, `notificationsBehavior.test.tsx`, `riskBehavior.test.tsx`, `systemStatusBehavior.test.tsx`, `riskRulerBehavior.test.tsx` | Activity auth boundary, double-tap toggle gate, Builder expiry/reauth/disconnect, dirty/save/unknown Risk states, status refresh и ruler touch/mouse/settle behavior |
 | Resource, cache и lifecycle | `resources.test.ts`, `useResource.test.tsx`, `settingsPrefetch.test.ts`, `settingsNavigationPerformance.test.tsx`, `appShellKeepAlive.test.tsx`, `historyResources.test.ts` | Session owner, weak/strong singleflight, invalidation/write fences, bounded Settings prefetch, root keep-alive, scroll/focus/Sheet cleanup, 50-cycle lifecycle и S3 history cache/revision/retry |
 
-Последний фактический запуск frontend suite:
+Запуск frontend suite на момент S3-снимка (исторический снимок; актуальные
+числа — в `ENGINE_TEST_STATUS_2026-08.md`):
 
 ```text
 cd miniapp && CI=true pnpm test
