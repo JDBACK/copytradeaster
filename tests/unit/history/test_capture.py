@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from copytradeaster.aster.models import OrderDTO, PositionDTO
+from copytradeaster.domain.models import PosSide
 from copytradeaster.history.capture import HistoryCapture, read_boundary
 from copytradeaster.history.reader import Span, Window, WindowRead
 from copytradeaster.history.reconcile import HistoryReconciliationError
@@ -49,6 +50,18 @@ def boundary(row=None, started=0, received=100):
 
 def after_boundary(row=None):
     return boundary(row, started=2200, received=2300)
+
+
+def hedge_boundary(update_time=50):
+    return PositionBoundary.from_positions(
+        "BTCUSDT",
+        [
+            position(positionAmt="0", positionSide="LONG", updateTime=update_time),
+            position(positionAmt="0", positionSide="SHORT", updateTime=update_time),
+        ],
+        request_started=0,
+        response_received=100,
+    )
 
 
 def capture_for(db, history):
@@ -162,6 +175,34 @@ async def test_ending_mismatch_refuses_without_erasing_prior(storage):
         )
     repo = EpisodeRepository(db)
     assert await repo.get(scope, first[0].episode.public_ref) == first[0]
+
+
+async def test_other_position_mode_book_fills_do_not_block_publication(storage):
+    """One fill stream keeps both eras; each book must close inside its legs."""
+    db, history, scope = storage
+    window = Window(0, 100)
+    await commit(
+        history,
+        scope,
+        [
+            fill(10, "BUY", "1"),
+            fill(20, "BUY", "2", leg="LONG"),
+            fill(30, "SELL", "2", "110", "5", leg="LONG"),
+        ],
+        window,
+    )
+    capture = capture_for(db, history)
+    before = hedge_boundary()
+    after = replace(before, request_started=2200, response_received=2300)
+    stored = await capture.publish_reconciled(
+        scope, "BTCUSDT", window, before=before, after=after, cutoff=100
+    )
+    assert len(stored) == 1
+    episode = stored[0].episode
+    assert episode.position_side is PosSide.LONG
+    assert episode.quality == "complete" and episode.remaining_qty == D(0)
+    assert episode.realized_pnl_gross == D(5)
+    assert {allocation.trade_id for allocation in episode.allocations} == {20, 30}
 
 
 async def test_concurrent_captures_serialize_to_one_result(storage):

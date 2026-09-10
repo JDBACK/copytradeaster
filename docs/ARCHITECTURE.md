@@ -709,7 +709,10 @@ notification_outbox
 - `agent_validations` — последняя безопасная signed Agent snapshot;
 - `notification_outbox` — recipient-specific delivery journal без secrets.
 - `follower_fills`, `follower_cash_flows`, `history_sync_state` — факты и
-  coverage импорта account-owned истории;
+  coverage импорта account-owned истории; один биржевой поток исполнений держит
+  обе эпохи position mode (`BOTH` и `LONG`/`SHORT`), поэтому replay публикует
+  только книгу, которую описывает его authoritative boundary, а ярлыки чужой
+  книги пропускает (иначе окно не публикуется в принципе);
 - `follower_episode_*`, `history_scope_state`,
   `history_projection_boundaries` — revisioned projection сделок, stable refs,
   aliases/splits и durable replay boundaries;

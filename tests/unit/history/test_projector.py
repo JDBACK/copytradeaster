@@ -79,6 +79,12 @@ def test_hedge_legs_remain_independent():
     assert {e.direction: e.remaining_qty for e in episodes} == {"long": D(2), "short": D(3)}
 
 
+def test_projection_still_requires_fills_of_the_seeded_book():
+    """Selecting the authoritative book is the caller's job, never guessed here."""
+    with pytest.raises(ValueError, match="no authoritative seed"):
+        project([fill(1, "BUY", "1", leg="LONG")])
+
+
 def test_known_existing_seed_partial_until_flat_then_next_episode_complete():
     first, second = project(
         [fill(1, "SELL", "2", "110", "20"), fill(2, "BUY", "1")],

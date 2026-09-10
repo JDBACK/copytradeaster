@@ -36,10 +36,13 @@ from copytradeaster.history.reconcile import (
 )
 from copytradeaster.history.replay import choose_replay_range
 from copytradeaster.history.snapshot import derive_starting_seeds
+from copytradeaster.logging_utils import get_logger
 from copytradeaster.storage.episodes import EpisodeRepository, StoredEpisode
 from copytradeaster.storage.events import EventRepository, StoredEvent
 from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import CommandRepo
+
+log = get_logger(__name__)
 
 
 class HistoryProjection:
@@ -231,6 +234,22 @@ class HistoryProjection:
             raise HistoryReconciliationError("import window is still incomplete")
         require_coverage(replay, [(row["start_ms"], row["end_ms"]) for row in relevant])
         fills = await self._history.fills(scope, symbol, replay)
+        book = [fill for fill in fills if fill.position_side in seeds]
+        if len(book) != len(fills):
+            # One exchange fill stream carries every position-mode era, so the
+            # retained range can hold a second book whose legs this boundary
+            # does not describe. Only the authoritative book's fills replay
+            # against its seeds; the other book is neither rewritten nor
+            # guessed at, and a book that cannot close inside its own legs
+            # still fails the reconciliation below.
+            log.info(
+                "history projection keeps out %d fill(s) of another position-mode "
+                "book account_id=%s symbol=%s",
+                len(fills) - len(book),
+                scope.account_id,
+                symbol,
+            )
+            fills = book
         if order_sources is None:
             order_sources = await self._history.proven_order_sources(scope, symbol)
         projection = project_with_transitions(
