@@ -8,6 +8,7 @@
 
 import { isBuilderVerified } from './accountBuilder'
 import { formatTime } from './format'
+import { TRUST_STEP } from './trustSteps'
 import type {
   AsterState,
   CopyState,
@@ -177,21 +178,21 @@ export interface StatusTrustItem {
   done: boolean
 }
 
-/** Trust rail over StatusDTO evidence (same Wallet → Agent → Builder → Sync
+/** Trust rail over StatusDTO evidence (same Кошелёк → Agent → Builder → Сверка
  * direction as Home).  Builder uses the single shared P2.6 attestation
- * verdict (verified only); Sync requires the authoritative overall
+ * verdict (verified only); Сверка requires the authoritative overall
  * ``ready`` verdict. */
 export function statusTrust(dto: StatusDTO): StatusTrustItem[] {
-  return [
-    { key: 'wallet', label: 'Wallet', done: Boolean(dto.account_masked) },
-    {
-      key: 'agent',
-      label: 'Agent',
-      done: Boolean(dto.signer_masked) && dto.permissions_state === 'valid',
-    },
-    { key: 'builder', label: 'Builder', done: isBuilderVerified(dto) },
-    { key: 'sync', label: 'Sync', done: dto.state === 'ready' },
-  ]
+    return [
+        { key: 'wallet', label: TRUST_STEP.wallet, done: Boolean(dto.account_masked) },
+        {
+            key: 'agent',
+            label: TRUST_STEP.agent,
+            done: Boolean(dto.signer_masked) && dto.permissions_state === 'valid',
+        },
+        { key: 'builder', label: TRUST_STEP.builder, done: isBuilderVerified(dto) },
+        { key: 'sync', label: TRUST_STEP.sync, done: dto.state === 'ready' },
+    ]
 }
 
 /** Marker shown when the transport failed but a previous DTO stays on screen. */

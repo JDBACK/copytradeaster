@@ -94,7 +94,7 @@ describe('home view model', () => {
 describe('trust summary', () => {
   it('marks wallet and agent done, but builder remains pending before P2.6', () => {
     const items = trustSummary(dashboard({ snapshot_captured_at: '2026-09-01T12:41:00Z' }))
-    expect(items.map((item) => item.label)).toEqual(['Wallet', 'Agent', 'Builder', 'Sync'])
+    expect(items.map((item) => item.label)).toEqual(['Кошелёк', 'Agent', 'Builder', 'Сверка'])
     expect(items.find((item) => item.key === 'wallet')?.done).toBe(true)
     expect(items.find((item) => item.key === 'agent')?.done).toBe(true)
     expect(items.find((item) => item.key === 'builder')?.done).toBe(false)

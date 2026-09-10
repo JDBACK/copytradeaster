@@ -17,7 +17,8 @@ import type { ConfirmationDTO, DashboardDTO } from '../types'
 import { Brand, ErrorBox, Sheet } from '../components/ui'
 import type { NestedScreen, RootTab } from '../navigation'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources, useTransportStale } from '../useResource'
+import { useLiveSnapshot, useResource, useScreenResources, useTransportStale } from '../useResource'
+import { railSpeaks } from '../live'
 
 // Re-exported for existing importers (behavior tests); the value lives in
 // the shared warm-activation primitive and doubles as the 30 s client floor
@@ -79,6 +80,7 @@ export function HomeScreen({
   const resourceDashboard = dashboardResource.snapshot.data
   const transportUnhealthy = useTransportStale(resources, dashboardResource.snapshot.error)
   const transportStale = resourceDashboard !== null && transportUnhealthy
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), resourceDashboard !== null)
   const ownerMutationState = resources.mutationState('pause-resume')
   const ownerActing = ownerMutationState !== null
   const ownerUnknownSince = resources.mutationUnknownSinceRevision('pause-resume')
@@ -293,9 +295,12 @@ export function HomeScreen({
 
       {/* Error slot honesty: partial-ready paints over dashboard data without
           clearing a visible error, and a failed background revalidation only
-          fills this slot — the stale ready UI underneath is never wiped. */}
-      {(error ?? dashboardResource.snapshot.error) && (
-        <ErrorBox {...describeError((error ?? dashboardResource.snapshot.error)!)} />
+          fills this slot — the stale ready UI underneath is never wiped. A read
+          failure while the rail already reports the outage is the same fact
+          twice, so the rail keeps it; a failed action always keeps its box. */}
+      {error && <ErrorBox {...describeError(error)} />}
+      {!error && dashboardResource.snapshot.error && !railOwnsOutage && (
+        <ErrorBox {...describeError(dashboardResource.snapshot.error)} />
       )}
 
       <button type="button" className="summary-status" onClick={() => onOpen?.({ kind: 'system-status' })}>

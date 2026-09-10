@@ -2,7 +2,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AuthContext } from '../api'
 import type { MiniAppResources } from '../resources'
-import { useScreenResources } from '../useResource'
+import { useLiveSnapshot, useScreenResources } from '../useResource'
+import { railSpeaks } from '../live'
 import { useResourceScope } from '../resourceScopeContext'
 import { useHistory } from '../useHistory'
 import type { ActivityFilter } from '../types'
@@ -20,6 +21,7 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
   const [calendar, setCalendar] = useState(() => new Date())
   const calendarDay = calendar.toDateString()
   const feed = useHistory(resources.history, { kind: 'feed', filter }, active || (warm && !resources.history.get({ kind: 'feed', filter }).data), foregroundSignal + invalidateSignal)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), feed.data !== null)
   useEffect(() => {
     if (!active) return
     // Local midnight updates labels only, never triggers an API request.
@@ -36,7 +38,7 @@ export function ActivityScreen({ auth, resources: providedResources, accountMask
     <h1 className="h1">Активность</h1>
     <div className="segmented" role="tablist" aria-label="Фильтр журнала">{(['all', 'trade', 'system'] as const).map(value => <button type="button" role="tab" key={value} className={`segmented-item${filter === value ? ' active' : ''}`} aria-selected={filter === value} onClick={() => { setFilter(value); hapticImpact('light') }}>{value === 'all' ? 'Все' : value === 'trade' ? 'Сделки' : 'Система'}</button>)}</div>
     {!!feed.data?.pending.length && <section className="panel"><h2 className="h2">В процессе</h2>{feed.data.pending.map((operation, index) => <p key={`${operation.symbol}:${operation.operation}:${index}`}>{operation.state === 'UNKNOWN' ? 'Проверяем результат на бирже' : 'Ожидаем подтверждения'} {operation.symbol ?? ''}</p>)}</section>}
-    {feed.error && <ErrorBox {...describeError(feed.error)} />}
+    {feed.error && !railOwnsOutage && <ErrorBox {...describeError(feed.error)} />}
     {!feed.data && !feed.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка журнала" />}
     {feed.data?.items.length === 0 && <p className="info-box">{filter === 'trade' ? 'Сделок пока нет' : filter === 'system' ? 'Системных событий пока нет' : 'Событий пока нет'}</p>}
     {groups.filter(group => group.items.length).map(group => <section key={group.bucket} aria-label={ACTIVITY_TIME_LABELS[group.bucket]}><h2 className="activity-day-label">{ACTIVITY_TIME_LABELS[group.bucket]}</h2>{group.items.map(event => <TradeEventRow key={event.event_ref} event={event} onOpen={tradeRef => onOpen({ kind: 'trade-detail', tradeRef })} />)}</section>)}

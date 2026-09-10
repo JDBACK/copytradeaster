@@ -7,7 +7,8 @@ import { PROTECTION_WARNING } from '../protectionWarning'
 import type { PositionSummaryDTO } from '../types'
 import type { NestedScreen } from '../navigation'
 import { MiniAppResources } from '../resources'
-import { useResource, useScreenResources, useTransportStale } from '../useResource'
+import { useLiveSnapshot, useResource, useScreenResources, useTransportStale } from '../useResource'
+import { railSpeaks } from '../live'
 import { PositionSummaryCard } from '../components/PositionSummaryCard'
 import { orderedPositions } from '../tradeView'
 import { ClosedTrades } from './TradeListScreen'
@@ -24,6 +25,7 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
   const data = resource.snapshot.data
   const transportUnhealthy = useTransportStale(resources, resource.snapshot.error)
   const stale = !!data && (data.is_stale || transportUnhealthy)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), data !== null)
   const positions = orderedPositions(data?.positions ?? [], attention)
   return <div className="screen">
     <Brand right={accountMasked ? <span className="wallet-chip num">{accountMasked}</span> : undefined} />
@@ -31,7 +33,7 @@ export function PositionsScreen({ auth, accountMasked, active = true, warm = tru
     <div className="history-segments" role="tablist" aria-label="Состояние позиций"><button type="button" role="tab" aria-selected={segment === 'open'} onClick={() => setSegment('open')}>Открытые {data?.count ?? '—'}</button><button type="button" role="tab" aria-selected={segment === 'closed'} onClick={() => setSegment('closed')}>Закрытые</button></div>
     <div hidden={segment !== 'closed'}><ClosedTrades resources={resources} onOpen={onOpen} active={active && segment === 'closed'} preview foregroundSignal={foregroundSignal} /></div>
     <div hidden={segment !== 'open'} className="history-stack">
-      {resource.snapshot.error && <ErrorBox {...describeError(resource.snapshot.error)} />}
+      {resource.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(resource.snapshot.error)} />}
       {!data && !resource.snapshot.error && <div className="skeleton" style={{ minHeight: 240 }} aria-label="Загрузка позиций" />}
       {stale && <p className="position-warning" role="status">Снимок позиций не обновляется. Статус защиты может быть неполным.</p>}
       {data?.positions.some(p => p.protection_state !== 'protected') && <div className="history-segments"><button type="button" aria-pressed={!attention} onClick={() => setAttention(false)}>Все</button><button type="button" aria-pressed={attention} onClick={() => setAttention(true)}>Требуют внимания</button></div>}

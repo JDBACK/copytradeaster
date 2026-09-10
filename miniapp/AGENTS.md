@@ -127,7 +127,8 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 ## Code Conventions & Common Patterns
 
-- **View-models are pure**: `home.ts`, `tradeView.ts`, `riskView.ts`, `activityView.ts`, `notificationsView.ts`, `systemStatus.ts`, `settingsView.ts`, `navigation.ts`, `session.ts`, `wizard.ts` — no fetch, no Telegram, unit-testable in node. Server DTO ownership lives in the session resource owner; component state is presentation/draft/interaction state, not an independent data store.
+- **View-models are pure**: `home.ts`, `tradeView.ts`, `riskView.ts`, `activityView.ts`, `notificationsView.ts`, `systemStatus.ts`, `settingsView.ts`, `navigation.ts`, `session.ts`, `wizard.ts`, `trustSteps.ts` (step copy shared by Home/Status/wizard) — no fetch, no Telegram, unit-testable in node. Server DTO ownership lives in the session resource owner; component state is presentation/draft/interaction state, not an independent data store.
+- **One voice per fact**: `railSpeaks()` (`live.ts`) keeps the shell rail as the only transport voice while last-good data is on screen; screens suppress their duplicate read-error box (never a failed action, never the empty-data case).
 - **Read-only honesty**: read-only screens assert it in markup (no trading controls, no secrets/ids); mutating screens change confirmed values only.
 - **No manual refresh in the product**: routine re-reads (live invalidation, TTL,
   reconcile, batch refetch) are invisible — `snapshot.stale` is a cache-revision

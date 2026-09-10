@@ -117,17 +117,17 @@ describe('remediationOf', () => {
 })
 
 describe('statusTrust', () => {
-  it('derives Wallet/Agent/Sync from evidence and keeps Builder neutral', () => {
+  it('derives Кошелёк/Agent/Сверка from evidence and keeps Builder neutral', () => {
     const trust = statusTrust(dto())
     expect(trust).toEqual([
-      { key: 'wallet', label: 'Wallet', done: true },
+      { key: 'wallet', label: 'Кошелёк', done: true },
       { key: 'agent', label: 'Agent', done: true },
       { key: 'builder', label: 'Builder', done: false },
-      { key: 'sync', label: 'Sync', done: true },
+      { key: 'sync', label: 'Сверка', done: true },
     ])
   })
 
-  it('never marks Builder verified and drops Sync without ready', () => {
+  it('never marks Builder verified and drops Сверка without ready', () => {
     const trust = statusTrust(dto({ state: 'stale', signer_masked: null }))
     expect(trust.find((item) => item.key === 'builder')?.done).toBe(false)
     expect(trust.find((item) => item.key === 'sync')?.done).toBe(false)

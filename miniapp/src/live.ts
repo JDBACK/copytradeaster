@@ -9,6 +9,19 @@ export interface LiveSnapshot {
   retrying: boolean
 }
 
+/** Does the shell rail already speak for this failure?
+ *
+ * The rail is the single voice for a transport outage; screens keep their last
+ * good data on screen and would otherwise repeat the same failure as a red box
+ * ("Нет связи — проверьте интернет"), which reads as two different problems and
+ * blames the user's connection for our own restarts. Suppression applies only
+ * while data is on screen: with nothing to show, the box is the only honest
+ * explanation and stays.
+ */
+export function railSpeaks(snapshot: LiveSnapshot, hasData: boolean): boolean {
+  return snapshot.health === 'stale' && hasData
+}
+
 export interface LiveUpdate {
   resources: readonly string[]
   revision: number

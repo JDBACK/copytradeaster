@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import type { AuthContext } from './api'
+import type { LiveSnapshot } from './live'
 import {
   MiniAppResources,
   RESOURCE_TTL_MS,
@@ -132,10 +133,15 @@ export function useResource<K extends ResourceKey>(args: {
  * An in-flight refresh is not staleness and must never be shown as one.
  */
 export function useTransportStale(resources: MiniAppResources, error: string | null): boolean {
-  const live = useSyncExternalStore(
+  const live = useLiveSnapshot(resources)
+  return error !== null || live.health === 'stale'
+}
+
+/** Raw live verdict for screens that decide on the rail's own signal. */
+export function useLiveSnapshot(resources: MiniAppResources): LiveSnapshot {
+  return useSyncExternalStore(
     resources.subscribeLive,
     resources.getLiveSnapshot,
     resources.getLiveSnapshot,
   )
-  return error !== null || live.health === 'stale'
 }

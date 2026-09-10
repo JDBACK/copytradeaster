@@ -1,7 +1,8 @@
 import type { MiniAppResources } from '../resources'
 import type { NestedScreen } from '../navigation'
 import { useHistory } from '../useHistory'
-import { useResource, useTransportStale } from '../useResource'
+import { useLiveSnapshot, useResource, useTransportStale } from '../useResource'
+import { railSpeaks } from '../live'
 import { ErrorBox } from '../components/ui'
 import { describeError } from '../errors'
 import { formatDateTime, formatDuration, formatPnl, formatPrice, formatQuantity, formatUsdt } from '../format'
@@ -13,8 +14,9 @@ export function PositionDetailScreen({ resources, symbol, side, active = true, f
   const snapshot = useResource({ resources, key: 'positions', active, foregroundSignal })
   const transportStale = useTransportStale(resources, snapshot.snapshot.error)
   const position = snapshot.snapshot.data?.positions.find(p => p.symbol === symbol && p.side === side)
+  const railOwnsOutage = railSpeaks(useLiveSnapshot(resources), snapshot.snapshot.data !== null)
   return <div className="screen"><h1 className="h1">{symbol} · {side}</h1>
-    {snapshot.snapshot.error && <ErrorBox {...describeError(snapshot.snapshot.error)} />}
+    {snapshot.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(snapshot.snapshot.error)} />}
     {position ? <><p className="lede num">{formatQuantity(position.qty, position.quantity_asset)}</p><PositionCard position={position} /><p className="info-box">{snapshot.snapshot.data?.is_stale || transportStale ? 'Снимок устарел. Защита требует проверки. ' : ''}История этой позиции ещё уточняется. Отображается текущий снимок аккаунта.</p></> : <p className="info-box">{snapshot.snapshot.data ? 'Позиция больше не отображается в текущем снимке. Проверьте закрытые сделки.' : 'Получаем данные позиции'}</p>}
     <p className="freshness">Снимок: {formatDateTime(snapshot.snapshot.data?.snapshot_captured_at)}</p>
   </div>
@@ -27,6 +29,10 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   const events = useHistory(resources.history, { kind: 'events', tradeRef }, active && !!data, foregroundSignal)
   const positions = useResource({ resources, key: 'positions', enabled: data?.trade.state === 'open', active: active && data?.trade.state === 'open', foregroundSignal })
   const transportStale = useTransportStale(resources, positions.snapshot.error)
+  const liveSnapshot = useLiveSnapshot(resources)
+  const railOwnsOutage = railSpeaks(liveSnapshot, positions.snapshot.data !== null)
+  // Reaching the ready branch proves the detail itself has data on screen.
+  const railOwnsDetailOutage = railSpeaks(liveSnapshot, true)
   const trade = data?.trade
   if (resolution) return <div className="screen"><h1 className="h1">История сделки уточнена</h1><p className="info-box">Исходная запись разделена на несколько эпизодов. Выберите эпизод для просмотра.</p>{resolution.targets.map((ref, index) => <button type="button" className="btn btn-secondary" key={ref} onClick={() => onOpen({ kind: 'trade-detail', tradeRef: ref })}>Открыть эпизод {index + 1}</button>)}<button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'closed', period: 'all' })}>Открыть историю</button></div>
   if (!trade || !data) return <div className="screen"><h1 className="h1">Детали сделки</h1>{detail.error ? <><ErrorBox {...describeError(detail.error)} /><button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all' })}>Мои позиции</button></> : <div className="skeleton" style={{ minHeight: 300 }} />}</div>
@@ -37,10 +43,10 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   return <div className="screen">
     <h1 className="h1">{trade.symbol} · {trade.side ?? 'Направление уточняется'}</h1>
     <p className="lede">{trade.state === 'open' ? 'Открыта' : 'Закрыта'} · {{ copy: 'Копирование', external: 'Внешние операции', mixed: 'Смешанные операции', unknown: 'Источник уточняется' }[trade.source]}</p>
-    {detail.error && <ErrorBox {...describeError(detail.error)} />}
+    {detail.error && !railOwnsDetailOutage && <ErrorBox {...describeError(detail.error)} />}
     {detail.error && <p className="freshness">Показаны ранее полученные данные. Сверка продолжится автоматически.</p>}
     {trade.state === 'open' && <>
-      {positions.snapshot.error && <ErrorBox {...describeError(positions.snapshot.error)} />}
+      {positions.snapshot.error && !railOwnsOutage && <ErrorBox {...describeError(positions.snapshot.error)} />}
       {liveStale && <p className="position-warning" role="status">Снимок позиции не обновляется. PnL и статус защиты могут быть неточными.</p>}
       <p className="freshness">Снимок позиции: {formatDateTime(positions.snapshot.data?.snapshot_captured_at)}</p>
     </>}
