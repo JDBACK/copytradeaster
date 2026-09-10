@@ -9,8 +9,9 @@ process at `/miniapp/`. Talks to the backend only via 26 POST `/miniapp/api/*`
 
 Follower Mini App (Stage 3 Part 2, CLOSED): 4-tab shell (`Главная`, `Позиции`,
 `Активность`, `Настройки`) with nested Risk/Notifications/SystemStatus/
-AccountBuilder/Security/Help screens, plus an out-of-shell onboarding flow
-(session gate → builder wizard → attempt recovery → success receipt).
+AccountBuilder/Security/Help plus TradeList/TradeDetail/PositionDetail screens,
+plus an out-of-shell onboarding flow (session gate → builder wizard |
+attempt recovery → success receipt → home shell).
 
 ```bash
 cd miniapp && pnpm install && pnpm dev        # HMR dev, /miniapp/api proxied to 127.0.0.1:8080
@@ -22,7 +23,7 @@ cd miniapp && pnpm lint && pnpm test && pnpm build   # oxlint + vitest + tsc -b 
 ```text
 main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
   -> sessionDestination(session.ts) maps MiniAppSessionDTO -> destination
-  -> connected home creates one MiniAppResources session owner
+  -> onboarding onConnected or session->home opens one MiniAppResources owner per session generation; success reuses it, home mounts AppShell with it
   -> AppShell (navigation.ts RouteState tab + nested[] stack) shares that owner
   -> screens/resources -> api.ts -> 26 POST /miniapp/api/* -> UserApplicationService
 ```
@@ -37,7 +38,9 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
   resource read admitted before that write boundary; only post-boundary
   authoritative evidence may resolve the owner lock.
 - `MiniAppResources` is a bounded per-connected-session owner, not a global
-  store: Dashboard/Positions/Risk/Notifications/Status/AccountBuilder only.
+  store. Direct keys: Dashboard/Positions/Risk/RiskPreview/Notifications/
+  Status/AccountBuilder; history (Trades/Feed/Detail/Events) lives in the
+  child `resources.history` owner.
   Weak/strong reads, generations, invalidation and write barriers prevent stale
   responses overwriting confirmed mutations. `401`/`invalid_session` hard-disposes
   the owner and returns the application to the session gate.
@@ -53,9 +56,9 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 |---|---|
 | `App.tsx` | Root composition: 5-kind `Phase` machine, `routeSession`/`loadSession`/`handleRecover`, dev banner. Backend: `session`, `builder/recover` |
 | `main.tsx` | Bootstrap: StrictMode `createRoot` + `index.css`; no exports |
-| `navigation.ts` | Pure typed nav: `ROOT_TABS` (home/positions/activity/settings, RU labels), `NestedScreen` (risk/notifications/system-status/account-builder/security/help), `initialRoute/selectTab/pushNested/popNested/currentNested` |
-| `session.ts` | Server→UI router: `sessionDestination()` over `MiniAppSessionDTO` (recovery_required beats connected; APPROVAL_SENT/APPROVED → attempt_recovery; PREPARED → wizard) |
-| `components/AppShell.tsx` | Shell: mount-all four tabs in `hidden` wrappers + `NestedRoute`; Back/Sheet ordering, one foreground signal, bounded Settings prefetch, root + nested scroll/focus slots; shared resource owner passed to resource-backed screens |
+| `navigation.ts` | Pure typed nav: `ROOT_TABS` (home/positions/activity/settings, RU labels), `NestedScreen` (risk/notifications/system-status/account-builder/security/help + trade-list/trade-detail/position-detail), `initialRoute/selectTab/pushNested/popNested/currentNested` |
+| `session.ts` | Server→UI router: `sessionDestination()` over `MiniAppSessionDTO` (approved: recovery_required → runtime_recovery beats account_connected/connected → home; onboarding + APPROVAL_SENT/APPROVED → attempt_recovery, else wizard incl. PREPARED; pending/rejected/invalid pass through) |
+| `components/AppShell.tsx` | Shell: mount-all four tabs in `hidden` wrappers + `NestedRoute`; Back/Sheet ordering, one foreground signal, warm-gated tabs, root + nested scroll/focus slots; shared resource owner passed to resource-backed screens |
 | `screens/SessionGate.tsx` | Read-only access gate (loading/pending/rejected/invalid/error/recovery_required) |
 | `screens/SuccessScreen.tsx` | Post-onboarding receipt (`BuilderOnboardedDTO` rows; copying paused) |
 | `screens/BuilderAttemptRecovery.tsx` | Durable-attempt resync without wallet re-prompt (`builder/resume-attempt` + `client-log`) |
@@ -77,10 +80,10 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 | `wallet.ts` | Adapters: injected EIP-1193 first, lazy WalletConnect second; BSC-56 signing domain; typed `WalletError` (`VITE_WC_PROJECT_ID`) |
 | `telegram.ts` | Sole Telegram wrapper: initData, setup, haptics, close, closing-confirm, BackButton registry |
 | `errors.ts` | Server-code → Russian `{title,hint}` map + FALLBACK; never leaks raw payloads |
-| `types.ts` | DTO mirrors of backend `application/models.py` (session/dashboard/builder/status/account-builder) |
+| `types.ts` | DTO mirrors of backend `application/models.py` (session/dashboard/positions/activity+feed/risk+preview/notifications/status/confirmation/builder+reauthorize/account-builder/trade history+events/overview/resume) |
 | `wizard.ts` | Pure onboarding machine: wallet→review→signing→sync + trust-rail index |
 | `accountBuilder.ts` | Shared verdict (verified-only), state/reason copy, local-only disconnect copy |
-| `revalidate.ts` | Legacy/direct-screen warm primitive used by Activity: active-only TTL/invalidation/foreground edges, busy guard, retry/revalidate split + `ACTIVITY_REVALIDATE_MS`; resource-backed screens use `useResource` |
+| `revalidate.ts` | Unused warm-activation primitive (no callers; Activity reads via `useHistory` over HistoryResources): active-only TTL/invalidation/foreground edges, busy guard, retry/revalidate split; `HOME_REVALIDATE_MS` reused as `useResource` TTL, `ACTIVITY_REVALIDATE_MS` covered by keep-alive tests; resource-backed screens use `useResource` |
 | `screens/BuilderWizard.tsx` | Onboarding screen: resolveAdapter → prepare → one combined `approveAgent` signature → submit |
 | `screens/AccountBuilderScreen.tsx` | Read-only attestation: seq-guarded refresh, backend-gated reauthorize, local-only disconnect |
 
@@ -88,11 +91,11 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 
 | Screen | Contract | Backend routes |
 |---|---|---|
-| `HomeScreen.tsx` (+`home.ts`) | MUTATES pause/resume (+ confirm Sheet); account overview, freshness, compact copy state and contextual navigation | `dashboard`, `pause`, `resume`, `confirmation/begin`, `confirmation/confirm` |
+| `HomeScreen.tsx` (+`home.ts`) | MUTATES pause/resume (+ confirm Sheet); account overview, freshness, compact copy state and contextual navigation | `dashboard`, `pause`, `resume`, `confirmation/begin` |
 | `PositionsScreen.tsx` | READ-ONLY list + exported `PositionCard` (entry/now/stop/TP/risk-to-stop/leverage); refresh-only | `positions` |
 | `ActivityScreen.tsx` (+`activityView.ts`) | READ-ONLY user-event feed, pending operations, pinned cursor pages and trade links | `activity/feed` |
-| `RiskScreen.tsx` (+`riskView.ts`) | MUTATES risk-on-Stop: draft/confirmed/save integration, exact 1e-5 integer math; ruler control lives in `components/RiskRuler.tsx` | `risk`, `risk/percent` |
-| `SettingsScreen.tsx` (+`settingsView.ts`) | READ-ONLY capability list; navigation only | — (routes to nested) |
+| `RiskScreen.tsx` (+`riskView.ts`) | MUTATES risk-on-Stop: draft/confirmed/save integration, exact 1e-5 integer math; ruler control lives in `components/RiskRuler.tsx` | `risk`, `risk/preview`, `risk/percent` |
+| `SettingsScreen.tsx` (+`settingsView.ts`) | READ-ONLY capability list; bounded Settings prefetch (weak, max-2); navigation only | — (routes to nested) |
 | `NotificationsScreen.tsx` (+`notificationsView.ts`) | MUTATES single toggle (`role=switch`), server-confirmed flip + double-tap gate | `notifications`, `notifications/enabled` |
 | `SystemStatusScreen.tsx` (+`systemStatus.ts`) | READ-ONLY status slice, seq-guarded refresh, transport-stale honesty | `status` |
 | `components/ui.tsx` | Shared `Brand/TrustRail/Sheet/Row/ErrorBox` (+ inline SVG icons) | — |
@@ -105,7 +108,7 @@ main.tsx -> App.tsx Phase machine (gate|wizard|attempt_recovery|success|home)
 
 ```bash
 cd miniapp
-pnpm install          # deps (@walletconnect lazy chunk needs VITE_WC_PROJECT_ID at runtime)
+pnpm install          # deps (@walletconnect lazy chunk needs VITE_WC_PROJECT_ID at build time)
 pnpm dev              # HMR; needs backend on :8080 (VITE_API_TARGET override) — or real bot via dev-up.sh
 pnpm lint             # oxlint (no ESLint)
 pnpm test             # vitest run; current counters and UI acceptance map are in docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md
@@ -119,7 +122,7 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 
 ## Code Conventions & Common Patterns
 
-- **View-models are pure**: `home.ts`, `riskView.ts`, `activityView.ts`, `notificationsView.ts`, `systemStatus.ts`, `settingsView.ts`, `navigation.ts`, `session.ts`, `wizard.ts` — no fetch, no Telegram, unit-testable in node. Server DTO ownership lives in the session resource owner; component state is presentation/draft/interaction state, not an independent data store.
+- **View-models are pure**: `home.ts`, `tradeView.ts`, `riskView.ts`, `activityView.ts`, `notificationsView.ts`, `systemStatus.ts`, `settingsView.ts`, `navigation.ts`, `session.ts`, `wizard.ts` — no fetch, no Telegram, unit-testable in node. Server DTO ownership lives in the session resource owner; component state is presentation/draft/interaction state, not an independent data store.
 - **Read-only honesty**: read-only screens assert it in markup (no trading controls, no secrets/ids); mutating screens change confirmed values only.
 - **Secret-safety**: masked addresses only; `describeError` maps codes, raw payloads never render; wallet private key never enters the app.
 - **Russian UI copy** (`ROOT_TAB_LABELS`, errors, info screens); inline SVG icons, no emoji; `:focus-visible`, semantic dialog roles; native BackButton/Haptics.
@@ -143,7 +146,7 @@ Pairing with backend: `./scripts/dev-up.sh` (bundle + tunnel + bot), or
 ## Runtime & Tooling Preferences
 
 - Node (unpinned — use modern for Vite 8) + `pnpm` (lockfile 9.0).
-- React 19 + TypeScript strict (`erasableSyntaxOnly`, `noUnused*`) + Oxlint (react + typescript plugins; NO ESLint).
+- React 19 + TypeScript (`erasableSyntaxOnly`, `noUnused*`; strict not enabled) + Oxlint (react + typescript + oxc plugins; NO ESLint).
 - Vitest `environment: 'node'`, `src/**/*.test.{ts,tsx}`; `dist/` git-ignored.
 - Backend pairing on `127.0.0.1:8080` (`VITE_API_TARGET` override; `VITE_DEV_USER_ID` for unsigned dev sessions).
 
@@ -155,5 +158,5 @@ matrix are indexed in
 styles:
 
 - **Pure VM** (node, no rendering): `home/navigation/session/wallet/wizard/accountBuilder/systemStatus/format/riskRuler` tests — import helpers directly.
-- **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/systemStatus/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
-- **Behavior** (jsdom + testing-library, mocked `api.*`): `resources`/`useResource` (singleflight, fencing, invalidation, scope disposal), `settingsNavigationPerformance` (weak prefetch/join/cached nested), `activityInvalidSession` + `notificationsBehavior` (direct hard-session boundary), `riskBehavior` (draft/save/unknown/auth), `riskRulerBehavior`, `systemStatusBehavior`, `accountBuilderBehavior` (expiry/reauth/disconnect/unknown outcomes), `appShellKeepAlive` (cold4, StrictMode, early tap, TTL/foreground, scroll/focus/Sheet lifecycle, cross-remount locks, 50 cycles).
+- **Static contract** (`renderToStaticMarkup`, effects never fire): `positions/risk/activity/notifications/settings` — loading frames + presentational views on canned DTOs, read-only/secret-free assertions.
+- **Behavior** (jsdom + testing-library, mocked `api.*`): `resources`/`useResource` (singleflight, fencing, invalidation, scope disposal), `settingsNavigationPerformance` (weak prefetch/join/cached nested), `activityInvalidSession` + `notificationsBehavior` (direct hard-session boundary), `riskBehavior` (draft/save/unknown/auth), `riskRulerBehavior`, `systemStatusBehavior`, `accountBuilderBehavior` (expiry/reauth/disconnect/unknown outcomes), `appShellKeepAlive` (startup four-read budget, StrictMode, early tap, TTL/foreground, scroll/focus/Sheet lifecycle, cross-remount locks, 50 cycles).

@@ -8,7 +8,7 @@
 
 - один разработчик + LLM;
 - один master account;
-- ориентир 30–100 followers;
+- текущий кап: 10 followers (`max_followers` / `CT_MAX_FOLLOWERS`, fail-closed); 30–100 — целевой масштаб архитектуры, не действующий кап;
 - Python 3.12, async-first;
 - надёжность финансовых операций важнее максимальной пропускной способности;
 - без микросервисов и инфраструктуры, которая не нужна этому масштабу;
@@ -120,8 +120,8 @@ Telegram и Builder не находятся внутри этого потока
 
 Signing details:
 - Контексты EIP-712: trading — chainId 1666 (mainnet) / 714 (testnet); registration (ApproveAgent / ApproveBuilder) — только 56 (BSC; `CT_REGISTRATION_CHAIN_ID` валидатором отвергает всё остальное).
-- Nonce signer-ключа персистентен: хранится в storage, инкрементируется и сохраняется ДО отправки подписи; после рестарта восстанавливается из БД, а не из памяти.
-- При retry после 503/timeout сначала проверяется фактическое состояние биржи (clientOrderId / open orders), затем переподпись с актуальным nonce.
+- Nonce signer-ключа персистентен: хранится в storage (`NonceStore.next_nonce`, `storage/repositories.py`), инкрементируется и сохраняется ДО отправки подписи; после рестарта восстанавливается из БД, а не из памяти.
+- При retry после 503/504/timeout (`MAX_ATTEMPTS=3`) сначала проверяется фактическое состояние биржи по `clientOrderId`: `query_order` (текущий ордер), затем `query_order_history` (`allOrders`, до 3 попыток) плюс дельта `positionRisk` для MARKET; `open_orders` используется только для confirm условных `PLACE_STOP`/`PLACE_TP`. Повторная отправка идёт с новым `clientOrderId` (`…r{attempt}`) и свежим nonce через обычный signed-запрос.
 
 ### `master/`
 
@@ -150,8 +150,8 @@ Risk engine должен возвращать целевое состояние/
 
 Runtime leverage follower управляется `LeverageManager`: catalog из signed
 `leverageBracket` задаёт ceiling, authoritative `positionRisk` — текущую
-конфигурацию. Любое положительное подтверждённое плечо ниже catalog/operator
-ceilings считается готовым для текущего поколения. Worker читает конфигурацию
+конфигурацию. Любое положительное подтверждённое плечо не выше catalog/operator
+ceilings (≤) считается готовым для текущего поколения.
 до записи и не повышает stop-driven downshift обратно до максимума, в том
 числе после рестарта. Нечитаемая конфигурация блокирует подготовку. Записи при
 необходимом понижении ограничены semaphore/pacing; детерминированный отказ
@@ -166,19 +166,17 @@ Coordinator держит account mutation lock от восстановления
 
 `risk/account_budget.py` резервирует stop-risk и margin сразу для всех
 увеличений аккаунта. `CT_MAX_TOTAL_RISK_PCT` (по умолчанию 0.10) ограничивает
-суммарный mark-to-stop риск относительно USDT equity; для margin остаётся
-80% available. Ноги не неттируются; неподтверждённые закрытия/ужесточения
+суммарный mark-to-stop риск относительно USDT equity; для margin доступно не более
+80% available (cap, не остаток). Ноги не неттируются; неподтверждённые закрытия/ужесточения
 стопов не освобождают резерв, отсутствие наблюдаемого стопа блокирует рост.
 Fee buffer в суммарном резерве считается от цены единицы. Это консервативный
 stop-loss budget, не модель гарантированного исполнения или cross-liquidation.
 
-Liquidation сравнивается с текущим mark, не с entry: adverse direction LONG —
-liq <= mark, SHORT — liq >= mark. Равенство опасно; shared HEDGE quote в другом
-направлении оценивается на соответствующей противоположной ноге.
+Направление оценивается по текущему mark (LONG опасен при liq на/ниже mark, SHORT — на/выше; равенство опасно; shared HEDGE-quote относится к противоположной ноге). Нарушение — против стопа с буфером: LONG liq >= stop×(1−0.005), SHORT liq <= stop×(1+0.005); входной гейт учитывает MMR-запас 0.01.
 
 Ядро не меняет `marginType` перед входом: текущий режим аккаунта сохраняется
-без скрытой подмены; isolated включается только по результату отдельной
-проверки на Aster testnet.
+без скрытой подмены; торговых вызовов `set_margin_type` из ядра нет, отдельной
+isolated-проверки в коде нет.
 
 ### `trading/`
 
@@ -218,16 +216,16 @@ restart и late backfill без отдельного accumulator-сервиса.
 
 ### `credentials/`
 
-Шифрование и получение signer credentials — только для пути `onboarding/direct`.
+Шифрование и получение signer credentials — для путей `onboarding/direct` и `onboarding/builder` (оба через `credentials/` + OnboardingStore; builder-commit несёт `identity_source=builder` со snapshot).
 
 Приватные signer keys в БД хранятся только зашифрованными (AESGCM, ключ вне БД:
 `CT_ENCRYPTION_KEY`). Реализация: `credentials/service.py` + `credentials/crypto.py`.
 
-Асимметрия Builder-пути (этап 3): при ApproveAgent + ApproveBuilder сгенерированный signer-ключ шифруется и персистится в `credentials/` после успешного commit, а главный приватный ключ пользователя в backend никогда не передаётся и не сохраняется. До момента commit промежуточное состояние онбординга хранится в таблице `builder_onboarding_attempts` (состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
+Асимметрия Builder-пути (этап 3): при комбинированном ApproveAgent (builder-поля внутри одного user-signed POST `/fapi/v3/approveAgent`, `signature_plan=combined_approve_agent`; отдельного POST approveBuilder в Mini App-флоу нет) сгенерированный signer-ключ шифруется и персистится в `credentials/` после успешного commit, а главный приватный ключ пользователя в backend никогда не передаётся и не сохраняется. До момента commit промежуточное состояние онбординга хранится в таблице `builder_onboarding_attempts` (состояния: `PREPARED -> APPROVAL_SENT -> APPROVED -> COMMITTED`).
 
 `APPROVAL_SENT` является fail-closed состоянием неизвестного результата
 удалённого `approveAgent`: transport/5xx/unknown exchange response не откатывает
-его в `PREPARED` и не разрешает слепой повтор user-signed POST. Recovery сначала
+его в `PREPARED` и не разрешает слепой повтор user-signed POST; исключение — истечение `approval_deadline_ms`: неподтверждённый Agent возвращает просроченный `APPROVAL_SENT` в `PREPARED`.
 проверяет Agent идемпотентным signed GET. Mini App может продолжить без второй
 wallet signature только server-owned `APPROVAL_SENT`/`APPROVED`; `PREPARED`
 всегда требует подпись. После paused account commit attempt переводится в
@@ -238,12 +236,12 @@ Durable account identity (P2.6): `accounts` несут `identity_source`
 (`direct|builder`) + nullable Builder snapshot (`builder_address`,
 `builder_name`, `builder_max_fee_rate`, `builder_agent_expires_at_ms`,
 `builder_verified_at`). Snapshot — last-known evidence, не proof: verified
-только одновременными signed `GET /agent` (current signer, допустимые
+только последовательными signed `GET /agent` (current signer, допустимые
 permissions) + exact-match `GET /builder` (`userAddress`, `builderAddress`,
-`maxFeeRate` == cap). Commit Builder-атомарен (credentials + validation +
+`maxFeeRate` == cap) с race-check по `account_version` перед commit.
 `identity_source=builder` + snapshot); direct/replacement/disconnect
-атомарно чистят proof (`identity_source=direct`, поля NULL). Race исключён
-`account_version` (mismatch → `IDENTITY_CHANGED` без commit). Disconnect —
+атомарно чистят proof (`identity_source=direct`, поля NULL). Race в reauthorization исключён
+`account_version` (mismatch → `IDENTITY_CHANGED` без commit); первичный submit защищён конфликтом владельца. Disconnect —
 local-only: remote Agent/Builder revoke не выполняется и не заявляется.
 Reauthorization — same-signer reuse Part 1 wallet/EIP-712 flow, без ротации
 signer; после неё account остаётся paused.
@@ -251,12 +249,12 @@ signer; после неё account остаётся paused.
 ### `onboarding/`
 
 Способ получения `TradingIdentity`. Два независимых адаптера: `direct`
-(прямой V3 набор) и `builder` (ApproveAgent + ApproveBuilder). Direct
-принимается CLI-импортом (`cli/main.py`) и `onboarding/direct.py`: локальная
+(прямой V3 набор) и `builder` (комбинированный ApproveAgent). Direct Stage 2
+принимается только `onboarding/direct.py`: локальная
 проверка адресов/key pair, подписанный `GET /fapi/v3/agent`,
 balance/position/open-order preflight и atomic paused commit через
-`application/adapters.py`. Trading core не знает, каким способом
-credentials появились.
+`application/adapters.py`. Исполнение ордеров от способа не зависит, но
+attribution/отображение знают `identity_source` (`trading/builder_attribution`).
 
 ### `notifications/`
 
@@ -269,7 +267,7 @@ S3 production factory включает durable user-event consumer: per-scope cu
 периодический sweep используют один consumer; выключенные уведомления не
 останавливают историю. Mini App/menu/push используют `format_user_event`;
 command confirmations в S3 не доставляются как факты позиции. Keyboard строится
-из configured HTTPS Mini App URL и owned opaque trade ref, только private chat.
+из configured HTTPS Mini App URL и owned opaque trade ref, только private chat при включённом `trade_links_enabled`, action `open_trade` и непустом ref.
 
 Telegram handlers никогда напрямую не вызывают торговые endpoints Aster.
 
@@ -277,9 +275,8 @@ Direct onboarding остаётся двухфазным: signed preflight обя
 любого credential commit; activation после commit публикует только paused
 account. `UserApplicationService` не сворачивает `OnboardingError` в общий
 `ValidationError`: наружу передаётся только typed
-`OnboardingApplicationError.code` (`OnboardingErrorCode`). Exchange status,
-адреса и private key не переходят через application boundary. Telegram и
-Mini App сами маппят enum в безопасный actionable copy.
+`OnboardingApplicationError.code` (`OnboardingErrorCode`); инварианты результата/контекста
+дополнительно охраняются `ValidationError`. Exchange status,
 
 ### `application/` и `telegram/`
 
@@ -382,9 +379,9 @@ plan:
 действий**. Recompute возвращает фактический размер оценённого плана вместе
 с safety-действиями; retry/blocked не превращается в ноль из-за reuse строки
 или размера `recent()`. Неоценённая generation даёт -1. Snapshot scope локален
-вызову через ContextVar. Только полный authoritative отчёт для всех followers
-с нулевыми действиями, чистым master, пустым in-flight и готовым leverage
-может снять degraded. Master READY и scoped sweep такого права не дают.
+вызову через ContextVar. Degraded снимает только полный authoritative отчёт App READY
+(master-boundary + stream) для всех followers: без sweep-failures, с нулевыми действиями,
+чистым master (без dirty), пустым in-flight, готовым leverage (is_ready, pending=0) и в пределах follower-cap; scoped sweep и не-READY права не дают.
 
 Инвариант конвергенции защиты (правило 9 planner):
 после reconciliation на одной follower-leg остаётся **ровно один** bot-owned
@@ -413,7 +410,7 @@ qty=0 при живом эпизоде мастера ≠ всегда «нам�
   обратная сторона открывается следующим проходом.
 
 Флип является границей эпизода: `_apply_fill` закрывает старый episode и
-открывает новый с колонкой `copy_trades.direction = ±1` (миграция #13).
+открывает новый с колонкой `copy_trades.direction = ±1` (миграция #14).
 Snapshot-sync `rebuild_full` детектит рассинхрон направления после офлайна и
 делает тот же close+open. Новый эпизод автоматически снимает sticky-маркеры,
 поэтому dust-flat одного направления не блокирует вход в противоположном.
@@ -423,10 +420,10 @@ Reconciliation запускается не только после ошибок,
 - startup;
 - master event;
 - завершение follower command;
-- reconnect;
-- timeout/503 UNKNOWN;
+- reconnect/boundary;
 - периодический sweep;
-- ручной admin trigger.
+- ручной admin/CLI-триггер.
+UNKNOWN разрешается резолвером внутри submit и доводится следующим sweep; отдельного UNKNOWN-триггера нет.
 
 ## 7. Execution journal
 
@@ -435,18 +432,19 @@ Reconciliation запускается не только после ошибок,
 Минимальная persistent-модель команды:
 
 ```text
-id
-command_key
+command_key (PK)
 account_id
 trade_id
 kind
-payload
+payload (JSON)
 recovery_context
 priority
 status
 attempts
 last_error
-timestamps
+client_order_id
+operation_id
+created_at/updated_at
 ```
 
 Минимальные статусы:
@@ -457,7 +455,7 @@ PENDING → SENDING → SUBMITTED → CONFIRMED
                          ↘ FAILED
 ```
 
-`503` или timeout после отправки финансовой команды трактуется как `UNKNOWN`, а не как
+`503/504`, timeout либо коды `-1000/-1006/-1007` после отправки финансовой команды трактуется как `UNKNOWN`, а не как
 гарантированный fail. Для `MARKET_OPEN`/`MARKET_CLOSE` Executor до перехода
 `PENDING → SENDING` сохраняет в `recovery_context` symbol/leg, точную Decimal-позицию
 до mutation и ожидаемый signed delta. Runtime, повторный submit и boot используют один
@@ -484,17 +482,16 @@ Partial progress без terminal history остаётся UNKNOWN. Новая qt
 
 Outbound Builder-атрибуция применяется после journal identity,
 непосредственно при построении `PlaceOrderRequest` (`builder`/`feeRate`,
-Decimal, cap `0.001`, optional `time_in_force` для plain LIMIT): `command_key`, journal payload и operation ID от
+Decimal, cap `0.001`, optional `time_in_force` — планировщик/исполнитель сейчас не выставляют): `command_key`, journal payload и operation ID от
 metadata не зависят. `BuilderAttributionProvider` (composition boundary,
 `App`) различает DIRECT / BUILDER_VALID / BUILDER_UNAVAILABLE по durable
 P2.6 proof + current signer + Agent permissions/actual expiry + config match (permissions строго tri-state: read/perp ровно True, withdraw ровно False; malformed fail closed);
-UI TTL на execution не влияет. Snapshot берётся лениво под per-account
-mutation lock, один на весь `Executor.submit`, сохраняется через
-send→query→retry (`_with_coid`). Safety: entry при UNAVAILABLE fail-closed
+:UI TTL на execution не влияет. Snapshot решения берётся лениво под per-account
+mutation lock, один на весь `Executor.submit` (кэш на план); персистентность команды — insert/set_status, а send→query→retry с новым COID — контур разрешения UNKNOWN. Safety: entry при UNAVAILABLE fail-closed
 до HTTP, close/Stop/TP — fallback без полей + degraded signal,
 cancel/leverage не блокируются.
 
-## 8. Конкурентность и масштаб 30–100 followers
+## 8. Конкурентность и масштаб (v1 launch cap: 10 followers)
 
 Для текущего масштаба достаточно одного asyncio application process.
 
@@ -515,7 +512,7 @@ aiosqlite connection. Это предотвращает interleave `execute/comm
 Read/write cursors закрываются сразу после операции, WAL и busy timeout остаются
 включёнными.
 
-Это упрощает nonce, order sequencing и recovery, не создавая заметного bottleneck при 30–100 followers.
+Это упрощает nonce, order sequencing и recovery, не создавая заметного bottleneck при ≤10 followers (v1 launch cap `max_followers=10`); масштаб 30–100 — только после нагрузочных замеров и поднятия cap.
 
 Общий weighted rate limiter находится в `aster/` и учитывает фактические веса Aster endpoints.
 
@@ -559,8 +556,7 @@ Follower stream pool добавляется позже только если tes
 Master может использовать:
 
 - standalone STOP/TP;
-- OCO/OTOCO;
-- ручной UI.
+- ручной UI (позиция без защитных ордеров).
 
 После нормализации trading core видит только target position/protection state.
 
@@ -622,8 +618,7 @@ open process-local entry admission + entry reconciliation
 READY
 ```
 
-Новые follower entries разрешаются только при одновременных `READY`, live
-master stream и clean projector. Если WS недоступен, процесс остаётся живым
+Новые follower entries разрешаются только при одновременных process-local admission (взводится вместе с `READY`), live master stream, clean projector и соблюдении follower-cap (`len(real_followers) <= max_followers`). Если WS недоступен, процесс остаётся живым
 для authoritative REST close/reduce/protection sweeps, но не публикует READY и не
 открывает exposure. Disconnect, dirty projection, continuous boundary events или
 in-flight commands закрывают admission, но не блокируют risk-reducing actions.
@@ -659,16 +654,16 @@ backup-файлов); active и rollover-файлы создаются с POSIX 
 signed URL/query не попадали в request logs.
 
 Критические onboarding-действия пишутся через `log_onboarding_audit`: только
-стабильные `user_id`/opaque `account_id`, `mode` (`connect`/`replace`),
+стабильные `user_id`/opaque `account_id`, `mode` (`connect`/`replace`/`miniapp_recover_runtime`/`builder_prepare`/`builder_submit`/`builder_resume_attempt`),
 `event` (`attempt`/`success`/`recovered`/`rejected`), `result`, `paused` и
 стабильная typed classification. `attempt`/`success`/`recovered` имеют INFO,
 `rejected` — WARNING. Wallet/API-wallet addresses, private keys, token,
 signature, signed URL/query и raw exchange/exception payload не являются
-аргументами этих logging calls. Для `attempt` и `rejected` состояние `paused`
-пишется как `unknown`, потому что replace может обращаться к уже существующему
-account; только `success` и `recovered` подтверждают `paused=true`. Handler
-filter — только defense-in-depth для legacy/third-party records, а не замена
-этому контракту.
+аргументами этих logging calls. Для `attempt` и `rejected` `paused` обычно пишется как
+`unknown`, потому что replace может обращаться к уже существующему
+account; исключение — `miniapp_recover_runtime`, чей `attempt` подтверждает `paused=true`.
+Завершённые `success`/`recovered` подтверждают `paused=true`; `success` подготовки
+(`builder_prepare`/`prepared`) пишет `unknown`, потому что пауза ещё не зафиксирована. Handler
 
 ## 13. Минимальное хранение
 
@@ -695,7 +690,7 @@ notification_outbox
 - `copy_settings` — risk %, limits, enable/disable;
 - `master_events` — raw event ledger для replay/recovery;
 - `copy_trades` — внутренние торговые эпизоды (с `direction = ±1` — сторона
-  эпизода, миграция #13);
+  эпизода, `0` = не установлена, миграция #14);
 - `order_links` — master ↔ follower order mapping;
 - `execution_commands` — durable execution journal/queue; additive migration #59
   добавляет `recovery_context` с pre-mutation evidence для MARKET recovery.
@@ -726,13 +721,9 @@ notification_outbox
 
 Ошибка одного follower не должна останавливать остальных.
 
-Минимальные runtime состояния приложения:
-
-```text
-RUNNING
-PAUSED
-DEGRADED
-```
+Минимальные состояния: `SystemState` (`READY`/`STALE`/`DEGRADED`/`UNKNOWN`) и
+`CopyState` (`ACTIVE`/`PAUSED`/`DEGRADED`/`BLOCKED`, плюс `EMPTY` без счёта);
+CLI `status` показывает `ready`/`stale`/`stopped`.
 
 Отдельно должен существовать флаг/политика `allow_new_entries`.
 
@@ -795,123 +786,20 @@ reconcile()
 
 ```text
 copytradeaster/
-│
 ├── pyproject.toml
 ├── AGENTS.md                       # правила работы агентов с репо
 ├── miniapp/                        # Mini App frontend (Vite+React+TS, Stage 3: 4-tab shell)
-│   ├── src/screens/                #   Home, Positions, Activity, Settings; nested Risk, Notifications, SystemStatus, AccountBuilder, Security, Help; flow SessionGate, BuilderWizard/Recovery, SuccessScreen
-│   ├── src/wallet.ts               #   injected EIP-1193 + WalletConnect adapter
-│   └── dist/                       #   собранный бандл (раздаёт бот, git-ignored)
-├── scripts/                        # operational scripts (tunnel, mini app preview, load tests)
+├── scripts/                        # operational scripts + doc-budgets.json (карта: scripts/AGENTS.md)
 ├── docs/                           # документация; карта — docs/AGENTS.md
-│   ├── AGENTS.md                   # карта доков: что где лежит и когда читать
-│   ├── ARCHITECTURE.md             # этот файл
-│   ├── DEV_PLAN_SKELETON.md        # roadmap + чеклисты этапов
-│   ├── ENGINE_TEST_STATUS_2026-08.md  # ЕДИНЫЙ живой статус движка
-│   ├── ASTER_API_RESEARCH_2026-08.md  # справочник по V3 API
-│   ├── reports/                    # исторические отчёты кампаний и журналы прогонов
-│   ├── reviews/                    # дословные тексты внешних ревью (не редактируются)
-│   └── history/                    # выполненный план Stage 1, исходный брифинг
-│
-├── src/
-│   └── copytradeaster/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── app.py                 # composition root / startup (§12 boot order)
-│       ├── config.py              # Settings (.env)
-│       ├── logging_utils.py
-│       │
-│       ├── domain/
-│       │   └── models.py          # основные внутренние модели (PositionKey,
-│       │                           #   TargetPosition, ExecutionAction, ...)
-│       │
-│       ├── aster/                  # адаптер Aster V3, без copytrade-логики
-│       │   ├── trading_api.py     # account/trading REST (AsterClient)
-│       │   ├── management_api.py  # Agent / Builder management
-│       │   ├── user_stream.py     # listenKey + WebSocket (UserStream)
-│       │   ├── signing.py         # EIP-712 trading/registration contexts
-│       │   ├── models.py          # Aster DTO
-│       │   ├── ports.py           # exchange-порт для тестов
-│       │   ├── rate_limits.py     # weighted limits
-│       │   └── shadow.py          # load-only SHADOW adapter (без кредов)
-│       │
-│       ├── master/
-│       │   └── projector.py       # MasterProjector: raw WS -> MasterState +
-│       │                          #   deltas, episode lifecycle, rebuild_full
-│       │
-│       ├── risk/
-│       │   └── engine.py          # entry_quantity / scaled_reduce / post_fill_cap
-│       │
-│       ├── trading/                # прикладное ядро
-│       │   ├── coordinator.py     # master delta -> targets per follower
-│       │   ├── planner.py         # actual vs target -> minimal plan
-│       │   ├── executor.py        # durable command execution + retry/recovery
-│       │   ├── reconciler.py      # periodic full sweep
-│       │   ├── leverage.py        # LeverageManager: RAM candidate catalog + confirmed state
-│       │   ├── builder_attribution.py # Builder fee attribution (DIRECT/VALID/UNAVAILABLE)
-│       │   └── registry.py        # FollowerRegistry: dynamic follower runtime
-│       ├── history/                # fill/cash import, projection, replay и reconciliation
-│       │   ├── worker.py          # bounded capture/sync loop
-│       │   ├── projector.py       # revisioned episodes/events publication
-│       │   └── reader.py          # account-owned read model
-│       ├── storage/                # SQLite: миграции + репозитории
-│       │   ├── database.py        # aiosqlite, WAL, write_lock, MIGRATIONS
-│       │   ├── repositories.py    # CopyTradeRepo / SyncBasisRepo / CommandRepo ...
-│       │   ├── history.py         # fills/cash/sync/projection persistence
-│       │   ├── episodes.py        # stable episode identities and allocations
-│       │   └── events.py          # immutable user-event feed + delivery state
-│       │
-│       ├── credentials/
-│       │   ├── service.py         # SqliteCredentials (AESGCM-v1)
-│       │   └── crypto.py
-│       │
-│       ├── notifications/
-│       │   ├── console.py         # локальный structured sink
-│       │   ├── formatter.py       # trader cards formatting (format_confirmed_action, format_skip_reason)
-│       │   ├── models.py          # NotificationEvent, NotificationRecipient, NotificationFilter
-│       │   ├── protocol.py        # NotificationRouter protocol
-│       │   ├── router.py          # owner/admin routing → durable outbox
-│       │   └── worker.py          # bounded Telegram delivery/retry
-│       │
-│       ├── onboarding/
-│       │   ├── builder.py         # 4-state Builder onboarding (PREPARED..COMMITTED)
-│       │   ├── direct.py          # signed V3 preflight, testnet-only
-│       │   ├── errors.py          # typed OnboardingErrorCode / OnboardingError
-│       │   ├── models.py          # DirectOnboardingRequest / EphemeralKeyProvider / AgentValidation
-│       │   └── providers.py       # DirectKeyProvider
-│       │
-│       ├── application/
-│       │   ├── service.py         # shared Bot/Mini App use cases
-│       │   ├── adapters.py        # concrete App/SQLite/Aster boundaries
-│       │   ├── control.py         # common emergency workflow
-│       │   ├── engine.py          # Stage 2 process lifecycle
-│       │   └── models.py          # transport-neutral Stage 2 DTO/errors
-│       │
-│       ├── telegram/
-│       │   ├── runtime.py         # aiogram dispatcher/polling lifecycle
-│       │   ├── menu.py            # inline presenters/typed callbacks
-│       │   ├── flow.py            # non-secret onboarding FSM
-│       │   ├── access.py          # captcha challenges and access request store
-│       │   ├── middleware.py      # authorization and activity tracker middleware
-│       │   └── routers/           # navigation/settings/admin handlers (common, settings, access)
-│       ├── miniapp/
-│       │   └── server.py          # Mini App aiohttp transport: HMAC initData сессия,
-│       │                          #   builder/dashboard/pause/resume/confirmation, client-log,
-│       │                          #   static /miniapp/ (Vite bundle)
-│       └── cli/
-│           └── main.py            # run/run-bot/import/admin commands
-│
-├── tests/
-│   ├── unit/                      # risk/planner/storage/domain
-│   ├── integration/               # FakeAster e2e через реальное ядро
-│   ├── testnet/                   # signed scenarios (маркер `testnet`, CT_TESTNET=1)
-│   └── replay/                    # replay захваченных стримов
-│
-├── scripts/                        # operational scripts (hybrid_load_test.py, ...)
+├── src/copytradeaster/             # backend: app.py / config.py + 16 пакетов
+│                                   # (domain, aster, master, risk, trading, history,
+│                                   #  storage, credentials, notifications, onboarding,
+│                                   #  application, telegram, miniapp, cli)
+├── tests/                          # unit/ + integration/ + testnet/ + replay/
 └── data/                           # SQLite БД и артефакты load-прогонов (git-ignored)
 ```
 
-Tree отражает фактическую структуру. Отдельного `master/observer.py` нет:
+Tree отражает фактическую структуру на уровне пакетов. Назначение каждого файла — в корневом `AGENTS.md` (Key Directories) и §4 выше. Отдельного `master/observer.py` нет:
 граница `UserStream` + `MasterProjector` — достаточная, механическое выделение
 файла архитектуру не меняет.
 
@@ -929,3 +817,13 @@ Tree отражает фактическую структуру. Отдельн�
 10. Не создавать God class, но и не дробить одну цельную обязанность на множество микросервисов/микромодулей.
 
 Эта архитектура рассчитана на заявленный масштаб 30–100 followers и должна оставаться основной до появления измеримой причины усложнять инфраструктуру.
+
+## 19. Куда класть новую возможность (Footprint Ladder)
+
+Новая capability кладётся на высшую подходящую ступень — выбирай первую сверху, которая корректно решает задачу:
+
+1. Расширь существующий код — вариация имеющегося, ноль новой поверхности.
+2. Новый скрипт в `scripts/` — операция, выражаемая процедурой (карта: `scripts/AGENTS.md`).
+3. Новый модуль в существующем пакете — новая обязанность внутри известной границы (§4).
+4. Новый пакет `src/copytradeaster/<name>/` — новая граница с протоколом; карта доков обновляется в том же коммите.
+5. Новый процесс/инфраструктура — только при измеренной причине (§1, §8); текущий масштаб держится на одном процессе.

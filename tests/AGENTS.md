@@ -58,7 +58,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `storage/test_wp1.py` | Migrations, casefold owners, policies, access requests, outbox lease/retry |
 | `storage/test_account_builder_identity.py` | Builder-snapshot primitives: set/clear/invalidation (P2.6) |
 | `storage/test_episode_allocations.py` | Allocation index (C2): HEDGE/flip shares sum to source, rebuild from payloads |
-| `storage/test_database_upgrade.py` | Fresh/ghost-v33/S1 upgrade convergence incl. C1–C3 tables |
+| `storage/test_database_upgrade.py` | Ghost-v33/fresh-schema convergence plus G1 corrective, hardening-v33 and frontend-v58 lineages |
 
 ## unit/history — projection, capture, events (S1 remediation C1–C5)
 
@@ -85,7 +85,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `application/test_history_contracts.py` | S1.4 read contracts: trades/detail/events/feed DTOs, ownership, cursors |
 | `application/test_history_acceptance.py` | S1.6 offline cross-surface: one ref, four surfaces, transition kinds (C3 semantics) |
 | `application/test_risk_preview_resume.py` | Risk preview steps + resume context incl. disabled/whitelist advisory |
-| `application/test_trade_views.py` | Shared presenters: neutral close, executed_qty None, money sections (C5) |
+| `application/test_trade_views.py` | Shared presenters: open/closed cards, unknown-direction honesty, executed_qty None when unproven, feed kinds, risk budget steps |
 | `application/test_trade_events_c2.py` | Allocation-bound fills, split cursors, history_page_changed (R1/C2) |
 | `application/test_trade_money_c5.py` | Proof-driven net/gaps over HTTP-equivalent service calls (R5/C5) |
 | `application/test_system_events_c4.py` | ENTRY_SKIPPED dedup, connectivity transitions, writer-failure tolerance (R4/C4) |
@@ -96,7 +96,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `application/test_control.py` | Transport-neutral emergency: per-account/global flatten with two flat-proofs, failure isolation, cancel-then-reduceOnly plan shape |
 | `application/test_engine.py` | `Stage2Process` lifecycle: start/run/shutdown order, shared bot, admin bootstrap, recovery floor |
 | `onboarding/test_direct.py` | Direct gates: fail-closed agent policy, flat/mode/signer/IP, testnet guards, stable IDs, commit→activate |
-| `onboarding/test_builder.py` | Builder prepare/submit: EIP-712 payload, pending lifecycle, flat/expiry/IP, paused commit, secret-safe logs |
+| `onboarding/test_builder.py` | Builder prepare/submit: EIP-712 payload, pending lifecycle, flat/expiry, paused commit, secret-safe logs |
 | `onboarding/test_builder_attestation.py` | Pure `validate_builder_record`: exact-match addresses, Decimal fee compare, fail-closed errors |
 | `onboarding/test_builder_reauthorize.py` | Same-signer reauthorization: foreign/stale/expired/rotated signer rejected, stays paused |
 
@@ -163,8 +163,8 @@ A process-wide file lock serializes signed pytest campaigns on shared accounts.
 Corrective live package: `test_engine_corrective_live.py` (LC1–LC6), with signed
 evidence and unconditional audited cleanup. Run order and current qualification
 status: `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md`.
-Protocol: `wallet.txt` at repo root (git-ignored, never commit) with section blocks `main`/`copyc1..3`/`copyc2`/`builder`/`builder-gate`; `ensure_testnet_guard` (host + chains 714/56), pre/post `flatten` (cancel + MARKET-close to flat in `finally`), scratch DBs via `sqlite3.backup` (never touch prod).
-Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): label line, then `evm adress: 0x…` (user), `api wallet adress: 0x…` (signer), `privte key: 0x…` (66-hex signer key), optional `main privte key: 0x…`. Fund accounts from the testnet faucet (`https://www.asterdex-testnet.com/en/faucet`: 1000 test USDT + 1000 test ASTER once a day); example shape in `tests/unit/cli/test_wallet_parser.py:WALLET_FIXTURE`.
+Protocol: `wallet.txt` at repo root (git-ignored, never commit) with section blocks `main`/`copyc1`/`copyc2`/`copyc3`/`builder`/`builder-gate`; `ensure_testnet_guard` (host + chains 714/56), pre/post `flatten` (cancel + MARKET-close to flat in `finally`), scratch DBs via `sqlite3.backup` (never touch prod).
+Format per block (parser: `src/copytradeaster/cli/main.py:parse_wallet_file`, typos are literal): label line, then `evm adress: 0x…` (user), `api wallet adress: 0x…` (signer), `privte key: 0x…` (66-hex signer key), optional `main privte key: 0x…`. Fund accounts from the testnet faucet (`https://www.asterdex-testnet.com/en/faucet`: 1000 test USDT + 1000 test ASTER once a day); example shape in `tests/unit/cli/test_wallet_parser.py:WALLET_FIXTURE`.
 
 | File | Scenario |
 |---|---|
@@ -177,13 +177,13 @@ Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): l
 | `test_builder_stale_corrective_live.py` | Stale builder fee → direct fallback on risk-reducing close |
 | `test_builder_engine_attribution_live.py` | P2.7 proof: Builder vs direct routing through the production core with a `place_order` spy |
 | `test_pre_mainnet_unknown_live.py` | Package A UNKNOWN live matrix A1–A5 (CLOSE response-lost via real allOrders, all-reads-down hold, partial residual, proven-not-executed retry ×1 on copyc3, SIGKILL boot CONFIRM); flat/zero audit in `finally` |
-| `test_pre_mainnet_master_live.py` | Package B Snapshot/WS/Startup live matrix LIVE-COMPLETE (S1/S2/W1/W2/P1 + REAL-06 App/WS/reconnect); flat/zero audit in `finally` |
+| `test_pre_mainnet_master_live.py` | Package B Snapshot/WS/Startup live matrix (S1/S2/W1/W2/P1); flat/zero audit in `finally` |
 | `test_pre_mainnet_network_live.py` | Package C NetworkProfile live 3/3 (MAINNET composition, mode-failure block, in-flight block), no order writes; flat/zero audit in `finally` |
-| `test_pre_mainnet_risk_live.py` | Package D ZeroReason/naked/liquidation live matrix 6/6 in one run (Dust-1/2/3, Protection-cancel/naked, liquidation-hold); flat/zero audit in `finally` |
+| `test_pre_mainnet_risk_live.py` | Package D Dust/Protection/liquidation live matrix 6/6 (Dust-1/2/3, Protection-cancel/naked, liquidation-hold); flat/zero audit in `finally` |
 | `test_pre_mainnet_limit_live.py` | Package E2 LIMIT live: L1/L3 green, L2 honest skip (exchange filled full twice — needs partial for residual row); flat/zero audit in `finally` |
-| `test_pre_mainnet_isolation_live.py` | Package E2 isolation live 3/3 на финальном дереве (F1 429, F2 permission + degraded, F3 control-plane-denial); flat/zero audit в `finally` |
-| `test_pre_mainnet_load_live.py` | Package F hybrid load live (3 REAL + 10 SHADOW, 100 циклов, restart/SIGTERM/SIGKILL, loadgate8 3:39:15); flat/zero audit in `finally` |
-| `test_pre_mainnet_hedge_live.py` | Package G HEDGE live matrix 7/7 (G0 pre-check + G1 LONG+SHORT + G2 asymmetry + G3 stop replace + G4 leverage + G5 partial + G6 close, прод-баг #27); flat/zero audit in `finally` |
+| `test_pre_mainnet_isolation_live.py` | Package E2 isolation live 3/3 (F1 429, F2 permission + degraded, F3 control-plane-denial); flat/zero audit in `finally` |
+| `test_pre_mainnet_load_live.py` | Package F hybrid load live (3 REAL + 10 SHADOW, 100 cycles, restart/SIGTERM/SIGKILL); flat/zero audit in `finally` |
+| `test_pre_mainnet_hedge_live.py` | Package G HEDGE live matrix 7/7 (G0 pre-check + G1 LONG+SHORT + G2 asymmetry + G3 stop replace + G4 leverage + G5 partial + G6 close, prod bug #27); flat/zero audit in `finally` |
 | `test_live_status_acceptance.py` | P2.5 status: signed snapshot+agent reads, safe DTO + HTTP contract |
 | `test_live_positions_acceptance.py` | P2.1 positions: copy, stop-move, TP, partial, MISSING_STOP, flat audit |
 | `test_live_risk_acceptance.py` | P2.4 risk: 1% vs 3% legs, ratio check, forged-body 400, DB invariance |
@@ -192,14 +192,16 @@ Format per block (parser: `cli/main.py:parse_wallet_file`, typos are literal): l
 | `test_live_account_builder_acceptance.py` | P2.6 attestation (copyc1/copyc2) + disconnect + fresh onboarding |
 | `test_live_builder_reauthorize.py` | Same-signer reauth: 5d EXPIRING → re-auth → 30d VERIFIED, no orders |
 | `test_history_acceptance_live.py` | §10.9 history acceptance (copyc2/BTCUSDT): executor/journal lifecycle, distant STOP place+cancel, post-send-timeout query-before-retry, REAL file restart, authenticated HTTP on all surfaces. Requires an EXCLUSIVE window: skips unless flat, no open orders, and no fills in the last 5 minutes |
+| `test_history_reads_live.py` | History reads probe (copyc1): existing-follower history contract on tmp storage, no writes |
 | `support/app_live.py` | Controlled production-App admission helper for focused signed Mini App acceptance tests that use REST rebuilds instead of the background master WS loop |
 | `support/builder_live.py` | Shared helpers: wallet.txt parsing, testnet guard, signed reads, state snapshot, flatten |
 
 ## Conventions
 
-- **Names**: `test_<module>_<behavior>.py` (`test_live_*_acceptance.py` / `test_builder_*_live.py` allowed in testnet).
+- **Names**: `test_<module>_<behavior>.py` (testnet additionally allows `test_live_*_acceptance.py`, `test_builder_*_live.py`, `test_pre_mainnet_*_live.py`, `test_history_*_live.py`, `test_engine_corrective_live.py`, `test_signed_scenarios.py`, `test_one_way_engine_e2e.py`, `test_leverage_control_plane_live.py`).
 - **Isolation**: `tmp_path` SQLite + `await db.migrate()` per test; `respx` for HTTP (only `aster/`, heavy CLI, boot); synthetic `0x..` keys; zero network by default.
 - **Asyncio**: `asyncio_mode=auto` (`pyproject.toml`); stray `@pytest.mark.asyncio` decorators are redundant but harmless.
 - **Markers**: `testnet` (live, double-gated), `load` (registered, unused — the real gate is `CT_LOAD=1` + explicit path).
+- **Verification labels**: every verification claim states where it ran (offline suite / testnet / full gate) and how a narrower run is weaker than the full one. Bare "verified" is forbidden.
 - **Secret-safety**: no secrets/signatures in asserts; the `privte`/`adress` wallet typos are literals — do not "fix".
 - **Living docs**: after suite changes update counters only in `docs/ENGINE_TEST_STATUS_2026-08.md`, never duplicate them.

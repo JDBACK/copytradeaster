@@ -30,7 +30,7 @@ Handoff и сохранённые промпты — контекст своей
 7. `docs/reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` — центральная карта
    фактических UI-проверок Mini App в Telegram WebView, Chromium/CDP и frontend.
 8. `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` — design-only источник:
-   IA, восемь Aster-style concepts и исходные screen states.
+   IA, восемь Aster-style screen-эталонов (один Operate-концепт) и исходные screen states.
 9. `docs/reports/STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md` —
    закрытый corrective gate Part 1 и фактическое acceptance evidence.
 10. `docs/ARCHITECTURE.md` — архитектура ядра и Stage 2 process.
@@ -41,8 +41,8 @@ Handoff и сохранённые промпты — контекст своей
    guest captcha, durable access request, env-admin approval и regression gate.
 13. `docs/reports/STAGE1_CORRECTIVE_REFACTOR_PLAN_2026-08.md` — выполненный
     corrective gate после независимого аудита: план, полный журнал и evidence.
-14. `docs/plan_live_test.md` — исходный pre-mainnet hardening plan с текущими
-    статусами Package A–F; подробный факт исполнения — в отчёте ниже.
+14. `docs/plan_live_test.md` — исходный pre-mainnet hardening plan с историческими
+   статусами Package A–G; подробный факт исполнения — в отчёте ниже.
 15. `docs/reports/PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` — handoff кампании
     от 2026-09-04; читать при продолжении hardening вместе с последними
     записями `docs/reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md`.
@@ -60,8 +60,8 @@ Handoff и сохранённые промпты — контекст своей
 |---|---|---|
 | `PRODUCT.md` (корень) | Пользователи, purpose, позиционирование, operating context и durable product principles | Читать перед проектированием пользовательских поверхностей; менять только при изменении product truth |
 | `docs/ARCHITECTURE.md` | Архитектура системы: стили, модули, planner/reconciliation, journal, конкурентность, recovery, этапы | Читать затронутые разделы перед работой с кодом. **Не перемещать**: докстринги `src/copytradeaster/` ссылаются на её секции по номерам (`ARCHITECTURE.md §6/§7/§12`). Менять при изменении дизайна |
-| `docs/DEV_PLAN_SKELETON.md` | Видение трёх этапов + актуальные Stage 1/2 чеклисты | Читать для понимания «что дальше». Обновлять по факту выполнения пунктов |
-| `docs/plan_live_test.md` | Живой owner-provided pre-mainnet hardening plan; статусы Packages A–F и acceptance-критерии | Читать перед продолжением hardening; помечать только фактически подтверждённое |
+| `docs/DEV_PLAN_SKELETON.md` | Видение трёх этапов + актуальные Stage 1/2/3 чеклисты (включая Mini App S1–S3) | Читать для понимания «что дальше». Обновлять по факту выполнения пунктов |
+| `docs/plan_live_test.md` | Живой owner-provided pre-mainnet hardening plan; статусы Packages A–G и acceptance-критерии | Читать перед продолжением hardening; помечать только фактически подтверждённое |
 | `docs/ENGINE_TEST_STATUS_2026-08.md` | **Единая точка истины** о текущем состоянии: актуальные счётчики suite, таблица багов #1–27, разделы тестовых кампаний | Обновлять после каждого значимого изменения кода/тестов. Не дублировать его счётчики в других файлах |
 | `docs/ASTER_API_RESEARCH_2026-08.md` | Фактологический справочник по Aster V3 API: подписи, ордера, WS, лимиты, режимы позиций | Читать при работе с `src/copytradeaster/aster/` или новыми API-вызовами |
 
@@ -104,16 +104,16 @@ Handoff и сохранённые промпты — контекст своей
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
 | `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` | Append-only журнал pre-mainnet hardening: Packages A–G, corrective qualification, signed REAL Aster Testnet и load evidence; исходная ветка квалифицирована 2026-09-07, интеграционный verdict брать из `ENGINE_TEST_STATUS_2026-08.md` |
 | `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | Handoff от 2026-09-04: исходные требования REAL Aster Testnet qualification; актуальный прогресс и следующий незакрытый пакет сверять с журналом выше. |
-| `docs/reports/acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
-| `docs/reports/acceptance-s3/` | S3 browser evidence: 20 скриншотов production bundle, включая Home, history alias/split/partial, nested screens и risk states; итог — S3 progress §§19–26 |
-| `MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` | Центральная карта принятой UI-кампании: Chromium/CDP, Telegram Desktop, iPhone Mirroring, frontend tests и screenshots; G3 CLOSED в согласованном scope |
+| `acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
+| `acceptance-s3/` | S3 browser evidence: 20 скриншотов production bundle, включая Home, history alias/split/partial, nested screens и risk states; итог — S3 progress §§19–26 |
+| `MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md` | Центральная карта принятой UI-кампании: Chromium/CDP, Telegram Desktop, iPhone Mirroring, frontend tests и screenshots; G3 ACCEPTED в согласованном scope |
 | `MINIAPP_TAB_PERF_2026-09.md` | Приёмка тёплого переключения вкладок Mini App: keep-alive + фоновая ревалидация, замеры cold/warm, бюджет запросов, цикл ревалидации (2026-09-04) |
 | `MINIAPP_S2_REVIEW_HANDOFF_2026-09.md` | Handoff независимому reviewer по закрытому S2/G2: три архитектурных слоя, инварианты §19/§20, критические race/lifecycle точки и команды gate (2026-09-07) |
 | `MINIAPP_S2_TESTING_HANDOFF_2026-09.md` | Handoff тестировщику S2/G2: browser/manual матрица cold/warm, Settings prefetch, mutation unknown/recovery, Back/Sheet/scroll/focus, 50-cycle memory и граница G3 (2026-09-07) |
-| [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md) | Исходный план последовательности S1/G1 → S2/G2 → S3/G3; все три gate закрыты к 2026-09-09. Backend B1–B10, §19 — скорость F0–F6, §20 — review. Фактические итоги: MINIAPP_FUNCTIONAL_PROGRESS, MINIAPP_S2_PROGRESS и MINIAPP_S3_PROGRESS |
+| `MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md` | Исходный план последовательности S1/G1 → S2/G2 → S3/G3; все три gate закрыты к 2026-09-09. Backend B1–B10, §19 — скорость F0–F6, §20 — review. Фактические итоги: MINIAPP_FUNCTIONAL_PROGRESS, MINIAPP_S2_PROGRESS и MINIAPP_S3_PROGRESS |
 | `MINIAPP_RISK_RULER_2026-09.md` | Шкала риска — vertical slice S2.5 lifecycle + S3.4 motion: browser 15/15 PASS и независимая перепроверка; итоговый touch/keyboard/WebKit проход выполнен на iPhone Mirroring в S3 §26 |
-| [MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md) | Исторический независимый verdict `REQUEST CHANGES` (`f77a3fd`, повторный проход `9a0dd98`): источник N1–N6 и baseline reproductions. Обязательные для G1 N1–N3 затем закрыты corrective-пакетом; текущий статус брать из ENGINE_TEST_STATUS / журнала шага 30 |
-| [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md) | Выполненный corrective handoff масштаба 10–30: N1–N3, T1–T6 и §6 закрыты на tested `84cabfb`; G1 CLOSED 2026-09-07. Отложенные там N4–N6 позднее закрыты в S3/G3 |
+| `MINIAPP_S1_REVIEW_2026-09.md` | Исторический независимый verdict `REQUEST CHANGES` (`f77a3fd`, повторный проход `9a0dd98`): источник N1–N6 и baseline reproductions. Обязательные для G1 N1–N3 затем закрыты corrective-пакетом; текущий статус брать из ENGINE_TEST_STATUS / журнала шага 30 |
+| `MINIAPP_S1_FIX_HANDOFF_2026-09.md` | Выполненный corrective handoff масштаба 10–30: N1–N3, T1–T6 и §6 закрыты на tested `84cabfb`; G1 CLOSED 2026-09-07. Отложенные там N4–N6 позднее закрыты в S3/G3 |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 
@@ -124,9 +124,9 @@ Handoff и сохранённые промпты — контекст своей
 |---|---|---|
 | `review_stage1_old.md` | Первое большое ревью после базового рефакторинга | список P0/P1, часть снята |
 | `review_stage1_new.md` | Второе ревью: 6 блокеров (protective convergence, nonce, leverage…) | все закрыты в follow-up |
-| `review_stage1_final.md` | Третий проход: dust zero-target edge case | закрыт (миграция #12) |
-| `review_stage1_acceptance.md` | Финальное принятие: flip-регрессия + честное dust-evidence | **Stage 1 принят**, 0 blockers, две P2-заметки |
-| `review_leverage_control_plane.md` | Три прохода ревью leverage control-plane: 4 находки → остаточный P1 (ambiguous ≠ FAILED) → финальный acceptance `69fa148` (2026-08-25) |
+| `review_stage1_final.md` | Третий проход: P1 protective convergence (failed CANCEL после успешного PLACE) + недостающий ONE_WAY E2E live-proof | оба закрыты в follow-up; dust zero-target — миграция #12, flip — граница эпизода #13 |
+| `review_stage1_acceptance.md` | Финальное принятие: flip-регрессия + честное dust-evidence | **Stage 1 принят**, 0 blockers, две мелочи (doc-расхождение hold_flat + P2 polish) |
+| `review_leverage_control_plane.md` | Три прохода ревью leverage control-plane | 4 находки → остаточный P1 (ambiguous ≠ FAILED) → финальный acceptance `69fa148` (2026-08-25) |
 | `review_miniapp_risk_ruler_2026-09.md` | Независимая перепроверка браузерной приёмки шкалы риска: перемер подмножества живым CDP/DOM, все числа сошлись; одна формулировочная находка («в тот же тик» → «в ближайшие кадры») | verdict: приёмка реальная, slice принять; правка применена, разрешение — в `MINIAPP_RISK_RULER_2026-09.md` |
 Это исторический verdict того прохода. Актуальный corrective acceptance после
 нового независимого аудита описан в
@@ -144,14 +144,15 @@ Handoff и сохранённые промпты — контекст своей
 - Один дом на факт: счётчики suite — только `ENGINE_TEST_STATUS_2026-08.md`,
   карта — только этот файл, контракты подсистем — только вложенные
   `tests|scripts|miniapp/AGENTS.md`; остальное ссылается, не пересказывает.
+- Отчёт о работе: сначала why, потом what (net change списком файлов), потом verification с меткой источника (где гонялось и чем локальный прогон слабее полного). «Проверено» без метки запрещено.
 - Язык: корень и `tests|scripts|miniapp/AGENTS.md` — English, `docs/*.md` — Russian.
-- Свежесть карт: новый тестовый файл/скрипт/экран — одна строка
-  в соответствующий `AGENTS.md` в том же коммите.
+- Свежесть в том же коммите: изменил поведение — обнови доку сразу: новый файл/скрипт/экран — строка в соответствующий `AGENTS.md`; новая секция поведения — `docs/ARCHITECTURE.md` + ссылки из докстрингов; переезд символа — grep по `docs/`, `miniapp/`, всем `AGENTS.md`.
+- Потолки объёма стоячих доков (`scripts/doc-budgets.json`, гейт `python scripts/check_doc_budgets.py`): при красном гейте сначала вынеси чужое в свой дом + однострочная ссылка, потом ужати своё, потолок поднимай только если словам тесно — с обоснованием в коммите. Слишком низкий потолок — баг бюджета.
 - Новые кампании: `docs/reports/TOPIC_YYYY-MM.md`, даты прогонов внутри файла.
 - Актуальные счётчики тестов — только в `docs/ENGINE_TEST_STATUS_2026-08.md`;
   в исторических файлах они остаются как снимки момента.
 - Перемещение документов согласуется с этой картой; перед коммитом проверить,
-  что все `.md`-ссылки указывают на существующие файлы (`python scripts/check_doc_links.py`).
+  что все `.md`-ссылки указывают на существующие файлы (`python scripts/check_doc_links.py`), а объёмы карт — в потолках (`python scripts/check_doc_budgets.py`).
 
 Текущий журнал реализации: [MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md](reports/MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md) — append-only шаги; G1/G2/G3 закрыты.
-Отдельный журнал S2: [MINIAPP_S2_PROGRESS_2026-09.md](reports/MINIAPP_S2_PROGRESS_2026-09.md) — S2.1–S2.6 CLOSED, session resources, Settings prefetch, lifecycle, performance measurements и G2 evidence.
+Отдельный журнал S2: [MINIAPP_S2_PROGRESS_2026-09.md](reports/MINIAPP_S2_PROGRESS_2026-09.md) — S2.1–S2.6 выполнены, G2 ACCEPTED, session resources, Settings prefetch, lifecycle, performance measurements и G2 evidence.
