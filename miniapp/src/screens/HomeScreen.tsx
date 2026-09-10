@@ -61,13 +61,19 @@ export function HomeScreen({
   const actingRef = useRef(false)
   const readyNotifiedRef = useRef(false)
   const resources = useScreenResources(providedResources, auth)
+  // Once the live rail is genuinely healthy, its update is already backed by
+  // the process-local authoritative follower snapshot. Steady reads must then
+  // consume that cache instead of launching another Aster REST refresh. This
+  // also prevents a refresh=true request from fencing itself when its own
+  // FollowerSnapshotStore publication reaches this client before HTTP settles.
+  const liveCacheReady = resources.getLiveSnapshot().health === 'live'
 
   const dashboardResource = useResource({
     resources,
     key: 'dashboard',
     active,
     ttlMs: HOME_REVALIDATE_MS,
-    strength: 'strong',
+    strength: liveCacheReady ? 'weak' : 'strong',
     foregroundSignal,
   })
   const resourceDashboard = dashboardResource.snapshot.data

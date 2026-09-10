@@ -137,15 +137,22 @@ class UserStream:
                 timeout = max(deadline - asyncio.get_running_loop().time(), 0.1)
                 recv_task = asyncio.ensure_future(ws.recv())
                 stop_task = asyncio.ensure_future(stop.wait())
-                done, pending = await asyncio.wait(
-                    {recv_task, stop_task},
-                    timeout=timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
+                try:
+                    done, _ = await asyncio.wait(
+                        {recv_task, stop_task},
+                        timeout=timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    # A close can race the stop waiter and complete recv() with
+                    # ConnectionClosedOK after asyncio.wait() wakes. Await every
+                    # child, including already-finished ones, so shutdown never
+                    # leaks an unobserved recv exception.
+                    for task in (recv_task, stop_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(recv_task, stop_task, return_exceptions=True)
                 if stop_task in done:
-                    recv_task.cancel()
                     return
                 if recv_task not in done:
                     log.info("proactive reconnect after max session time")

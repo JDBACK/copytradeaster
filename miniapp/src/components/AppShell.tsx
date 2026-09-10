@@ -57,9 +57,10 @@ export function AppShell({
   const [visited, setVisited] = useState<ReadonlySet<RootTab>>(
     () => new Set<RootTab>([initialRoute().tab]),
   )
-  // Raised once Home reaches ready: its dashboard(true) refresh populates the
-  // cached snapshot, so the other tabs' cheap reads stop returning empty or
-  // stale frames. Until then they fetch on first tap (previous cold path).
+  // Raised once Home reaches ready. Before live is healthy Home performs the
+  // authoritative dashboard(true) boundary; once live is healthy it consumes
+  // the already-authoritative process cache with dashboard(false). Either path
+  // leaves the shared snapshot ready for the other tabs' cheap reads.
   const [warmReady, setWarmReady] = useState(false)
   const handleHomeReady = useCallback(() => setWarmReady(true), [])
   // Activity pagination is intentionally still screen-owned in S2/F2; keep a

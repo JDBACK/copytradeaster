@@ -241,3 +241,82 @@ live mode production-ready: следующий шаг — довести L6 и a
 
 Live mode всё ещё **IN PROGRESS**: REAL Aster Testnet и ручной Telegram Mini App
 acceptance из §6 не выполнены и не считаются закрытыми этим checkpoint.
+
+### 2026-09-10 — REAL acceptance corrective checkpoint
+
+После `dbddd98` implementation scope L1–L6 остаётся кодово завершённым, но REAL
+acceptance выявил несколько transport/causal/lifecycle дефектов. Они исправляются
+отдельным corrective-коммитом; `dbddd98` не переписывается.
+
+Текущий фактический прогресс:
+
+- [x] L1–L6 implementation сохранён: общий follower snapshot store,
+  authenticated live WebSocket, private follower hints, public mark-price
+  presentation stream, session-scoped live client и live/stale UX без generic
+  healthy `Обновить`.
+- [x] Real Telegram signed WebView подтверждён: Mini App открывается через
+  реальную кнопку бота и transport rail достигает `LIVE`; synthetic initData,
+  fake HMAC и browser-side bot token не использовались.
+- [x] `/live-ticket` больше не связывает Mini App доступ с
+  `telegram_users.blocked_at`: notification mute/delivery state остаётся
+  отдельным от `access_enabled` authorization boundary.
+- [x] Исправлен shutdown race в `UserStream` и market live stream: дочерние
+  `recv()/stop.wait()` tasks отменяются и обязательно awaited/consumed при
+  parent cancellation и simultaneous completion. После corrective shutdown
+  новые `Task exception was never retrieved` / `ConnectionClosedOK` не
+  воспроизвелись; старые блоки логов до фикса не считаются регрессией.
+- [x] Исправлена causal self-invalidation сильного Dashboard refresh:
+  authoritative REST snapshot мог публиковаться через `FollowerSnapshotStore`
+  в live hub раньше завершения собственного HTTP response и тем самым fence'ить
+  самого себя. Frontend теперь сохраняет `source/captured_at`, принимает только
+  точно совпадающую REST self-publication как покрытую этим strong response, а
+  более новый REST/mark/gap/mutation boundary по-прежнему выигрывает.
+- [x] Healthy live steady-state использует weak cache reads; initial/recovery и
+  explicit authoritative verification остаются strong. Weak live evidence не
+  снимает retained mutation uncertainty.
+- [x] Исправлен stale-rail race: после 12s deadline автоматические reconnect
+  attempts продолжаются в фоне, но больше не перетирают `stale` обратно в
+  `reconnecting`. Manual `Повторить` намеренно начинает новый deadline.
+- [x] Найдена отдельная backend causal race для `LIVE + Требуется проверка`:
+  periodic master boundary временно выставляет `ready=false/degraded=true`, в
+  этот момент follower reconciliation публикует свежий snapshot, а после
+  успешного `clear_degraded()` изменение process-wide system state раньше не
+  давало live invalidation. Поэтому browser мог удерживать transient degraded
+  Dashboard до следующей follower publication.
+- [x] Для этой race добавлен regression, сначала воспроизводивший отсутствие
+  post-READY publication. `FollowerSnapshotStore.republish()` теперь может
+  переиздать уже существующий immutable follower snapshot с тем же
+  `captured_at`, а App после успешного снятия degraded публикует
+  `source=system-state` для `dashboard/positions/status`. Это presentation
+  invalidation без дополнительного Aster REST и без подделки REST freshness.
+- [x] Targeted corrective regressions, changed-surface Ruff и
+  `git diff --check` проходят на текущем checkpoint.
+
+Что ещё **не закрыто** и поэтому весь live mode остаётся `IN PROGRESS`:
+
+- [ ] Перезапустить production/Testnet bot process с последним backend
+  `system-state` corrective (Cloudflare URL сохранить) и подтвердить в уже
+  открытом real Telegram WebView, что periodic master boundary больше не
+  оставляет `Требуется проверка` после возврата backend в READY.
+- [ ] На самом новом bundle вручную подтвердить полный transport цикл
+  `LIVE -> reconnecting -> stale -> LIVE`, stale примерно после 12 секунд,
+  сохранение last-good cards и отсутствие нового recv-task leak при restart.
+- [ ] После нового direct flat/zero-orders audit выполнить минимальный REAL
+  Aster Testnet master open; в уже открытом Mini App визуально подтвердить, что
+  follower position появляется без manual refresh.
+- [ ] Пока position открыта, визуально подтвердить изменение PnL от public
+  mark-price stream без private follower event и без изменения REST
+  `captured_at`.
+- [ ] Немедленно закрыть smoke position и повторно доказать FLAT + zero open
+  orders для всех Testnet accounts; mainnet writes должны остаться нулевыми.
+- [ ] Реально проверить 50 tab/nested transitions, focus/visibility/retry и
+  доказать отсутствие duplicate browser WebSocket sessions и REST storm.
+- [ ] Подтвердить lifecycle/max-followers v1 evidence: follower private streams,
+  один shared mark stream, отсутствие orphan listenKeys/tasks и приемлемый
+  socket/task count.
+- [ ] После последнего corrective выполнить полный frontend gate и полный
+  backend `pytest -q -m "not testnet"`; глобальный `ruff check .` не является
+  текущим gate из-за известного несвязанного `scripts/check_doc_facts.py`.
+
+До выполнения этих пунктов REAL Telegram position/PnL/reconnect acceptance не
+объявляется PASS, а §6 остаётся открытым.

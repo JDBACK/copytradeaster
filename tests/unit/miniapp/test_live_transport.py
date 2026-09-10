@@ -2,7 +2,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from copytradeaster.domain.models import AccountState, PositionKey, PositionState, PosSide
-from copytradeaster.miniapp.live import LiveGrant, LiveTicketStore, MiniAppLiveHub, _mark_prices
+from copytradeaster.miniapp.live import (
+    LiveGrant,
+    LiveTicketStore,
+    MiniAppLiveHub,
+    MiniAppLiveRuntime,
+    _mark_prices,
+)
 from copytradeaster.trading.snapshots import FollowerSnapshotStore
 
 
@@ -17,6 +23,42 @@ async def test_live_ticket_is_single_use_and_expires() -> None:
     expired = await store.issue(grant)
     now[0] = 106.0
     assert await store.consume(expired) is None
+
+
+async def test_live_ticket_uses_miniapp_access_not_notification_block_state() -> None:
+    from types import SimpleNamespace
+
+    class Users:
+        access_enabled = 1
+
+        async def get(self, user_id: int):
+            assert user_id == 7
+            return {
+                "telegram_user_id": 7,
+                "account_id": "follower-7",
+                "access_enabled": self.access_enabled,
+                # Notification mute / Telegram delivery failure is not the
+                # Mini App authorization boundary; access_enabled is.
+                "blocked_at": "2026-09-10T00:00:00+00:00",
+            }
+
+    follower = object()
+    users = Users()
+    live = object.__new__(MiniAppLiveRuntime)
+    live._users = users
+    live.tickets = LiveTicketStore()
+    live.app = SimpleNamespace(
+        follower_registry=SimpleNamespace(
+            get=lambda account_id: follower if account_id == "follower-7" else None
+        )
+    )
+
+    issued = await live.issue_ticket(7)
+    assert issued is not None
+    assert await live.consume_ticket(issued["ticket"]) == LiveGrant(7, "follower-7")
+
+    users.access_enabled = 0
+    assert await live.issue_ticket(7) is None
 
 
 def test_live_hub_is_account_scoped_and_latest_wins_when_client_is_slow() -> None:
@@ -78,8 +120,6 @@ async def test_follower_live_burst_coalesces_to_one_post_boundary_rest_refresh()
     from types import SimpleNamespace
 
     from copytradeaster.aster.user_stream import StreamEvent
-    from copytradeaster.miniapp.live import MiniAppLiveRuntime
-
     class Registry:
         def __init__(self) -> None:
             self.runtime = None
@@ -130,3 +170,50 @@ async def test_follower_live_burst_coalesces_to_one_post_boundary_rest_refresh()
     # One authoritative REST boundary on connect + one coalesced refresh for
     # the entire private-stream burst. The WebSocket never mirrors 20 commands.
     assert coordinator.calls == 2
+
+
+async def test_market_stream_parent_cancellation_cleans_recv_child() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    started = asyncio.Event()
+
+    class HangingWS:
+        def __init__(self) -> None:
+            self.recv_task: asyncio.Task | None = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def recv(self):
+            self.recv_task = asyncio.current_task()
+            started.set()
+            await asyncio.sleep(3600)
+
+    ws = HangingWS()
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_live = False
+    live._private_health = {}
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            ws_user_base="wss://example.invalid/ws",
+            symbol_whitelist=["BTCUSDT"],
+        ),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=lambda prices: None),
+    )
+    live._market_ws_factory = lambda url: ws
+
+    task = asyncio.create_task(live._run_market_stream())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ws.recv_task is not None
+    assert ws.recv_task.cancelled()

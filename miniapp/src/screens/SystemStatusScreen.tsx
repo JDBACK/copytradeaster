@@ -53,17 +53,24 @@ export function SystemStatusScreen({
 }) {
   const [refreshing, setRefreshing] = useState(false)
   const resources = useScreenResources(providedResources, auth)
+  // A healthy live boundary guarantees that the shared follower store was
+  // authoritatively refreshed. Use its cheap cached Status read in steady
+  // state; explicit remediation below remains refresh=true and therefore also
+  // rechecks signed permissions.
+  const liveCacheReady = resources.getLiveSnapshot().health === 'live'
   const resource = useResource({
     resources,
     key: 'status',
     active: true,
-    strength: 'strong',
+    strength: liveCacheReady ? 'weak' : 'strong',
     foregroundSignal,
   })
   const dto = resource.snapshot.data
   const transportStale =
     dto !== null &&
-    (resource.snapshot.error !== null || resource.snapshot.stale || resource.snapshot.strength !== 'strong')
+    (resource.snapshot.error !== null ||
+      resource.snapshot.stale ||
+      (!liveCacheReady && resource.snapshot.strength !== 'strong'))
   const load: LoadState = dto
     ? { kind: 'ready', dto, transportStale }
     : resource.snapshot.error

@@ -65,6 +65,30 @@ describe('MiniAppLiveSession', () => {
     session.dispose()
   })
 
+  it('preserves snapshot source and capture boundary on an ordinary update', async () => {
+    const updates = vi.fn()
+    const session = new MiniAppLiveSession({ initData: 'signed' }, updates, vi.fn())
+    session.start()
+    await flush()
+    const socket = FakeWebSocket.instances[0]
+    socket.message({ type: 'hello', revision: 0, health: 'live', updated_at: '2026-09-10T03:00:00Z' })
+    socket.message({
+      type: 'update',
+      revision: 1,
+      resources: ['dashboard', 'positions'],
+      source: 'rest',
+      captured_at: '2026-09-10T03:00:01.123456+00:00',
+    })
+
+    expect(updates).toHaveBeenCalledWith({
+      resources: ['dashboard', 'positions'],
+      revision: 1,
+      source: 'rest',
+      capturedAt: '2026-09-10T03:00:01.123456+00:00',
+    })
+    session.dispose()
+  })
+
   it('turns a revision gap into one full live-resource reconciliation', async () => {
     const updates = vi.fn()
     const session = new MiniAppLiveSession({ initData: 'signed' }, updates, vi.fn())
@@ -151,6 +175,27 @@ describe('MiniAppLiveSession', () => {
     await flush()
     vi.advanceTimersByTime(3_000)
     expect(session.getSnapshot().health).not.toBe('stale')
+    session.dispose()
+  })
+
+  it('becomes stale after the deadline even while automatic reconnect attempts keep failing', async () => {
+    const session = new MiniAppLiveSession({ initData: 'signed' }, vi.fn(), vi.fn())
+    session.start()
+    await flush()
+    const socket = FakeWebSocket.instances[0]
+    socket.message({ type: 'hello', revision: 1, health: 'live', updated_at: '2026-09-10T03:00:00Z' })
+    vi.mocked(api.liveTicket).mockRejectedValue(new ApiError(0, 'network_error', 'offline'))
+
+    socket.close()
+    expect(session.getSnapshot().health).toBe('reconnecting')
+
+    await vi.advanceTimersByTimeAsync(12_100)
+    expect(session.getSnapshot().health).toBe('stale')
+    // Backoff attempts continue in the background, but once the outage crossed
+    // the stale boundary they must not cosmetically downgrade the rail back to
+    // "reconnecting" until an authoritative hello actually recovers it.
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(session.getSnapshot().health).toBe('stale')
     session.dispose()
   })
 

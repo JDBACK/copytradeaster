@@ -21,7 +21,9 @@ from copytradeaster.config import Settings
 from copytradeaster.domain.models import AccountState, ActionKind, ExecutionAction
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
 from copytradeaster.trading.coordinator import FollowerRuntime
+from copytradeaster.trading.reconciler import ReconcileReport
 from copytradeaster.trading.registry import FollowerRegistry
+from copytradeaster.trading.snapshots import FollowerSnapshotStore
 
 
 def cfg(*, shadow_enabled: bool, rest: str = TESTNET_REST_URL, ws: str = TESTNET_WS_URL):
@@ -353,6 +355,116 @@ def test_master_entry_admission_requires_ready_connected_and_clean_projection():
     app._entry_admission_ready = False
     assert app._master_entry_admitted() is False
 
+
+@pytest.mark.asyncio
+async def test_successful_master_boundary_republishes_system_state_after_degraded_clears():
+    """A follower snapshot sampled while the master boundary is fail-closed
+    must not be the browser's last word after the same boundary proves READY.
+
+    Dashboard/Positions/Status derive global readiness from app_state, not AccountState.
+    The recovery therefore needs a presentation invalidation even when the
+    follower state itself didn't change and no extra Aster read is warranted.
+    """
+
+    sequence: list[tuple] = []
+
+    class SettingsDouble:
+        async def set_flag(self, key, value):
+            sequence.append(("flag", key, value))
+
+        async def clear_degraded(self):
+            sequence.append(("clear-degraded",))
+
+    class ProjectorDouble:
+        state = object()
+
+        def __init__(self):
+            self.generation = 0
+            self.dirty_symbols = frozenset()
+
+        async def rebuild_full(self, client, account_id):
+            del client
+            assert account_id == "main"
+            self.generation += 1
+            self.dirty_symbols = frozenset()
+
+        def mark_dirty(self, *symbols):
+            self.dirty_symbols = frozenset(symbols)
+
+    class ReconcilerDouble:
+        async def reconcile(self, state, reason):
+            del state, reason
+            return ReconcileReport(per_account={"copyc1": 0}, authoritative=True)
+
+    app = App.__new__(App)
+    app.master_client = object()
+    app.projector = ProjectorDouble()
+    app.reconciler = ReconcilerDouble()
+    app.settings = SettingsDouble()
+    app.follower_registry = FollowerRegistry(
+        [FollowerRuntime("copyc1", object(), identity=None)]
+    )
+    app.follower_snapshots = FollowerSnapshotStore()
+    app.follower_snapshots.publish(
+        AccountState(
+            account_id="copyc1",
+            available_usdt=Decimal("1000"),
+            positions={},
+            open_orders=[],
+        )
+    )
+    original = app.follower_snapshots.get("copyc1")
+    assert original is not None
+    app.follower_snapshots.subscribe(
+        lambda publication: sequence.append(
+            (
+                "snapshot",
+                publication.source,
+                publication.resources,
+                publication.captured_at,
+            )
+        )
+    )
+    app._stream_connected = True
+    app._stream_epoch = 1
+    app._master_event_seq = 0
+    app._entry_admission_ready = True
+    app._stream_ready = asyncio.Event()
+    app._stream_ready.set()
+    app._ready = True
+    app._master_boundary_active = False
+    app._master_boundary_lock = asyncio.Lock()
+    app._master_recovery_requested = asyncio.Event()
+    app._notification_token = "live-state-boundary"
+
+    async def no_failures(report):
+        del report
+        return []
+
+    async def no_unsettled(account_ids):
+        del account_ids
+        return []
+
+    async def converged(report):
+        del report
+        return None
+
+    app._record_sweep_failures = no_failures
+    app._unsettled_for = no_unsettled
+    app._sweep_hold_reason = converged
+
+    assert await app._establish_master_boundary("periodic-snapshot") is True
+
+    clear_index = sequence.index(("clear-degraded",))
+    recovery = [item for item in sequence[clear_index + 1 :] if item[0] == "snapshot"]
+    assert recovery == [
+        (
+            "snapshot",
+            "system-state",
+            frozenset({"dashboard", "positions", "status"}),
+            original.captured_at,
+        )
+    ]
 
 @pytest.mark.asyncio
 async def test_stream_startup_timeout_selects_real_rest_fallback(monkeypatch):

@@ -22,6 +22,7 @@ import { HOME_REVALIDATE_MS, HomeScreen } from './screens/HomeScreen'
 import { PositionsScreen } from './screens/PositionsScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
 import { MiniAppResources } from './resources'
+import type { LiveUpdate } from './live'
 import { RESUME_CONFIRM_BODY, RESUME_CONFIRM_FLAT_BODY } from './home'
 import type {
   AccountBuilderDTO,
@@ -173,6 +174,10 @@ function deferred<T>() {
     reject = rej
   })
   return { promise, resolve, reject }
+}
+
+function applyLiveUpdate(resources: MiniAppResources, event: LiveUpdate) {
+  ;(resources as unknown as { applyLiveUpdate: (update: LiveUpdate) => void }).applyLiveUpdate(event)
 }
 
 /** True when the element sits under a hidden keep-alive wrapper. */
@@ -992,6 +997,119 @@ describe('HomeScreen loading lifecycle', () => {
     await screen.findByText('5')
     expect(dashboardSpy).toHaveBeenCalledTimes(2)
     expect(dashboardSpy.mock.lastCall?.slice(0, 2)).toEqual([AUTH, true])
+  })
+
+  it('a strong Dashboard response covers its own matching REST live publication', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-live-self-fence')
+    let liveHealth: 'connecting' | 'live' = 'connecting'
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => ({
+      health: liveHealth,
+      revision: liveHealth === 'live' ? 2 : 1,
+      lastUpdatedAt: liveHealth === 'live' ? Date.now() : 0,
+      retrying: false,
+    }))
+    const strongGate = deferred<DashboardDTO>()
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockReturnValue(strongGate.promise)
+    const capturedAt = '2026-09-10T06:02:48.123456+00:00'
+
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(1))
+    expect(dashboardSpy.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, true])
+
+    // This is the real server ordering: the strong refresh publishes its
+    // FollowerSnapshotStore update to live clients before its HTTP response
+    // can settle. The publication must fence that response, but it must not
+    // make Home start another refresh=true request.
+    liveHealth = 'live'
+    act(() => applyLiveUpdate(resources, {
+      resources: ['dashboard', 'positions', 'status'],
+      revision: 2,
+      source: 'rest',
+      capturedAt,
+    }))
+    strongGate.resolve(dashboard({ open_positions: 3, snapshot_captured_at: capturedAt }))
+
+    await screen.findByText('3')
+    await act(async () => {})
+    await act(async () => {})
+    expect(resources.getSnapshot('dashboard').stale).toBe(false)
+    expect(resources.getSnapshot('dashboard').strength).toBe('strong')
+    expect(dashboardSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a newer mark live boundary still fences the strong response and converges with one weak cache read', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-live-mark-overtake')
+    let liveHealth: 'connecting' | 'live' = 'connecting'
+    vi.spyOn(resources, 'getLiveSnapshot').mockImplementation(() => ({
+      health: liveHealth,
+      revision: liveHealth === 'live' ? 3 : 1,
+      lastUpdatedAt: liveHealth === 'live' ? Date.now() : 0,
+      retrying: false,
+    }))
+    const strongGate = deferred<DashboardDTO>()
+    const weakGate = deferred<DashboardDTO>()
+    const dashboardSpy = vi
+      .spyOn(api, 'dashboard')
+      .mockReturnValueOnce(strongGate.promise)
+      .mockReturnValueOnce(weakGate.promise)
+    const capturedAt = '2026-09-10T06:02:48.123456+00:00'
+
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(1))
+    liveHealth = 'live'
+    act(() => {
+      applyLiveUpdate(resources, {
+        resources: ['dashboard', 'positions', 'status'],
+        revision: 2,
+        source: 'rest',
+        capturedAt,
+      })
+      applyLiveUpdate(resources, {
+        resources: ['dashboard', 'positions'],
+        revision: 3,
+        source: 'mark-price',
+        capturedAt,
+      })
+    })
+    strongGate.resolve(dashboard({ open_positions: 1, snapshot_captured_at: capturedAt }))
+
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(2))
+    expect(dashboardSpy.mock.calls.map((call) => call[1])).toEqual([true, false])
+    expect(resources.getSnapshot('dashboard').stale).toBe(true)
+    weakGate.resolve(dashboard({ open_positions: 4, snapshot_captured_at: capturedAt }))
+    await screen.findByText('4')
+    await act(async () => {})
+    expect(resources.getSnapshot('dashboard').stale).toBe(false)
+    expect(dashboardSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('a weak live Dashboard cannot resolve retained pause uncertainty; explicit strong evidence can', async () => {
+    const resources = new MiniAppResources(AUTH, 'home-live-unknown-recovery')
+    resources.publishConfirmed('dashboard', dashboard({ copy_state: 'active' }))
+    const release = resources.acquireMutation('pause-resume')
+    expect(release).not.toBeNull()
+    expect(resources.markMutationUnknown('pause-resume', 'pause')).toBe(true)
+    release?.()
+    vi.spyOn(resources, 'getLiveSnapshot').mockReturnValue({
+      health: 'live',
+      revision: 5,
+      lastUpdatedAt: Date.now(),
+      retrying: false,
+    })
+    const dashboardSpy = vi.spyOn(api, 'dashboard').mockResolvedValue(dashboard({ copy_state: 'active' }))
+
+    resources.invalidate(['dashboard'])
+    render(<HomeScreen auth={AUTH} resources={resources} onNotConnected={noop} />)
+
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(1))
+    expect(dashboardSpy.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, false])
+    await act(async () => {})
+    expect(resources.mutationState('pause-resume')).toBe('unknown')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить данные' }))
+    await waitFor(() => expect(dashboardSpy).toHaveBeenCalledTimes(2))
+    expect(dashboardSpy.mock.calls[1]?.slice(0, 2)).toEqual([AUTH, true])
+    await waitFor(() => expect(resources.mutationState('pause-resume')).toBeNull())
   })
 })
 

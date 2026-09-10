@@ -12,6 +12,10 @@ export interface LiveSnapshot {
 export interface LiveUpdate {
   resources: readonly string[]
   revision: number
+  /** Snapshot publications carry their origin so a matching strong HTTP
+   * response can prove that it causally covers its own live invalidation. */
+  source?: string
+  capturedAt?: string
 }
 
 const STALE_AFTER_MS = 12_000
@@ -115,7 +119,7 @@ export class MiniAppLiveSession {
     const controller = new AbortController()
     this.ticketAbort = controller
     this.publish({
-      health: this.snapshot.lastUpdatedAt ? 'reconnecting' : 'connecting',
+      health: this.automaticReconnectHealth(),
       retrying: this.reconnectAttempt > 0,
     })
     this.armStaleTimer()
@@ -178,7 +182,12 @@ export class MiniAppLiveSession {
       Array.isArray(value.resources) &&
       value.resources.every((item) => typeof item === 'string')
     ) {
-      this.onUpdate({ resources: value.resources, revision })
+      this.onUpdate({
+        resources: value.resources,
+        revision,
+        ...(typeof value.source === 'string' ? { source: value.source } : {}),
+        ...(typeof value.captured_at === 'string' ? { capturedAt: value.captured_at } : {}),
+      })
     }
   }
 
@@ -186,14 +195,14 @@ export class MiniAppLiveSession {
     if (this.disposed || generation !== this.generation) return
     this.socket = null
     this.clearHeartbeatTimer()
-    this.publish({ health: 'reconnecting', retrying: true })
+    this.publish({ health: this.automaticReconnectHealth(), retrying: true })
     this.armStaleTimer()
     this.scheduleReconnect()
   }
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer) return
-    this.publish({ health: 'reconnecting', retrying: true })
+    this.publish({ health: this.automaticReconnectHealth(), retrying: true })
     this.armStaleTimer()
     const delay = Math.min(1_000 * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS)
     this.reconnectAttempt += 1
@@ -204,7 +213,7 @@ export class MiniAppLiveSession {
   }
 
   private armStaleTimer(): void {
-    if (this.staleTimer || this.disposed) return
+    if (this.staleTimer || this.disposed || this.snapshot.health === 'stale') return
     this.staleTimer = setTimeout(() => {
       this.staleTimer = null
       if (!this.disposed && this.snapshot.health !== 'live') {
@@ -216,6 +225,11 @@ export class MiniAppLiveSession {
   private clearReconnectTimer(): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+  }
+
+  private automaticReconnectHealth(): LiveHealth {
+    if (this.snapshot.health === 'stale') return 'stale'
+    return this.snapshot.lastUpdatedAt ? 'reconnecting' : 'connecting'
   }
 
   private clearStaleTimer(): void {

@@ -124,6 +124,29 @@ describe('SystemStatusScreen behavior', () => {
     expect(screen.queryByRole('button', { name: 'Обновить' })).toBeNull()
   })
 
+  it('uses the live authoritative cache for steady reads but keeps explicit verification strong', async () => {
+    const resources = new MiniAppResources(AUTH, 'status-live-cache')
+    vi.spyOn(resources, 'getLiveSnapshot').mockReturnValue({
+      health: 'live',
+      revision: 3,
+      lastUpdatedAt: Date.now(),
+      retrying: false,
+    })
+    const loader = vi
+      .spyOn(api, 'status')
+      .mockResolvedValueOnce(staleDto())
+      .mockResolvedValueOnce(dto())
+
+    render(<SystemStatusScreen auth={AUTH} resources={resources} />)
+    await screen.findByLabelText('Состояние: Данные устарели')
+    expect(loader.mock.calls[0]?.slice(0, 2)).toEqual([AUTH, false])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить' }))
+    await screen.findByText('Всё работает')
+    expect(loader).toHaveBeenCalledTimes(2)
+    expect(loader.mock.calls[1]?.slice(0, 2)).toEqual([AUTH, true])
+  })
+
   it('backend stale keeps values visible with an amber note, never healthy', async () => {
     vi.spyOn(api, 'status').mockResolvedValue(staleDto())
     render(<SystemStatusScreen auth={AUTH} />)

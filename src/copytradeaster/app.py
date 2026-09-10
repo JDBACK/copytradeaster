@@ -47,7 +47,7 @@ from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.leverage import LeverageManager
 from copytradeaster.trading.reconciler import Reconciler, build_snapshot_scope
 from copytradeaster.trading.registry import FollowerRegistry
-from copytradeaster.trading.snapshots import FollowerSnapshotStore
+from copytradeaster.trading.snapshots import ACCOUNT_RESOURCES, FollowerSnapshotStore
 
 log = get_logger(__name__)
 CLOCK_DRIFT_MAX_MS = 2000
@@ -920,6 +920,32 @@ class App:
         await self.settings.set_flag("ready", "false")
         await self.settings.set_flag("degraded", reason)
 
+    def _publish_system_state_change(self) -> None:
+        """Revalidate AccountState-backed DTOs without another Aster read.
+
+        Dashboard, Positions and Status combine a follower snapshot with
+        process-wide READY/degraded flags. A master boundary can publish a
+        follower snapshot while those flags are deliberately fail-closed, then
+        prove READY without changing follower state again. Re-publish the
+        existing snapshot after that flag transition so live clients perform a
+        cheap cache read and cannot retain the transient degraded verdict.
+
+        ``FollowerSnapshotStore.republish`` preserves REST ``captured_at``;
+        this is a presentation boundary, never fabricated exchange freshness.
+        """
+        snapshots = getattr(self, "follower_snapshots", None)
+        registry = getattr(self, "follower_registry", None)
+        if snapshots is None or registry is None:
+            return
+        for runtime in registry.snapshot():
+            if runtime.execution_mode != "REAL":
+                continue
+            snapshots.republish(
+                runtime.account_id,
+                resources=ACCOUNT_RESOURCES,
+                source="system-state",
+            )
+
     async def _publish_master_ready(
         self,
         *,
@@ -1079,6 +1105,7 @@ class App:
                     )
                     if published and await self._sweep_hold_reason(entry) is None:
                         await self.settings.clear_degraded()
+                        self._publish_system_state_change()
                     return published
 
                 self.projector.mark_dirty("*")
@@ -1390,6 +1417,7 @@ class App:
                 hold_reason = await self._sweep_hold_reason(report)
                 if hold_reason is None:
                     await self.settings.clear_degraded()
+                    self._publish_system_state_change()
                 else:
                     log.info("sweep holds degraded (%s)", hold_reason)
             except Exception as exc:  # noqa: BLE001

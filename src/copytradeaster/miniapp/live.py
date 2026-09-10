@@ -257,7 +257,6 @@ class MiniAppLiveRuntime:
         if (
             row is None
             or not int(row["access_enabled"])
-            or row["blocked_at"] is not None
             or row["account_id"] is None
         ):
             return None
@@ -275,7 +274,6 @@ class MiniAppLiveRuntime:
         if (
             row is None
             or not int(row["access_enabled"])
-            or row["blocked_at"] is not None
             or str(row["account_id"] or "") != grant.account_id
             or self.app.follower_registry.get(grant.account_id) is None
         ):
@@ -372,11 +370,15 @@ class MiniAppLiveRuntime:
             while not stop.is_set():
                 dirty_wait = asyncio.create_task(dirty.wait())
                 stop_wait = asyncio.create_task(stop.wait())
-                done, pending = await asyncio.wait(
-                    {dirty_wait, stop_wait}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
+                try:
+                    done, _ = await asyncio.wait(
+                        {dirty_wait, stop_wait}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for task in (dirty_wait, stop_wait):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(dirty_wait, stop_wait, return_exceptions=True)
                 if stop_wait in done:
                     return
                 dirty.clear()
@@ -419,11 +421,20 @@ class MiniAppLiveRuntime:
                     while not self._stop.is_set():
                         receive = asyncio.create_task(ws.recv())
                         stopping = asyncio.create_task(self._stop.wait())
-                        done, pending = await asyncio.wait(
-                            {receive, stopping}, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        for task in pending:
-                            task.cancel()
+                        try:
+                            done, _ = await asyncio.wait(
+                                {receive, stopping}, return_when=asyncio.FIRST_COMPLETED
+                            )
+                        finally:
+                            # Always consume both child tasks. During shutdown the
+                            # websocket can finish recv() with ConnectionClosedOK
+                            # in the same turn that the stop waiter wins; merely
+                            # calling cancel() then leaves the finished exception
+                            # unobserved ("Task exception was never retrieved").
+                            for task in (receive, stopping):
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(receive, stopping, return_exceptions=True)
                         if stopping in done:
                             return
                         prices = _mark_prices(receive.result(), set(self.app.cfg.symbol_whitelist))

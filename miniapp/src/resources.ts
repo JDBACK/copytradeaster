@@ -88,6 +88,12 @@ interface Flight<T> {
   promise: Promise<T>
 }
 
+interface LiveInvalidationBoundary {
+  invalidationRevision: number
+  source: string | null
+  capturedAt: string | null
+}
+
 interface Entry<T> {
   data: T | null
   receivedAt: number
@@ -95,7 +101,11 @@ interface Entry<T> {
   dataInvalidationRevision: number
   generation: number
   barrierGeneration: number
+  /** Latest non-live fence. A matching REST live publication may cover its
+   * own live barrier, but it must never cover mutation/local/scope fences. */
+  hardBarrierGeneration: number
   publishedGeneration: number
+  latestLiveBoundary: LiveInvalidationBoundary | null
   weak: Flight<T> | null
   strong: Flight<T> | null
   error: string | null
@@ -122,7 +132,9 @@ function emptyEntry<T>(): Entry<T> {
     dataInvalidationRevision: -1,
     generation: 0,
     barrierGeneration: 0,
+    hardBarrierGeneration: 0,
     publishedGeneration: 0,
+    latestLiveBoundary: null,
     weak: null,
     strong: null,
     error: null,
@@ -239,6 +251,8 @@ export class MiniAppResources {
       // synchronously before the request starts.
       entry.invalidationRevision += 1
       entry.barrierGeneration = ++entry.generation
+      entry.hardBarrierGeneration = entry.barrierGeneration
+      entry.latestLiveBoundary = null
       this.publishSnapshot(entry)
     }
     return this.startFlight(key, strength)
@@ -261,6 +275,8 @@ export class MiniAppResources {
     // Cancellation is also a publication fence: a test double or unusual
     // WebView body implementation may ignore AbortSignal and resolve late.
     entry.barrierGeneration = ++entry.generation
+    entry.hardBarrierGeneration = entry.barrierGeneration
+    entry.latestLiveBoundary = null
     flight.controller.abort('speculative_cancelled')
     this.publishSnapshot(entry)
     return true
@@ -298,6 +314,8 @@ export class MiniAppResources {
       const entry = this.entry(key)
       entry.invalidationRevision += 1
       entry.barrierGeneration = ++entry.generation
+      entry.hardBarrierGeneration = entry.barrierGeneration
+      entry.latestLiveBoundary = null
       this.publishSnapshot(entry)
     }
   }
@@ -309,7 +327,9 @@ export class MiniAppResources {
     entry.invalidationRevision += 1
     const generation = ++entry.generation
     entry.barrierGeneration = generation
+    entry.hardBarrierGeneration = generation
     entry.publishedGeneration = generation
+    entry.latestLiveBoundary = null
     entry.dataInvalidationRevision = entry.invalidationRevision
     entry.data = data
     entry.receivedAt = Date.now()
@@ -421,6 +441,8 @@ export class MiniAppResources {
       entry.strength = null
       entry.invalidationRevision += 1
       entry.barrierGeneration = ++entry.generation
+      entry.hardBarrierGeneration = entry.barrierGeneration
+      entry.latestLiveBoundary = null
       this.publishSnapshot(entry)
     }
   }
@@ -461,9 +483,17 @@ export class MiniAppResources {
     if (entry.strong === flight) entry.strong = null
     if (this.disposed) return
 
-    const fenced = flight.token < entry.barrierGeneration
+    const hardFenced = flight.token < entry.hardBarrierGeneration
     const superseded = flight.token < entry.publishedGeneration
     const invalidatedDuringFlight = flight.invalidationAtStart !== entry.invalidationRevision
+    const liveCovered =
+      data !== null &&
+      flight.strength === 'strong' &&
+      invalidatedDuringFlight &&
+      !hardFenced &&
+      this.strongReadCoversLiveBoundary(key, data, entry.latestLiveBoundary)
+    const fenced = flight.token < entry.barrierGeneration && !liveCovered
+    const invalidationBlocksPublication = invalidatedDuringFlight && !liveCovered
 
     if (error !== null) {
       // Authentication loss is a hard scope boundary, not a per-screen
@@ -472,14 +502,14 @@ export class MiniAppResources {
       if (this.handleInvalidSessionError(error)) return
       // A losing/obsolete request cannot poison the error slot after a newer
       // strong read or confirmed mutation has already published.
-      if (!fenced && !superseded && !invalidatedDuringFlight && !(error instanceof ApiError && error.code === 'aborted')) {
+      if (!fenced && !superseded && !invalidationBlocksPublication && !(error instanceof ApiError && error.code === 'aborted')) {
         entry.error = error instanceof ApiError ? error.code : 'network_error'
       }
       this.publishSnapshot(entry)
       return
     }
 
-    if (!fenced && !superseded && !invalidatedDuringFlight && data !== null) {
+    if (!fenced && !superseded && !invalidationBlocksPublication && data !== null) {
       entry.data = data
       entry.receivedAt = Date.now()
       entry.dataInvalidationRevision = entry.invalidationRevision
@@ -492,7 +522,7 @@ export class MiniAppResources {
     // A real dashboard refresh defines a newer server snapshot. Any positions
     // read that predated it must be fenced, and active consumers will perform
     // exactly one follow-up through useResource.
-    if (key === 'dashboard' && flight.strength === 'strong' && !fenced && !superseded && !invalidatedDuringFlight) {
+    if (key === 'dashboard' && flight.strength === 'strong' && !fenced && !superseded && !invalidationBlocksPublication) {
       this.invalidate(['positions'])
     }
   }
@@ -558,6 +588,36 @@ export class MiniAppResources {
     return false
   }
 
+  private strongReadCoversLiveBoundary<K extends ResourceKey>(
+    key: K,
+    data: ResourceValues[K],
+    boundary: LiveInvalidationBoundary | null,
+  ): boolean {
+    if (
+      boundary === null ||
+      boundary.source !== 'rest' ||
+      boundary.capturedAt === null ||
+      boundary.invalidationRevision !== this.entry(key).invalidationRevision
+    ) return false
+    if (key !== 'dashboard' && key !== 'positions' && key !== 'status') return false
+    const snapshotData = data as DashboardDTO | PositionPageDTO | StatusDTO
+    return snapshotData.snapshot_captured_at === boundary.capturedAt
+  }
+
+  private invalidateFromLive(keys: readonly ResourceKey[], event: LiveUpdate): void {
+    for (const key of keys) {
+      const entry = this.entry(key)
+      entry.invalidationRevision += 1
+      entry.barrierGeneration = ++entry.generation
+      entry.latestLiveBoundary = {
+        invalidationRevision: entry.invalidationRevision,
+        source: event.source ?? null,
+        capturedAt: event.capturedAt ?? null,
+      }
+      this.publishSnapshot(entry)
+    }
+  }
+
   private applyLiveUpdate(event: LiveUpdate): void {
     if (this.disposed) return
     const allowed = new Set<ResourceKey>([
@@ -572,7 +632,7 @@ export class MiniAppResources {
     const keys = [...new Set(event.resources)].filter(
       (key): key is ResourceKey => allowed.has(key as ResourceKey),
     )
-    if (keys.length) this.invalidate(keys)
+    if (keys.length) this.invalidateFromLive(keys, event)
     if (event.resources.includes('history')) this.history.liveInvalidate()
     queueMicrotask(() => {
       if (this.disposed) return

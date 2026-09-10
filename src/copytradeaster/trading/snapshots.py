@@ -124,6 +124,38 @@ class FollowerSnapshotStore:
             changed.append(record)
         return tuple(changed)
 
+    def republish(
+        self,
+        account_id: str,
+        *,
+        resources: frozenset[str],
+        source: str,
+    ) -> SnapshotPublication | None:
+        """Emit a presentation boundary without pretending REST got fresher.
+
+        Dashboard/Status also depend on process-wide application state such as
+        READY/degraded, which isn't part of ``AccountState``. Re-publish the
+        latest immutable follower state while preserving its original capture
+        time so live clients can cheaply recompute those DTOs from current
+        application flags without another exchange request.
+        """
+        previous = self._entries.get(account_id)
+        if previous is None:
+            return None
+        now = self._clock()
+        record = SnapshotPublication(
+            account_id=account_id,
+            state=previous.state,
+            captured_at=previous.captured_at,
+            published_at=now,
+            revision=previous.revision + 1,
+            resources=resources,
+            source=source,
+        )
+        self._entries[account_id] = record
+        self._notify(record)
+        return record
+
     def discard(self, account_id: str) -> None:
         self._entries.pop(account_id, None)
 
