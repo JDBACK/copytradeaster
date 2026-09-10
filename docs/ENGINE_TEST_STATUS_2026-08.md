@@ -10,6 +10,13 @@
 > frontend **34 файла / 400 passed**, ruff/format, doc links/budgets/facts и `git diff --check` чисто;
 > браузерная приёмка Mini App — top-блок ниже и live-план §8. Это не переоценка вердикта по слиянию в
 > `main`: он остаётся привязанным к своему дереву.
+> **Corrective (2026-09-10, позже в тот же день):** закрыты два хвоста live-плана — история
+> `copyc1/BTCUSDT` (один биржевой поток держал обе эпохи position mode, из-за чего окно не
+> публиковалось; replay публикует книгу своего authoritative boundary) и liveness public
+> mark-стрима (SUBSCRIBE-ack больше не считается доказательством котировок). Актуальный полный
+> offline gate: backend **1554 passed / 2 skipped / 87 deselected**, frontend **35 файлов / 401
+> passed**; ruff check/format, doc links/budgets/facts и `git diff --check` чисто. Детали,
+> причина и проверка — live-план §8, «corrective pass».
 
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и
