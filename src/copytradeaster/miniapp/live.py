@@ -8,7 +8,7 @@ import hashlib
 import json
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -35,6 +35,15 @@ MARKET_BACKOFF_INITIAL_S = 1.0
 LIVE_MARK_ACK_TIMEOUT_S = 10.0
 MARK_FALLBACK_INTERVAL_S = 3.0
 MARK_FALLBACK_FRESH_S = 12.0
+# A streaming symbol delivers roughly one mark frame per second, so five
+# silent seconds mean that symbol's quotes stopped flowing.
+MARK_FRAME_FRESH_S = 5.0
+# Mark frames are coalesced per symbol and published to the UI at most once
+# per window. Without it a whitelist of N symbols re-invalidated every client
+# resource N times a second, which is faster than a client's own weak DTO read
+# (measured ~0.9s over the tunnel): the response was always fenced by the next
+# quote, so the DTO starved and the client looped without ever converging.
+MARK_RENDER_CADENCE_S = 1.0
 FOLLOWER_EVENT_TYPES = frozenset(
     {"ACCOUNT_UPDATE", "ORDER_TRADE_UPDATE", "ACCOUNT_CONFIG_UPDATE", "MARGIN_CALL"}
 )
@@ -187,6 +196,11 @@ class _FollowerHandle:
     task: asyncio.Task[None]
 
 
+def _fresh(stamp: float | None, now: float, window_s: float) -> bool:
+    """Whether a per-symbol quote stamp is still inside its freshness window."""
+    return stamp is not None and now - stamp <= window_s
+
+
 def _ticket_digest(token: str) -> bytes:
     return hashlib.sha256(token.encode("utf-8")).digest()
 
@@ -220,6 +234,13 @@ def _mark_prices(payload: str | bytes, whitelist: set[str]) -> dict[str, Decimal
 class MiniAppLiveRuntime:
     """Own follower private streams, shared mark stream, tickets and fan-out."""
 
+    #: Coalesced quotes and the last render-cadence flush. Class-level defaults
+    #: keep the coalescer usable on an instance built without ``init``; the
+    #: buffer is always rebound, never mutated in place, so nothing leaks
+    #: between instances.
+    _pending_marks: dict[str, Decimal] = {}
+    _marks_flushed_at: float = 0.0
+
     def __init__(
         self,
         app: App,
@@ -239,8 +260,14 @@ class MiniAppLiveRuntime:
         self._fallback_task: asyncio.Task[None] | None = None
         self._followers: dict[str, _FollowerHandle] = {}
         self._private_health: dict[str, bool] = {}
-        self._market_live = False
-        self._mark_fallback_at = 0.0
+        # Quotes are tracked per symbol, never as one global flag: a symbol
+        # that keeps streaming must not mark another symbol's dead feed as
+        # healthy, nor keep the REST fallback idle for it.
+        self._market_frames: dict[str, float] = {}
+        self._fallback_quotes_at: dict[str, float] = {}
+        # Coalesced quotes awaiting the next render cadence flush.
+        self._pending_marks: dict[str, Decimal] = {}
+        self._marks_flushed_at = 0.0
         self._quotes_live = False
         self._unsubscribe = app.follower_snapshots.subscribe(self.hub.publish_snapshot)
 
@@ -350,6 +377,12 @@ class MiniAppLiveRuntime:
     async def _run_follower(self, runtime: FollowerRuntime, stop: asyncio.Event) -> None:
         dirty = asyncio.Event()
         refresh_lock = asyncio.Lock()
+        # The authoritative REST boundary started on connect can outlive the
+        # socket that triggered it (the stream notifies the disconnect first).
+        # Health is only re-asserted while the socket that owns the snapshot is
+        # still up, so a dead stream can never read as live after the boundary
+        # finishes.
+        stream_state = {"socket_live": False}
 
         async def refresh(*, connected_boundary: bool = False) -> None:
             async with refresh_lock:
@@ -368,7 +401,7 @@ class MiniAppLiveRuntime:
                     if connected_boundary:
                         raise
                     return
-                self._private_health[runtime.account_id] = True
+                self._private_health[runtime.account_id] = stream_state["socket_live"]
                 self._publish_health(runtime.account_id)
 
         async def on_event(event: StreamEvent) -> None:
@@ -376,13 +409,16 @@ class MiniAppLiveRuntime:
                 dirty.set()
 
         async def on_reconnect() -> None:
+            stream_state["socket_live"] = False
             self._private_health[runtime.account_id] = False
             self._publish_health(runtime.account_id)
 
         async def on_connected() -> None:
+            stream_state["socket_live"] = True
             await refresh(connected_boundary=True)
 
         async def on_disconnected() -> None:
+            stream_state["socket_live"] = False
             self._private_health[runtime.account_id] = False
             self._publish_health(runtime.account_id)
 
@@ -472,15 +508,15 @@ class MiniAppLiveRuntime:
                             raise TimeoutError("mark-price stream produced no frame")
                         prices = _mark_prices(receive.result(), set(self.app.cfg.symbol_whitelist))
                         if prices:
-                            self.app.follower_snapshots.apply_mark_prices(prices)
                             # Only a frame that actually carries a mark price
-                            # proves the stream delivers quotes. The SUBSCRIBE
+                            # proves the stream delivers quotes, and only for
+                            # the symbol it carries. The SUBSCRIBE
                             # acknowledgement is a frame too, so claiming
                             # liveness on it idles the REST fallback while PnL
                             # freezes, then drops health on every 10s timeout.
-                            if not self._market_live:
-                                self._market_live = True
-                                self._refresh_health()
+                            self._record_market_frames(prices)
+                            self._refresh_health()
+                            self._queue_mark_prices(prices)
                             # A delivered quote is the only proof the endpoint
                             # is healthy: an accepted-and-silent socket must
                             # keep growing the backoff instead of paying a new
@@ -497,7 +533,10 @@ class MiniAppLiveRuntime:
                 else:
                     log.warning("mark-price stream failed class=%s", type(exc).__name__)
             finally:
-                self._market_live = False
+                self._market_frames.clear()
+                # A pending quote still belongs to the user: publish it before
+                # the socket claim is withdrawn.
+                self._flush_mark_prices()
                 self._refresh_health()
             if self._stop.is_set():
                 break
@@ -511,16 +550,19 @@ class MiniAppLiveRuntime:
     async def _run_mark_fallback(self) -> None:
         """Keep presentation quotes alive when the cluster pushes no mark frames.
 
-        The shared mark-price stream stays primary: while it delivers frames
-        this loop only sleeps. The Aster testnet cluster accepts the mark
-        subscription and then stays silent, so a bounded unsigned REST read
-        fills the same presentation-only quote path. Quotes never touch trading
-        state and never refresh the REST ``captured_at`` age.
+        The shared mark-price stream stays primary per symbol: while a symbol
+        delivers frames the fallback never requests it, so its REST budget is
+        spent only on symbols whose feed went quiet. The Aster testnet cluster
+        accepts the mark subscription and then stays silent, so a bounded
+        unsigned REST read fills the same presentation-only quote path. Quotes
+        never touch trading state and never refresh the REST ``captured_at``
+        age.
         """
         while not self._stop.is_set():
-            if not self._market_live:
+            silent = self._silent_symbols()
+            if silent:
                 try:
-                    prices = await self._fetch_mark_prices()
+                    prices = await self._fetch_mark_prices(silent)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -530,8 +572,8 @@ class MiniAppLiveRuntime:
                         log.warning("mark-price fallback failed class=%s", type(exc).__name__)
                 else:
                     if prices:
-                        self._mark_fallback_at = time.monotonic()
-                        self.app.follower_snapshots.apply_mark_prices(prices)
+                        self._record_fallback_quotes(prices)
+                        self._queue_mark_prices(prices)
                 # Re-evaluate on every silent iteration so a fallback outage
                 # demotes health once the last accepted quote ages out.
                 self._refresh_health()
@@ -541,17 +583,69 @@ class MiniAppLiveRuntime:
             except TimeoutError:
                 pass
 
-    async def _fetch_mark_prices(self) -> dict[str, Decimal]:
+    async def _fetch_mark_prices(self, symbols: Sequence[str]) -> dict[str, Decimal]:
         client = getattr(self.app, "master_client", None)
         fetch = getattr(client, "mark_prices", None)
         if fetch is None:
             return {}
-        return await fetch(list(self.app.cfg.symbol_whitelist))
+        return await fetch(list(symbols))
+
+    def _record_market_frames(
+        self, prices: Mapping[str, Decimal], *, at: float | None = None
+    ) -> None:
+        """Stamp streamed quotes per symbol: a frame proves only its own symbol."""
+        stamp = time.monotonic() if at is None else at
+        for symbol in prices:
+            self._market_frames[str(symbol).strip().upper()] = stamp
+
+    def _queue_mark_prices(self, prices: Mapping[str, Decimal], *, at: float | None = None) -> None:
+        """Coalesce quotes per symbol and publish at most once per cadence.
+
+        The UI is re-invalidated once per window instead of once per symbol
+        frame: a client whose weak DTO read is slower than the frame rate would
+        otherwise have every response fenced by the next quote and never
+        converge on fresh marks.
+        """
+        if not prices:
+            return
+        stamp = time.monotonic() if at is None else at
+        self._pending_marks = {
+            **self._pending_marks,
+            **{str(symbol).strip().upper(): price for symbol, price in prices.items()},
+        }
+        if stamp - self._marks_flushed_at >= MARK_RENDER_CADENCE_S:
+            self._flush_mark_prices(at=stamp)
+
+    def _flush_mark_prices(self, *, at: float | None = None) -> None:
+        """Publish the coalesced quotes and re-invalidate the UI once."""
+        if not self._pending_marks:
+            return
+        prices = self._pending_marks
+        self._pending_marks = {}
+        self._marks_flushed_at = time.monotonic() if at is None else at
+        self.app.follower_snapshots.apply_mark_prices(prices)
+
+    def _record_fallback_quotes(
+        self, prices: Mapping[str, Decimal], *, at: float | None = None
+    ) -> None:
+        stamp = time.monotonic() if at is None else at
+        for symbol in prices:
+            self._fallback_quotes_at[str(symbol).strip().upper()] = stamp
+
+    def _silent_symbols(self, *, at: float | None = None) -> list[str]:
+        """Whitelisted symbols with no fresh quote from either quote source."""
+        stamp = time.monotonic() if at is None else at
+        silent = []
+        for symbol in self.app.cfg.symbol_whitelist:
+            streamed = _fresh(self._market_frames.get(symbol), stamp, MARK_FRAME_FRESH_S)
+            fetched = _fresh(self._fallback_quotes_at.get(symbol), stamp, MARK_FALLBACK_FRESH_S)
+            if not streamed and not fetched:
+                silent.append(symbol)
+        return silent
 
     def _refresh_health(self) -> None:
         """Publish ``live`` only while exchange quotes are actually flowing."""
-        fresh = time.monotonic() - self._mark_fallback_at <= MARK_FALLBACK_FRESH_S
-        live = self._market_live or fresh
+        live = not self._silent_symbols()
         if live == self._quotes_live:
             return
         self._quotes_live = live

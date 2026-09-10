@@ -265,6 +265,40 @@ async def test_backoff_grows_between_failures():
     assert gaps[1] > gaps[0]
 
 
+async def test_expiring_socket_does_not_reset_the_reconnect_backoff():
+    """An accepted socket that expires at once must keep growing the ladder."""
+
+    class ExpiringFactory:
+        def __init__(self) -> None:
+            self.opens: list[float] = []
+
+        def __call__(self, url: str):
+            self.opens.append(time.monotonic())
+            return FakeWS(['{"e":"listenKeyExpired","E":5}'])
+
+    factory = ExpiringFactory()
+    stream = make_stream(
+        FakeClient(["k"] * 50),
+        factory,
+        lambda event: asyncio.sleep(0),
+        backoff_base_s=0.05,
+        backoff_max_s=0.4,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(stream.run(stop))
+    await asyncio.sleep(1.0)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert len(factory.opens) >= 3
+    gaps = [
+        later - earlier for earlier, later in zip(factory.opens, factory.opens[1:], strict=False)
+    ]
+    # Resetting on the handshake kept every gap at the base interval; only a
+    # session that actually stayed up may restart the ladder.
+    assert gaps[-1] > gaps[0] * 2
+
+
 async def test_stop_event_terminates_promptly():
     ws = FakeWS([])
     factory = FlakyFactory(0, [ws])

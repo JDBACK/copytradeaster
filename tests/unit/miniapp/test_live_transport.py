@@ -1,3 +1,4 @@
+import contextlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -10,6 +11,13 @@ from copytradeaster.miniapp.live import (
     _mark_prices,
 )
 from copytradeaster.trading.snapshots import FollowerSnapshotStore
+
+
+def streaming_frames(*symbols: str) -> dict[str, float]:
+    """Fresh per-symbol stream frame stamps, as the mark loop records them."""
+    import time
+
+    return {symbol: time.monotonic() for symbol in symbols}
 
 
 async def test_live_ticket_is_single_use_and_expires() -> None:
@@ -185,9 +193,9 @@ async def test_follower_live_burst_coalesces_to_one_post_boundary_rest_refresh()
     live.hub = MiniAppLiveHub()
     live._user_stream_factory = BurstStream
     live._private_health = {}
-    live._market_live = True
+    live._market_frames = streaming_frames("BTCUSDT")
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
 
     stop = asyncio.Event()
     await live._run_follower(runtime, stop)
@@ -195,6 +203,74 @@ async def test_follower_live_burst_coalesces_to_one_post_boundary_rest_refresh()
     # One authoritative REST boundary on connect + one coalesced refresh for
     # the entire private-stream burst. The WebSocket never mirrors 20 commands.
     assert coordinator.calls == 2
+
+
+async def test_slow_boundary_after_a_dead_socket_never_reads_live() -> None:
+    """A REST boundary that outlives its socket must not restore ``live``."""
+    import asyncio
+    from types import SimpleNamespace
+
+    release = asyncio.Event()
+    boundary_started = asyncio.Event()
+
+    class Registry:
+        def __init__(self) -> None:
+            self.runtime = None
+
+        def get(self, account_id: str):
+            assert account_id == "follower-1"
+            return self.runtime
+
+    class Coordinator:
+        async def snapshot_follower(self, runtime) -> None:
+            boundary_started.set()
+            await release.wait()
+
+    class DyingStream:
+        def __init__(self, **kwargs) -> None:
+            self.on_connected = kwargs["on_connected"]
+            self.on_disconnected = kwargs["on_disconnected"]
+
+        async def run(self, stop: asyncio.Event) -> None:
+            # The socket accepts, starts the authoritative boundary, dies while
+            # that boundary is still in flight, and only then lets it finish.
+            boundary = asyncio.create_task(self.on_connected())
+            await asyncio.sleep(0)
+            await self.on_disconnected()
+            await boundary
+
+    registry = Registry()
+    hub = MiniAppLiveHub()
+    queue, _ = hub.subscribe("follower-1")
+    app = SimpleNamespace(
+        follower_registry=registry,
+        coordinator=Coordinator(),
+        cfg=SimpleNamespace(ws_user_base="wss://example.invalid", listenkey_keepalive_min=50),
+    )
+    runtime = SimpleNamespace(account_id="follower-1", client=object())
+    registry.runtime = runtime
+
+    live = object.__new__(MiniAppLiveRuntime)
+    live.app = app
+    live.hub = hub
+    live._user_stream_factory = DyingStream
+    live._private_health = {}
+    live._quotes_live = True
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(live._run_follower(runtime, stop))
+    await asyncio.wait_for(boundary_started.wait(), timeout=1)
+    release.set()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    events = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+    assert live._private_health.get("follower-1") is False
+    assert [event for event in events if event.get("health") == "live"] == []
 
 
 async def test_market_stream_parent_cancellation_cleans_recv_child() -> None:
@@ -227,9 +303,9 @@ async def test_market_stream_parent_cancellation_cleans_recv_child() -> None:
     ws = HangingWS()
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = False
+    live._market_frames = {}
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {}
     live.app = SimpleNamespace(
         cfg=SimpleNamespace(
@@ -283,9 +359,9 @@ async def test_silent_mark_stream_is_not_claimed_live() -> None:
     hub = MiniAppLiveHub()
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = False
+    live._market_frames = {}
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {"a": True}
     live.hub = hub
     live.app = SimpleNamespace(
@@ -310,7 +386,7 @@ async def test_silent_mark_stream_is_not_claimed_live() -> None:
     finally:
         live_module.LIVE_MARK_ACK_TIMEOUT_S = original
 
-    assert live._market_live is False
+    assert live._market_frames == {}
     assert live._quotes_live is False
     assert ws.closes >= 1
     # No frame means no claim of liveness: the rail must never read `live`
@@ -353,9 +429,9 @@ async def test_subscription_ack_alone_never_claims_live_quotes() -> None:
     applied: list[dict[str, Decimal]] = []
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = False
+    live._market_frames = {}
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {"a": True}
     live.hub = hub
     live.app = SimpleNamespace(
@@ -385,7 +461,7 @@ async def test_subscription_ack_alone_never_claims_live_quotes() -> None:
         events.append(queue.get_nowait())
     assert ws.acks == 1
     assert applied == []
-    assert live._market_live is False
+    assert live._market_frames == {}
     assert live._quotes_live is False
     # The acknowledgement must not be published as a live verdict: the rail
     # would otherwise claim flowing quotes while PnL stands still.
@@ -409,9 +485,9 @@ async def test_rest_mark_fallback_keeps_quotes_live_without_frames() -> None:
     hub = MiniAppLiveHub()
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = False  # the mark socket opened but stays silent
+    live._market_frames = {}  # the mark socket opened but stays silent
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {"a": True}
     live.hub = hub
     live.app = SimpleNamespace(
@@ -457,9 +533,9 @@ async def test_mark_fallback_stands_down_while_stream_frames_flow() -> None:
 
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = True
+    live._market_frames = streaming_frames("BTCUSDT")
     live._quotes_live = True
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {}
     live.hub = MiniAppLiveHub()
     live.app = SimpleNamespace(
@@ -485,6 +561,118 @@ async def test_mark_fallback_stands_down_while_stream_frames_flow() -> None:
         live_module.MARK_FALLBACK_INTERVAL_S = original
 
     assert calls == []
+
+
+def _fallback_runtime(whitelist, mark_prices, applied):
+    import asyncio
+    from types import SimpleNamespace
+
+    live = object.__new__(MiniAppLiveRuntime)
+    live._stop = asyncio.Event()
+    live._market_frames = streaming_frames("BTCUSDT")
+    live._fallback_quotes_at = {}
+    live._quotes_live = False
+    live._private_health = {"a": True}
+    live.hub = MiniAppLiveHub()
+    live.app = SimpleNamespace(
+        cfg=SimpleNamespace(ws_user_base="wss://example.invalid/ws", symbol_whitelist=whitelist),
+        follower_snapshots=SimpleNamespace(apply_mark_prices=applied.append),
+        master_client=SimpleNamespace(mark_prices=mark_prices),
+    )
+    return live
+
+
+async def _run_fallback_briefly(live) -> None:
+    import asyncio
+
+    import copytradeaster.miniapp.live as live_module
+
+    original = live_module.MARK_FALLBACK_INTERVAL_S
+    live_module.MARK_FALLBACK_INTERVAL_S = 0.05
+    try:
+        task = asyncio.create_task(live._run_mark_fallback())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    finally:
+        live_module.MARK_FALLBACK_INTERVAL_S = original
+
+
+def test_mark_frames_coalesce_per_symbol_and_hold_the_render_cadence() -> None:
+    """Quotes reach the UI once per window, carrying the latest per symbol.
+
+    Publishing every frame re-invalidated each client DTO faster than its own
+    weak read could finish, so the response was always fenced by the next quote
+    and the screen never converged on fresh marks.
+    """
+    from types import SimpleNamespace
+
+    applied: list[dict[str, Decimal]] = []
+    live = object.__new__(MiniAppLiveRuntime)
+    live.app = SimpleNamespace(follower_snapshots=SimpleNamespace(apply_mark_prices=applied.append))
+
+    live._queue_mark_prices({"BTCUSDT": Decimal("70000")}, at=100.0)
+    assert applied == [{"BTCUSDT": Decimal("70000")}]
+
+    # Both symbols arrive inside the window: one publication, latest per symbol.
+    live._queue_mark_prices({"ETHUSDT": Decimal("3000")}, at=100.4)
+    live._queue_mark_prices({"BTCUSDT": Decimal("70001")}, at=100.9)
+    assert len(applied) == 1
+
+    live._queue_mark_prices({"ETHUSDT": Decimal("3001")}, at=101.0)
+    assert applied[-1] == {"BTCUSDT": Decimal("70001"), "ETHUSDT": Decimal("3001")}
+    assert len(applied) == 2
+
+
+async def test_partial_mark_feed_falls_back_only_for_the_silent_symbol() -> None:
+    """One streaming symbol must not keep the fallback idle for another."""
+
+    requested: list[list[str]] = []
+    applied: list[dict[str, Decimal]] = []
+
+    async def mark_prices(symbols: list[str]) -> dict[str, Decimal]:
+        requested.append(list(symbols))
+        return {"ETHUSDT": Decimal("3000")}
+
+    live = _fallback_runtime(["BTCUSDT", "ETHUSDT"], mark_prices, applied)
+    await _run_fallback_briefly(live)
+
+    # BTCUSDT is streaming, so its feed is never re-read over REST; the silent
+    # symbol is the only thing the fallback pays for.
+    assert requested and all(row == ["ETHUSDT"] for row in requested)
+    assert applied and applied[0] == {"ETHUSDT": Decimal("3000")}
+    assert live._quotes_live is True
+    assert live.hub._health.get("a") == "live"
+    assert live._silent_symbols() == []
+
+
+async def test_streaming_symbol_never_masks_a_dead_one() -> None:
+    """A live BTCUSDT feed must not report ETHUSDT quotes as healthy."""
+    import time
+
+    import copytradeaster.miniapp.live as live_module
+
+    requested: list[list[str]] = []
+    applied: list[dict[str, Decimal]] = []
+
+    async def mark_prices(symbols: list[str]) -> dict[str, Decimal]:
+        requested.append(list(symbols))
+        return {"BTCUSDT": Decimal("70000")}
+
+    live = _fallback_runtime(["BTCUSDT", "ETHUSDT"], mark_prices, applied)
+    # Both symbols were streaming and the account read live; then ETHUSDT stops
+    # delivering frames while BTCUSDT keeps going.
+    live._market_frames = streaming_frames("BTCUSDT", "ETHUSDT")
+    live._market_frames["ETHUSDT"] = time.monotonic() - live_module.MARK_FRAME_FRESH_S - 1.0
+    live._quotes_live = True
+    live.hub.publish_health("a", "live")
+    await _run_fallback_briefly(live)
+
+    assert requested and all(row == ["ETHUSDT"] for row in requested)
+    assert live._silent_symbols() == ["ETHUSDT"]
+    assert live._quotes_live is False
+    assert live.hub._health.get("a") == "reconnecting"
 
 
 async def test_mark_frame_from_the_stream_claims_live_quotes() -> None:
@@ -522,9 +710,9 @@ async def test_mark_frame_from_the_stream_claims_live_quotes() -> None:
     applied: list[dict[str, Decimal]] = []
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = False
+    live._market_frames = {}
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {"a": True}
     live.hub = hub
     live.app = SimpleNamespace(
@@ -579,9 +767,9 @@ async def test_silent_stream_backs_off_instead_of_reconnecting_forever() -> None
 
     live = object.__new__(MiniAppLiveRuntime)
     live._stop = asyncio.Event()
-    live._market_live = False
+    live._market_frames = {}
     live._quotes_live = False
-    live._mark_fallback_at = 0.0
+    live._fallback_quotes_at = {}
     live._private_health = {}
     live.hub = MiniAppLiveHub()
     live.app = SimpleNamespace(
