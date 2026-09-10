@@ -1126,3 +1126,21 @@ files / 412 passed**. Числа 309/312 и «87 deselected» выше — сн�
 mainnet-trading (только публичные котировки mainnet при
 `MARK_PARTIAL_LIVE_MAINNET=1`), протокольные сбои вне уже перечисленных сценариев
 и Android-клиент (живой UI проверен в Telegram Desktop и Telegram iOS).
+
+**Мобильный WebView (iPhone, проверка владельца, 2026-09-10).** Тот же инстанс
+открыт с телефона в Telegram iOS: индикатор pull-to-refresh больше не выглядит
+полосой/прямоугольником (дефект «индикатор свайпа перестал быть полосой»),
+содержимое тянется за пальцем, отрисовка и прокрутка — без замечаний. Пункт
+«мобильный WebView не покрыт» этим закрыт.
+
+### 2026-09-10 — merge в `main` по итогам merge-review
+
+Ревьюер подтвердил закрытие всех 7 × P1 и вернул **GO** с одной косметической правкой:
+пустая строка в конце `MINIAPP_LIVE_MERGE_REVIEW_RESPONSE_2026-09.md` формально ломала `git diff --check`.
+Правка внесена (`ae3a8a2`), после неё `git diff --check main...HEAD` чист, и ветка
+слита в `main` merge-коммитом `c4a8eba`
+(`af757d0..c4a8eba`, 100 файлов, +9774 / −597). Гейты прогнаны заново уже на
+merged-дереве: backend, frontend (тесты, oxlint, production build), ruff check/form,
+doc links/budgets/facts и `git diff --check af757d0..HEAD` — всё чисто; актуальные числа
+счётчиков — в `docs/ENGINE_TEST_STATUS_2026-08.md`. Ветка `codex/miniapp-live-updates`
+и `main` синхронизированы с origin.
