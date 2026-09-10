@@ -23,10 +23,26 @@
 > keep-alive вкладки как live-потребители, отсутствие L4-coalescing котировок и cadence, а также
 > восемь пунктов P2 (кнопка generic retry, дублирование rail, истечение Agent evidence как
 > «потеря связи», a11y тикающего rail, отчёт pull-to-refresh раньше истины, whitespace-дрейф,
-> docs-факты). Актуальный полный offline gate: backend **1570 passed / 2 skipped / 87
+> docs-факты). Полный offline gate того прохода: backend **1570 passed / 2 skipped / 87
 > deselected**, frontend **35 файлов / 412 passed**; `ruff check`/`format --check` (312 файлов),
 > doc links/budgets/facts и `git diff --check` чисто. Детали каждого пункта — live-план
 > «merge-review corrective».
+> **Live-перепроверка тех же правок (2026-09-10, после merge-review corrective):** ограничение
+> отчёта снято на живых каналах, без изменений в `src/`. Актуальный offline gate: backend
+> **1570 passed / 2 skipped / 92 deselected** (deselected вырос с 87 из-за пяти новых
+> live-тестов), frontend **35 файлов / 412 passed**; ruff/format (316 файлов), doc
+> links/budgets/facts и `git diff --check` — чисто. Testnet: реальная смена
+> HEDGE → ONE_WAY → HEDGE на `copyc2` через production capture
+> (`tests/testnet/test_history_mode_switch_live.py`, A/B: до `9eaddbb` — падение на шаге
+> ONE_WAY, сейчас PASS), health/лестница private stream при убитом сервером сокете
+> (`test_live_stream_health_acceptance.py`, A/B: до `b2fea64` — ложный `live` через 7.95 с),
+> посимвольный mark-фид (`test_live_mark_partial_acceptance.py`, гейт `check_mark_stream.py`:
+> STREAMING exit 0 → PARTIAL exit 3), реальный live-WS работающего инстанса
+> (`test_live_channel_cadence_acceptance.py`: coalescing, догон, single-use тикет). Живой UI в
+> Chromium с реальной позицией: jitter 70 с — 6 текстовых мутаций без предупреждений, pull-to-refresh
+> `ready → refreshing → idle`, все четыре вкладки с живыми данными, `churn` 50 переключений при
+> `liveSockets=1`. После кампании все пять аккаунтов flat / 0 orders. Детали — live-план,
+> «live-перепроверка снятых ограничений».
 
 > **TL;DR (2026-09-09, integrated requalification):** локальная ветка
 > `codex/integrate-hardening-frontend` собрана из hardening tip `4c0d1a1` и

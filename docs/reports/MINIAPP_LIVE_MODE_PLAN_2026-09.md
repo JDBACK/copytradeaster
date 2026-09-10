@@ -1045,3 +1045,76 @@ usage самого скрипта дополнен `status/churn/shot` и фла
 skipped, 87 deselected**; frontend — **35 files / 412 passed**, Oxlint и build PASS;
 `ruff check .`, `ruff format --check .` (312 файлов), `git diff --check`, doc
 links/budgets/facts — PASS.
+
+### 2026-09-10 — live-перепроверка снятых ограничений (те же правки, реальные каналы)
+
+Исходное ограничение отчёта («смену position mode и частичный mark-фид проверял
+юнит-тестами и разбором кода, каденцию — в jsdom») снято на живых testnet/mainnet
+каналах. Правки в `src/` для этого не потребовались: доказывались уже
+зафиксированные фиксы.
+
+**P1-1 — реальная смена книги.** Новый
+`tests/testnet/test_history_mode_switch_live.py` проводит на `copyc2` настоящий
+HEDGE → ONE_WAY → HEDGE через `AsterClient.set_position_mode` и после каждого
+round-trip гоняет production `HistoryCapture.capture_and_publish`. Проверяются:
+эпизод каждой книги и стабильность `public_ref`, соответствие boundary набору ног
+authoritative snapshot, консьюм dirty только вместе с публикацией, отсутствие филлов
+без аллокации, суммовой PnL против биржевых филлов. **Гейт A/B:** на коде до
+`9eaddbb` сценарий падает на шаге ONE_WAY (сделка BOTH не публикуется при ушедшем
+вперёд boundary), на текущем дереве — **PASS** (159 s). Дискриминирующая форма
+воспроизведена и офлайн-стендом на fake-exchange: до фикса два BOTH-филла остаются
+без аллокации, после — размечены.
+
+Чтобы дефект не маскировался самим импортёром: он перечитывает последние 60 с перед
+опубликованным frontier, поэтому книга принимается только после тихого окна
+`QUIET_GAP_S` (65 с) — иначе филл снятой книги в этом окне сам триггерит
+late-fact replay, и ветка смены mode не проверяется. Это же объясняет, почему на
+живой базе дефект выглядел как 241 BOTH-филл без аллокаций внутри принятого
+диапазона, а не проявлялся в каждом прогоне.
+
+**P1-2 — посимвольные котировки.** Новый
+`tests/testnet/test_live_mark_partial_acceptance.py`. Testnet-половина: кластер
+не отдаёт mark-кадры, поэтому fallback обязан покрыть котировкой **каждый** символ
+whitelist, и только после этого health становится `live` (**PASS**). Mainnet-половина
+(opt-in `MARK_PARTIAL_LIVE_MAINNET=1`, публичные unsigned данные): BTCUSDT стримится
+~1 кадр/с, ZZZUSDT — никогда; fallback продолжает опрашивать только молчащий символ
+и больше не запрашивает стримящийся, health не публикует `live` (**PASS**). Гейт
+`scripts/check_mark_stream.py` на том же partial-фиде: до фикса — `VERDICT: STREAMING`
+exit 0, на текущем дереве — `VERDICT: PARTIAL` exit 3.
+
+**P1-3/P1-4 — health мёртвого private stream и лестница reconnect.**
+Новый `tests/testnet/test_live_stream_health_acceptance.py` поднимает production
+`MiniAppLiveRuntime` с настоящим `UserStream` и медленным (8 с) authoritative
+boundary, убивает сокет серверной стороной (`DELETE /fapi/v3/listenKey`) во время
+этого boundary и требует, чтобы health не прочитался `live` до реально новой
+сессии; отдельно измеряется лестница на свежем потоке (base 1 s → ≥ 3 s за четыре
+быстрые смерти). **PASS на текущем дереве.**
+**Гейт A/B:** на коде до `b2fea64` тот же сценарий падает — `live` публикуется
+через 7.95 с после смерти сокета, которым владел boundary.
+
+**P1-5/P1-6 — каденция и медленный клиент на реальном канале.** Новый
+`tests/testnet/test_live_channel_cadence_acceptance.py` подключается к настоящему
+`/miniapp/api/live` работающего инстанса по сессии из локально минтированного
+Telegram-стаба и проверяет hello-baseline, строго возрастающие ревизии, coalescing
+(≤ 2 инвалидации/с при живом mark-фиде), догон «молчащего» читателя ограниченным
+burst'ом вместо ограждённого бэклога и single-use тикет. **PASS** (32 s).
+
+**Живой продукт (тот же инстанс, реальная позиция).** Реальные `audit_miniapp_browser.mjs`
+на запущенном боте с позицией `tg-8264892202` (0.086 BTC): `jitter` 70 с — 6
+мутаций, все текстовые (PnL и `freshness`), предупреждений нет; `swipe` — полный
+жест pull-to-refresh (`ready → refreshing → idle`, haptics, `refresh=true` чтения,
+guard для прокрученного контекста); `series` — все четыре вкладки с живыми данными
+(`Открытые 1`, `PnL сейчас`, mark 77 338.6655405 от посимвольного fallback, стоп
+`подтверждён`); `churn` — 50 переключений при `liveSockets=1`. После проверки
+мастер-позиция закрыта, аудит по всем пяти аккаунтам — `flat / 0 orders`.
+
+**Гейты на дереве с новыми live-тестами.** `ruff check .` / `ruff format --check .`
+(316 файлов), doc links (60 файлов) / budgets / facts (13 PASS / 1 SKIPPED / 0 FAIL),
+`git diff --check` — чисто; offline backend — **1570 passed / 2 skipped / 92
+deselected** (deselected вырос с 87: пять новых testnet-тестов), frontend — **35
+files / 412 passed**. Числа 309/312 и «87 deselected» выше — снимки соответствующих
+проходов, не текущее состояние.
+
+**Осталось за рамками.** Push в remote не делался; живые проверки не покрывают
+mainnet-trading (только публичные котировки mainnet), мобильный WebView и
+протокольные сбои вне уже перечисленных сценариев.
