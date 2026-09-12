@@ -28,7 +28,7 @@ from copytradeaster.aster.models import (
 from copytradeaster.aster.ports import IdentityProvider, KeyProvider, NonceSource
 from copytradeaster.aster.rate_limits import RateLimits
 from copytradeaster.aster.signing import prepare_signed_request
-from copytradeaster.domain.models import PosSide, Side
+from copytradeaster.domain.models import PosSide, Side, normalize_margin_type
 from copytradeaster.logging_utils import get_logger
 
 log = get_logger(__name__)
@@ -655,18 +655,37 @@ class AsterClient:
         )
 
     async def set_margin_type(self, account_id: str, symbol: str, margin_type: str) -> None:
+        normalized = normalize_margin_type(margin_type)
+        if normalized is None:
+            raise ValueError("margin_type must be CROSSED or ISOLATED")
         try:
             await self._signed(
                 account_id,
                 "POST",
                 "/fapi/v3/marginType",
-                {"symbol": symbol, "marginType": margin_type},
+                {"symbol": symbol, "marginType": normalized},
                 weight=1,
             )
         except AsterError as exc:
-            if exc.code in (-4046, -4045):  # "no need to change"
+            if exc.code == -4046:  # authoritative "no need to change"
                 return
             raise
+
+    async def get_multi_assets_mode(self, account_id: str) -> bool:
+        body = await self._signed(account_id, "GET", "/fapi/v3/multiAssetsMargin", {}, weight=30)
+        value = body["multiAssetsMargin"]
+        if type(value) is not bool:
+            raise ValueError("invalid multi-assets mode response")
+        return value
+
+    async def set_multi_assets_mode(self, account_id: str, enabled: bool) -> None:
+        await self._signed(
+            account_id,
+            "POST",
+            "/fapi/v3/multiAssetsMargin",
+            {"multiAssetsMargin": "true" if enabled else "false"},
+            weight=1,
+        )
 
     async def get_position_mode(self, account_id: str) -> bool:
         body = await self._signed(account_id, "GET", "/fapi/v3/positionSide/dual", {}, weight=30)

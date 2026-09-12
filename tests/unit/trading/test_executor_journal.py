@@ -103,6 +103,7 @@ class FakeClient:
         self.place_calls = 0
         self.canceled: list[str] = []
         self.leverage_calls: list[tuple[str, int]] = []
+        self.margin_calls: list[tuple[str, str]] = []
         self.open_orders_result: list = []
         self.query_results: dict[str, object | None] = {}
         self.history_results: dict[str, object | None] = {}
@@ -130,6 +131,12 @@ class FakeClient:
 
     async def set_leverage(self, account_id, symbol, leverage):
         self.leverage_calls.append((symbol, leverage))
+
+    async def set_margin_type(self, account_id, symbol, margin_type):
+        self.margin_calls.append((symbol, margin_type))
+        for row in self.positions_result:
+            if row.symbol == symbol:
+                row.margin_type = margin_type
 
     async def open_orders(self, account_id, symbol=None):
         return self.open_orders_result
@@ -562,6 +569,61 @@ def leverage_action(action_id="leverage:BTCUSDT", lev="20"):
     )
 
 
+def margin_action(action_id="margin:BTCUSDT", mode="ISOLATED"):
+    return ExecutionAction(
+        kind=ActionKind.SET_MARGIN_TYPE,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT", "marginType": mode},
+        client_order_id=None,
+        replaces_client_order_id=None,
+        priority=0,
+        action_id=action_id,
+    )
+
+
+async def test_margin_mode_confirmed_by_read_before_open(env):
+    executor, client, _commands, _links, _settings = env
+    client.positions_result = [SimplePosition(20, margin_type="cross")]
+    plan = plan_of(
+        margin_action(),
+        with_dependency(leverage_action(), "margin:BTCUSDT"),
+        with_dependency(open_action(), "leverage:BTCUSDT"),
+    )
+    results = await executor.submit(plan)
+    assert [result.status for result in results] == ["CONFIRMED"] * 3
+    assert client.margin_calls == [("BTCUSDT", "ISOLATED")]
+    assert client.leverage_calls == [("BTCUSDT", 20)]
+    assert len(client.placed) == 1
+
+
+async def test_margin_mode_exchange_rejection_blocks_open(env):
+    executor, client, _commands, _links, _settings = env
+
+    async def reject(account_id, symbol, margin_type):
+        raise AsterError(-4168, "multi-assets blocks isolated")
+
+    client.set_margin_type = reject  # type: ignore[method-assign]
+    results = await executor.submit(
+        plan_of(margin_action(), with_dependency(open_action(), "margin:BTCUSDT"))
+    )
+    assert [result.status for result in results] == ["FAILED", "BLOCKED"]
+    assert client.placed == []
+
+
+async def test_margin_mode_unknown_post_stays_unknown_until_boot_resolution(env):
+    executor, client, commands, _links, _settings = env
+
+    async def unknown(account_id, symbol, margin_type):
+        raise AsterError(-1000, "gateway outcome unknown", http_status=503)
+
+    client.set_margin_type = unknown  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(margin_action()))
+
+    assert results[0].status == "UNKNOWN"
+    row = await commands.get(results[0].command_key)
+    assert row["status"] == "UNKNOWN"
+
+
 def with_dependency(action, action_id):
     return dataclasses.replace(action, depends_on_action_id=action_id)
 
@@ -822,9 +884,12 @@ async def test_boot_market_history_found_confirms_without_new_mutation(
 
 
 class SimplePosition:
-    def __init__(self, leverage: int, symbol: str = "BTCUSDT"):
+    def __init__(self, leverage: int, symbol: str = "BTCUSDT", margin_type: str = "cross"):
         self.leverage = leverage
         self.symbol = symbol
+        self.margin_type = margin_type
+        self.position_side = PosSide.BOTH
+        self.position_amt = Decimal(0)
 
 
 async def _seed_sending_set_command(commands: CommandRepo) -> str:
@@ -842,6 +907,28 @@ async def _seed_sending_set_command(commands: CommandRepo) -> str:
     )
     await commands.set_status(key, "SENDING")
     return key
+
+
+async def test_boot_resolves_unknown_margin_mode_from_position_risk(env):
+    _executor, client, commands, links, _ = env
+    action = margin_action()
+    plan = plan_of(action)
+    key = command_key_of(plan, action)
+    await commands.insert(
+        key,
+        plan.account_id,
+        None,
+        action.kind.value,
+        json.dumps(action.payload),
+        action.priority,
+        None,
+    )
+    await commands.set_status(key, "UNKNOWN")
+    client.positions_result = [SimplePosition(20, margin_type="isolated")]
+    report = await resolve_boot_unknowns(lambda _aid: client, commands, links)
+    assert report.confirmed == 1 and report.unresolved == 0
+    assert (await commands.get(key))["status"] == "CONFIRMED"
+    assert client.margin_calls == []
 
 
 async def test_boot_resolves_sending_set_leverage_when_exchange_matches_target(env):

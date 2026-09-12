@@ -197,6 +197,7 @@ Mainnet V3 reference содержит `bind/create/list/update/subAccountTransfe
 | Trailing stop | `TRAILING_STOP_MARKET` | `activationPrice` и `callbackRate` 0.1–5%. |
 | Плечо | `POST /fapi/v3/leverage` | Текст reference указывает 1–125, но live testnet 24.08.2026 принял 200x для BTCUSDT/ETHUSDT; фактический максимум задаёт symbol-specific `leverageBracket`, а не локальный cap. |
 | Cross/Isolated | `POST /fapi/v3/marginType` | Поддерживается. |
+| Multi-Assets | signed `GET/POST /fapi/v3/multiAssetsMargin` | Account-wide `true` блокирует переход символа в `ISOLATED` (`-4168` на Testnet); для isolated нужен Single-Asset `false`. |
 | Изменение isolated margin | `POST /fapi/v3/positionMargin` | Добавить или уменьшить маржу позиции. |
 | One-way/Hedge | `POST /fapi/v3/positionSide/dual` | Режим меняется для аккаунта. |
 | Перевод spot↔futures | `POST /fapi/v3/asset/wallet/transfer` | Поддерживается перевод средств между внутренними кошельками. |
@@ -219,10 +220,14 @@ Signed `GET /fapi/v3/leverageBracket?symbol=...` на подключённом f
   а последующий `positionRisk` подтвердил их;
 - позиции и open orders оставались нулевыми, `marginType` остался `cross`.
 
-Следствие для Stage 2: adapter принимает обе формы ответа и не применяет
-устаревший локальный ceiling 125x. Leverage читается только для нового входа или
-увеличения; сбой endpoint не блокирует закрытие, сокращение и защиту. Сам Stage 2
-`marginType` не меняет.
+Следствие для Stage 2 на дату этого августовского среза (историческое,
+superseded follow-up от 2026-09-12): adapter принимает обе формы ответа и не
+применяет устаревший локальный ceiling 125x. Leverage читается только для
+нового входа или увеличения; сбой endpoint не блокирует закрытие, сокращение и
+защиту. Пользовательская поверхность Stage 2 по-прежнему не меняет
+`marginType`, но текущий engine зеркалирует авторитетный режим master — см.
+`Follow-up: margin mode на Testnet — 2026-09-12` и
+`reports/MARGIN_MODE_MIRROR_2026-09.md`.
 
 ### Follow-up: leverage как control-plane — 2026-08-25
 
@@ -232,6 +237,17 @@ GET больше не выполняется на hot path сделки. Кан�
 (reject → follower-specific bracket GET → POST максимума аккаунта), а рестарт
 восстанавливает его из authoritative `positionRisk`. Факты API выше
 (формы ответа, максимумы 200/200/100, принятие POST) остаются в силе.
+
+### Follow-up: margin mode на Testnet — 2026-09-12
+
+[Aster Futures V3](https://asterdex.github.io/aster-api-website/futures-v3/account%26trades/)
+публикует signed `marginType` и `multiAssetsMargin` GET/POST. На настоящих
+Testnet-ключах `POST marginType(ISOLATED)` вернул `-4168`, пока аккаунт был
+в Multi-Assets. После signed Single-Asset переключения биржа приняла оба
+направления `CROSSED`/`ISOLATED`; signed `positionRisk` подтвердил режим,
+фактический `isolatedMargin` и `liquidationPrice` после входа. Подробная
+приёмка — `reports/MARGIN_MODE_MIRROR_2026-09.md`. Только код `-4046` означает
+«режим уже установлен»; прежнее подавление `-4045` в адаптере удалено.
 
 ### Стопы, тейки и их перестановка
 

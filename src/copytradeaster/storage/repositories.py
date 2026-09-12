@@ -464,14 +464,20 @@ class CopyTradeRepo:
             " VALUES (?, ?, ?, ?, ?)",
             (symbol, pos_side, int(direction), _now_iso(), master_event_id),
         )
-        # A NEW master episode invalidates per-follower intentional-flat
-        # markers for this leg: followers may enter normally again.
+        trade_id = int(lastrowid)
+        # A NEW master episode invalidates both kinds of per-follower entry
+        # refusal for this leg: intentional dust-flat and an external close of
+        # the previous episode.  Reset the observation baseline too; otherwise
+        # a follower still flat at the first snapshot of the new episode would
+        # look like another non-zero -> flat transition from the old episode.
         await self.db.execute_write(
-            "UPDATE sync_basis SET zero_target=0, updated_at=?"
-            " WHERE symbol=? AND pos_side=? AND zero_target<>0",
-            (_now_iso(), symbol, pos_side),
+            "UPDATE sync_basis SET zero_target=0, episode_trade_id=?,"
+            " last_observed_qty=NULL, last_engine_close_key=NULL,"
+            " external_close_blocked=0, external_close_reason=NULL, updated_at=?"
+            " WHERE symbol=? AND pos_side=?",
+            (trade_id, _now_iso(), symbol, pos_side),
         )
-        return int(lastrowid)
+        return trade_id
 
     async def close_trade(self, trade_id: int) -> None:
         await self.db.execute_write(
@@ -682,6 +688,38 @@ class CommandRepo:
             (limit,),
         )
 
+    async def latest_confirmed_market_close_for_leg(
+        self,
+        account_id: str,
+        trade_id: int,
+        symbol: str,
+        pos_side: str,
+    ) -> Row | None:
+        """Newest confirmed engine reduction for one follower master episode.
+
+        The caller stores this opaque key alongside every authoritative
+        follower quantity.  A later non-zero -> flat observation is external
+        only when this cursor did not advance.  Parsing in Python keeps the
+        lookup compatible with SQLite builds where JSON1 is unavailable.
+        """
+        rows = await self.db.fetchall(
+            "SELECT command_key, payload FROM execution_commands"
+            " WHERE account_id=? AND trade_id=? AND kind='MARKET_CLOSE'"
+            " AND status='CONFIRMED' ORDER BY rowid DESC",
+            (account_id, trade_id),
+        )
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload"]))
+            except (TypeError, ValueError):
+                continue
+            if payload.get("symbol") != symbol:
+                continue
+            if str(payload.get("positionSide", "BOTH")) != pos_side:
+                continue
+            return row
+        return None
+
 
 class NonceStore:
     """Persistent strictly-monotonic nonce per signer; commit happens before return.
@@ -812,6 +850,104 @@ class SyncBasisRepo:
             " WHERE account_id=? AND symbol=? AND pos_side=?",
             (_now_iso(), account_id, symbol, pos_side),
         )
+
+    async def episode_observation(
+        self,
+        account_id: str,
+        symbol: str,
+        pos_side: str,
+        trade_id: int,
+    ) -> Row | None:
+        """Observation state only when it belongs to this exact master episode."""
+        row = await self.get(account_id, symbol, pos_side)
+        if row is None or row["episode_trade_id"] is None or row["last_observed_qty"] is None:
+            return None
+        return row if int(row["episode_trade_id"]) == trade_id else None
+
+    async def observe_episode_qty(
+        self,
+        account_id: str,
+        symbol: str,
+        pos_side: str,
+        trade_id: int,
+        qty: Decimal,
+        engine_close_key: str | None,
+    ) -> None:
+        """Persist one complete authoritative follower-position observation.
+
+        An episode change clears the old block atomically.  Repeated snapshots
+        of the same episode preserve its block until explicit re-arm.
+        """
+        await self.db.execute_write(
+            "INSERT INTO sync_basis(account_id, symbol, pos_side, master_ref_abs, revision,"
+            " updated_at, episode_trade_id, last_observed_qty, last_engine_close_key,"
+            " external_close_blocked, external_close_reason)"
+            " VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?, 0, NULL)"
+            " ON CONFLICT(account_id, symbol, pos_side) DO UPDATE SET"
+            " episode_trade_id=excluded.episode_trade_id,"
+            " last_observed_qty=excluded.last_observed_qty,"
+            " last_engine_close_key=excluded.last_engine_close_key,"
+            " external_close_blocked=CASE"
+            " WHEN sync_basis.episode_trade_id=excluded.episode_trade_id"
+            " THEN sync_basis.external_close_blocked ELSE 0 END,"
+            " external_close_reason=CASE"
+            " WHEN sync_basis.episode_trade_id=excluded.episode_trade_id"
+            " THEN sync_basis.external_close_reason ELSE NULL END,"
+            " updated_at=excluded.updated_at",
+            (
+                account_id,
+                symbol,
+                pos_side,
+                _now_iso(),
+                trade_id,
+                format(qty, "f"),
+                engine_close_key,
+            ),
+        )
+
+    async def mark_external_close(
+        self,
+        account_id: str,
+        symbol: str,
+        pos_side: str,
+        trade_id: int,
+        *,
+        reason: str = "EXTERNAL_OR_UNKNOWN",
+    ) -> None:
+        """Latch same-episode entry refusal after a proven external flat."""
+        await self.db.execute_write(
+            "UPDATE sync_basis SET external_close_blocked=1, external_close_reason=?,"
+            " updated_at=? WHERE account_id=? AND symbol=? AND pos_side=?"
+            " AND episode_trade_id=?",
+            (reason, _now_iso(), account_id, symbol, pos_side, trade_id),
+        )
+
+    async def is_external_close_blocked(
+        self,
+        account_id: str,
+        symbol: str,
+        pos_side: str,
+        trade_id: int,
+    ) -> bool:
+        row = await self.episode_observation(account_id, symbol, pos_side, trade_id)
+        return row is not None and bool(row["external_close_blocked"])
+
+    async def rearm_external_close(
+        self,
+        account_id: str,
+        symbol: str,
+        pos_side: str,
+        trade_id: int,
+    ) -> bool:
+        """Core persistence seam for a separately confirmed operator re-arm."""
+        rowcount, _ = await self.db.execute_write(
+            "UPDATE sync_basis SET external_close_blocked=0, external_close_reason=NULL,"
+            " last_observed_qty='0', updated_at=?"
+            " WHERE account_id=? AND symbol=? AND pos_side=? AND episode_trade_id=?"
+            " AND external_close_blocked<>0",
+            (_now_iso(), account_id, symbol, pos_side, trade_id),
+        )
+        return rowcount > 0
 
 
 class TelegramUserRepo:

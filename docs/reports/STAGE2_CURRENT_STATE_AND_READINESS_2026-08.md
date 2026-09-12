@@ -176,9 +176,10 @@ Adapter принимает документированный object и факт
 не выполняется. Закрытие, сокращение и поддержка защитных ордеров продолжаются
 с leverage существующей позиции и не блокируются этим чтением.
 
-Stage 2 не меняет `marginType`. На подключённом account фактически остаётся
-`cross`. Принудительный Isolated вынесен в отдельную будущую задачу после
-специальной проверки реального Aster testnet поведения.
+**Исторический Stage 2 срез (2026-08-24):** Stage 2 не менял `marginType`. На
+подключённом account фактически оставался `cross`; принудительный Isolated был
+вынесен в будущую задачу после специальной проверки реального Aster testnet
+поведения. Этот пункт superseded engine follow-up в §27 ниже.
 
 ## 8. Управление и safety boundaries
 
@@ -302,3 +303,19 @@ exchange payloads в логирование не передаются.
 5. **Финальные метрики:** offline gate **666 passed / 2 skipped / 21 deselected**,
    coverage **87.29%** (87%), static analysis clean, signed live gate **20 passed / 1 skipped**.
 Stage 2 полностью закрыт.
+
+## 27. Engine follow-up, superseding the 2026-08 scope — 2026-09-12
+
+Этот отчёт сохраняет исторический Stage 2 срез: пункты §7, §12 и §24 о том,
+что `marginType` не меняется и Isolated отложен, были верны на 2026-08-24,
+но больше не описывают текущий engine scope. С 2026-09-12 ядро авторитетно
+зеркалирует master `CROSSED`/`ISOLATED`, применяет isolated `2×` fee-buffered
+Stop-loss collateral gate и fail-closed `SET_MARGIN_TYPE` DAG; подробности и
+подписанный Testnet evidence — в
+[`MARGIN_MODE_MIRROR_2026-09.md`](MARGIN_MODE_MIRROR_2026-09.md).
+
+Тогда же политика ручного полного закрытия follower была усилена: полный
+authoritative `non-zero → flat` без подтверждённого engine close или linked
+Stop/TP fill сохраняет durable episode-bound запрет на same-episode re-entry
+через reconcile и restart. Актуальная политика и acceptance находятся в
+[`EXTERNAL_FOLLOWER_CLOSE_POLICY.md`](../EXTERNAL_FOLLOWER_CLOSE_POLICY.md).

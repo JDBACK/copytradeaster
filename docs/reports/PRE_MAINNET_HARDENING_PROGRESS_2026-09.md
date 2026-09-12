@@ -927,3 +927,13 @@ leverage, stale baseline/cleanup, shared DB/history source и admission seam),
 а не наблюдаемым нарушением engine safety invariants. **Итог: GO для
 fast-forward/push проверенного merge-коммита в Git `main`; mainnet остаётся
 запрещённым fail-closed конфигурацией.**
+
+## 2026-09-12 — Engine audit follow-up (после этого hardening среза)
+
+Запись выше относится к дереву hardening с migration lineage `0..59`. После
+него в текущем worktree добавлена migration #60 и отдельная engine-приёмка:
+authoritative `CROSSED`/`ISOLATED` mirror с isolated `2×` fee-buffered Stop-loss
+collateral и durable external-follower-close latch. Эти изменения не меняют
+прежний pre-mainnet verdict автоматически; их counters/evidence ведутся в
+`../ENGINE_TEST_STATUS_2026-08.md`, а подробные policy/report — в
+`../EXTERNAL_FOLLOWER_CLOSE_POLICY.md` и `MARGIN_MODE_MIRROR_2026-09.md`.

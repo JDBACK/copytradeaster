@@ -17,6 +17,7 @@ from copytradeaster.storage.repositories import (
     NonceStore,
     OrderLinkRepo,
     SettingsRepo,
+    SyncBasisRepo,
 )
 
 
@@ -45,6 +46,76 @@ async def test_migrations_idempotent(db):
         "app_state",
         "schema_migrations",
     } <= names
+
+
+async def test_external_close_episode_state_and_rearm_roundtrip(db):
+    basis = SyncBasisRepo(db)
+    trades = CopyTradeRepo(db)
+    first_trade = await trades.open_trade("BTCUSDT", "BOTH", None, direction=1)
+
+    await basis.observe_episode_qty(
+        "copyc1", "BTCUSDT", "BOTH", first_trade, Decimal("0.019"), "close-before"
+    )
+    await basis.mark_external_close("copyc1", "BTCUSDT", "BOTH", first_trade)
+    await basis.observe_episode_qty(
+        "copyc1", "BTCUSDT", "BOTH", first_trade, Decimal(0), "close-before"
+    )
+    assert await basis.is_external_close_blocked("copyc1", "BTCUSDT", "BOTH", first_trade)
+
+    assert await basis.rearm_external_close("copyc1", "BTCUSDT", "BOTH", first_trade)
+    assert not await basis.is_external_close_blocked("copyc1", "BTCUSDT", "BOTH", first_trade)
+    assert not await basis.rearm_external_close("copyc1", "BTCUSDT", "BOTH", first_trade)
+
+    await basis.mark_external_close("copyc1", "BTCUSDT", "BOTH", first_trade)
+    await trades.close_trade(first_trade)
+    next_trade = await trades.open_trade("BTCUSDT", "BOTH", None, direction=1)
+    row = await basis.get("copyc1", "BTCUSDT", "BOTH")
+    assert row is not None
+    assert int(row["episode_trade_id"]) == next_trade
+    assert row["last_observed_qty"] is None
+    assert int(row["external_close_blocked"]) == 0
+
+
+async def test_confirmed_market_close_cursor_is_episode_and_leg_scoped(db):
+    commands = CommandRepo(db)
+    trade = await CopyTradeRepo(db).open_trade("BTCUSDT", "LONG", None, direction=1)
+    await commands.insert(
+        "close-partial",
+        "copyc1",
+        trade,
+        "MARKET_CLOSE",
+        '{"positionSide":"LONG","symbol":"BTCUSDT","quantity":"0.001"}',
+        1,
+        "ct-close-partial",
+    )
+    await commands.set_status("close-partial", "CONFIRMED")
+    await commands.insert(
+        "close-long",
+        "copyc1",
+        trade,
+        "MARKET_CLOSE",
+        '{"positionSide":"LONG","symbol":"BTCUSDT","quantity":"0.019"}',
+        1,
+        "ct-close-long",
+    )
+    await commands.set_status("close-long", "CONFIRMED")
+    await commands.insert(
+        "close-other-leg",
+        "copyc1",
+        trade,
+        "MARKET_CLOSE",
+        '{"positionSide":"SHORT","symbol":"BTCUSDT"}',
+        1,
+        "ct-close-short",
+    )
+    await commands.set_status("close-other-leg", "CONFIRMED")
+
+    row = await commands.latest_confirmed_market_close_for_leg("copyc1", trade, "BTCUSDT", "LONG")
+    assert row is not None and row["command_key"] == "close-long"
+    assert (
+        await commands.latest_confirmed_market_close_for_leg("copyc1", trade, "BTCUSDT", "BOTH")
+        is None
+    )
 
 
 async def test_account_and_credential_roundtrip(db):

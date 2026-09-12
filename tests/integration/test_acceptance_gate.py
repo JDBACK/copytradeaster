@@ -75,12 +75,19 @@ def build_stack(db: Database, fake: FakeAster) -> tuple[MasterProjector, Coordin
         working_type="MARK_PRICE",
         basis=SyncBasisRepo(db),
     )
+
+    async def on_master_delta(delta):
+        # Match App._on_delta: WS frames trigger the decision, while the
+        # symbol-scoped REST read supplies authoritative mark/margin fields.
+        await projector.refresh_mark_prices(fake, "main", delta.changed_symbols)
+        await coordinator.on_master_delta(delta)
+
     projector = MasterProjector(
         MasterEventRepo(db),
         CopyTradeRepo(db),
         OrderLinkRepo(db),
         SettingsRepo(db),
-        lambda delta: coordinator.on_master_delta(delta),
+        on_master_delta,
     )
     return projector, coordinator
 
@@ -326,6 +333,7 @@ class TestPauseAndRisk:
             leverage=20,
             mark_price=D("65800"),  # 1.23% above historical entry (> 1% policy)
             liquidation_price=D(0),
+            margin_type="CROSSED",
             stop=ProtectiveOrder(
                 client_order_id="m-stop",
                 order_id=1,

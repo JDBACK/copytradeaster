@@ -163,10 +163,12 @@ Inline-first UX brief и решение по Scenes Wizard:
 - [x] Product-boundary correction: follower меняет только `risk_percent`;
   leverage автоматически выбирается по signed `leverageBracket` для каждого
   symbol без локального потолка; master leverage и legacy policy caps не
-  показываются пользователю. Stage 2 пока не меняет `marginType`; isolated
-  enforcement отложен до отдельной реальной проверки Aster testnet. Emergency
-  для follower запрещён на application/UI boundary, global emergency остаётся
-  admin-only.
+  показываются пользователю. **Исторический срез 2026-08:** Stage 2 тогда не
+  менял `marginType`, а isolated enforcement был отложен. Это superseded
+  текущим engine-аудитом 2026-09-12 в §9 и
+  `reports/MARGIN_MODE_MIRROR_2026-09.md`; пользовательская поверхность по-прежнему
+  не меняет режим вручную. Emergency для follower запрещён на
+  application/UI boundary, global emergency остаётся admin-only.
 #### WP9b — ручная приёмка владельца в private Telegram chat (принята 24.08.2026)
 
 Все пункты ручной приёмки владельцем успешно завершены:
@@ -534,8 +536,11 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
   живого эпизода мастера; входная ветка skip'ает `INTENTIONAL_FLAT`; маркер
   снимают новый эпизод мастера и `mark_zero_target` (со сбросом
   `issued_target` против глотания идемпотентностью).
-- [x] Контрольный тест: ненулевой таргет + ручное закрытие follower'а →
-  drift-recovery по-прежнему восстанавливает позицию.
+- [x] Контрольный тест (исторический, 2026-08-23): ненулевой таргет + ручное
+  закрытие follower'а → drift-recovery восстанавливал позицию. **Superseded
+  2026-09-12:** при живом master внешнее полное закрытие теперь ставит
+  durable episode-bound блок и не переоткрывает follower; см.
+  `EXTERNAL_FOLLOWER_CLOSE_POLICY.md` и текущий пункт §9.
 - [x] Live dust-фаза в signed ONE_WAY E2E (phase 4b).
 
 ### Третий проход ревью: flip-регрессия + честное dust-evidence (2026-08-23)
@@ -707,6 +712,24 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 - Повторная квалификация движка pending: последняя — `f7df60b` (requalify integrated live gates, 2026-09-09); после неё в launch-path зашли ровно `ffa2848` + `58c10f7` (`9b65312` — только docs/maps/гейты, переквалификации не требует).
 - Дальше — прогоны по `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:6-11` (NO-GO до повторной квалификации); verdict и счётчики — только в `docs/ENGINE_TEST_STATUS_2026-08.md`.
 - Исторический план A–G демотирован из корня `docs/` в `docs/reports/plan_live_test.md` (история — `git log --follow`); старые A–G — история прогонов предыдущего кода (`docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:10-11`).
+
+### Engine audit follow-up — 2026-09-12
+
+- [x] **Зеркалирование margin mode:** authoritative master `positionRisk`
+  переносит `CROSSED`/`ISOLATED` в target; плоский follower получает
+  journaled `SET_MARGIN_TYPE → SET_LEVERAGE → MARKET_OPEN`, а unknown mode,
+  конфликт HEDGE-строк и занятый символ блокируют только risk-increasing
+  действия. Для `ISOLATED` входной leverage ограничен так, чтобы initial
+  collateral был не меньше `2×` fee-buffered Stop loss; post-fill snapshot
+  проверяет фактический `isolatedMargin` и liquidation guard. Signed Testnet
+  evidence и ограничения account-wide Multi-Assets — в
+  `reports/MARGIN_MODE_MIRROR_2026-09.md`.
+- [x] **External follower close:** complete authoritative `non-zero → flat`
+  без нового confirmed engine close или linked protective fill ставит
+  durable episode-bound latch в `sync_basis` (migration #60). Same-episode
+  `MARKET_OPEN` запрещён после reconcile/restart; новый master `trade_id`
+  очищает latch. Политика и acceptance — в
+  `EXTERNAL_FOLLOWER_CLOSE_POLICY.md`.
 
 ## 10. Mini App Live Mode — ACCEPTED 2026-09-10 (REAL Aster Testnet)
 

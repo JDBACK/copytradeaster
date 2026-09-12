@@ -22,7 +22,7 @@ from copytradeaster.domain.models import (
     TargetPosition,
     TargetState,
 )
-from copytradeaster.master.projector import MasterProjector, MasterState
+from copytradeaster.master.projector import MasterDelta, MasterProjector, MasterState
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
     AccountRepo,
@@ -123,6 +123,7 @@ async def env(tmp_path: Path):
 
     async def on_delta(delta):
         deltas.append(delta)
+        await projector.refresh_mark_prices(fake, "main", delta.changed_symbols)
         await coordinator.on_master_delta(delta)
 
     projector = MasterProjector(
@@ -264,6 +265,65 @@ class TestOpenAndClose:
         for fid in fids:
             assert follower_qty(fake, fid) == 0, fid
             assert follower_stop(fake, fid) is None, fid
+
+
+class TestMarginMode:
+    async def test_isolated_mode_is_mirrored_before_entry_and_reconcile_is_idempotent(self, env):
+        projector, coordinator, fake, db, _deltas, _fids = env
+        fake.margin_types[("main", "BTCUSDT")] = "ISOLATED"
+
+        await open_master_long(projector, fake)
+
+        follower_rows = await fake.position_risk("copyc1", "BTCUSDT")
+        follower_pos = next(row for row in follower_rows if row.position_amt != 0)
+        assert follower_pos.margin_type.upper() == "ISOLATED"
+        assert follower_pos.isolated_margin is not None
+        assert follower_pos.isolated_margin >= D("2") * D("0.019") * D("500") * D("1.001")
+
+        journal = await db.fetchall(
+            "SELECT kind,status FROM execution_commands WHERE account_id='copyc1' ORDER BY rowid"
+        )
+        kinds = [str(row["kind"]) for row in journal]
+        assert kinds[:3] == ["SET_MARGIN_TYPE", "MARKET_OPEN", "PLACE_STOP"]
+        assert all(str(row["status"]) == "CONFIRMED" for row in journal)
+
+        before = len(journal)
+        fr = next(fr for fr in coordinator.followers if fr.account_id == "copyc1")
+        await coordinator.recompute_follower(
+            fr, MasterDelta(frozenset({"BTCUSDT"}), projector.state), snapshot_scope={"BTCUSDT"}
+        )
+        after = await db.fetchall(
+            "SELECT kind,status FROM execution_commands WHERE account_id='copyc1' ORDER BY rowid"
+        )
+        assert len(after) == before
+        assert follower_qty(fake, "copyc1") == D("0.019")
+
+    async def test_isolated_margin_shortfall_flattens_after_authoritative_post_fill_check(
+        self, env, monkeypatch
+    ):
+        projector, _coordinator, fake, db, _deltas, _fids = env
+        fake.margin_types[("main", "BTCUSDT")] = "ISOLATED"
+        original_position_risk = fake.position_risk
+
+        async def underfunded_position_risk(account_id, symbol=None):
+            rows = await original_position_risk(account_id, symbol)
+            if account_id == "copyc1":
+                for row in rows:
+                    if row.symbol == "BTCUSDT" and row.position_amt != 0:
+                        row.isolated_margin = D(0)
+            return rows
+
+        monkeypatch.setattr(fake, "position_risk", underfunded_position_risk)
+        await open_master_long(projector, fake)
+
+        assert follower_qty(fake, "copyc1") == 0
+        assert follower_stop(fake, "copyc1") is None
+        close = await db.fetchone(
+            "SELECT status FROM execution_commands"
+            " WHERE account_id='copyc1' AND kind='MARKET_CLOSE'"
+            " ORDER BY rowid DESC LIMIT 1"
+        )
+        assert close is not None and close["status"] == "CONFIRMED"
 
 
 class TestReduceAndStops:
@@ -737,6 +797,9 @@ class TestSelfStopGuard:
         await projector.apply_raw(stop_new(E=1700, c="m-stop-4", sp="64400", i=104))
         assert follower_qty(fake, "copyc2") == 0
         assert len(follower_qty_all(fake, "copyc2")) == 0
+        own_stop_row = await SyncBasisRepo(db).get("copyc2", "BTCUSDT", "BOTH")
+        assert own_stop_row is not None
+        assert int(own_stop_row["external_close_blocked"]) == 0
 
         # master closes and opens a NEW episode -> copyc2 may enter again
         await projector.apply_raw(
@@ -1046,8 +1109,8 @@ class TestDustReductionNoReentry:
     """Reviewer edge case: a proportional reduction that rounds down to zero
     (master 1.0 -> 0.5 vs a minQty follower) is an INTENTIONAL flat inside the
     still-open master episode. The engine must not re-open the follower on the
-    next post-fill/periodic reconcile - and must NOT lose the repaired
-    drift-recovery behavior when the target was genuinely non-zero."""
+    next post-fill/periodic reconcile. External non-zero -> flat transitions
+    have their own episode-bound latch and must not reuse the dust marker."""
 
     async def test_zero_rounded_target_stays_flat_until_new_episode(self, env):
         projector, coordinator, fake, db, deltas, fids = env
@@ -1073,6 +1136,9 @@ class TestDustReductionNoReentry:
         )
         await asyncio.sleep(0)
         assert follower_qty(fake, fid) == 0, "dust target must flatten the leg"
+        dust_row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert dust_row is not None
+        assert int(dust_row["external_close_blocked"]) == 0
 
         # post-fill recompute + repeated reconciles must NOT re-open:
         from copytradeaster.master.projector import MasterDelta
@@ -1112,15 +1178,21 @@ class TestDustReductionNoReentry:
         qty = follower_qty(fake, fid)
         assert qty > D("0"), "new episode must allow normal entry again"
 
-    async def test_manual_close_with_nonzero_target_still_recovers(self, env):
-        """Control: when the issued target was NON-zero, an actual-vs-target
-        drift (manual close) must still be repaired by re-entry."""
+    async def test_manual_close_blocks_reentry_until_new_episode_and_after_restart(self, env):
+        """A manual follower close opts out of only the current master episode."""
         projector, coordinator, fake, db, deltas, fids = env
         fid = "copyc1"
         # master long 1.0 with stop; followers enter 0.019 as usual
         await open_master_long(projector, fake)
         assert follower_qty(fake, fid) > 0
-        entered = follower_qty(fake, fid)
+        trade = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert trade is not None
+        trade_id = int(trade["trade_id"])
+        before_opens = await db.fetchone(
+            "SELECT COUNT(*) AS n FROM execution_commands"
+            " WHERE account_id=? AND trade_id=? AND kind='MARKET_OPEN'",
+            (fid, trade_id),
+        )
 
         # simulate a MANUAL external close of the follower position
         key = ("copyc1", "BTCUSDT:BOTH")
@@ -1131,7 +1203,152 @@ class TestDustReductionNoReentry:
 
         fr = next(f for f in coordinator.followers if f.account_id == fid)
         await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
-        recovered = follower_qty(fake, fid)
-        assert recovered > 0, "genuine drift must be repaired"
-        # same magnitude: the persisted basis is unchanged, this is recovery
-        assert recovered == entered
+        assert follower_qty(fake, fid) == 0
+        assert resting_conditionals(fake, fid) == [], "orphan bot protection must be canceled"
+        row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert row is not None
+        assert int(row["episode_trade_id"]) == trade_id
+        assert int(row["external_close_blocked"]) == 1
+        assert row["external_close_reason"] == "EXTERNAL_OR_UNKNOWN"
+
+        # Periodic reconciliation and an unrelated-symbol master event retain
+        # the same episode latch and create no new MARKET_OPEN generation.
+        for changed in ({"*"}, {"ETHUSDT"}, {"*"}):
+            await coordinator.recompute_follower(
+                fr, MasterDelta(frozenset(changed), projector.state)
+            )
+        after_opens = await db.fetchone(
+            "SELECT COUNT(*) AS n FROM execution_commands"
+            " WHERE account_id=? AND trade_id=? AND kind='MARKET_OPEN'",
+            (fid, trade_id),
+        )
+        assert int(after_opens["n"]) == int(before_opens["n"])
+        assert follower_qty(fake, fid) == 0
+
+        # Re-compose the trading core over the same durable DB: the block is
+        # not a process-local memory flag and survives restart.
+        restarted_fr = FollowerRuntime(account_id=fid, client=fake, identity=None)
+        restarted = Coordinator(
+            followers=[restarted_fr],
+            settings=SettingsRepo(db),
+            executor=Executor(
+                lambda _aid: fake,
+                CommandRepo(db),
+                OrderLinkRepo(db),
+                {},
+                settings=SettingsRepo(db),
+            ),
+            trades=CopyTradeRepo(db),
+            links=OrderLinkRepo(db),
+            filters_provider=lambda: {"BTCUSDT": btc_filters()},
+            app_flags=SettingsRepo(db),
+            symbol_whitelist=["BTCUSDT", "ETHUSDT"],
+            fee_buffer_pct=D("0.001"),
+            working_type="MARK_PRICE",
+            basis=SyncBasisRepo(db),
+        )
+        await restarted.recompute_follower(
+            restarted_fr, MasterDelta(frozenset({"*"}), projector.state)
+        )
+        assert follower_qty(fake, fid) == 0
+
+        # Closing and reopening the master creates a new durable episode and
+        # resets only the old episode's block; the next protected trade enters.
+        await projector.apply_raw(
+            order_trade(
+                E=1400,
+                S="SELL",
+                x="TRADE",
+                X="FILLED",
+                l="1",
+                z="1",
+                ap="65000",
+                L="65000",
+                q="1",
+            )
+        )
+        await projector.apply_raw(
+            order_trade(
+                E=1500,
+                x="TRADE",
+                X="FILLED",
+                l="1",
+                z="1",
+                ap="65000",
+                L="65000",
+                q="1",
+                i=300,
+            )
+        )
+        await projector.apply_raw(stop_new(E=1510, c="m-stop-new", sp="64500", i=302))
+        new_trade = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert new_trade is not None and int(new_trade["trade_id"]) != trade_id
+        assert follower_qty(fake, fid) > 0
+
+    async def test_incomplete_follower_read_does_not_create_external_close_marker(
+        self, env, monkeypatch
+    ):
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        assert follower_qty(fake, fid) > 0
+
+        fake.positions.pop((fid, "BTCUSDT:BOTH"), None)
+        fake.entry_prices.pop((fid, "BTCUSDT:BOTH"), None)
+        original_position_risk = fake.position_risk
+
+        async def unavailable(*args, **kwargs):
+            del args, kwargs
+            raise TimeoutError("synthetic authoritative read failure")
+
+        monkeypatch.setattr(fake, "position_risk", unavailable)
+        from copytradeaster.master.projector import MasterDelta
+
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        with pytest.raises(TimeoutError, match="authoritative read failure"):
+            await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        failed_read_row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert failed_read_row is not None
+        assert int(failed_read_row["external_close_blocked"]) == 0
+
+        # The next complete REST snapshot supplies the missing transition proof
+        # and latches the safe no-reentry state.
+        monkeypatch.setattr(fake, "position_risk", original_position_risk)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        recovered_row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert recovered_row is not None
+        assert int(recovered_row["external_close_blocked"]) == 1
+        assert follower_qty(fake, fid) == 0
+
+    async def test_new_partial_engine_close_cursor_does_not_explain_full_external_flat(self, env):
+        projector, coordinator, fake, db, deltas, fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        held = follower_qty(fake, fid)
+        assert held > D("0.001")
+        trade = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert trade is not None
+        trade_id = int(trade["trade_id"])
+
+        commands = CommandRepo(db)
+        await commands.insert(
+            "synthetic-partial-close",
+            fid,
+            trade_id,
+            "MARKET_CLOSE",
+            '{"quantity":"0.001","reduceOnly":"true","symbol":"BTCUSDT"}',
+            1,
+            "ct-synthetic-partial",
+        )
+        await commands.set_status("synthetic-partial-close", "CONFIRMED")
+        fake.positions.pop((fid, "BTCUSDT:BOTH"), None)
+        fake.entry_prices.pop((fid, "BTCUSDT:BOTH"), None)
+
+        from copytradeaster.master.projector import MasterDelta
+
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert row is not None
+        assert int(row["external_close_blocked"]) == 1
+        assert follower_qty(fake, fid) == 0

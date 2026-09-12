@@ -28,7 +28,12 @@ _SKIP_REASON_COPY: dict[str, str] = {
     "PAUSED": "копирование приостановлено",
     "STALE_MASTER": "сигнал мастера устарел",
     "OWN_PROTECTIVE_FILLED": "защитный стоп в этой сделке уже исполнен",
+    "EXTERNAL_FOLLOWER_CLOSE": (
+        "позиция закрыта вне копитрейдинга; повторный вход отключён до следующей сделки мастера"
+    ),
     "LEVERAGE_NOT_READY": "плечо для символа ещё не подготовлено",
+    "MARGIN_TYPE_UNKNOWN": "режим маржи мастера не подтверждён",
+    "MARGIN_TYPE_MISMATCH": "режим маржи отличается; увеличение позиции остановлено",
 }
 
 _SKIP_FLAT_REASON = "INTENTIONAL_FLAT"

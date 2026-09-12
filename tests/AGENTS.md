@@ -23,9 +23,9 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 
 | File | What it pins |
 |---|---|
-| `trading/test_planner_transitions.py` | Exhaustive `build_plan` table: open/reduce/stop-replace/leverage-gate/hedge/idempotency/Rule-9; exact `(kind, priority)`, payloads, coids, `depends_on_action_id` |
-| `trading/test_executor_journal.py` | Journal/idempotency: UNKNOWN resolution (503/timeout/query), reduceOnly/−2011, P0 leverage gate (`BLOCKED`), `command_key` stability, SENDING/UNKNOWN boot resolver |
-| `trading/test_coordinator_routing.py` | 4-follower fan-out: error isolation/degraded, pause barriers, generation-safe hot-add/replace, stale-master, self-stop/re-entry, no-stop/whitelist, leverage gating |
+| `trading/test_planner_transitions.py` | Exhaustive `build_plan` table: open/reduce/stop-replace/margin-mode→leverage gate/hedge/idempotency/Rule-9; exact `(kind, priority)`, payloads, coids, `depends_on_action_id` |
+| `trading/test_executor_journal.py` | Journal/idempotency: UNKNOWN resolution (503/timeout/query), reduceOnly/−2011, P0 margin-mode/leverage gates (`BLOCKED`), `command_key` stability, SENDING/UNKNOWN boot resolver |
+| `trading/test_coordinator_routing.py` | 4-follower fan-out: error isolation/degraded, pause barriers, generation-safe hot-add/replace, stale-master, self-stop/re-entry, durable external-close latch, no-stop/whitelist, margin-mode and leverage gating |
 | `trading/test_leverage_manager.py` | `LeverageManager` with no HTTP: candidate catalog, singleflight, generation invalidation, `observe()` restore, bounded worker, read-before-write |
 | `trading/test_builder_attribution.py` | P2.7 payload (`builder`/`feeRate`, 0.001 cap, Decimal canonicalization) + `BuilderAttributionProvider` routing (strict tri-state permissions, expiry) + `time_in_force` |
 | `trading/test_builder_executor.py` | P2.7 in executor: attribution on the wire only (journal clean), entry fail-closed, close/Stop/TP fallback, snapshot/race isolation, no-secrets |
@@ -189,7 +189,7 @@ Format per block (parser: `src/copytradeaster/cli/main.py:parse_wallet_file`, ty
 | File | Scenario |
 |---|---|
 | `test_signed_scenarios.py` | Checklist: clock drift, reads, listenKey, master cycle, margin error + REAL-01/04/05/06 and idempotency |
-| `test_one_way_engine_e2e.py` | Full ONE_WAY engine cycle (open/stop-move/partial/TP/flat/dust/reversal) + HEDGE-resize proof |
+| `test_one_way_engine_e2e.py` | Full ONE_WAY engine cycle (open/stop-move/partial/TP/flat/dust/reversal), external follower close no-reentry across restart/new episode, real CROSSED/ISOLATED mirror + 2× collateral/boot proof, + HEDGE-resize proof |
 | `test_leverage_control_plane_live.py` | Leverage live: −4028 fallback, fail-closed unready, P0 executor gate, durable downshift |
 | `test_builder_onboarding_recovery_live.py` | Builder lifecycle L1–L4: reads, happy path, lost response, commit/activation recovery |
 | `test_builder_mini_app_e2e.py` | Part 1 e2e: onboarding commit, feeRate round-trip trade, over-cap rejection |

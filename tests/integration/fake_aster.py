@@ -73,6 +73,7 @@ class FakeAster:
         self.positions: dict[tuple[str, str], Decimal] = {}  # (account, pos_side)->signed qty
         self.entry_prices: dict[tuple[str, str], Decimal] = {}
         self.leverages: dict[str, int] = {}
+        self.margin_types: dict[tuple[str, str], str] = {}
         self.orders: dict[str, FakeOrder] = {}  # key: account|coid
         self.open_order_coids: dict[str, set[str]] = {}
         self._seq = 0
@@ -273,6 +274,7 @@ class FakeAster:
                 continue
             entry = self.entry_prices.get((account, side_key), self.fill_price)
             leverage = self.leverages.get(account, 20) or 20
+            margin_type = self.margin_types.get((account_id, sym), "cross")
             # Realistic cross liquidation: entry*(1 -/+ 1/leverage) by side.
             # A hardcoded placeholder (e.g. 100) trips the PM-B7
             # liquidation-vs-stop safety net on every leg; the fake must not
@@ -287,8 +289,28 @@ class FakeAster:
                     markPrice=self.price,
                     leverage=leverage,
                     liquidationPrice=liq if liq > 0 else D(0),
-                    marginType="cross",
+                    marginType=margin_type,
+                    isolatedMargin=(abs(qty) * entry / D(leverage))
+                    if margin_type.upper() == "ISOLATED"
+                    else D(0),
                     positionSide=ps,
+                    unRealizedProfit=D(0),
+                )
+            )
+        if (symbol is None or symbol == "BTCUSDT") and not any(
+            row.symbol == "BTCUSDT" and row.position_side == PosSide.BOTH for row in out
+        ):
+            out.append(
+                PositionDTO(
+                    symbol="BTCUSDT",
+                    positionAmt=D(0),
+                    entryPrice=D(0),
+                    markPrice=self.price,
+                    leverage=self.leverages.get(account_id, 20),
+                    liquidationPrice=D(0),
+                    marginType=self.margin_types.get((account_id, "BTCUSDT"), "cross"),
+                    isolatedMargin=D(0),
+                    positionSide=PosSide.BOTH,
                     unRealizedProfit=D(0),
                 )
             )
@@ -439,6 +461,14 @@ class FakeAster:
     async def set_leverage(self, account_id: str, symbol: str, leverage: int) -> None:
         del symbol
         self.leverages[account_id] = leverage
+
+    async def set_margin_type(self, account_id: str, symbol: str, margin_type: str) -> None:
+        if any(
+            account == account_id and side_key.startswith(f"{symbol}:") and qty != 0
+            for (account, side_key), qty in self.positions.items()
+        ):
+            raise AsterError(-4048, "position exists")
+        self.margin_types[(account_id, symbol)] = margin_type
 
     async def get_position_mode(self, account_id: str) -> bool:
         del account_id

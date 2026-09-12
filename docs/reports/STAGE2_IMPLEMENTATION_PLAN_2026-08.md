@@ -1412,8 +1412,9 @@ testnet evidence:
   или deviation, не публикует follower emergency; `GLOBAL_EMERGENCY` остаётся
   admin-only. Notifications, собственные pause/resume и account lifecycle —
   пользовательские возможности;
-- Stage 2 сейчас не меняет `marginType`; isolated enforcement отложен до
-  отдельной реальной проверки Aster testnet. Mock/Fake evidence её не заменяет;
+- На дату этого августовского среза Stage 2 не менял `marginType`; isolated
+  enforcement был отложен до отдельной реальной проверки Aster testnet.
+  Mock/Fake evidence её не заменяет; текущий engine follow-up добавлен ниже;
 - владелец вручную подтвердил notifications и изменение risk percent. Полный
   trading cycle/resume-copy остаётся открытым и не объявляется проверенным.
 
@@ -1430,7 +1431,8 @@ testnet evidence:
   закрытие, сокращение или защиту;
 - follower emergency удалён из UI/router и запрещён application boundary;
   global emergency остаётся admin-only;
-- `marginType` не меняется, текущий Cross сохранён; Isolated отложен;
+- **Исторический срез:** `marginType` не менялся, текущий Cross сохранялся;
+  Isolated был отложен (см. follow-up после исходного плана);
 - captcha/access approval, direct onboarding, typed errors, чистые Step 1/2/3,
   notifications, risk и итоговое меню вручную подтверждены владельцем;
 - актуальный runtime поднят на `b238407`, READY, без in-flight commands, при
@@ -1469,3 +1471,14 @@ testnet evidence:
    coverage **87.29%** (87%), static analysis clean, signed live gate **20 passed / 1 skipped**.
 
 Внешний вердикт: **Stage 2 и leverage control-plane полностью приняты (CLOSED).**
+
+## 27. Engine follow-up after the original plan — 2026-09-12
+
+Исходный план и его §16/§24–26 отражают Stage 2 scope на 2026-08 и не
+переопределяют текущий engine. Последующий аудит добавил authoritative
+зеркалирование `CROSSED`/`ISOLATED`, journaled `SET_MARGIN_TYPE` dependency и
+для Isolated обязательный `2×` fee-buffered Stop-loss collateral. Отдельно
+добавлен durable episode-bound запрет re-entry после внешнего полного закрытия
+follower при активном master. Acceptance и ограничения account-wide
+Multi-Assets собраны в [`MARGIN_MODE_MIRROR_2026-09.md`](MARGIN_MODE_MIRROR_2026-09.md)
+и [`EXTERNAL_FOLLOWER_CLOSE_POLICY.md`](../EXTERNAL_FOLLOWER_CLOSE_POLICY.md).

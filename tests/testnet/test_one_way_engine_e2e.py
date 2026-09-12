@@ -44,7 +44,7 @@ from copytradeaster.storage.repositories import (
     SyncBasisRepo,
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
-from copytradeaster.trading.executor import Executor
+from copytradeaster.trading.executor import Executor, resolve_boot_unknowns
 from copytradeaster.trading.leverage import LeverageManager
 
 pytestmark = [
@@ -144,12 +144,18 @@ async def stack(tmp_path):
             pacing_s=0.0,
         ),
     )
+
+    async def on_master_delta(delta):
+        # Match App._on_delta: a WS trigger is never a mode/mark authority.
+        await projector.refresh_mark_prices(client, "main", delta.changed_symbols)
+        await coordinator.on_master_delta(delta)
+
     projector = MasterProjector(
         MasterEventRepo(db),
         CopyTradeRepo(db),
         OrderLinkRepo(db),
         SettingsRepo(db),
-        coordinator.on_master_delta,
+        on_master_delta,
     )
     info = await client.exchange_info(force=True)
     filters_cache.update(info.tradable_filters())
@@ -767,6 +773,480 @@ async def test_one_way_full_engine_signed_cycle(stack):
                 await client.set_position_mode(fr_id, True)
 
 
+async def test_external_follower_close_stays_flat_until_next_master_episode(stack):
+    """REAL follower manual close latches no-reentry across reconcile + restart."""
+    from copytradeaster.master.projector import MasterDelta
+
+    client: AsterClient = stack["client"]
+    projector: MasterProjector = stack["projector"]
+    coordinator: Coordinator = stack["coordinator"]
+    filters: SymbolFilters = stack["filters"][SYMBOL]
+    db: Database = stack["db"]
+    fr_id = "copyc1"
+    base = int(time.time() * 1000)
+    original_master_hedge = await client.get_position_mode("main")
+    original_follower_hedge = await client.get_position_mode(fr_id)
+
+    async def drive(active: Coordinator = coordinator) -> int:
+        state = await projector.rebuild_full(client, "main")
+        fr = active.followers[0]
+        return await active.recompute_follower(
+            fr,
+            MasterDelta(frozenset({SYMBOL}), state),
+            snapshot_scope={SYMBOL},
+        )
+
+    async def wait_for(predicate, what: str, *, active: Coordinator = coordinator) -> None:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if await predicate():
+                return
+            await drive(active)
+            await asyncio.sleep(1)
+        raise TimeoutError(f"timed out waiting for {what}")
+
+    try:
+        if original_master_hedge:
+            await client.set_position_mode("main", False)
+        if original_follower_hedge:
+            await client.set_position_mode(fr_id, False)
+        await _flatten(client, "main", False, f"ext-pre-m-{base}")
+        await _flatten(client, fr_id, False, f"ext-pre-f-{base}")
+
+        master_rows = await client.position_risk("main", SYMBOL)
+        master_flat = next(row for row in master_rows if row.position_side == PosSide.BOTH)
+        mark = master_flat.mark_price
+        minimum_notional_qty = _snap(
+            filters.min_notional / mark + filters.step_size, filters.step_size
+        )
+        open_qty = max(filters.min_qty, minimum_notional_qty, filters.step_size)
+        master_balance = next(
+            b.available_balance for b in await client.balance("main") if b.asset == "USDT"
+        )
+        affordable = _snap(
+            master_balance * D(max(master_flat.leverage, 1)) * D("0.25") / mark,
+            filters.step_size,
+        )
+        if affordable < open_qty:
+            pytest.skip(
+                "master Testnet balance cannot safely fund external-close scenario "
+                f"(safe_qty={affordable}, required={open_qty})"
+            )
+
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=open_qty,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"ext-m-open-{base}"[:36],
+            ),
+        )
+        master_pos = next(
+            row
+            for row in await client.position_risk("main", SYMBOL)
+            if row.position_side == PosSide.BOTH and row.position_amt > 0
+        )
+        stop = _snap(
+            master_pos.entry_price
+            - max(master_pos.entry_price * D("0.01"), filters.tick_size * 10),
+            filters.tick_size,
+        )
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="STOP_MARKET",
+                quantity=master_pos.position_amt,
+                stop_price=stop,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                working_type="MARK_PRICE",
+                new_order_resp_type="ACK",
+                new_client_order_id=f"ext-m-stop-{base}"[:36],
+            ),
+        )
+        await drive()
+
+        async def follower_open_and_protected() -> bool:
+            return await _position_qty(client, fr_id) > 0 and bool(
+                await _conditionals(client, fr_id)
+            )
+
+        await wait_for(follower_open_and_protected, "initial follower entry")
+        trade = await CopyTradeRepo(db).active_trade(SYMBOL, PosSide.BOTH.value)
+        assert trade is not None
+        first_trade_id = int(trade["trade_id"])
+        opens_before = await db.fetchone(
+            "SELECT COUNT(*) AS n FROM execution_commands"
+            " WHERE account_id=? AND trade_id=? AND kind='MARKET_OPEN'",
+            (fr_id, first_trade_id),
+        )
+        assert opens_before is not None and int(opens_before["n"]) >= 1
+
+        follower_qty = abs(await _position_qty(client, fr_id))
+        await _place(
+            client,
+            fr_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="MARKET",
+                quantity=follower_qty,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"ext-user-close-{base}"[:36],
+            ),
+        )
+
+        async def follower_flat() -> bool:
+            return await _position_qty(client, fr_id) == 0
+
+        await wait_for(follower_flat, "manual follower flat")
+        # Drive once authoritatively after the direct exchange mutation.
+        await drive()
+        assert await _position_qty(client, fr_id) == 0
+        assert not await _conditionals(client, fr_id)
+
+        for _ in range(3):
+            await drive()
+            await asyncio.sleep(1)
+            assert await _position_qty(client, fr_id) == 0
+        basis = SyncBasisRepo(db)
+        blocked = await basis.get(fr_id, SYMBOL, PosSide.BOTH.value)
+        assert blocked is not None
+        assert int(blocked["episode_trade_id"]) == first_trade_id
+        assert int(blocked["external_close_blocked"]) == 1
+        opens_after = await db.fetchone(
+            "SELECT COUNT(*) AS n FROM execution_commands"
+            " WHERE account_id=? AND trade_id=? AND kind='MARKET_OPEN'",
+            (fr_id, first_trade_id),
+        )
+        assert opens_after is not None
+        assert int(opens_after["n"]) == int(opens_before["n"])
+
+        restarted_fr = FollowerRuntime(account_id=fr_id, client=client, identity=None)
+        restarted = Coordinator(
+            followers=[restarted_fr],
+            settings=SettingsRepo(db),
+            executor=Executor(
+                lambda _aid: client,
+                CommandRepo(db),
+                OrderLinkRepo(db),
+                {},
+                settings=SettingsRepo(db),
+            ),
+            trades=CopyTradeRepo(db),
+            links=OrderLinkRepo(db),
+            filters_provider=lambda: stack["filters"],
+            app_flags=SettingsRepo(db),
+            symbol_whitelist=[SYMBOL],
+            fee_buffer_pct=D("0.001"),
+            working_type="MARK_PRICE",
+            basis=basis,
+            leverage=coordinator._leverage,  # noqa: SLF001 - restart parity in signed harness
+        )
+        await drive(restarted)
+        assert await _position_qty(client, fr_id) == 0
+
+        # End the old episode authoritatively, then create a fresh protected
+        # master episode.  Only that episode boundary may re-arm the follower.
+        for order in await client.open_orders("main", symbol=SYMBOL):
+            await client.cancel_order("main", SYMBOL, orig_client_order_id=order.client_order_id)
+        old_master_qty = abs(await _position_qty(client, "main"))
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="MARKET",
+                quantity=old_master_qty,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"ext-m-close-{base}"[:36],
+            ),
+        )
+        await drive(restarted)
+        assert await CopyTradeRepo(db).active_trade(SYMBOL, PosSide.BOTH.value) is None
+
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=open_qty,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"ext-m-reopen-{base}"[:36],
+            ),
+        )
+        new_master = next(
+            row
+            for row in await client.position_risk("main", SYMBOL)
+            if row.position_side == PosSide.BOTH and row.position_amt > 0
+        )
+        new_stop = _snap(
+            new_master.entry_price
+            - max(new_master.entry_price * D("0.01"), filters.tick_size * 10),
+            filters.tick_size,
+        )
+        await _place(
+            client,
+            "main",
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.SELL,
+                type="STOP_MARKET",
+                quantity=new_master.position_amt,
+                stop_price=new_stop,
+                reduce_only=True,
+                position_side=PosSide.BOTH,
+                working_type="MARK_PRICE",
+                new_order_resp_type="ACK",
+                new_client_order_id=f"ext-m-restop-{base}"[:36],
+            ),
+        )
+        await drive(restarted)
+
+        async def follower_reentered() -> bool:
+            return await _position_qty(client, fr_id) > 0
+
+        await wait_for(follower_reentered, "new-episode follower entry", active=restarted)
+        second_trade = await CopyTradeRepo(db).active_trade(SYMBOL, PosSide.BOTH.value)
+        assert second_trade is not None
+        assert int(second_trade["trade_id"]) != first_trade_id
+    finally:
+        with contextlib.suppress(Exception):
+            await _flatten(client, "main", False, f"ext-clean-m-{base}")
+        with contextlib.suppress(Exception):
+            await _flatten(client, fr_id, False, f"ext-clean-f-{base}")
+        for account_id in ("main", fr_id):
+            assert await _position_qty(client, account_id) == 0
+            assert not await client.open_orders(account_id, symbol=SYMBOL)
+        if original_master_hedge:
+            await client.set_position_mode("main", True)
+        if original_follower_hedge:
+            await client.set_position_mode(fr_id, True)
+
+
+async def test_margin_mode_mirrors_master_and_isolated_collateral_is_double_stop_risk(stack):
+    """Signed V3: both margin-mode transitions through the production copy core."""
+    from copytradeaster.master.projector import MasterDelta
+
+    client: AsterClient = stack["client"]
+    projector: MasterProjector = stack["projector"]
+    coordinator: Coordinator = stack["coordinator"]
+    db: Database = stack["db"]
+    filters: SymbolFilters = stack["filters"][SYMBOL]
+    follower = "copyc1"
+    base = int(time.time() * 1000)
+    original_hedge = {
+        account: await client.get_position_mode(account) for account in ("main", follower)
+    }
+    original_margin: dict[str, str] = {}
+    for account in ("main", follower):
+        # The disposable accounts may be left in HEDGE mode by an earlier
+        # signed campaign, so there is no BOTH row until the setup below
+        # switches them to ONE_WAY.  Preserve the authoritative mode from any
+        # flat positionRisk leg and verify HEDGE legs agree.
+        rows = await client.position_risk(account, SYMBOL)
+        modes = {str(p.margin_type).upper() for p in rows}
+        if len(modes) != 1:
+            pytest.fail(f"inconsistent initial margin types for {account}: {modes}")
+        original_margin[account] = next(iter(modes))
+    original_multi_assets = {
+        account: await client.get_multi_assets_mode(account) for account in ("main", follower)
+    }
+
+    async def drive() -> None:
+        state = await projector.rebuild_full(client, "main")
+        await coordinator.recompute_follower(
+            coordinator.followers[0],
+            MasterDelta(frozenset({SYMBOL}), state),
+            snapshot_scope={SYMBOL},
+        )
+
+    try:
+        for account in ("main", follower):
+            await _flatten(client, account, original_hedge[account], f"mode-pre-{account}-{base}")
+            if original_hedge[account]:
+                await client.set_position_mode(account, False)
+            assert not any(p.position_amt != 0 for p in await client.position_risk(account))
+            assert not await client.open_orders(account)
+            if original_multi_assets[account]:
+                await client.set_multi_assets_mode(account, False)
+                assert not await client.get_multi_assets_mode(account)
+
+        for index, desired in enumerate(("ISOLATED", "CROSSED")):
+            opposite = "CROSSED" if desired == "ISOLATED" else "ISOLATED"
+            for account, mode in (("main", desired), (follower, opposite)):
+                await client.set_margin_type(account, SYMBOL, mode)
+                observed = next(
+                    p.margin_type.upper()
+                    for p in await client.position_risk(account, SYMBOL)
+                    if p.position_side == PosSide.BOTH
+                )
+                assert observed in ({"CROSS", "CROSSED"} if mode == "CROSSED" else {mode})
+
+            master_flat = next(
+                p
+                for p in await client.position_risk("main", SYMBOL)
+                if p.position_side == PosSide.BOTH
+            )
+            mark = master_flat.mark_price
+            minimum_qty = _snap(filters.min_notional / mark + filters.step_size, filters.step_size)
+            open_qty = max(filters.min_qty, minimum_qty)
+            available = next(
+                b.available_balance for b in await client.balance("main") if b.asset == "USDT"
+            )
+            assert open_qty * mark / D(max(master_flat.leverage, 1)) < available * D("0.25")
+            await _place(
+                client,
+                "main",
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.BUY,
+                    type="MARKET",
+                    quantity=open_qty,
+                    position_side=PosSide.BOTH,
+                    new_order_resp_type="RESULT",
+                    new_client_order_id=f"mode-m-open-{base}-{index}"[:36],
+                ),
+            )
+            master_pos = next(
+                p
+                for p in await client.position_risk("main", SYMBOL)
+                if p.position_side == PosSide.BOTH and p.position_amt > 0
+            )
+            stop = _snap(master_pos.entry_price * D("0.97"), filters.tick_size)
+            assert stop < master_pos.mark_price
+            await _place(
+                client,
+                "main",
+                PlaceOrderRequest(
+                    symbol=SYMBOL,
+                    side=Side.SELL,
+                    type="STOP_MARKET",
+                    quantity=master_pos.position_amt,
+                    stop_price=stop,
+                    reduce_only=True,
+                    position_side=PosSide.BOTH,
+                    working_type="MARK_PRICE",
+                    new_order_resp_type="ACK",
+                    new_client_order_id=f"mode-m-stop-{base}-{index}"[:36],
+                ),
+            )
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                await drive()
+                if await _position_qty(client, follower) > 0 and await _conditionals(
+                    client, follower
+                ):
+                    break
+                await asyncio.sleep(1)
+            else:
+                pytest.fail(f"real follower did not open/protect in {desired} mode")
+
+            follower_pos = next(
+                p
+                for p in await client.position_risk(follower, SYMBOL)
+                if p.position_side == PosSide.BOTH and p.position_amt > 0
+            )
+            assert follower_pos.margin_type.upper() in (
+                {"CROSS", "CROSSED"} if desired == "CROSSED" else {"ISOLATED"}
+            )
+            assert follower_pos.liquidation_price < stop * D("0.995")
+            if desired == "ISOLATED":
+                assert follower_pos.isolated_margin is not None
+                stop_loss = (
+                    follower_pos.position_amt * abs(follower_pos.entry_price - stop) * D("1.001")
+                )
+                assert follower_pos.isolated_margin >= D(2) * stop_loss
+                collateral_cap = int(
+                    follower_pos.entry_price
+                    // (D(2) * abs(follower_pos.entry_price - stop) * D("1.001"))
+                )
+                assert follower_pos.leverage <= collateral_cap
+                print(
+                    f"LIVE {desired}: leverage={follower_pos.leverage} "
+                    f"isolatedMargin={follower_pos.isolated_margin} "
+                    f"required={D(2) * stop_loss} "
+                    f"liquidationPrice={follower_pos.liquidation_price} stop={stop}"
+                )
+            else:
+                print(
+                    f"LIVE {desired}: leverage={follower_pos.leverage} "
+                    f"liquidationPrice={follower_pos.liquidation_price} stop={stop}"
+                )
+
+            journal = await db.fetchall(
+                "SELECT rowid, command_key, kind, status FROM execution_commands"
+                " WHERE account_id=? ORDER BY rowid",
+                (follower,),
+            )
+            kinds = [str(row["kind"]) for row in journal]
+            assert kinds.count("SET_MARGIN_TYPE") == index + 1, kinds
+            mode_rowids = [int(row["rowid"]) for row in journal if row["kind"] == "SET_MARGIN_TYPE"]
+            open_rowids = [int(row["rowid"]) for row in journal if row["kind"] == "MARKET_OPEN"]
+            assert len(open_rowids) == index + 1, kinds
+            assert mode_rowids[-1] < open_rowids[-1]
+            assert all(str(row["status"]) == "CONFIRMED" for row in journal)
+
+            # Crash-window replay is resolved by another signed V3 positionRisk
+            # read, never by assuming that a no-coid config POST was accepted.
+            latest_mode = next(row for row in reversed(journal) if row["kind"] == "SET_MARGIN_TYPE")
+            await CommandRepo(db).set_status(str(latest_mode["command_key"]), "UNKNOWN")
+            resolution = await resolve_boot_unknowns(
+                lambda _account: client, CommandRepo(db), only_account=follower
+            )
+            assert resolution.confirmed == 1 and resolution.unresolved == 0
+            for _ in range(2):
+                await drive()
+            repeated = await db.fetchall(
+                "SELECT kind FROM execution_commands WHERE account_id=? ORDER BY rowid",
+                (follower,),
+            )
+            assert [str(row["kind"]) for row in repeated] == kinds
+            assert await _position_qty(client, follower) == follower_pos.position_amt
+
+            await _flatten(client, "main", False, f"mode-m-end-{base}-{index}")
+            await drive()
+            await _flatten(client, follower, False, f"mode-f-end-{base}-{index}")
+            await drive()
+            assert await _position_qty(client, "main") == 0
+            assert await _position_qty(client, follower) == 0
+            assert not await client.open_orders("main", symbol=SYMBOL)
+            assert not await client.open_orders(follower, symbol=SYMBOL)
+    finally:
+        for account in ("main", follower):
+            with contextlib.suppress(Exception):
+                await _flatten(client, account, False, f"mode-final-{account}-{base}")
+            assert await _position_qty(client, account) == 0
+            assert not await client.open_orders(account, symbol=SYMBOL)
+            old_mode = original_margin[account].upper()
+            await client.set_margin_type(
+                account, SYMBOL, "CROSSED" if old_mode == "CROSS" else old_mode
+            )
+            if original_multi_assets[account]:
+                assert not any(p.position_amt != 0 for p in await client.position_risk(account))
+                assert not await client.open_orders(account)
+                await client.set_multi_assets_mode(account, True)
+                assert await client.get_multi_assets_mode(account)
+            if original_hedge[account]:
+                await client.set_position_mode(account, True)
+
+
 async def test_hedge_fixed_protection_resizes_long_and_short(stack):
     """REAL-03: production Coordinator/Planner/Executor against a REAL HEDGE
     follower. A fixed STOP is resized on both reduce and grow at the same
@@ -864,6 +1344,10 @@ async def test_hedge_fixed_protection_resizes_long_and_short(stack):
                     leverage=20,
                     mark_price=mark,
                     liquidation_price=D(0),
+                    # Margin mode is part of the authoritative master
+                    # state; omitting it must stay a deliberate unknown
+                    # mode and therefore blocks new exposure.
+                    margin_type="CROSSED",
                     stop=stop,
                 )
                 return MasterState(available_usdt=D("100000"), positions={key: position})

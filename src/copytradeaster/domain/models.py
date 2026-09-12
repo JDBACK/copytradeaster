@@ -23,7 +23,20 @@ class PosSide(StrEnum):
     SHORT = "SHORT"
 
 
+def normalize_margin_type(value: str | None) -> str | None:
+    """Translate positionRisk wire spelling to the marginType POST spelling."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    if normalized in {"CROSS", "CROSSED"}:
+        return "CROSSED"
+    if normalized == "ISOLATED":
+        return "ISOLATED"
+    return None
+
+
 class ActionKind(StrEnum):
+    SET_MARGIN_TYPE = "SET_MARGIN_TYPE"
     SET_LEVERAGE = "SET_LEVERAGE"
     MARKET_OPEN = "MARKET_OPEN"
     MARKET_CLOSE = "MARKET_CLOSE"
@@ -43,19 +56,22 @@ class SkipReason(StrEnum):
     STALE_MASTER = "STALE_MASTER"
     OWN_PROTECTIVE_FILLED = "OWN_PROTECTIVE_FILLED"
     INTENTIONAL_FLAT = "INTENTIONAL_FLAT"  # dust target=0 inside an open episode
+    EXTERNAL_FOLLOWER_CLOSE = "EXTERNAL_FOLLOWER_CLOSE"
     LEVERAGE_NOT_READY = "LEVERAGE_NOT_READY"
+    MARGIN_TYPE_UNKNOWN = "MARGIN_TYPE_UNKNOWN"
+    MARGIN_TYPE_MISMATCH = "MARGIN_TYPE_MISMATCH"
 
 
 class ZeroReason(StrEnum):
     """WHY a TargetPosition quantity is zero (explicit per PM-B5).
 
-    ONLY ``PROPORTIONAL_REDUCTION_DUST`` latches ``hold_flat_until_episode_end``
-    (the follower must stay flat until the master episode ends). Every other
-    zero is transient or terminal and MUST allow same-episode re-entry once
-    its cause clears: risk-cap / stop-move recomputes, flip closes (the
-    reversed leg opens next pass), master-closed legs, and safety flattens
-    (naked unprotected legs, unprotected fresh entries, liquidation-vs-stop
-    violations).
+    ``PROPORTIONAL_REDUCTION_DUST`` latches the existing dust marker;
+    ``EXTERNAL_FOLLOWER_CLOSE`` preserves a separate episode-bound external
+    close marker.  Every other zero is transient or terminal and MUST allow
+    same-episode re-entry once its cause clears: risk-cap / stop-move
+    recomputes, flip closes (the reversed leg opens next pass), master-closed
+    legs, and safety flattens (naked unprotected legs, unprotected fresh
+    entries, liquidation-vs-stop violations).
     """
 
     PROPORTIONAL_REDUCTION_DUST = "PROPORTIONAL_REDUCTION_DUST"
@@ -66,6 +82,9 @@ class ZeroReason(StrEnum):
     SAFETY_NAKED = "SAFETY_NAKED"
     SAFETY_UNPROTECTED_ENTRY = "SAFETY_UNPROTECTED_ENTRY"
     LIQUIDATION_VIOLATION = "LIQUIDATION_VIOLATION"
+    ISOLATED_MARGIN_SHORTFALL = "ISOLATED_MARGIN_SHORTFALL"
+    MARGIN_MODE_VIOLATION = "MARGIN_MODE_VIOLATION"
+    EXTERNAL_FOLLOWER_CLOSE = "EXTERNAL_FOLLOWER_CLOSE"
 
 
 class _DecimalStrict:
@@ -129,6 +148,8 @@ class PositionState(_DecimalStrict):
     extra_stops: tuple[ProtectiveOrder, ...] = ()
     extra_tps: tuple[ProtectiveOrder, ...] = ()
     unrealized_profit: Decimal = Decimal(0)
+    margin_type: str | None = None
+    isolated_margin: Decimal | None = None
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = (
         "qty",
@@ -136,6 +157,7 @@ class PositionState(_DecimalStrict):
         "mark_price",
         "liquidation_price",
         "unrealized_profit",
+        "isolated_margin",
     )
 
 
@@ -152,6 +174,8 @@ class AccountState(_DecimalStrict):
     symbol_leverages: dict[str, int] = field(default_factory=dict)
 
     equity_usdt: Decimal | None = None
+    # positionRisk includes flat rows. Conflicting HEDGE rows are omitted.
+    symbol_margin_types: dict[str, str] = field(default_factory=dict)
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("available_usdt", "equity_usdt")
 
@@ -187,9 +211,12 @@ class TargetPosition(_DecimalStrict):
     tp_type: str = "TAKE_PROFIT_MARKET"
     hold_flat_until_episode_end: bool = False
     # Explicit zero taxonomy (PM-B5). Set on EVERY zero-qty target; None only
-    # for non-zero targets. _persist_refs latches the sticky marker ONLY when
-    # this equals PROPORTIONAL_REDUCTION_DUST.
+    # for non-zero targets. _persist_refs keeps the corresponding sticky
+    # marker for dust and external follower-close zeros only.
     zero_reason: ZeroReason | None = None
+    # None is accepted for legacy pure-planner callers; the production
+    # coordinator refuses risk-increasing actions without a master REST mode.
+    margin_type: str | None = None
 
     _DECIMAL_FIELDS: ClassVar[tuple[str, ...]] = ("qty", "stop_price", "tp_price")
 

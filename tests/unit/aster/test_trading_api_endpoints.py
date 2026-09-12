@@ -108,6 +108,20 @@ async def test_set_margin_type_swallows_no_change():
 
 
 @respx.mock
+async def test_set_margin_type_normalizes_wire_spelling():
+    route = respx.post(f"{BASE}/fapi/v3/marginType").respond(json={"code": 200})
+    client = make_client()
+    await client.set_margin_type("copyc1", "BTCUSDT", " cross ")
+    assert dict(route.calls[0].request.url.params)["marginType"] == "CROSSED"
+
+
+async def test_set_margin_type_rejects_unknown_spelling_before_http():
+    client = make_client()
+    with pytest.raises(ValueError, match="CROSSED or ISOLATED"):
+        await client.set_margin_type("copyc1", "BTCUSDT", "PORTFOLIO")
+
+
+@respx.mock
 async def test_set_margin_type_reraises_other_errors():
     respx.post(f"{BASE}/fapi/v3/marginType").respond(json={"code": -1000, "msg": "boom"})
     client = make_client()
@@ -115,6 +129,35 @@ async def test_set_margin_type_reraises_other_errors():
 
     with pytest.raises(AsterError):
         await client.set_margin_type("copyc1", "BTCUSDT", "CROSSED")
+
+
+@respx.mock
+async def test_set_margin_type_does_not_swallow_minus_4045():
+    respx.post(f"{BASE}/fapi/v3/marginType").respond(
+        json={"code": -4045, "msg": "MAX_STOP_ORDER_EXCEEDED"}
+    )
+    client = make_client()
+    with pytest.raises(AsterError) as exc:
+        await client.set_margin_type("copyc1", "BTCUSDT", "ISOLATED")
+    assert exc.value.code == -4045
+
+
+@respx.mock
+async def test_multi_assets_mode_get_set_signed():
+    respx.get(f"{BASE}/fapi/v3/multiAssetsMargin").respond(json={"multiAssetsMargin": True})
+    post = respx.post(f"{BASE}/fapi/v3/multiAssetsMargin").respond(json={"code": 200})
+    client = make_client()
+    assert await client.get_multi_assets_mode("copyc1") is True
+    await client.set_multi_assets_mode("copyc1", False)
+    assert dict(post.calls[0].request.url.params)["multiAssetsMargin"] == "false"
+
+
+@respx.mock
+async def test_multi_assets_mode_rejects_non_boolean_response():
+    respx.get(f"{BASE}/fapi/v3/multiAssetsMargin").respond(json={"multiAssetsMargin": "true"})
+    client = make_client()
+    with pytest.raises(ValueError, match="invalid multi-assets mode"):
+        await client.get_multi_assets_mode("copyc1")
 
 
 @respx.mock

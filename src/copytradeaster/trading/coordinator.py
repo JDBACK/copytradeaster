@@ -44,6 +44,7 @@ from copytradeaster.domain.models import (
     TargetPosition,
     TargetState,
     ZeroReason,
+    normalize_margin_type,
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.master.projector import MasterDelta, MasterState
@@ -126,9 +127,10 @@ def _canonical_target(t: TargetPosition) -> str:
             "stop_type": t.stop_type,
             "tp_type": t.tp_type,
             "leverage": t.leverage,
-            # the WHY of a zero target is part of the desired state: a sticky
-            # dust-flat and a transitional flip-zero with identical qty must
-            # not share command keys
+            "margin_type": t.margin_type,
+            # the WHY of a zero target is part of the desired state: sticky
+            # dust/external flats and a transitional flip-zero with identical
+            # qty must not share command keys
             "hold_flat_until_episode_end": t.hold_flat_until_episode_end,
             "zero_reason": None if t.zero_reason is None else t.zero_reason.value,
         },
@@ -575,6 +577,7 @@ class Coordinator:
         if policy is None or not policy.enabled:
             return -1
         actual = await self._snapshot(fr)
+        await self._observe_external_follower_closes(fr, delta.state, actual)
         targets, skips = await self._targets_for(
             fr.account_id,
             delta.state,
@@ -732,6 +735,7 @@ class Coordinator:
         partially protected sub-position.
         """
         actual = await self._snapshot(fr)
+        await self._observe_external_follower_closes(fr, master, actual)
         adjusted = self._targets_at_actual_qty(targets, actual)
         protection_plan = build_plan(
             actual,
@@ -763,6 +767,7 @@ class Coordinator:
             results.extend(await self._executor.submit(protection_plan, client=fr.client))
 
         verified = await self._snapshot(fr)
+        await self._observe_external_follower_closes(fr, master, verified)
         verified_targets = self._targets_at_actual_qty(targets, verified)
         verification = build_plan(
             verified,
@@ -796,12 +801,21 @@ class Coordinator:
         safety_reasons: dict[PositionKey, ZeroReason] = {
             key: ZeroReason.SAFETY_UNPROTECTED_ENTRY for key in unsafe_opened
         }
+        target_by_key = {target.key: target for target in targets}
         for key, pos in verified.positions.items():
             if pos.qty == 0 or key.symbol not in self._whitelist:
                 continue
             mpos = master.positions.get(key)
             if mpos is None or mpos.qty == 0:
                 continue  # master-closed legs converge through reconciliation
+            desired_mode = target_by_key.get(key)
+            if (
+                key in opened_keys
+                and desired_mode is not None
+                and pos.margin_type != desired_mode.margin_type
+            ):
+                safety_reasons.setdefault(key, ZeroReason.MARGIN_MODE_VIOLATION)
+                continue
             master_stop = mpos.stop.stop_price if mpos.stop else None
             if not self._stop_usable(mpos, master_stop) and pos.stop is None:
                 safety_reasons.setdefault(key, ZeroReason.SAFETY_NAKED)
@@ -813,6 +827,21 @@ class Coordinator:
             )
             if effective is not None and self._liquidation_violated(pos, effective):
                 safety_reasons.setdefault(key, ZeroReason.LIQUIDATION_VIOLATION)
+            if key in opened_keys and pos.margin_type == "ISOLATED":
+                required = (
+                    Decimal(2)
+                    * abs(pos.qty)
+                    * abs(pos.entry_price - effective)
+                    * (1 + self._fee_buffer)
+                    if effective is not None
+                    else None
+                )
+                if (
+                    required is None
+                    or pos.isolated_margin is None
+                    or pos.isolated_margin < required
+                ):
+                    safety_reasons.setdefault(key, ZeroReason.ISOLATED_MARGIN_SHORTFALL)
         if not safety_reasons:
             return results
 
@@ -892,6 +921,15 @@ class Coordinator:
                 master_still_open = mpos is not None and mpos.qty != 0
                 if (
                     t.hold_flat_until_episode_end
+                    and t.zero_reason is ZeroReason.EXTERNAL_FOLLOWER_CLOSE
+                    and master_still_open
+                ):
+                    # The episode observation row owns this separate durable
+                    # latch.  Do not clear it merely because cancellation of
+                    # orphan protection converged or a later sweep was a no-op.
+                    continue
+                if (
+                    t.hold_flat_until_episode_end
                     and t.zero_reason is ZeroReason.PROPORTIONAL_REDUCTION_DUST
                     and master_still_open
                 ):
@@ -939,8 +977,11 @@ class Coordinator:
         for o in orders:
             orders_by_symbol.setdefault(o.symbol, []).append(o)
         leverages_by_symbol: dict[str, set[int]] = {}
+        margins_by_symbol: dict[str, set[str | None]] = {}
         for p in await fr.client.position_risk(fr.account_id):
             leverage = int(p.leverage)
+            margin_type = normalize_margin_type(getattr(p, "margin_type", None))
+            margins_by_symbol.setdefault(p.symbol, set()).add(margin_type)
             if leverage > 0:
                 # Leverage is exchange-persisted per symbol and present on
                 # every positionRisk row, INCLUDING flat legs. Dropping the
@@ -969,9 +1010,12 @@ class Coordinator:
                 extra_stops=extra_stops,
                 extra_tps=extra_tps,
                 unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
+                margin_type=margin_type,
+                isolated_margin=getattr(p, "isolated_margin", None),
             )
-        # orphan protection: a conditional resting on the exchange WITHOUT a
-        # backing positionRisk row (flat leg). Not surfaced -> never canceled.
+        # Orphan protection: a conditional resting on the exchange WITHOUT a
+        # backing positionRisk row (flat leg). Surface it as a zero position so
+        # the planner can cancel it, including when mode mismatch blocks growth.
         CONDITIONAL_TYPES = STOP_TYPES + TP_TYPES
         for o in orders:
             if o.type not in CONDITIONAL_TYPES or not _bot_owned(o):
@@ -1003,6 +1047,11 @@ class Coordinator:
             for symbol, values in leverages_by_symbol.items()
             if len(values) == 1
         }
+        symbol_margin_types = {
+            symbol: next(iter(values))
+            for symbol, values in margins_by_symbol.items()
+            if len(values) == 1 and None not in values
+        }
         if self._leverage is not None and symbol_leverages:
             self._leverage.observe(fr.account_id, symbol_leverages)
         state = AccountState(
@@ -1011,6 +1060,7 @@ class Coordinator:
             equity_usdt=equity,
             positions=positions,
             symbol_leverages=symbol_leverages,
+            symbol_margin_types=symbol_margin_types,
             open_orders=[o.model_dump() for o in orders],
         )
         if self._snapshot_observer is not None:
@@ -1035,6 +1085,21 @@ class Coordinator:
         if master_fresh is None:
             master_fresh = self._state_fresh(master)
         entries_allowed = await self._entries_allowed(policy)
+        master_modes_by_symbol: dict[str, set[str | None]] = {}
+        for position in master.positions.values():
+            if position.qty == 0 or position.key.symbol not in self._whitelist:
+                continue
+            master_modes_by_symbol.setdefault(position.key.symbol, set()).add(
+                normalize_margin_type(position.margin_type)
+            )
+        # A malformed/partial HEDGE snapshot that disagrees across legs is not
+        # an actionable mode. Treat it exactly like an unknown master mode so
+        # no new exposure is opened from one arbitrarily chosen leg.
+        authoritative_master_modes = {
+            symbol: next(iter(modes))
+            for symbol, modes in master_modes_by_symbol.items()
+            if len(modes) == 1 and None not in modes
+        }
         for key in actual.positions:
             if key.symbol not in self._whitelist:
                 continue
@@ -1055,6 +1120,8 @@ class Coordinator:
                 log.debug("symbol %s not whitelisted - skipped", key.symbol)
                 continue
             master_qty = master_pos.qty
+            master_margin_type = authoritative_master_modes.get(key.symbol)
+            follower_margin_type = actual.symbol_margin_types.get(key.symbol)
             master_stop = master_pos.stop.stop_price if master_pos.stop else None
             master_tp = master_pos.take_profit.stop_price if master_pos.take_profit else None
             master_stop_type = master_pos.stop.type if master_pos.stop else "STOP_MARKET"
@@ -1068,6 +1135,62 @@ class Coordinator:
             follower_pos = actual.positions.get(key)
 
             if follower_pos is None or follower_pos.qty == 0:
+                if await self._external_close_blocked(account_id, key):
+                    # Keep a zero target in the plan so bot-owned protection
+                    # left behind by the external MARKET close is canceled.
+                    # The separate durable marker (not zero_target) survives
+                    # this convergence and every later same-episode sweep.
+                    targets.append(
+                        TargetPosition(
+                            key=key,
+                            qty=Decimal(0),
+                            stop_price=None,
+                            tp_price=None,
+                            leverage=(
+                                follower_pos.leverage
+                                if follower_pos is not None
+                                else actual.symbol_leverages.get(key.symbol, 0)
+                            ),
+                            hold_flat_until_episode_end=True,
+                            zero_reason=ZeroReason.EXTERNAL_FOLLOWER_CLOSE,
+                        )
+                    )
+                    skips.append(await self._skip_record(key, SkipReason.EXTERNAL_FOLLOWER_CLOSE))
+                    continue
+                if master_margin_type is None:
+                    skips.append(await self._skip_record(key, SkipReason.MARGIN_TYPE_UNKNOWN))
+                    continue
+                if follower_margin_type != master_margin_type and any(
+                    pos.qty != 0 and pos.key.symbol == key.symbol
+                    for pos in actual.positions.values()
+                ):
+                    # A mode change is forbidden while another HEDGE leg is
+                    # occupied, but a flat leg may still carry bot-owned
+                    # protection left behind by an external/manual close.
+                    # Keep the growth skip fail-closed while still giving the
+                    # planner a zero target so those orphan conditionals are
+                    # canceled without attempting SET_MARGIN_TYPE.
+                    if follower_pos is not None and any(
+                        protection is not None
+                        for protection in (
+                            follower_pos.stop,
+                            follower_pos.take_profit,
+                            *follower_pos.extra_stops,
+                            *follower_pos.extra_tps,
+                        )
+                    ):
+                        targets.append(
+                            TargetPosition(
+                                key=key,
+                                qty=Decimal(0),
+                                stop_price=None,
+                                tp_price=None,
+                                leverage=follower_pos.leverage,
+                                margin_type=master_margin_type,
+                            )
+                        )
+                    skips.append(await self._skip_record(key, SkipReason.MARGIN_TYPE_MISMATCH))
+                    continue
                 if not self._stop_usable(master_pos, master_stop):
                     # stop on the wrong side of the CURRENT market: unusable as
                     # copy level. Never validated against the historical entry -
@@ -1137,7 +1260,15 @@ class Coordinator:
                 # would instantly flatten it and the transient zero would
                 # re-open it in a loop. Unviable sizing fails closed below
                 # via the margin check (INSUFFICIENT_MARGIN skip, no loop).
-                leverage = self._entry_leverage_for_stop(expected, master_stop, policy, leverage)
+                if master_margin_type == "ISOLATED" and expected < (
+                    Decimal(2) * abs(expected - master_stop) * (1 + self._fee_buffer)
+                ):
+                    # Even 1x cannot reserve twice the planned Stop loss.
+                    skips.append(await self._skip_record(key, SkipReason.INSUFFICIENT_MARGIN))
+                    continue
+                leverage = self._entry_leverage_for_stop(
+                    expected, master_stop, policy, leverage, master_margin_type
+                )
                 decision = entry_quantity(
                     policy,
                     actual.available_usdt,
@@ -1169,6 +1300,7 @@ class Coordinator:
                         stop_type=master_stop_type,
                         tp_type=master_tp_type,
                         leverage=leverage,
+                        margin_type=master_margin_type,
                     )
                 )
                 continue
@@ -1290,6 +1422,18 @@ class Coordinator:
                 )
             if not entries_allowed and target_abs > current_abs:
                 target_abs = current_abs  # pause: increases blocked
+            if target_abs > current_abs and (
+                master_margin_type is None or follower_margin_type != master_margin_type
+            ):
+                skips.append(
+                    await self._skip_record(
+                        key,
+                        SkipReason.MARGIN_TYPE_UNKNOWN
+                        if master_margin_type is None
+                        else SkipReason.MARGIN_TYPE_MISMATCH,
+                    )
+                )
+                target_abs = current_abs
             if (
                 self._leverage is not None
                 and target_abs > current_abs
@@ -1360,6 +1504,7 @@ class Coordinator:
                     leverage=leverage,
                     hold_flat_until_episode_end=dust_flat,
                     zero_reason=zero_reason,
+                    margin_type=master_margin_type,
                 )
             )
         if self._max_total_risk_pct is not None:
@@ -1464,6 +1609,7 @@ class Coordinator:
         stop_price: Decimal,
         policy: RiskPolicy,
         leverage: int | None,
+        margin_type: str | None = None,
     ) -> int | None:
         """Cap entry leverage so estimated liquidation satisfies the stop margin.
 
@@ -1485,6 +1631,14 @@ class Coordinator:
         invariant_cap = int(expected_entry // per_unit)
         operator_cap = self._operator_max_leverage
         cap = invariant_cap if operator_cap is None else min(invariant_cap, operator_cap)
+        if margin_type == "ISOLATED":
+            # Initial isolated collateral N/L must cover at least twice the
+            # same fee-buffered Stop loss used by entry_quantity. Quantity
+            # cancels: (q*entry)/L >= 2*q*distance*(1+fee_buffer).
+            collateral_cap = int(
+                expected_entry // (Decimal(2) * stop_distance * (1 + self._fee_buffer))
+            )
+            cap = min(cap, collateral_cap)
         if leverage is None:
             if cap >= policy.max_leverage:
                 return None
@@ -1541,6 +1695,115 @@ class Coordinator:
             return None
         value = Decimal(str(row["master_ref_abs"]))
         return value if value > 0 else None
+
+    async def _observe_external_follower_closes(
+        self,
+        fr: FollowerRuntime,
+        master: MasterState,
+        actual: AccountState,
+    ) -> None:
+        """Latch a proven external non-zero -> flat follower transition.
+
+        Both snapshots come from complete authoritative REST reads.  A newer
+        confirmed MARKET_CLOSE cursor proves the engine initiated the
+        reduction/close; a FILLED linked Stop/TP preserves the existing own-
+        protective guard.  With neither proof (including an unreadable
+        protective cause), fail closed and suppress re-entry for this episode.
+        """
+        if self._basis is None:
+            return
+        for key, master_pos in master.positions.items():
+            if key.symbol not in self._whitelist or master_pos.qty == 0:
+                continue
+            trade = await self._trades.active_trade(key.symbol, key.pos_side.value)
+            if trade is None:
+                # Synthetic/public test seams without a durable episode cannot
+                # establish the minimum policy identity and must not latch.
+                continue
+            trade_id = int(trade["trade_id"])
+            position = actual.positions.get(key)
+            qty = position.qty if position is not None else Decimal(0)
+            close_row = await self.commands.latest_confirmed_market_close_for_leg(
+                fr.account_id,
+                trade_id,
+                key.symbol,
+                key.pos_side.value,
+            )
+            close_key = str(close_row["command_key"]) if close_row is not None else None
+            previous = await self._basis.episode_observation(
+                fr.account_id,
+                key.symbol,
+                key.pos_side.value,
+                trade_id,
+            )
+            if previous is not None:
+                previous_qty = Decimal(str(previous["last_observed_qty"]))
+                already_blocked = bool(previous["external_close_blocked"])
+                transitioned_flat = previous_qty != 0 and qty == 0
+                close_cursor_advanced = (
+                    close_key is not None and close_key != previous["last_engine_close_key"]
+                )
+                engine_close_proves_flat = close_cursor_advanced and self._close_covers_qty(
+                    close_row, previous_qty
+                )
+                if (
+                    transitioned_flat
+                    and not already_blocked
+                    and not engine_close_proves_flat
+                    and not await self._ended_by_own_protective(fr.account_id, key)
+                ):
+                    await self._basis.mark_external_close(
+                        fr.account_id,
+                        key.symbol,
+                        key.pos_side.value,
+                        trade_id,
+                    )
+                    log.info(
+                        "external follower close latched account_id=%s symbol=%s side=%s "
+                        "trade_id=%s",
+                        _safe_fragment(fr.account_id),
+                        _safe_fragment(key.symbol),
+                        key.pos_side.value,
+                        trade_id,
+                    )
+            if (
+                previous is None
+                or Decimal(str(previous["last_observed_qty"])) != qty
+                or previous["last_engine_close_key"] != close_key
+            ):
+                await self._basis.observe_episode_qty(
+                    fr.account_id,
+                    key.symbol,
+                    key.pos_side.value,
+                    trade_id,
+                    qty,
+                    close_key,
+                )
+
+    @staticmethod
+    def _close_covers_qty(close_row, previous_qty: Decimal) -> bool:
+        """A new partial-reduction cursor cannot explain a fully flat leg."""
+        if close_row is None:
+            return False
+        try:
+            payload = json.loads(str(close_row["payload"]))
+            close_qty = Decimal(str(payload["quantity"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return close_qty >= abs(previous_qty) > 0
+
+    async def _external_close_blocked(self, account_id: str, key: PositionKey) -> bool:
+        if self._basis is None:
+            return False
+        trade = await self._trades.active_trade(key.symbol, key.pos_side.value)
+        if trade is None:
+            return False
+        return await self._basis.is_external_close_blocked(
+            account_id,
+            key.symbol,
+            key.pos_side.value,
+            int(trade["trade_id"]),
+        )
 
     async def _ended_by_own_protective(self, account_id: str, key: PositionKey) -> bool:
         """True when a protective order (stop OR take-profit) of the ACTIVE
@@ -1691,6 +1954,8 @@ class Coordinator:
         """
         position = actual.positions.get(target.key)
         kind = action.kind
+        if kind == ActionKind.SET_MARGIN_TYPE:
+            return actual.symbol_margin_types.get(action.symbol) != target.margin_type
         if kind == ActionKind.SET_LEVERAGE:
             return position is None or position.leverage != target.leverage
         if kind == ActionKind.MARKET_OPEN:

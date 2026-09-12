@@ -2,7 +2,8 @@
 
 No Aster API calls, no I/O. Transition rules are fixed by the stage-1 plan
 (docs/ARCHITECTURE.md §6):
-1. leverage mismatch -> SET_LEVERAGE (prio 0);
+1. margin-mode mismatch -> SET_MARGIN_TYPE, then leverage mismatch -> SET_LEVERAGE
+   (prio 0, both confirmed before any risk-increasing order);
 2. increase -> MARKET_OPEN delta (prio 1), then missing/shifted protections;
 3. partial reduce -> MARKET_CLOSE delta (prio 1), protections untouched;
 4. flat target -> cancel protections (prio 1), then full close (prio 2);
@@ -412,6 +413,13 @@ def build_plan(
         if tp.qty != 0 and tp.leverage > 0:
             ceilings[tp.key.symbol] = min(ceilings.get(tp.key.symbol, tp.leverage), tp.leverage)
     known_by_symbol = dict(actual.symbol_leverages)
+    known_margin_by_symbol = dict(actual.symbol_margin_types)
+    occupied_symbols = {p.key.symbol for p in actual.positions.values() if p.qty != 0}
+    desired_modes: dict[str, set[str]] = {}
+    for tp in target.targets:
+        if tp.qty != 0 and tp.margin_type is not None:
+            desired_modes.setdefault(tp.key.symbol, set()).add(tp.margin_type)
+    conflicting_modes = {symbol for symbol, modes in desired_modes.items() if len(modes) != 1}
     for symbol in ceilings:
         if symbol not in known_by_symbol:
             values = {
@@ -421,13 +429,40 @@ def build_plan(
             }
             if len(values) == 1:
                 known_by_symbol[symbol] = values.pop()
-    emitted: set[str] = set()
+    emitted_leverage: set[str] = set()
+    emitted_margin: set[str] = set()
     for original in target.targets:
         tp = replace(original, leverage=ceilings.get(original.key.symbol, original.leverage))
         filters = filters_by_symbol.get(tp.key.symbol)
         if filters is None:
             continue
         actual_pos = actual.positions.get(tp.key)
+        configured_mode = known_margin_by_symbol.get(tp.key.symbol)
+        mode_mismatch = tp.margin_type is not None and configured_mode != tp.margin_type
+        mode_blocked = tp.key.symbol in conflicting_modes or (
+            mode_mismatch and tp.key.symbol in occupied_symbols
+        )
+        current_abs = abs(actual_pos.qty) if actual_pos is not None else Decimal(0)
+        if mode_blocked and abs(tp.qty) > current_abs:
+            # No mode switch while ANY HEDGE leg is open; preserve existing
+            # protection/reductions but never grow exposure in the wrong mode.
+            tp = replace(tp, qty=actual_pos.qty if actual_pos is not None else Decimal(0))
+        margin_action_id: str | None = None
+        if tp.qty != 0 and mode_mismatch and not mode_blocked:
+            margin_action_id = f"margin:{tp.key.symbol}"
+            if tp.key.symbol not in emitted_margin:
+                emitted_margin.add(tp.key.symbol)
+                actions.append(
+                    ExecutionAction(
+                        kind=ActionKind.SET_MARGIN_TYPE,
+                        symbol=tp.key.symbol,
+                        payload={"symbol": tp.key.symbol, "marginType": tp.margin_type},
+                        client_order_id=None,
+                        replaces_client_order_id=None,
+                        priority=0,
+                        action_id=margin_action_id,
+                    )
+                )
         # --- rule 1: leverage ---------------------------------------------------
         # Known configured leverage, in confidence order: the authoritative
         # per-symbol positionRisk map first (flat symbols included), then the
@@ -436,12 +471,12 @@ def build_plan(
         # with projected leverage 0).
         known_leverage = known_by_symbol.get(tp.key.symbol)
         prerequisite_action_id: str | None = None
-        if tp.qty != 0 and tp.leverage > 0 and known_leverage != tp.leverage:
+        if tp.qty != 0 and tp.leverage > 0 and known_leverage != tp.leverage and not mode_blocked:
             # Intra-plan dependency: the entry and its protection must not run
             # when this transition FAILED. Closes/reductions never reference it.
             prerequisite_action_id = f"leverage:{tp.key.symbol}"
-            if tp.key.symbol not in emitted:
-                emitted.add(tp.key.symbol)
+            if tp.key.symbol not in emitted_leverage:
+                emitted_leverage.add(tp.key.symbol)
                 actions.append(
                     ExecutionAction(
                         kind=ActionKind.SET_LEVERAGE,
@@ -451,8 +486,11 @@ def build_plan(
                         replaces_client_order_id=None,
                         priority=0,
                         action_id=prerequisite_action_id,
+                        depends_on_action_id=margin_action_id,
                     )
                 )
+        if prerequisite_action_id is None:
+            prerequisite_action_id = margin_action_id
         actions.extend(
             _plan_for_target(
                 actual_pos,

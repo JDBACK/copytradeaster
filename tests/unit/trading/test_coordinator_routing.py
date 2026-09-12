@@ -14,10 +14,13 @@ from copytradeaster.domain.models import (
     ExecutionAction,
     PositionKey,
     PositionState,
+    PosSide,
     ProtectiveOrder,
     RiskPolicy,
     Side,
+    SkipReason,
     SymbolFilters,
+    TargetState,
 )
 from copytradeaster.master.projector import MasterDelta, MasterState
 from copytradeaster.notifications.models import NotificationEvent, NotificationSeverity
@@ -27,6 +30,7 @@ from copytradeaster.storage.repositories import (
     CopyTradeRepo,
     OrderLinkRepo,
     SettingsRepo,
+    SyncBasisRepo,
 )
 from copytradeaster.trading.coordinator import Coordinator, FollowerRuntime
 from copytradeaster.trading.executor import Executor
@@ -39,6 +43,9 @@ class FakeClient:
         self.positions: dict[PositionKey, dict] = {}
         self.placed: list[dict] = []
         self.leverage_calls: list[tuple[str, int]] = []
+        self.margin_type_calls: list[tuple[str, str]] = []
+        self.flat_margin_types: dict[str, str] = {}
+        self.flat_leverage = 20
         self.query_results: dict[str, object] = {}
 
     async def balance(self, account_id):
@@ -46,11 +53,26 @@ class FakeClient:
 
     async def position_risk(self, account_id, symbol=None):
         del account_id
-        return [
+        rows = [
             FakePosition(k, v)
             for k, v in self.positions.items()
             if symbol is None or k.symbol == symbol
         ]
+        for flat_symbol in ("BTCUSDT",):
+            if (symbol is None or symbol == flat_symbol) and not any(
+                row.symbol == flat_symbol for row in rows
+            ):
+                rows.append(
+                    FakePosition(
+                        PositionKey(flat_symbol),
+                        {
+                            "qty": D(0),
+                            "leverage": self.flat_leverage,
+                            "margin_type": self.flat_margin_types.get(flat_symbol, "cross"),
+                        },
+                    )
+                )
+        return rows
 
     async def open_orders(self, account_id, symbol=None):
         out = []
@@ -74,6 +96,14 @@ class FakeClient:
 
     async def set_leverage(self, account_id, symbol, leverage):
         self.leverage_calls.append((symbol, leverage))
+
+    async def set_margin_type(self, account_id, symbol, margin_type):
+        del account_id
+        self.margin_type_calls.append((symbol, margin_type))
+        self.flat_margin_types[symbol] = margin_type
+        for key, value in self.positions.items():
+            if key.symbol == symbol:
+                value["margin_type"] = margin_type
 
     async def query_order(self, account_id, symbol, *, orig_client_order_id=None, order_id=None):
         del account_id, symbol, order_id
@@ -106,6 +136,13 @@ class FakePosition:
         self.liquidation_price = D(30000)
         self.position_side = key.pos_side
         self.un_realized_profit = D(0)
+        self.margin_type = v.get("margin_type", "cross")
+        self.isolated_margin = v.get(
+            "isolated_margin",
+            abs(self.position_amt) * self.entry_price / D(max(int(self.leverage), 1))
+            if str(self.margin_type).upper() == "ISOLATED"
+            else D(0),
+        )
 
 
 class FakeOrder:
@@ -158,6 +195,7 @@ def master_state(qty=D("1"), stop=D(64500), leverage=20, entry=D(65000)) -> Mast
         leverage=leverage,
         mark_price=D(65000),
         liquidation_price=D(30000),
+        margin_type="CROSSED",
     )
     if stop is not None:
         pos.stop = ProtectiveOrder(
@@ -993,6 +1031,234 @@ async def test_snapshot_preserves_flat_symbol_leverage(tmp_path):
         await db.close()
 
 
+async def test_snapshot_preserves_margin_mode_and_omits_conflicting_hedge_rows(tmp_path):
+    """Mode is authoritative per symbol; disagreeing HEDGE rows fail closed."""
+    db = Database(tmp_path / "margin-snapshot.sqlite3")
+    await db.connect()
+    await db.migrate()
+    fake = FakeClient()
+    fake.positions = {
+        PositionKey("BTCUSDT", PosSide.LONG): {
+            "qty": D(0),
+            "leverage": 20,
+            "margin_type": "cross",
+        },
+        PositionKey("BTCUSDT", PosSide.SHORT): {
+            "qty": D(0),
+            "leverage": 20,
+            "margin_type": "isolated",
+        },
+    }
+    fr = FollowerRuntime(account_id="copyc1", client=fake, identity=None)
+    try:
+        coordinator = Coordinator(
+            [fr],
+            SettingsRepo(db),
+            Executor(lambda aid: fr.client, CommandRepo(db), OrderLinkRepo(db), {}),
+            CopyTradeRepo(db),
+            OrderLinkRepo(db),
+            filters_provider,
+            SettingsRepo(db),
+            ["BTCUSDT"],
+            D("0.001"),
+            "MARK_PRICE",
+        )
+        snap = await coordinator.snapshot_follower(fr)
+        assert snap.positions[PositionKey("BTCUSDT", PosSide.LONG)].margin_type == "CROSSED"
+        assert snap.positions[PositionKey("BTCUSDT", PosSide.SHORT)].margin_type == "ISOLATED"
+        assert snap.symbol_margin_types == {}
+    finally:
+        await db.close()
+
+
+async def test_unknown_master_margin_mode_skips_new_entry(env):
+    coordinator, followers, db, _ = env
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    master = master_state()
+    master.positions[PositionKey("BTCUSDT")].margin_type = None
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("1000"),
+        positions={},
+        symbol_margin_types={"BTCUSDT": "CROSSED"},
+    )
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    assert targets == []
+    assert any(skip.reason is SkipReason.MARGIN_TYPE_UNKNOWN for skip in skips)
+    assert followers[0].client.placed == []
+
+
+async def test_conflicting_master_hedge_margin_modes_skip_new_entry(env):
+    coordinator, followers, db, _ = env
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    master = master_state()
+    long_key = PositionKey("BTCUSDT", PosSide.LONG)
+    short_key = PositionKey("BTCUSDT", PosSide.SHORT)
+    master.positions[long_key] = master.positions.pop(PositionKey("BTCUSDT"))
+    master.positions[long_key].key = long_key
+    master.positions[short_key] = PositionState(
+        key=short_key,
+        qty=D("1"),
+        entry_price=D("65000"),
+        leverage=20,
+        mark_price=D("65000"),
+        liquidation_price=D("30000"),
+        margin_type="ISOLATED",
+        stop=ProtectiveOrder(
+            client_order_id="m-short-stop",
+            order_id=2,
+            type="STOP_MARKET",
+            side=Side.BUY,
+            stop_price=D("65500"),
+            reduce_only=True,
+            close_position=False,
+            working_type="MARK_PRICE",
+        ),
+    )
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("1000"),
+        positions={},
+        symbol_margin_types={"BTCUSDT": "CROSSED"},
+    )
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    assert targets == []
+    assert len([skip for skip in skips if skip.reason is SkipReason.MARGIN_TYPE_UNKNOWN]) == 2
+    assert followers[0].client.placed == []
+
+
+async def test_isolated_entry_caps_leverage_for_double_fee_buffered_stop_risk(env):
+    coordinator, _followers, db, _ = env
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    master = master_state(stop=D("63000"), leverage=20)
+    master.positions[PositionKey("BTCUSDT")].margin_type = "ISOLATED"
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("1000"),
+        positions={},
+        symbol_margin_types={"BTCUSDT": "ISOLATED"},
+    )
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    assert skips == []
+    assert targets and targets[0].margin_type == "ISOLATED"
+    # liquidation cap is 21x here; the isolated 2x-loss collateral cap binds at 16x.
+    assert targets[0].leverage == 16
+
+
+async def test_isolated_entry_rejects_when_one_x_cannot_cover_double_stop_loss(env):
+    coordinator, _followers, db, _ = env
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    master = master_state(stop=D("30000"), leverage=20)
+    master.positions[PositionKey("BTCUSDT")].margin_type = "ISOLATED"
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("1000"),
+        positions={},
+        symbol_margin_types={"BTCUSDT": "ISOLATED"},
+    )
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    assert targets == []
+    assert any(skip.reason is SkipReason.INSUFFICIENT_MARGIN for skip in skips)
+
+
+async def test_open_growth_is_clamped_until_follower_mode_matches_master(env):
+    coordinator, followers, db, _ = env
+    coordinator._basis = SyncBasisRepo(db)
+    await coordinator._basis.upsert_ref("copyc1", "BTCUSDT", "BOTH", D("1"))
+    fr = followers[0]
+    key = PositionKey("BTCUSDT")
+    fr.client.positions[key] = {
+        "qty": D("0.01"),
+        "entry": D("65000"),
+        "leverage": 20,
+        "stop": D("64500"),
+        "margin_type": "cross",
+    }
+    actual = await coordinator.snapshot_follower(fr)
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    master = master_state(qty=D("2"), stop=D("64500"), leverage=20)
+    master.positions[key].margin_type = "ISOLATED"
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    assert targets and targets[0].qty == D("0.01")
+    assert targets[0].margin_type == "ISOLATED"
+    assert any(skip.reason is SkipReason.MARGIN_TYPE_MISMATCH for skip in skips)
+
+
+async def test_mode_mismatch_with_other_hedge_leg_still_cancels_flat_orphan_protection(env):
+    """Blocked mode changes must not leave a flat leg's bot-owned orders behind."""
+    coordinator, _followers, db, _ = env
+    key = PositionKey("BTCUSDT", PosSide.LONG)
+    other_key = PositionKey("BTCUSDT", PosSide.SHORT)
+    orphan = ProtectiveOrder(
+        client_order_id="ct-orphan-stop",
+        order_id=7,
+        type="STOP_MARKET",
+        side=Side.SELL,
+        stop_price=D("64500"),
+        reduce_only=True,
+        close_position=True,
+        working_type="MARK_PRICE",
+    )
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("1000"),
+        positions={
+            key: PositionState(
+                key=key,
+                qty=D(0),
+                entry_price=D(0),
+                leverage=20,
+                mark_price=D(65000),
+                liquidation_price=D(0),
+                stop=orphan,
+            ),
+            other_key: PositionState(
+                key=other_key,
+                qty=D("0.01"),
+                entry_price=D("65000"),
+                leverage=20,
+                mark_price=D(65000),
+                liquidation_price=D("30000"),
+            ),
+        },
+        symbol_leverages={"BTCUSDT": 20},
+        symbol_margin_types={"BTCUSDT": "CROSSED"},
+    )
+    master = master_state()
+    master_pos = master.positions.pop(PositionKey("BTCUSDT"))
+    master_pos.key = key
+    master_pos.margin_type = "ISOLATED"
+    master.positions[key] = master_pos
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+
+    assert any(skip.reason is SkipReason.MARGIN_TYPE_MISMATCH for skip in skips)
+    orphan_target = next(target for target in targets if target.key == key)
+    assert orphan_target.qty == D(0)
+    from copytradeaster.trading.planner import build_plan
+
+    plan = build_plan(
+        actual,
+        TargetState(account_id="copyc1", targets=targets),
+        filters_provider(),
+        coordinator._coid_factory(),
+        working_type="MARK_PRICE",
+    )
+    assert any(
+        action.kind is ActionKind.CANCEL_ORDER
+        and action.payload.get("origClientOrderId") == "ct-orphan-stop"
+        for action in plan.actions
+    )
+    assert not any(action.kind is ActionKind.SET_MARGIN_TYPE for action in plan.actions)
+
+
 @pytest.fixture
 async def managed_env(tmp_path):
     from copytradeaster.storage.repositories import AccountRepo
@@ -1002,7 +1268,9 @@ async def managed_env(tmp_path):
     db = Database(tmp_path / "managed.sqlite3")
     await db.connect()
     await db.migrate()
-    fr = FollowerRuntime(account_id="copyc1", client=FakeClient(), identity=None)
+    fake = FakeClient()
+    fake.flat_leverage = 0  # preserve the explicit RAM control-plane test value
+    fr = FollowerRuntime(account_id="copyc1", client=fake, identity=None)
     await AccountRepo(db).upsert("copyc1", "follower", "copyc1", "0xu")
     await SettingsRepo(db).upsert_policy(
         RiskPolicy(risk_percent=D("0.01"), max_leverage=20, max_entry_deviation_pct=D("0.01")),

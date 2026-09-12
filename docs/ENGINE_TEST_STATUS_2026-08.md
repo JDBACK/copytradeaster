@@ -4,6 +4,48 @@
 кампания зафиксирована в `feature/frontend`; ветка Stage 3 части 2
 `codex/stage-3-mini-app-part2` смержена ранее.
 
+> **Margin-mode mirroring (2026-09-12):** ядро копирует master
+> `CROSSED`/`ISOLATED` через авторитетный `positionRisk`, выставляет
+> `SET_MARGIN_TYPE → SET_LEVERAGE → MARKET_OPEN` с fail-closed зависимостями
+> и для isolated требует начальный залог ≥ 2× fee-buffered риска до Stop
+> вместе с прежним liquidation guard. Подписанная приёмка на настоящих
+> Testnet-ключах `main/copyc1`: оба перехода, реальные позиция и Stop,
+> `isolatedMargin=5.16828252 ≥ 4.64544080` при `15x`,
+> `liq=72389.14424060 < Stop=75024.70`, повторный reconcile без
+> дубликатов, UNKNOWN→CONFIRMED по signed биржевому чтению, финальный
+> flat/0 orders и восстановление исходных режимов — **1 passed за 99.58s**
+> (повторная проверка после финального аудита). Первое живое обнаружение `-4168`
+> подтвердило, что
+> `ISOLATED` нельзя включить в Multi-Assets; тест временно переключает
+> только disposable аккаунты, production оставляет отказ fail-closed.
+> Подробности и границы: `reports/MARGIN_MODE_MIRROR_2026-09.md`.
+
+> **External follower-close policy (2026-09-12):** устранён автоматический
+> re-entry после ручного полного закрытия follower при живой master episode.
+> Durable observation/latch хранится в `sync_basis` migration #60 и различает
+> внешний `non-zero → flat`, подтверждённую `MARKET_CLOSE` движка, linked
+> Stop/TP fill и dust-flat; новый master `trade_id` снимает старый запрет.
+> Offline backend gate текущего дерева: **1596 passed / 2 skipped / 94
+> deselected** за 43.03s; targeted margin/external engine package — **210
+> passed**, storage/notification/acceptance add-on — **51 passed**. Подписанный
+> REAL Aster Testnet сценарий
+> `test_external_follower_close_stays_flat_until_next_master_episode` — **PASS**
+> за 68.86s: direct follower close, repeated reconcile, новый Coordinator на
+> той же SQLite, master close→reopen, финальный `main/copyc1` flat / 0 orders.
+> Эксклюзивный повторный live-run 2026-09-12 после аудита: margin-mode и
+> external-close сценарии — **2 passed за 173.23s** на настоящих ключах; в
+> isolated `isolatedMargin=5.19196191 ≥ 4.64043580`,
+> `liq=72350.05795489 < Stop=74973.10`; `finally` оставил flat/0 orders,
+> исходные режимы восстановлены, bot после `SIGCONT` снова `READY`.
+> HEDGE fixed-protection сценарий после добавления обязательного master
+> `margin_type=CROSSED` — **1 passed за 61.07s** на реальном Testnet;
+> отдельный signed read-only audit всех 5 REAL-аккаунтов: `FLAT-ALL`
+> (`positions=0`, `open_orders=0`).
+> Первый запуск не сертифицировал поведение из-за параллельного старого
+> `run-bot`: его `copyc1=0.005` re-entry отсутствовал в scratch journal теста и
+> присутствовал в production log. Эксклюзивный rerun выполнен при временном
+> `SIGSTOP`, после чего dev bot возвращён через `SIGCONT` и снова вышел READY.
+
 > **Примечание (2026-09-10):** вердикт ниже покрывает дерево `f7df60b`; коммиты `58c10f7` / `ffa2848` (поведенческие, `scripts/dev-up.sh`) приземлились позже — повторная квалификация pending; покрытие этих коммитов не утверждается.
 > **Текущая ветка (2026-09-10):** на `codex/miniapp-live-updates` полный offline gate прогонялся уже
 > на актуальном дереве (включая `58c10f7` / `ffa2848`): backend **1549 passed / 2 skipped / 87 deselected**,
@@ -956,8 +998,9 @@
   восстанавливает состояние из authoritative positionRisk
   (`AccountState.symbol_leverages`, flat symbols включительно). Смена
   максимума биржей инвалидирует готовность нового входа до переподготовки;
-  закрытие/сокращение/защита не зависят от плеча. Stage 2 по-прежнему не
-  меняет `marginType`; isolated enforcement отложен.
+  закрытие/сокращение/защита не зависят от плеча. **Исторический августовский
+  scope Stage 2:** тогда `marginType` не менялся, isolated enforcement был
+  отложен; текущий engine follow-up описан в верхнем блоке 2026-09-12.
 
 ## Найденные и исправленные баги (живой тестнет)
 
@@ -1115,9 +1158,12 @@ post-fill recompute видел «мастер открыт + follower flat» и 
   таргет совпал бы с нулевым в ревизии и новый MARKET_OPEN проглотила бы
   идемпотентность по command_key).
 
-Контрольный тест защищает починенный drift-recovery: ненулевой таргет +
-ручное закрытие follower'а → движок по-прежнему восстанавливает позицию той же
-величины. Live dust-фаза добавлена в signed ONE_WAY E2E (phase 4b).
+Исторический контрольный тест защищал прежний drift-recovery: ненулевой таргет
++ ручное закрытие follower'а → движок восстанавливал позицию той же величины.
+**Superseded 2026-09-12:** текущая политика намеренно оставляет follower flat
+до нового master episode; regression и signed evidence приведены в верхнем
+блоке и `EXTERNAL_FOLLOWER_CLOSE_POLICY.md`. Live dust-фаза добавлена в signed
+ONE_WAY E2E (phase 4b).
 
 ### 4. Третий проход ревью: flip-регрессия и фальшивое dust-evidence (2026-08-23)
 
@@ -1472,8 +1518,10 @@ Full offline gate: **615 passed / 2 skipped / 17 deselected**, coverage
   ложный cap `20x`;
 - owner вручную подтвердил notifications и изменение risk percent. Полный
   trading cycle и resume/copy flow остаются непроверенными;
-- Stage 2 намеренно не меняет `marginType`. Isolated enforcement отложен до
-  отдельной реальной проверки Aster testnet; evidence mock/fake не заменяет её.
+- **Исторический Stage 2 срез (2026-08-24):** он намеренно не менял
+  `marginType`; isolated enforcement был отложен до отдельной реальной проверки
+  Aster testnet. Текущий engine follow-up и signed evidence добавлены в блоке
+  2026-09-12 выше.
 
 Signed adapter evidence for connected testnet follower: `max_leverage(force=True)`
 вернул BTCUSDT=200, ETHUSDT=200, SOLUSDT=100; `positionRisk` подтвердил

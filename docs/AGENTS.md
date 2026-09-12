@@ -1,7 +1,7 @@
 # Карта документации
 
 Что где лежит, что из этого живое, а что история, и что читать в каком порядке.
-Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-09-10 (live-презентация Mini App и якорные карты после слияния в `main`).
+Обновляется при перемещении/добавлении документов. Последняя перестройка: 2026-09-13 (гайд ревьюеру по изменениям движка).
 
 ## Быстрый старт (что читать в новом сеансе)
 
@@ -66,6 +66,9 @@ Handoff и сохранённые промпты — контекст своей
 | `docs/reports/plan_live_test.md` | Живой owner-provided pre-mainnet hardening plan; статусы Packages A–G и acceptance-критерии | Читать перед продолжением hardening; помечать только фактически подтверждённое |
 | `docs/ENGINE_TEST_STATUS_2026-08.md` | **Единая точка истины** о текущем состоянии: актуальные счётчики suite, таблица багов #1–27, разделы тестовых кампаний | Обновлять после каждого значимого изменения кода/тестов. Не дублировать его счётчики в других файлах |
 | `docs/ASTER_API_RESEARCH_2026-08.md` | Фактологический справочник по Aster V3 API: подписи, ордера, WS, лимиты, режимы позиций | Читать при работе с `src/copytradeaster/aster/` или новыми API-вызовами |
+| `docs/EXTERNAL_FOLLOWER_CLOSE_POLICY.md` | Реализованная durable-политика ручного/внешнего закрытия follower при активном master + offline/Testnet evidence | Читать перед изменением Coordinator/reconciliation и обновлять при изменении этого правила |
+| `docs/reports/MARGIN_MODE_MIRROR_2026-09.md` | План и Testnet-журнал зеркалирования `CROSSED`/`ISOLATED` с двойным isolated-залогом до Stop | Читать при изменении режима маржи, плеча или соответствующей live-приёмки |
+| `docs/reports/ENGINE_MARGIN_AND_EXTERNAL_CLOSE_REVIEW_GUIDE_2026-09.md` | Гайд ревьюеру по двум изменениям движка: diff-map, инварианты, signed Testnet evidence и границы проверки | Перед code review этих изменений; не подменяет живые журналы и единый статус |
 
 ## docs/reports/ — отчёты кампаний и corrective-планы
 
@@ -104,6 +107,8 @@ Handoff и сохранённые промпты — контекст своей
 | `STAGE3_PART1_REMEDIATION_IMPLEMENTATION_PROMPT_2026-09.md` | Готовый промпт исполнителю Part 1 remediation (ветка `codex/stage-3-mini-app-part1`): обязательное чтение, diff-база, критерии приёмки. Исторический, исполнение закрыто файлом выше |
 | `STAGE3_MINI_APP_PART2_ADAPTED_PLAN_2026-09.md` | Исходный implementation plan follower Mini App: восемь подчастей P2.0–P2.7, конкретные файлы, Testnet acceptance gates и anti-overengineering boundaries (2026-09-01). Статус внутри — `PLAN READY / IMPLEMENTATION NOT STARTED`; факт исполнения — строкой ниже |
 | `STAGE3_PART2_PROGRESS_2026-09.md` | **Журнал исполнения Stage 3 Part 2: P2.0–P2.7 + post-closure Builder safety corrective, все CLOSED (2026-09-04).** Текущая правда по Part 2; сводные gates — `ENGINE_TEST_STATUS_2026-08.md` |
+| `MARGIN_MODE_MIRROR_2026-09.md` | План, fail-closed границы и signed Aster Testnet evidence зеркалирования режима маржи |
+| `ENGINE_MARGIN_AND_EXTERNAL_CLOSE_REVIEW_GUIDE_2026-09.md` | Гайд ревьюеру: новая семантика follower-close и mirror CROSSED/ISOLATED, карта diff, live-доказательства и ограничения |
 | `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` | Append-only журнал pre-mainnet hardening: Packages A–G, corrective qualification, signed REAL Aster Testnet и load evidence; исходная ветка квалифицирована 2026-09-07, интеграционный verdict брать из `ENGINE_TEST_STATUS_2026-08.md` |
 | `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | Handoff от 2026-09-04: исходные требования REAL Aster Testnet qualification; актуальный прогресс и следующий незакрытый пакет сверять с журналом выше. |
 | `acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |

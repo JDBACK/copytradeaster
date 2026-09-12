@@ -100,6 +100,18 @@ def test_format_set_leverage():
     assert "⚡️ Плечо BTCUSDT установлено: 200x" in text
 
 
+def test_format_margin_mode():
+    action = ExecutionAction(
+        kind=ActionKind.SET_MARGIN_TYPE,
+        symbol="BTCUSDT",
+        payload={"symbol": "BTCUSDT", "marginType": "ISOLATED"},
+        client_order_id=None,
+        replaces_client_order_id=None,
+        priority=0,
+    )
+    assert "ISOLATED" in format_confirmed_action(action)
+
+
 def test_format_cancel_order():
     action = ExecutionAction(
         kind=ActionKind.CANCEL_ORDER,
@@ -125,3 +137,12 @@ def test_format_skips():
         "BTCUSDT", SkipReason.ENTRY_DEVIATION, PosSide.LONG
     )
     assert "приостановлено" in format_skip_reason("BTCUSDT", SkipReason.PAUSED, PosSide.LONG)
+    external = format_skip_reason("BTCUSDT", SkipReason.EXTERNAL_FOLLOWER_CLOSE, PosSide.LONG)
+    assert "закрыта вне копитрейдинга" in external
+    assert "следующую сделку мастера" in external
+    assert "режим маржи мастера" in format_skip_reason(
+        "BTCUSDT", SkipReason.MARGIN_TYPE_UNKNOWN, PosSide.LONG
+    )
+    assert "режим маржи отличается" in format_skip_reason(
+        "BTCUSDT", SkipReason.MARGIN_TYPE_MISMATCH, PosSide.LONG
+    )

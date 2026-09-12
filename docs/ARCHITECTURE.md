@@ -182,9 +182,20 @@ stop-loss budget, не модель гарантированного испол�
 
 Направление оценивается по текущему mark (LONG опасен при liq на/ниже mark, SHORT — на/выше; равенство опасно; shared HEDGE-quote относится к противоположной ноге). Нарушение — против стопа с буфером: LONG liq >= stop×(1−0.005), SHORT liq <= stop×(1+0.005); входной гейт учитывает MMR-запас 0.01.
 
-Ядро не меняет `marginType` перед входом: текущий режим аккаунта сохраняется
-без скрытой подмены; торговых вызовов `set_margin_type` из ядра нет, отдельной
-isolated-проверки в коде нет.
+Режим `marginType` читается из авторитетного master/follower `positionRisk`
+(включая плоские строки) и нормализуется как `CROSSED`/`ISOLATED`. Для нового
+риска неизвестный режим мастера запрещён. Перед входом planner меняет режим
+фолловера на режим мастера, затем выставляет плечо; оба шага должны быть
+подтверждены до `MARKET_OPEN`. Если по символу уже открыта любая HEDGE-нога,
+смена режима и увеличение блокируются, но сокращение и защита продолжаются.
+В `ISOLATED` объём по риску до Stop не меняется; плечо дополнительно снижается
+так, чтобы начальный залог `notional/leverage ≥ 2 × qty × |entry−stop| ×
+(1+fee_buffer)`. Даже `1x` без такого запаса запрещён. После фактического
+входа `positionRisk.isolatedMargin` и `liquidationPrice` проверяются вместе
+со Stop; нарушение приводит к защитному закрытию. Это плановый Stop-risk,
+не гарантированный предел убытка при гэпе/неисполнении Stop. Multi-Assets
+режим аккаунта ядро автоматически не переключает: биржевой отказ `-4168`
+оставляет вход заблокированным.
 
 ### `trading/`
 
@@ -418,11 +429,13 @@ Stop и **ровно один** bot-owned TP. Дубликатные услов�
 `extra_stops/extra_tps`, и planner отменяет их отдельными независимыми
 `CANCEL_ORDER` (priority 1) — в том числе на flat-ноге.
 
-Инвариант блокировки зависимых действий при смене плеча (правило 1 planner, баг #25):
-`SET_LEVERAGE` получает `action_id`, а последующие `MARKET_OPEN` и защитные ордера —
-`depends_on_action_id`. При FAILED/UNKNOWN статусе `SET_LEVERAGE` исполнитель переводит
-зависимые действия в `BLOCKED` (fail-closed), при этом закрытия (`MARKET_CLOSE`) и
-отмены ордеров никогда не зависят от плеча и исполняются безусловно.
+Инвариант блокировки зависимых действий (правило 1 planner, баг #25):
+`SET_MARGIN_TYPE → SET_LEVERAGE → MARKET_OPEN` образуют цепочку `action_id` /
+`depends_on_action_id`; если плечо уже совпадает, вход зависит напрямую от
+режима. При FAILED/UNKNOWN конфигурации зависимое увеличение получает
+`BLOCKED` (fail-closed). Подтверждение режима требует повторного
+`positionRisk`, а in-flight без COID при старте разрешается тем же signed
+чтением до READY. Закрытия и отмены от конфигурации не зависят.
 Семантика нулевого таргета:
 
 ```text
@@ -431,11 +444,24 @@ qty=0 при живом эпизоде мастера ≠ всегда «нам�
 
 Причина нуля переносится явно — `TargetPosition.hold_flat_until_episode_end`:
 
-- `True` — только same-direction пропорциональная редукция, округлившаяся ниже
-  step (dust-нога): персистится маркер `sync_basis.zero_target`, вход запрещён
-  (skip `INTENTIONAL_FLAT`) до конца эпизода мастера;
+- `True` — same-direction пропорциональная редукция, округлившаяся ниже step
+  (dust-нога), либо доказанное внешнее закрытие follower: dust персистит
+  `sync_basis.zero_target`, external-close — отдельный episode-bound latch;
+  соответствующий вход запрещён до конца эпизода мастера;
 - `False` — транзитный ноль flip'а («мастер перевернулся»): basis очищается,
   обратная сторона открывается следующим проходом.
+
+Политика внешнего закрытия follower: после каждого полного authoritative REST
+snapshot Coordinator персистит quantity и курсор последней подтверждённой
+`MARKET_CLOSE` для `(account, symbol, position side, master trade_id)`. Переход
+`non-zero → flat` при живом master episode блокирует повторный вход, если нет
+нового confirmed engine-close, покрывающего предыдущий authoritative qty, и
+linked bot-owned Stop/TP не подтверждён как `FILLED`. Неизвестная причина
+трактуется fail-closed так же; неполный REST-read
+не меняет observation. Zero-target при блокировке удаляет orphan Stop/TP, но не
+снимает latch. Новый `copy_trades.trade_id` очищает latch и создаёт новый
+observation baseline. Полный продуктовый контракт и Testnet evidence —
+`EXTERNAL_FOLLOWER_CLOSE_POLICY.md`.
 
 Флип является границей эпизода: `_apply_fill` закрывает старый episode и
 открывает новый с колонкой `copy_trades.direction = ±1` (миграция #14).
@@ -517,7 +543,7 @@ P2.6 proof + current signer + Agent permissions/actual expiry + config match (pe
 :UI TTL на execution не влияет. Snapshot решения берётся лениво под per-account
 mutation lock, один на весь `Executor.submit` (кэш на план); персистентность команды — insert/set_status, а send→query→retry с новым COID — контур разрешения UNKNOWN. Safety: entry при UNAVAILABLE fail-closed
 до HTTP, close/Stop/TP — fallback без полей + degraded signal,
-cancel/leverage не блокируются.
+cancel/leverage/margin-type не блокируются.
 
 ## 8. Конкурентность и масштаб (v1 launch cap: 10 followers)
 
@@ -753,8 +779,9 @@ notification_outbox
 `runtime_id`, `started_at`, `heartbeat_at`, `allow_new_entries`,
 `emergency_active`, `emergency_operation_id`, `degraded`, `degraded_active`,
 `degraded_reason`); `sync_basis` — per-follower sizing reference с
-`zero_target`-маркером намеренного dust-flat и `issued_target` для
-идемпотентности ревизий; `nonce_store` — атомарная выдача nonces.
+`zero_target`-маркером намеренного dust-flat, `issued_target` для
+идемпотентности ревизий и migration #60 полями episode observation/external-close
+latch; `nonce_store` — атомарная выдача nonces.
 
 ## 14. Ошибки и safety state
 
@@ -809,7 +836,7 @@ reconcile()
 Торговое ядро едино для всех этапов; Telegram, CLI и Builder onboarding — внешние интерфейсы вокруг него (§1, §4). Risk, planner, reconciler и master flow между этапами не меняются.
 
 - Этап 1 — backend/testnet: `domain aster master risk trading storage credentials cli`; master + testnet followers без Telegram.
-- Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; `marginType` этап не меняет.
+- Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; в исходном scope Stage 2 `marginType` не менялся (текущий режим ядра — §4).
 - Этап 3 — Aster Code / Builder: + `onboarding/builder`, `history`, `miniapp`
   (aiohttp-транспорт под `/miniapp/`: 27 POST `/miniapp/api/*` + собранный
   Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow

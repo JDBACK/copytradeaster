@@ -500,6 +500,17 @@ MIGRATIONS: list[str | tuple[str, ...]] = [
     # under version 33, so migrate() treats the DDL as an idempotent compatibility
     # step while still recording version 59.
     "ALTER TABLE execution_commands ADD COLUMN recovery_context TEXT",
+    # External follower-close policy: retain the last authoritative follower
+    # quantity and the engine-close cursor for the exact master episode.  A
+    # proven non-zero -> flat transition with no newer engine close latches
+    # entry refusal across reconciles and process restarts.
+    (
+        "ALTER TABLE sync_basis ADD COLUMN episode_trade_id INTEGER",
+        "ALTER TABLE sync_basis ADD COLUMN last_observed_qty TEXT",
+        "ALTER TABLE sync_basis ADD COLUMN last_engine_close_key TEXT",
+        "ALTER TABLE sync_basis ADD COLUMN external_close_blocked INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE sync_basis ADD COLUMN external_close_reason TEXT",
+    ),
 ]
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version
@@ -510,6 +521,12 @@ RECOVERY_CONTEXT_INDEX_VERSION = next(
     version
     for version, statement in enumerate(MIGRATIONS)
     if isinstance(statement, str) and "ADD COLUMN recovery_context" in statement
+)
+EXTERNAL_CLOSE_INDEX_VERSION = next(
+    version
+    for version, statement in enumerate(MIGRATIONS)
+    if isinstance(statement, tuple)
+    and any("ADD COLUMN external_close_blocked" in step for step in statement)
 )
 
 

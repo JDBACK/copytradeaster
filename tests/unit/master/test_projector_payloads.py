@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from copytradeaster.domain.models import PositionKey, PosSide
+from copytradeaster.domain.models import PositionKey, PositionState, PosSide
 from copytradeaster.master.projector import MasterDelta, MasterProjector
 from copytradeaster.storage.database import Database
 from copytradeaster.storage.repositories import (
@@ -662,6 +662,8 @@ class TestRebuildFull:
             mark_price = D("65500")
             leverage = 5
             liquidation_price = D("30000")
+            margin_type = "isolated"
+            isolated_margin = D("12.5")
             position_side = PosSide.BOTH
             un_realized_profit = D("1")
 
@@ -704,9 +706,48 @@ class TestRebuildFull:
         pos = state.positions[key]
         assert pos.qty == D("0.002")
         assert pos.leverage == 5
+        assert pos.margin_type == "ISOLATED"
+        assert pos.isolated_margin == D("12.5")
         assert pos.stop is not None and pos.stop.stop_price == D("64000")
         assert pos.take_profit is not None and pos.take_profit.stop_price == D("70000")
         assert requested_order_symbols == ["BTCUSDT"]
+
+    async def test_refresh_mark_prices_updates_authoritative_margin_mode(self, deps):
+        projector, _, _ = deps
+        key = PositionKey("BTCUSDT", PosSide.BOTH)
+        projector.state.positions[key] = PositionState(
+            key=key,
+            qty=D("0.002"),
+            entry_price=D("65000"),
+            leverage=5,
+            mark_price=D("65000"),
+            liquidation_price=D("30000"),
+            margin_type="CROSSED",
+        )
+
+        class Position:
+            symbol = "BTCUSDT"
+            position_amt = D("0.002")
+            entry_price = D("65000")
+            mark_price = D("65500")
+            leverage = 15
+            liquidation_price = D("30000")
+            margin_type = " isolated "
+            isolated_margin = D("8")
+            position_side = PosSide.BOTH
+            un_realized_profit = D("0")
+
+        class Client:
+            async def position_risk(self, account_id, symbol=None):
+                assert account_id == "main" and symbol == "BTCUSDT"
+                return [Position()]
+
+        await projector.refresh_mark_prices(Client(), "main", {"BTCUSDT"})
+        pos = projector.state.positions[key]
+        assert pos.mark_price == D("65500")
+        assert pos.leverage == 15
+        assert pos.margin_type == "ISOLATED"
+        assert pos.isolated_margin == D("8")
 
     async def test_flat_snapshot_does_not_require_open_order_history(self, deps):
         projector, _, _ = deps

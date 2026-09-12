@@ -91,6 +91,10 @@ def format_confirmed_action(
         leverage = payload.get("leverage") or "—"
         return f"⚡️ Плечо {symbol} установлено: {leverage}x"
 
+    if kind == ActionKind.SET_MARGIN_TYPE:
+        margin_type = payload.get("marginType") or "—"
+        return f"Режим маржи {symbol} установлен: {margin_type}"
+
     # 6. Cancel Order
     if kind == ActionKind.CANCEL_ORDER:
         return f"🗑 Снят ордер {symbol}"
@@ -128,6 +132,15 @@ def format_skip_reason(
             "Причина: недостаточно свободной маржи на балансе."
         )
 
+    if reason_enum == SkipReason.MARGIN_TYPE_UNKNOWN:
+        return f"⚠️ Пропуск сделки {symbol}{side_suffix}: режим маржи мастера не подтверждён."
+
+    if reason_enum == SkipReason.MARGIN_TYPE_MISMATCH:
+        return (
+            f"⚠️ Пропуск увеличения {symbol}{side_suffix}: режим маржи отличается; "
+            "смена возможна после закрытия позиции."
+        )
+
     if reason_enum in (SkipReason.BELOW_MIN_QTY, SkipReason.BELOW_MIN_NOTIONAL):
         return (
             f"⚠️ Пропуск сделки {symbol}{side_suffix}\n"
@@ -160,6 +173,12 @@ def format_skip_reason(
 
     if reason_enum == SkipReason.INTENTIONAL_FLAT:
         return f"ℹ️ Фиксация позиции {symbol}{side_suffix}."
+
+    if reason_enum == SkipReason.EXTERNAL_FOLLOWER_CLOSE:
+        return (
+            f"ℹ️ Позиция {symbol}{side_suffix} закрыта вне копитрейдинга.\n"
+            "Повторный вход в этой сделке отключён; ожидаем следующую сделку мастера."
+        )
 
     if reason_enum == SkipReason.LEVERAGE_NOT_READY:
         return (

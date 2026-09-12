@@ -22,6 +22,7 @@ from copytradeaster.domain.models import (
     PosSide,
     ProtectiveOrder,
     Side,
+    normalize_margin_type,
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.storage.repositories import (
@@ -304,6 +305,8 @@ class MasterProjector:
                     stop=stop,
                     take_profit=tp,
                     unrealized_profit=getattr(p, "un_realized_profit", Decimal(0)),
+                    margin_type=normalize_margin_type(getattr(p, "margin_type", None)),
+                    isolated_margin=getattr(p, "isolated_margin", None),
                 )
             # E timestamps are in Aster server time. A local wall-clock cutoff
             # is unsafe within the allowed clock-drift window: a client clock
@@ -326,7 +329,7 @@ class MasterProjector:
     async def refresh_mark_prices(
         self, client: AsterClient, account_id: str, symbols: frozenset[str] | set[str]
     ) -> None:
-        """Refresh mark prices for the symbols about to enter risk decisions.
+        """Refresh mark prices and margin mode for symbols entering risk decisions.
 
         The user stream carries position/account changes but not a continuously
         authoritative mark price. A symbol-scoped `positionRisk` read is cheap
@@ -345,6 +348,8 @@ class MasterProjector:
                     position.mark_price = dto.mark_price
                     refreshed = True
                 position.leverage = int(dto.leverage)
+                position.margin_type = normalize_margin_type(getattr(dto, "margin_type", None))
+                position.isolated_margin = getattr(dto, "isolated_margin", None)
         if refreshed:
             self.state.event_time = int(time.time() * 1000)
 

@@ -90,6 +90,35 @@ def plan(actual, targets, flt=None):
     return build_plan(actual, TargetState("copyc1", targets), flt, coid_factory)
 
 
+def test_margin_mode_precedes_leverage_and_open():
+    actual = account(symbol_leverages={"BTCUSDT": 20})
+    actual.symbol_margin_types["BTCUSDT"] = "CROSSED"
+    target = TargetPosition(KEY, D("0.05"), D(64500), None, 12, margin_type="ISOLATED")
+    actions = plan(actual, [target]).actions
+    assert [action.kind for action in actions] == [
+        ActionKind.SET_MARGIN_TYPE,
+        ActionKind.SET_LEVERAGE,
+        ActionKind.MARKET_OPEN,
+        ActionKind.PLACE_STOP,
+    ]
+    assert actions[1].depends_on_action_id == actions[0].action_id
+    assert actions[2].depends_on_action_id == actions[1].action_id
+    assert actions[3].depends_on_action_id == actions[1].action_id
+
+
+def test_margin_mode_mismatch_while_open_blocks_growth_but_preserves_stop():
+    held = pos(KEY, "0.03", stop=prot("ct-old-stop", 64500))
+    actual = account([held], symbol_leverages={"BTCUSDT": 20})
+    actual.symbol_margin_types["BTCUSDT"] = "CROSSED"
+    target = TargetPosition(KEY, D("0.05"), D(64000), None, 20, margin_type="ISOLATED")
+    actions = plan(actual, [target]).actions
+    assert all(
+        action.kind not in {ActionKind.SET_MARGIN_TYPE, ActionKind.MARKET_OPEN}
+        for action in actions
+    )
+    assert any(action.kind == ActionKind.PLACE_STOP for action in actions)
+
+
 class TestOpenRules:
     def test_open_with_stop(self):
         p = plan(account(), [TARGET_LONG])

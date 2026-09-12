@@ -9,9 +9,10 @@
 `risk_percent`, получает notifications и управляет своим pause/resume/account
 lifecycle. Leverage автоматически выбирается как максимум для symbol и не
 редактируется; entry deviation — внутренний safety gate. Follower emergency
-отсутствует в UI/application boundary, global emergency — admin-only. Stage 2
-пока не меняет `marginType`; isolated enforcement отложен до отдельной реальной
-проверки Aster testnet.
+отсутствует в UI/application boundary, global emergency — admin-only. На дату
+brief (2026-08) Stage 2 ещё не менял `marginType`; isolated enforcement был
+отложен до отдельной реальной проверки Aster testnet. Текущий engine scope
+зафиксирован в §27 ниже.
 
 ## 1. Job и аудитория
 
@@ -569,10 +570,24 @@ Scenes можно пересмотреть, если одновременно п
 - account screen не содержит follower emergency. Per-account emergency
   остаётся внутренним control-core, а global emergency — admin-only;
 - onboarding напоминает включить Hedge Mode и при создании Agent/API wallet
-  выбрать Perps/`canPerpTrade`; Stage 2 не меняет `marginType` аккаунта.
-  Isolated enforcement отложен до отдельной реальной проверки Aster testnet;
+  выбрать Perps/`canPerpTrade`; **исторический Stage 2 срез** не менял
+  `marginType` аккаунта, а Isolated enforcement был отложен до отдельной
+  реальной проверки Aster testnet;
 - dashboard не обещает фиксированное плечо вроде `20x`. Full trading cycle и
   resume/copy flow не считаются проверенными только по UI/regression tests.
 
 Текущий фактический UI/readiness verdict после owner-проверки ведётся в
 [STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md](STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md).
+
+## 27. Engine follow-up (UI boundary unchanged) — 2026-09-12
+
+Пункты выше о deferred `marginType` и Isolated относятся к исходному UX-срезу
+2026-08 и superseded текущим engine-аудитом. Ядро теперь зеркалирует
+authoritative master `CROSSED`/`ISOLATED` и проверяет `2×` fee-buffered Stop-loss
+collateral, но Telegram/Mini App по-прежнему не дают пользователю вручную
+переключать режим. Полный scope и Testnet evidence — в
+[`MARGIN_MODE_MIRROR_2026-09.md`](MARGIN_MODE_MIRROR_2026-09.md).
+
+Внешнее полное закрытие follower при живом master больше не считается обычным
+drift-recovery: durable episode-bound latch запрещает same-episode re-entry,
+включая restart. См. [`EXTERNAL_FOLLOWER_CLOSE_POLICY.md`](../EXTERNAL_FOLLOWER_CLOSE_POLICY.md).

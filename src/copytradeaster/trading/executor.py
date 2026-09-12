@@ -32,6 +32,7 @@ from copytradeaster.domain.models import (
     ExecutionPlan,
     PosSide,
     Side,
+    normalize_margin_type,
 )
 from copytradeaster.logging_utils import get_logger
 from copytradeaster.storage.repositories import CommandRepo, OrderLinkRepo, SettingsRepo
@@ -186,8 +187,8 @@ class BootResolutionReport:
 def _payload_for(action: ExecutionAction) -> PlaceOrderRequest:
     p = action.payload
     kind = action.kind
-    if kind == ActionKind.SET_LEVERAGE:
-        raise ValueError("SET_LEVERAGE is not an order")
+    if kind in (ActionKind.SET_LEVERAGE, ActionKind.SET_MARGIN_TYPE):
+        raise ValueError(f"{kind.value} is not an order")
     pos_side = PosSide(p["positionSide"]) if "positionSide" in p else PosSide.BOTH
     order_type = p.get("type", "MARKET")
     return PlaceOrderRequest(
@@ -619,6 +620,8 @@ class Executor:
                 result = await self._submit_cancel(plan, action, client=client)
             elif action.kind == ActionKind.SET_LEVERAGE:
                 result = await self._submit_leverage(plan, action, client=client)
+            elif action.kind == ActionKind.SET_MARGIN_TYPE:
+                result = await self._submit_margin_type(plan, action, client=client)
             else:
                 if cached_decision is None:
                     cached_decision = await self._resolve_attribution(plan.account_id)
@@ -727,7 +730,7 @@ class Executor:
             await self._commands.insert(
                 key,
                 plan.account_id,
-                plan.trade_id,
+                action.trade_id if action.trade_id is not None else plan.trade_id,
                 action.kind.value,
                 payload_json,
                 action.priority,
@@ -807,7 +810,7 @@ class Executor:
             await self._commands.insert(
                 key,
                 plan.account_id,
-                plan.trade_id,
+                action.trade_id if action.trade_id is not None else plan.trade_id,
                 action.kind.value,
                 json.dumps(action.payload, sort_keys=True),
                 action.priority,
@@ -833,6 +836,70 @@ class Executor:
         await self._notify_confirmed(plan.account_id, action, key)
         return CommandResult(key, "CONFIRMED", None)
 
+    async def _submit_margin_type(
+        self,
+        plan: ExecutionPlan,
+        action: ExecutionAction,
+        *,
+        client: AsterClient | None = None,
+    ) -> CommandResult:
+        key = command_key_of(plan, action)
+        existing = await self._commands.get(key)
+        if existing is not None and existing["status"] in (
+            "SENDING",
+            "UNKNOWN",
+            "SUBMITTED",
+            "CONFIRMED",
+        ):
+            outcome = await _resolve_set_margin_type_boot(
+                lambda _: self._client_for(plan, client), self._commands, existing
+            )
+            if outcome == "confirmed":
+                return CommandResult(key, "CONFIRMED", None)
+            if outcome != "not_applied":
+                await self._commands.set_status(
+                    key, "UNKNOWN", last_error="margin-type read unavailable"
+                )
+                return CommandResult(key, "UNKNOWN", "margin-type read unavailable")
+        if existing is None:
+            await self._commands.insert(
+                key,
+                plan.account_id,
+                action.trade_id if action.trade_id is not None else plan.trade_id,
+                action.kind.value,
+                json.dumps(action.payload, sort_keys=True),
+                action.priority,
+                None,
+                plan.operation_id,
+            )
+        else:
+            await self._commands.set_status(key, "PENDING")
+        await self._commands.set_status(key, "SENDING")
+        try:
+            await self._client_for(plan, client).set_margin_type(
+                plan.account_id, action.payload["symbol"], action.payload["marginType"]
+            )
+        except AsterError as exc:
+            if exc.code in UNKNOWN_CODES or exc.http_status in {503, 504}:
+                return await self._mark_unresolved(
+                    plan, key, "UNKNOWN", "margin-type outcome unknown"
+                )
+            return await self._fail(plan, key, exc)
+        except (TimeoutError, OSError):
+            return await self._mark_unresolved(
+                plan, key, "UNKNOWN", "margin-type transport outcome unknown"
+            )
+        refreshed = await self._commands.get(key)
+        assert refreshed is not None
+        outcome = await _resolve_set_margin_type_boot(
+            lambda _: self._client_for(plan, client), self._commands, refreshed
+        )
+        if outcome == "confirmed":
+            await self._notify_confirmed(plan.account_id, action, key)
+            return CommandResult(key, "CONFIRMED", None)
+        await self._commands.set_status(key, "UNKNOWN", last_error="margin-type not verified")
+        return CommandResult(key, "UNKNOWN", "margin-type not verified")
+
     async def _submit_cancel(
         self,
         plan: ExecutionPlan,
@@ -850,7 +917,7 @@ class Executor:
             await self._commands.insert(
                 key,
                 plan.account_id,
-                plan.trade_id,
+                action.trade_id if action.trade_id is not None else plan.trade_id,
                 action.kind.value,
                 json.dumps(action.payload, sort_keys=True),
                 action.priority,
@@ -922,6 +989,7 @@ class Executor:
                     ActionKind.MARKET_OPEN.value,
                     ActionKind.MARKET_CLOSE.value,
                     ActionKind.SET_LEVERAGE.value,
+                    ActionKind.SET_MARGIN_TYPE.value,
                 }:
                     return CommandResult(key, "BLOCKED", "unresolved account exposure"), False
 
@@ -933,7 +1001,7 @@ class Executor:
             await self._commands.insert(
                 key,
                 plan.account_id,
-                plan.trade_id,
+                action.trade_id if action.trade_id is not None else plan.trade_id,
                 action.kind.value,
                 payload_json,
                 action.priority,
@@ -1309,6 +1377,15 @@ async def resolve_boot_unknowns(
             else:
                 unresolved_query_error += 1
             continue
+        if not coid and kind == ActionKind.SET_MARGIN_TYPE:
+            outcome = await _resolve_set_margin_type_boot(clients, commands, row)
+            if outcome == "confirmed":
+                confirmed += 1
+            elif outcome == "not_applied":
+                failed_not_found += 1
+            else:
+                unresolved_query_error += 1
+            continue
         if not coid:
             await commands.set_status(key, "UNKNOWN", last_error="boot: no coid to resolve")
             unresolved_without_coid += 1
@@ -1452,6 +1529,64 @@ async def _resolve_set_leverage_boot(
     await commands.set_status(
         key, "FAILED", last_error=f"boot-resolved:leverage-mismatch:{observed}"
     )
+    return "not_applied"
+
+
+async def _resolve_set_margin_type_boot(
+    clients: Callable[[str], AsterClient],
+    commands: CommandRepo,
+    row: Any,
+) -> str:
+    """Resolve a no-coid config write from authoritative flat-inclusive rows."""
+    key = str(row["command_key"])
+    account_id = str(row["account_id"])
+    try:
+        payload = json.loads(str(row["payload"]))
+        symbol = str(payload["symbol"])
+        target = normalize_margin_type(str(payload["marginType"]))
+        if not symbol or target is None:
+            raise ValueError("invalid margin-type payload")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        await commands.set_status(key, "UNKNOWN", last_error="boot: malformed margin-type payload")
+        return "unresolved"
+    for attempt in range(BOOT_QUERY_ATTEMPTS):
+        try:
+            rows = await clients(account_id).position_risk(account_id, symbol)
+            break
+        except (AsterError, TimeoutError, OSError) as exc:
+            log.warning(
+                "boot resolve margin-type read failed for %s (%d/%d): %s",
+                key,
+                attempt + 1,
+                BOOT_QUERY_ATTEMPTS,
+                exc,
+            )
+            if attempt + 1 < BOOT_QUERY_ATTEMPTS:
+                await asyncio.sleep(BOOT_QUERY_BACKOFF_S * (attempt + 1))
+    else:
+        await commands.set_status(
+            key, str(row["status"]), last_error="boot-query-unresolved:margin-type"
+        )
+        return "unresolved"
+    if not rows:
+        await commands.set_status(key, "FAILED", last_error="boot-resolved:no-margin-type-rows")
+        return "not_applied"
+    observed = {
+        normalize_margin_type(getattr(item, "margin_type", None))
+        for item in rows
+        if item.symbol == symbol
+    }
+    if len(observed) != 1 or None in observed:
+        await commands.set_status(
+            key, str(row["status"]), last_error="boot-query-unresolved:ambiguous-margin-type"
+        )
+        return "unresolved"
+    if target in observed:
+        await commands.set_status(
+            key, "CONFIRMED", last_error=f"boot-resolved:margin-type={target}"
+        )
+        return "confirmed"
+    await commands.set_status(key, "FAILED", last_error="boot-resolved:margin-type-mismatch")
     return "not_applied"
 
 

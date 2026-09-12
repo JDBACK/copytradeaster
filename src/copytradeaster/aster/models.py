@@ -155,6 +155,7 @@ class PositionDTO(BaseModel):
     leverage: int
     liquidation_price: Decimal = Field(alias="liquidationPrice")
     margin_type: str = Field(alias="marginType")
+    isolated_margin: Decimal | None = Field(default=None, alias="isolatedMargin")
     position_side: PosSide = Field(alias="positionSide")
     un_realized_profit: Decimal = Field(alias="unRealizedProfit")
 

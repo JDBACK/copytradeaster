@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from copytradeaster.storage.database import (
+    EXTERNAL_CLOSE_INDEX_VERSION,
     MIGRATIONS,
     RECOVERY_CONTEXT_INDEX_VERSION,
     Database,
@@ -154,7 +155,7 @@ async def test_corrective_g1_upgrade_marks_retained_history_dirty(tmp_path: Path
         )
         await database.conn.commit()
 
-        assert await database.migrate() == 2
+        assert await database.migrate() == 3
         a = await database.fetchone(
             "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
             "WHERE account_id='a' AND environment='testnet' AND symbol='BTCUSDT'"
@@ -220,8 +221,8 @@ async def test_hardening_v33_lineage_keeps_recovery_context_and_adds_history(tmp
         await database.close()
 
 
-async def test_frontend_v58_lineage_adds_recovery_context_as_v59(tmp_path: Path):
-    """A fully migrated frontend DB receives only the hardening compatibility step."""
+async def test_frontend_v58_lineage_adds_recovery_and_external_close_state(tmp_path: Path):
+    """A frontend-v58 DB receives the two later trading-core migrations."""
     database = Database(tmp_path / "frontend-v58.sqlite3")
     await database.connect()
     try:
@@ -230,12 +231,23 @@ async def test_frontend_v58_lineage_adds_recovery_context_as_v59(tmp_path: Path)
             "execution_commands", "recovery_context"
         )
 
-        assert await database.migrate() == 1
+        assert await database.migrate() == 2
         assert await database._column_exists(  # noqa: SLF001 - migration lineage proof
             "execution_commands", "recovery_context"
         )
         applied = await database.fetchone("SELECT MAX(version) AS version FROM schema_migrations")
         assert applied is not None
-        assert applied["version"] == RECOVERY_CONTEXT_INDEX_VERSION == 59
+        assert RECOVERY_CONTEXT_INDEX_VERSION == 59
+        assert applied["version"] == EXTERNAL_CLOSE_INDEX_VERSION == 60
+        sync_columns = {
+            row["name"] for row in await database.fetchall("PRAGMA table_info(sync_basis)")
+        }
+        assert {
+            "episode_trade_id",
+            "last_observed_qty",
+            "last_engine_close_key",
+            "external_close_blocked",
+            "external_close_reason",
+        } <= sync_columns
     finally:
         await database.close()
