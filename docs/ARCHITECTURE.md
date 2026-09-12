@@ -1,6 +1,6 @@
 # Архитектура copytradeaster
 
-Архитектура покрывает testnet-движок, Telegram-бота и Aster Code / Builder в одном процессе. Узкие места (порядок WS-событий, partial fill, ручная перестановка OCO/OTOCO) закрыты инвариантами ниже; подтверждение — signed testnet-прогоны (сводка в `ENGINE_TEST_STATUS_2026-08.md`).
+Архитектура покрывает testnet-движок, Telegram-бота и Aster Code / Builder в одном процессе. Узкие места (порядок WS-событий, partial fill, recovery и обычные SL/TP) закрыты инвариантами ниже; Strategy OCO/OTOCO намеренно не является фундаментом follower execution (§10). Подтверждение — signed testnet-прогоны (сводка в `ENGINE_TEST_STATUS_2026-08.md`).
 
 Торговое ядро едино для всех этапов: testnet-движок, Telegram-бот и Aster Code / Builder — внешние интерфейсы вокруг него.
 
@@ -465,7 +465,7 @@ observation baseline. Полный продуктовый контракт и Te
 `EXTERNAL_FOLLOWER_CLOSE_POLICY.md`.
 
 Флип является границей эпизода: `_apply_fill` закрывает старый episode и
-открывает новый с колонкой `copy_trades.direction = ±1` (миграция #14).
+открывает новый с колонкой `copy_trades.direction = ±1` (миграция #13).
 Snapshot-sync `rebuild_full` детектит рассинхрон направления после офлайна и
 делает тот же close+open. Новый эпизод автоматически снимает sticky-маркеры,
 поэтому dust-flat одного направления не блокирует вход в противоположном.
@@ -753,7 +753,7 @@ notification_outbox
 - `copy_settings` — risk %, limits, enable/disable;
 - `master_events` — raw event ledger для replay/recovery;
 - `copy_trades` — внутренние торговые эпизоды (с `direction = ±1` — сторона
-  эпизода, `0` = не установлена, миграция #14);
+  эпизода, `0` = не установлена, миграция #13);
 - `order_links` — master ↔ follower order mapping;
 - `execution_commands` — durable execution journal/queue; additive migration #59
   добавляет `recovery_context` с pre-mutation evidence для MARKET recovery.
@@ -838,7 +838,7 @@ reconcile()
 Торговое ядро едино для всех этапов; Telegram, CLI и Builder onboarding — внешние интерфейсы вокруг него (§1, §4). Risk, planner, reconciler и master flow между этапами не меняются.
 
 - Этап 1 — backend/testnet: `domain aster master risk trading storage credentials cli`; master + testnet followers без Telegram.
-- Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop; в исходном scope Stage 2 `marginType` не менялся (текущий режим ядра — §4).
+- Этап 2 — Telegram: + `telegram notifications onboarding/direct application`. Один asyncio-процесс, long polling, SQLite WAL. Фактический контур: captcha + durable access approval, direct V3 onboarding с typed errors, dashboard/status/risk/notifications/account, admin controls, pause/resume, symbol leverage, notification outbox. Пользователь меняет только риск на Stop и не переключает margin mode вручную; августовский scope не менял `marginType`, а текущая engine policy зеркалирует его из master (см. §4).
 - Этап 3 — Aster Code / Builder: + `onboarding/builder`, `history`, `miniapp`
   (aiohttp-транспорт под `/miniapp/`: 27 POST `/miniapp/api/*` + собранный
   Vite-бандл; frontend в `miniapp/`: 4-табовый AppShell, flow
@@ -848,7 +848,7 @@ reconcile()
   (journal payload от attribution не зависит). Транспортные хендлеры знают
   только application use cases и typed public codes.
 
-Детали исполнения и acceptance — в `docs/reports/`: Stage 2 — `STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`; Stage 3 Part 1 — `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`; Part 2 — `STAGE3_PART2_PROGRESS_2026-09.md`.
+Детали исполнения и acceptance — в `docs/reports/`: исторический Stage 2 snapshot — `STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`; Stage 3 Part 1 — `STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`; Part 2 — `STAGE3_PART2_PROGRESS_2026-09.md`. Текущие engine counters и verdict — в `docs/ENGINE_TEST_STATUS_2026-08.md`.
 
 ## 17. Filesystem tree
 
@@ -884,7 +884,7 @@ Tree отражает фактическую структуру на уровн�
 9. Сначала простой модуль; новая абстракция появляется только когда есть минимум две реальные реализации/причины для неё.
 10. Не создавать God class, но и не дробить одну цельную обязанность на множество микросервисов/микромодулей.
 
-Эта архитектура рассчитана на заявленный масштаб 30–100 followers и должна оставаться основной до появления измеримой причины усложнять инфраструктуру.
+Архитектура рассчитана на долгосрочный масштаб 30–100 followers, но действующий runtime-cap — 10 (`max_followers=10`) до отдельного измерения и решения владельца; один процесс и SQLite остаются основной схемой до измеримой причины усложнять инфраструктуру.
 
 ## 19. Куда класть новую возможность (Footprint Ladder)
 

@@ -465,3 +465,12 @@ P1 до условного recovery follow-up; N6 — дефект evidence harn
 SL fill и доказанная отмена STOP остаются в end-to-end acceptance до production
 rollout новой истории; совместить с G3. Эта запись не закрывает findings:
 требуется фактическое выполнение checklist FIX_HANDOFF §6.
+
+## Current disposition — 2026-09-13
+
+Вердикты `REQUEST CHANGES` и `G1 OPEN` выше относятся к независимому ревью и
+его handoff-срезу 2026-09-06/07; они сохраняются без переписывания. Findings
+N1–N3 закрыты corrective G1, N4–N6 закрыты в последующем S3/G3-проходе.
+Текущий execution-evidence и общий статус Mini App находятся в
+[`MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md`](MINIAPP_FUNCTIONAL_PROGRESS_2026-09.md)
+и [`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md).

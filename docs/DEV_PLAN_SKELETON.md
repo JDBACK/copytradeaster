@@ -1,6 +1,6 @@
 # Каркас плана разработки копитрейд-бота на AsterDex
 
-> **Заморозка (2026-09-10):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живые части — §9 «После hardening» (launch-path и ожидающая повторная квалификация) и §10 «Mini App Live Mode» (ACCEPTED 2026-09-10, журнал `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`).
+> **Заморозка (2026-09-13):** Stage 1–3 закрыты и смержены в `main` (§8 CLOSED 2026-09-09); разделы 1–8 ниже — исторический факт, не рабочий план. Живые части — §9 с текущим disposition engine hardening и §10 «Mini App Live Mode» (ACCEPTED 2026-09-10, журнал `docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`).
 
 Статус: Stage 1, Stage 2 и Stage 3 (Part 1 + Part 2, P2.0–P2.7 с corrective)
 закрыты; всё смержено в `main`. Сверх исходного видения сделаны: RAM
@@ -384,22 +384,23 @@ Activity/бот, local-calendar tests, flat resume, новые снимки и �
 приёмкой touch/мыши/trackpad. Геометрия Aster-шкалы и risk policy сохраняются.
 Подробности, зависимости, файлы и критерии:
 [MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md](reports/MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md).
-Кампания находится в реализации: историческое повторное ревью C1–C9 на
-`9a0dd98` дало REQUEST CHANGES, после чего corrective N1–N3/T1–T6 закрыт на
+Кампания завершена; ниже сохранён исторический порядок её закрытия. Повторное
+ревью C1–C9 на `9a0dd98` дало REQUEST CHANGES, после чего corrective N1–N3/T1–T6 закрыт на
 `84cabfb` и **G1 принят 2026-09-07**. S2.1–S2.6 затем выполнены на ветке
 `feature/frontend` и **G2 принят 2026-09-07**; текущая детальная evidence —
 [MINIAPP_S2_PROGRESS_2026-09.md](reports/MINIAPP_S2_PROGRESS_2026-09.md).
 Исходные находки N1–N6: [MINIAPP_S1_REVIEW_2026-09.md](reports/MINIAPP_S1_REVIEW_2026-09.md),
 corrective scope 10–30: [MINIAPP_S1_FIX_HANDOFF_2026-09.md](reports/MINIAPP_S1_FIX_HANDOFF_2026-09.md).
-N4–N6 сохраняют отдельные сроки; закрытие G2 их не переопределяет. Следующий
-этап кампании — S3/G3.
+N4–N6 сохраняли отдельные сроки; закрытие G2 их не переопределяло. Следующий
+этап кампании — S3/G3 — позднее закрыт 2026-09-09 в согласованном scope.
 Прежние acceptance-статусы вне S1 не переоткрываются. Изолированный первый slice —
 шкала риска (§21, S2.5 + S3.4) — выполнен и принят в браузерной части
 2026-09-06 (15/15 PASS + независимая перепроверка, журнал:
 [MINIAPP_RISK_RULER_2026-09.md](reports/MINIAPP_RISK_RULER_2026-09.md));
 устройство-зависимая часть (Telegram haptics, BackButton, WebKit,
-snap-stop A/B) **отложена на потом — устройства недоступны**, возврат
-в S3.5/G3 при их появлении.
+snap-stop A/B) на срезе 2026-09-06 была **отложена из-за отсутствия устройств**;
+затем touch/keyboard/WebKit-проход закрыт в S3/G3 на iPhone Mirroring
+2026-09-09. Android по решению владельца остаётся вне scope.
 
 - [x] Аудит текущих экранов/снимков и data paths; подробный UX/архитектурный план.
 - [x] Slice «шкала риска» (§21: S2.5 lifecycle + S3.4 motion) — браузерная часть (2026-09-06); не закрывает G1/G2; устройства отложены → S3.5/G3.
@@ -619,13 +620,15 @@ evidence: [HYBRID_LOAD_TEST_REPORT_2026-08.md](reports/HYBRID_LOAD_TEST_REPORT_2
 
 Источники: [ASTER_API_RESEARCH_2026-08.md](ASTER_API_RESEARCH_2026-08.md) — status 20–21.08.2026; [REPORTS_FACTUAL_COMPARISON_2026-08.md](reports/REPORTS_FACTUAL_COMPARISON_2026-08.md).
 
-## 7. Pre-Mainnet Hardening — STARTED 2026-09-04
+## 7. Pre-Mainnet Hardening — CLOSED FOR CURRENT TESTNET SCOPE 2026-09-13
 
 Рабочий журнал и evidence: [PRE_MAINNET_HARDENING_PROGRESS_2026-09.md](reports/PRE_MAINNET_HARDENING_PROGRESS_2026-09.md).
 
 **ВСЯ PRE-PRODUCTION QUALIFICATION — ТОЛЬКО REAL ASTER TESTNET С
 РЕАЛЬНЫМИ TESTNET-КОШЕЛЬКАМИ. OFFLINE/FAKE/SHADOW-ONLY НЕ ЗАСЧИТЫВАЮТСЯ
-КАК ACCEPTANCE. QUALIFICATION НАЧАТЬ ЗАНОВО С PACKAGE A.**
+КАК ACCEPTANCE. Packages A–G и corrective-пакет #62 приняты в текущем
+testnet scope; будущие изменения открывают отдельную кампанию, а не требуют
+молчаливо начинать закрытые пакеты заново.**
 
 Scope намеренно ограничен safety-hardening существующего modular monolith;
 инфраструктурная перестройка и новые типы торговых продуктов не входят.
@@ -675,17 +678,22 @@ copyc3, fail-closed by design.
 `codex/integrate-hardening-frontend`. Fake-only acceptance не закрывает package.
 
 
-## Corrective после независимого ревью, 2026-09-05
+## Corrective после независимого ревью, 2026-09-05 — CLOSED 2026-09-13
 
 - [x] Исправлены инварианты плеча, unresolved admission, общего риска, network
   wiring, REAL-cap и достоверной сходимости; архитектура сохранена.
 - [x] Подготовлены и обновлены live-сценарии для изменённого движка; выполнена
   офлайн-проверка кода тестов и opt-out gate.
-- [ ] Выполнена signed-квалификация исправленного дерева и полный load.
-- [ ] Закрыты отклонения, coverage-ограничение и сформулирован новый GO/NO-GO.
+- [x] Выполнена signed-квалификация исправленного дерева и owner-scoped load
+  integrated campaign; для migration #62 отдельно пройдена targeted upgrade
+  acceptance. Актуальное evidence хранится в `ENGINE_TEST_STATUS_2026-08.md`.
+- [x] Закрыты отклонения в согласованном scope, coverage-ограничение принято
+  как документарная цель, сформулирован текущий GO/NO-GO.
 
-Текущий verdict: **NO-GO для mainnet до повторной квалификации**.
-Исполнителю остаются прогоны и исправления по фактам:
+Текущий verdict: **GO для текущего testnet-пакета; NO-GO для mainnet по
+fail-closed guard и отсутствию отдельного owner-разрешения**. Полный
+`App`/OS-process restart остаётся честно обозначенным P2 proof gap и не является
+blocker'ом текущей фиксации; история плана и его ограничения — в
 [ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md](reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md).
 
 ## 8. Mini App Functional S1–S3 — CLOSED 2026-09-09
@@ -700,17 +708,22 @@ scope Chromium, Telegram Desktop WebView и iPhone Mirroring. Android исклю
 - [MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md](reports/MINIAPP_UI_ACCEPTANCE_INDEX_2026-09.md).
 
 Повторная квалификация объединённого hardening + frontend дерева выполнена
-фактическими offline, shadow, frontend и targeted signed-testnet прогонами.
-Интеграционный verdict и полный список оставшихся live-harness assumptions
-зафиксированы append-only в `ENGINE_TEST_STATUS_2026-08.md`; до закрытия этих
-отклонений общий pre-mainnet verdict остаётся **NO-GO**.
+фактическими offline, shadow, frontend и targeted signed-testnet прогонами
+(срез 2026-09-09). Интеграционный verdict и полный список оставшихся
+live-harness assumptions зафиксированы append-only в
+`ENGINE_TEST_STATUS_2026-08.md`; текущий corrective disposition обновлён ниже.
 
-## 9. После hardening — живая часть (2026-09-10)
+## 9. После hardening — текущий статус (обновлено 2026-09-13)
 
 - Builder fee сделан только на тестнете (P2.7, CLOSED 2026-09-04); вывод комиссий на mainnet через Builder Center открыт — статус в §4 «Этап 3», механика в `docs/ASTER_API_RESEARCH_2026-08.md:682`.
 - Tunnel keepalive и ready-gate приземлены 2026-09-09: `ffa2848` (keep mini app tunnel alive: `scripts/dev-up.sh` + `scripts/detach_process.py`) и `58c10f7` (withhold ready until public mini app is live: `scripts/dev-up.sh`).
-- Повторная квалификация движка pending: последняя — `f7df60b` (requalify integrated live gates, 2026-09-09); после неё в launch-path зашли ровно `ffa2848` + `58c10f7` (`9b65312` — только docs/maps/гейты, переквалификации не требует).
-- Дальше — прогоны по `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:6-11` (NO-GO до повторной квалификации); verdict и счётчики — только в `docs/ENGINE_TEST_STATUS_2026-08.md`.
+- Integrated hardening + frontend qualification завершена 2026-09-09; corrective
+  migration #62 для upgrade continuity принята 2026-09-13 на `54b8051`.
+  Все шесть исходных P1 закрыты; verdict и счётчики — только в
+  `docs/ENGINE_TEST_STATUS_2026-08.md`.
+- Текущий пакет имеет **GO для testnet scope**. Полный `App`/OS-process restart
+  не входил в доказанный acceptance (P2 proof gap); mainnet rollout остаётся
+  запрещённым fail-closed конфигурацией и не следует из этого GO.
 - Исторический план A–G демотирован из корня `docs/` в `docs/reports/plan_live_test.md` (история — `git log --follow`); старые A–G — история прогонов предыдущего кода (`docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md:10-11`).
 
 ### Engine audit follow-up — 2026-09-12

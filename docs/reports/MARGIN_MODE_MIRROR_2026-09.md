@@ -126,3 +126,12 @@ HEDGE-ноги слишком широко. Фактический и сохра
 даже `1x` не покрывает Stop-risk, рост не планируется. Offline регрессии
 проверяют downshift → `MARKET_OPEN` DAG и конфликт мастерских HEDGE-режимов,
 включая flat-строку. Текущий общий тестовый статус — в `ENGINE_TEST_STATUS`.
+
+## Current disposition — 2026-09-13
+
+Сценарий зеркалирования режима маржи принят как текущая engine policy в
+согласованном Testnet scope. Последующее migration #62 касается upgrade
+continuity внешнего close и описано в
+[`EXTERNAL_FOLLOWER_CLOSE_POLICY.md`](../EXTERNAL_FOLLOWER_CLOSE_POLICY.md) и
+review guide; оно не меняет margin-mode контракт. Текущие counters и общий
+verdict находятся в [`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md).

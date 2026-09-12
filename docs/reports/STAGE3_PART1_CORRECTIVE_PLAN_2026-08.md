@@ -1111,3 +1111,14 @@ gate — перед финальным verdict. Live testnet можно испо
 
 **Исторический вердикт 2026-08-31: CLOSED. Он отменён аудитом 2026-09-01;
 актуальный статус см. в addendum в начале документа.**
+
+## Current disposition — 2026-09-13
+
+Формулировка «финальный gate остаётся открытым» выше относится к
+историческому срезу до завершения Part 1. R1–R8 закрыты финальным
+audit/remediation, signed Testnet и ручной Telegram-приёмкой; последующее
+исполнение зафиксировано в
+[`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`](STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md).
+Текущие counters и ограничения брать из
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md); этот план
+сохраняется как историческая provenance-запись.

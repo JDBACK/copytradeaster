@@ -224,3 +224,14 @@ read-only `PositionPageDTO`, risk constraints, revoke/disconnect-семанти�
 - перепроверены официальные доки Builder и исходники демо (§3);
 - сгенерирован builder-адрес, добавлен в `wallet.txt` (§4);
 - начало WP1.
+
+## Current disposition — 2026-09-13
+
+Верхний статус о повторно открытом corrective gate относится к срезу
+2026-09-01. Part 1 позднее закрыта финальным аудитом, signed Testnet и ручной
+Telegram-приёмкой; execution-evidence находится в
+[`STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md`](STAGE3_PART1_FINAL_AUDIT_AND_REMEDIATION_2026-09.md),
+а общий текущий verdict — в
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md). Известный
+fee-statement `/builder/userTrades` остаётся отдельной границей, а не
+незакрытым Part 1 gate.

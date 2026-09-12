@@ -384,3 +384,12 @@ Live gate:
 backend contract → screen → live evidence. После каждой подчасти не начинать
 следующую, пока текущий экран не открыт на реальных данных и не записан его
 live-result.
+
+## Current disposition — 2026-09-13
+
+Статус `PLAN READY / IMPLEMENTATION NOT STARTED` в начале — исторический
+срез 2026-09-01. Все P2.0–P2.7 реализованы и закрыты; фактический журнал
+исполнения и post-closure corrective находится в
+[`STAGE3_PART2_PROGRESS_2026-09.md`](STAGE3_PART2_PROGRESS_2026-09.md). Этот
+файл сохраняет исходные границы и критерии Part 2 и не является текущей
+инструкцией начать реализацию заново.

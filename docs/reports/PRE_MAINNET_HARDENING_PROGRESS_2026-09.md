@@ -937,3 +937,14 @@ collateral и durable external-follower-close latch. Эти изменения �
 прежний pre-mainnet verdict автоматически; их counters/evidence ведутся в
 `../ENGINE_TEST_STATUS_2026-08.md`, а подробные policy/report — в
 `../EXTERNAL_FOLLOWER_CLOSE_POLICY.md` и `MARGIN_MODE_MIRROR_2026-09.md`.
+
+## 2026-09-13 — Current disposition after migration #62
+
+Запись выше сохраняет хронологию hardening и не переписывается задним числом.
+Текущая corrective-граница `e6f0d0f → #62` принята независимым re-review:
+все шесть исходных P1 закрыты, upgrade #60→#62 и #61→#62 проверен offline,
+а консервативный `UPGRADE_FLAT_CAUSE_UNKNOWN` блокирует re-entry до нового
+master `trade_id`. Текущий GO относится к согласованному Testnet scope; полный
+`App`/OS-process restart остаётся отдельным P2 proof gap и не является blocker'ом.
+Канонические counters, live evidence и оставшиеся ограничения — в
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md).

@@ -245,7 +245,7 @@ node scripts/audit_miniapp_browser.mjs smoke|series|nested|jitter|churn|swipe|st
 - **Coverage Requirement**: $\ge 87\%$ statement coverage across `src/copytradeaster` — documentary convention (no `fail_under` / `--cov-fail-under` enforcement; eyeball `--cov` output).
 - **Test Status**: counters and bug registry live only in `docs/ENGINE_TEST_STATUS_2026-08.md` (bugs #1–27 closed; баг #27: мусорный liq 25.5M → wrong-side guard) — never copy numbers here.
 - **Naming & Isolation**: `test_<module>_<behavior>.py`. Default `pytest -q -m "not testnet"` must run hermetically without network or private keys (per-test `tmp_path` SQLite + `migrate()`, `respx` HTTP mocks, `FakeAster`/`ShadowExchange`, synthetic `0x..` keys). `load` marker is registered but unused — real scale gate is `CT_LOAD=1` on the explicit path.
-- **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` (sections `main`/`copyc1`/`copyc2`/`copyc3`/`builder`) with testnet faucet accounts. Cleanup is flat-with-no-open-orders in `finally`; testnet accounts are disposable, but every signed campaign on a shared account is serialized by the file lock and must leave a state it can explain — see `tests/AGENTS.md`.
+- **Live Testnet Protocol**: Live scenarios require `CT_TESTNET=1` and `wallet.txt` (sections `main`/`copyc1`/`copyc2`/`copyc3`/`builder`/`builder-gate`) with testnet faucet accounts. Cleanup is flat-with-no-open-orders in `finally`; testnet accounts are disposable, but every signed campaign on a shared account is serialized by the file lock and must leave a state it can explain — see `tests/AGENTS.md`.
 - **Living Documentation**: Update `docs/ENGINE_TEST_STATUS_2026-08.md` after any test suite change. Do not duplicate counters across files.
 
 ---

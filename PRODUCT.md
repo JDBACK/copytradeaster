@@ -18,7 +18,9 @@ CLOSED 2026-09-09: 4-tab follower AppShell, история сделок и activ
   reconciliation и аварийным закрытием; per-account emergency остаётся
   внутренним control-core, но не пользовательской операцией.
 
-Первый рабочий масштаб — 10–30 followers, максимум около 100.
+Текущий launch-cap — до 10 REAL followers (`CT_MAX_FOLLOWERS=10`, fail-closed),
+подтверждённый измеренным request-weight envelope. Масштаб 30–100 — будущая
+цель, а не действующий лимит.
 
 ## Product Purpose
 
@@ -66,11 +68,16 @@ reconciliation восстанавливают правильное состоя�
   наружу выдаются только opaque trade refs и безопасные агрегаты, без exchange
   identifiers, credentials и чужих account данных;
 - leverage выбирается автоматически для каждого symbol по signed Aster V3
-  `leverageBracket` и устанавливается в максимальное положительное
-  `initialLeverage`, которое вернул exchange; master leverage и legacy policy
-  caps не являются пользовательскими настройками;
-- Stage 2 пока не меняет margin type аккаунта. Isolated enforcement отложен до
-  отдельной реальной проверки Aster testnet; текущий режим не переписывается;
+  `leverageBracket`: базовый ceiling — максимальное положительное
+  `initialLeverage`, которое вернул exchange, затем применяются operator и
+  risk-safety caps (для `ISOLATED` — дополнительный cap залога); master leverage
+  и legacy policy caps не являются пользовательскими настройками;
+- Движок авторитетно зеркалирует `CROSSED`/`ISOLATED` master на follower через
+  `positionRisk`; пользовательский control-plane не меняет режим вручную. Для
+  `ISOLATED` вход и рост проходят предварительный cap залога `2×` риска до Stop,
+  после fill проверяются фактический `isolatedMargin` и liquidation guard.
+  Account-wide Multi-Assets автоматически не переключается, а несовместимый
+  новый вход блокируется fail-closed. Подробности — в `docs/ARCHITECTURE.md` §4;
 - emergency actions доступны только администратору на application/UI boundary;
 - Telegram handlers не вызывают trading endpoints напрямую;
 - trading core Stage 1 не переписывается;
@@ -90,8 +97,9 @@ reconciliation восстанавливают правильное состоя�
 
 ## Evidence on Hand
 
-- актуальный scope и readiness verdict Stage 2:
-  `docs/reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md`;
+- исторический scope и readiness snapshot Stage 2:
+  `docs/reports/STAGE2_CURRENT_STATE_AND_READINESS_2026-08.md` (срез
+  2026-08-24; текущая engine truth — в `docs/ARCHITECTURE.md` и статусе ниже);
 - принятое торговое ядро и актуальные тестовые доказательства:
   `docs/ENGINE_TEST_STATUS_2026-08.md`;
 - архитектурные инварианты: `docs/ARCHITECTURE.md`;

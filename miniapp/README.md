@@ -1,18 +1,25 @@
-# ASTER COPY — Mini App (Stage 3, part 1)
+# ASTER COPY — Mini App
 
-Telegram Mini App для входа в копитрейд через Builder-авторизацию.
+Telegram Mini App для Builder-авторизации, управления follower account и
+просмотра состояния копитрейдинга через общий application layer.
 Стек: Vite + React 19 + TypeScript, без UI-кита — кастомные токены из
 `docs/reports/STAGE3_MINI_APP_UX_PLAN_2026-08.md` §5.
 
-## Экраны (часть 1)
+## Экраны и live-поведение
 
 1. **Session gate** — server-derived доступ: loading / pending / rejected / invalid.
 2. **Builder wizard** — trust rail `Wallet → Agent → Builder → Sync`,
    review разрешений и fee до подписи, одна combined-подпись
    `approveAgent` (EIP-712, chainId 56) кошельком пользователя.
 3. **Success** — подключено, копирование на паузе, срок авторизации.
-4. **Home (минимум)** — состояние, риск, открытые позиции, freshness,
-   pause/resume (resume — с typed-подтверждением, когда мастер в позиции).
+4. **Root AppShell** — четыре вкладки: `Главная`, `Позиции`, `Активность`,
+   `Настройки`; nested screens включают Risk, Notifications, System Status,
+   Account Builder и историю сделок.
+
+Позиции, PnL, история и статус получают resource invalidations через
+аутентифицированный single-use-ticket WebSocket. При разрыве остаётся последний
+подтверждённый снимок и показывается stale-rail; штатной refresh-кнопки нет,
+единственный ручной путь — pull-to-refresh сверху shell.
 
 ## Запуск (локальная разработка)
 
@@ -64,8 +71,10 @@ pnpm lint      # oxlint
 pnpm build     # tsc -b && vite build
 ```
 
-## Границы части 1
+## Текущий scope
 
-Полный 4-табовый shell, Позиции/Активность/Настройки, revoke/disconnect,
-`builder+feeRate` в регулярной торговле — часть 2 (см. реестр решений в
-`docs/reports/STAGE3_BUILDER_MINI_APP_PART1_2026-08.md`).
+В production bundle входят полный 4-табовый shell, account lifecycle,
+revoke/disconnect, `builder+feeRate` в регулярной торговле, account-owned
+история и live presentation. Реализация и acceptance S1–S3/Part 2 описаны в
+`docs/reports/STAGE3_PART2_PROGRESS_2026-09.md` и
+`docs/reports/MINIAPP_LIVE_MODE_PLAN_2026-09.md`.

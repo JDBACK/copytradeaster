@@ -180,9 +180,10 @@ in any state it can explain: the standing constraints are `CT_ALLOW_MAINNET=fals
 flat-with-no-open-orders cleanup in `finally`, and one campaign at a time per account
 (the file lock above). Do not describe these runs as needing separate authorization.
 
-Corrective live package: `test_engine_corrective_live.py` (LC1–LC6), with signed
-evidence and unconditional audited cleanup. Run order and current qualification
-status: `docs/reports/ENGINE_CORRECTIVE_TEST_PLAN_2026-09.md`.
+Historical corrective live package: `test_engine_corrective_live.py` (LC1–LC6),
+with signed evidence and unconditional audited cleanup. Its append-only plan is
+retained for provenance; current engine acceptance (including migration #62) is
+in `test_one_way_engine_e2e.py` and `docs/ENGINE_TEST_STATUS_2026-08.md`.
 Protocol: `wallet.txt` at repo root (git-ignored, never commit) with section blocks `main`/`copyc1`/`copyc2`/`copyc3`/`builder`/`builder-gate`; `ensure_testnet_guard` (host + chains 714/56), pre/post `flatten` (cancel + MARKET-close to flat in `finally`), scratch DBs via `sqlite3.backup` (never touch prod).
 Format per block (parser: `src/copytradeaster/cli/main.py:parse_wallet_file`, typos are literal): label line, then `evm adress: 0x…` (user), `api wallet adress: 0x…` (signer), `privte key: 0x…` (66-hex signer key), optional `main privte key: 0x…`. Fund accounts from the testnet faucet (`https://www.asterdex-testnet.com/en/faucet`: 1000 test USDT + 1000 test ASTER once a day); example shape in `tests/unit/cli/test_wallet_parser.py:WALLET_FIXTURE`.
 

@@ -953,3 +953,13 @@ rescope-замер + restart/SIGTERM/SIGKILL) 1 passed за 3:39:15 (loadgate8),
 HEDGE live matrix 7/7 закрыт с фиксом прод-бага #27 и снятием ONE_WAY-only boot refusal.
 Offline unit: 1068 passed, ruff clean, flat audit везде. Вердикт v1 (ONE_WAY + HEDGE): GO.
 Финальное решение по выходу в mainnet остаётся за owner'ом.**
+
+## Current disposition — 2026-09-13
+
+Этот файл остаётся историческим owner-provided планом и источником acceptance-
+критериев; его верхний NO-GO и список «следующей сессии» относятся к состоянию
+до corrective-переквалификации. Packages A–G и migration #62 теперь приняты в
+согласованном Testnet scope (все шесть исходных P1 закрыты). Текущий verdict,
+counters и честные ограничения брать из
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md); mainnet
+по-прежнему закрыт fail-closed guard.

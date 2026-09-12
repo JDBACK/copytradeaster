@@ -170,3 +170,13 @@ CT_TESTNET=1 .venv/bin/python -m pytest tests/testnet/ -v
 снапшот; 4-табовый shell (Позиции/Активность/Настройки); read-only
 PositionPageDTO; risk constraints; revoke/replace; VPS+домен вместо туннеля;
 `builder+feeRate` в регулярной торговле движка; mainnet-гейт.
+
+## Current disposition — 2026-09-13
+
+Верхний audit addendum с формулировкой «финальный gate остаётся открытым» —
+исторический срез до завершения Part 1. Финальный audit/remediation gate
+закрыт; последующие Part 2 и Mini App Live Mode также приняты в согласованном
+scope. Текущие counters и ограничения — в
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md). Этот guide
+сохраняется для воспроизведения исторических findings и не требует нового
+прогона без изменения кода.

@@ -268,3 +268,13 @@ CT_TESTNET=1 CT_DB_PATH=/Users/jd_ebash/copytradeaster/data/<UNIQUE-PM-A-RUN>.sq
 - Независимый signed REST audit показывает flat positions и zero open
   orders для всех задействованных Testnet-аккаунтов.
 - Документы и тестовые счётчики обновлены по факту.
+
+## Disposition — 2026-09-13
+
+Этот handoff — исторический снимок требований кампании от 2026-09-04. Его
+инструкцию «начать заново с Package A» нельзя использовать как текущую задачу:
+Packages A–G уже закрыты в согласованном Testnet scope, а последующий corrective
+с migration #62 принят с verdict **GO** независимого re-review. Полный
+`App`/OS-process restart сохранён как отдельный P2 proof gap; текущие counters и
+ограничения находятся в
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md).

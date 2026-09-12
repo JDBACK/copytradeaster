@@ -200,3 +200,15 @@ P8a strict без moot, P8b ассёрты внутри. Фронт: 0 стро�
 -4226 в тихом окне отсутствует полностью → прошлый шторм признан
 интерференцией двух движков. Load-гейт закрыт чисто. Остаток плана:
 coverage 86→87 (документарно), 3 honest shape-skip.
+
+## Current disposition — 2026-09-13
+
+Этот файл закрыт как append-only corrective handoff и сохраняется для provenance;
+его старые указания «следующему исполнителю» не означают, что кампанию A–G нужно
+запускать заново. Текущее дерево `e6f0d0f → #62` зафиксировано коммитом
+`54b8051`; независимый re-review дал **GO для согласованного Testnet scope** и
+принял все шесть исходных P1. Migration #62 закрывает upgrade continuity для
+старых flat-наблюдений с linked Stop/TP. Актуальные counters и ограничения — в
+[`ENGINE_TEST_STATUS_2026-08.md`](../ENGINE_TEST_STATUS_2026-08.md); полный
+`App`/OS-process restart остаётся non-blocking P2 proof gap, а mainnet guard
+остаётся fail-closed.
