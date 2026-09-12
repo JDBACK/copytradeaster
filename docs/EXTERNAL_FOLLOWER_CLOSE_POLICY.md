@@ -1,6 +1,6 @@
 # Политика ручного закрытия позиции follower
 
-Статус: **IMPLEMENTED / OFFLINE + ASTER TESTNET VERIFIED**
+Статус: **IMPLEMENTED / upgrade continuity OFFLINE VERIFIED; current live smoke ASTER TESTNET VERIFIED**
 Дата решения и реализации: **2026-09-12**
 
 ## Коротко
@@ -38,8 +38,8 @@ followers продолжают копирование без изменений.
 контракта этот исторический тест удалён и заменён обратной регрессией
 `test_manual_close_blocks_reentry_until_new_episode_and_after_restart`.
 
-Закрытие через собственный подтверждённый Stop/TP движка уже имеет отдельный
-`OWN_PROTECTIVE_FILLED` guard и не должно переоткрывать позицию до новой master-сделки.
+Закрытие через собственный подтверждённый Stop/TP движка имеет отдельный
+durable `OWN_PROTECTIVE_FILLED` guard и не переоткрывает позицию до новой master-сделки.
 Dust-flat, намеренно созданный пропорциональным сокращением, также имеет отдельный
 sticky-маркер. Эти случаи нельзя смешивать с ручным закрытием follower.
 
@@ -74,13 +74,27 @@ P&L закрытия — положительный, отрицательный 
   (`balance + openOrders + positionRisk`). Ошибка любого REST-read не создаёт
   переход и не меняет маркер; private stream/UI не участвуют в решении.
 - При `non-zero → flat` journal-cursor отличает новую подтверждённую
-  `MARKET_CLOSE` движка, а её quantity должна покрывать предыдущий authoritative
-  qty: соседняя partial-reduction не может объяснить полный flat. Для linked
-  bot-owned Stop/TP сохраняется отдельная проверка `FILLED` и guard
-  `OWN_PROTECTIVE_FILLED`. Если ни одна причина не доказана, безопасная
+  `MARKET_CLOSE` движка, но доказательством служит только сохранённый в journal
+  фактически исполненный биржей `executed_qty` (migration #61), покрывающий
+  предыдущий authoritative qty. Запрошенная quantity, `-2022 already flat`
+  (исполнение `0`) и один лишь position-delta без order provenance не считаются
+  доказательством. Для linked bot-owned Stop/TP подтверждённый `FILLED`
+  сохраняется отдельным episode-bound маркером `own_protective_filled` (#61).
+  Если ни одна причина не доказана, безопасная
   классификация — `EXTERNAL_OR_UNKNOWN`, без re-entry.
-- Блокированный flat получает zero-target: оставшиеся bot-owned Stop/TP
-  отменяются, но latch не снимается ни этой отменой, ни очередным reconcile.
+- Migration #62 отдельно обрабатывает upgrade с `e6f0d0f`/версий #60–#61:
+  старый процесс не сохранял успешный результат `query_order(...)=FILLED`.
+  Для active episode с наблюдённым flat, linked bot-owned Stop/TP и без
+  dust/external/new-proof маркера миграция ставит
+  `external_close_reason=UPGRADE_FLAT_CAUSE_UNKNOWN`. Это карантин неизвестной
+  причины, **не** утверждение о фактическом protective fill. Он сохраняется при
+  ошибке следующего `query_order` и снимается только новым master `trade_id`
+  (или отдельно подтверждённым re-arm). Возможна консервативная блокировка
+  старого flat, который был вызван иной причиной: прежняя SQLite не позволяет
+  достоверно восстановить источник закрытия.
+- Блокированная нога получает zero-target и при flat, и после ручного
+  same-episode reopen: открытый объём закрывается, оставшиеся bot-owned Stop/TP
+  отменяются, но latch не снимается ни исполнением, ни очередным reconcile.
 - `CopyTradeRepo.open_trade()` сбрасывает старый latch и observation baseline
   только на границе нового master episode. `SyncBasisRepo.rearm_external_close()`
   предоставляет persistence-seam для будущего отдельно подтверждаемого re-arm.
@@ -95,14 +109,16 @@ P&L закрытия — положительный, отрицательный 
 | Сценарий | Результат / evidence |
 |---|---|
 | Ручное закрытие follower независимо от P&L | PASS offline + REAL Testnet: follower остаётся flat; P&L не является входом классификатора |
+| Ручной reopen в том же episode | PASS offline + REAL Testnet: latch закрывает ненулевой объём и не ставит новый Stop |
 | Очередное событие master по другому символу | PASS offline: latch сохраняется, нового `MARKET_OPEN` нет |
 | Периодическая authoritative-сверка | PASS offline + REAL Testnet: несколько reconcile оставляют follower flat |
-| Рестарт процесса | PASS offline + REAL Testnet: новый Coordinator на той же SQLite восстанавливает latch |
+| Пересборка ядра на той же SQLite | PASS offline + REAL Testnet: новый Coordinator восстанавливает latch; полный App/process restart этим тестом не доказан |
 | Master закрыл старую и открыл новую сделку | PASS offline + REAL Testnet: новый `trade_id` снимает старый запрет, вход проходит обычные gates |
 | Явный re-arm в том же episode | Persistence-seam покрыт unit; публичный подтверждаемый UI/CLI action ещё не выставлен |
-| Сработал собственный Stop/TP движка | PASS offline: остаётся `OWN_PROTECTIVE_FILLED`, external latch не ставится |
+| Сработал собственный Stop/TP движка | PASS offline: durable `OWN_PROTECTIVE_FILLED` переживает следующую ошибку `query_order`; external latch не ставится |
+| Upgrade старого flat с linked Stop/TP (#60/#61 → #62) | PASS offline: неизвестная причина карантинируется, следующий `query_order` может отказать без re-entry; новая master-сделка снимает блок |
 | Engine dust-close | PASS offline: `zero_target` ставится, external latch не ставится |
-| Частичный engine-close рядом с полным внешним close | PASS offline: недостаточный engine-close не маскирует внешний переход в flat |
+| Нулевой/частичный engine-close при полном requested qty | PASS offline: фактический `executed_qty` не маскирует внешний переход в flat |
 | Временная ошибка чтения follower | PASS offline: неполный snapshot не ставит marker; следующий полный read фиксирует переход |
 
 Основная offline-регрессия:
@@ -122,3 +138,5 @@ reduce-only close follower, restart Coordinator, реальную новую mas
 отдельного подтверждаемого control-plane action нормальный путь — ждать следующую
 master-сделку. Liquidation/ADL безопасно попадают в `EXTERNAL_OR_UNKNOWN` и не
 переоткрываются, но отдельная user-facing классификация этих причин не реализована.
+Полный `App`/OS-process restart остаётся отдельным P2 proof gap: проверена
+пересборка Coordinator/Executor с той же SQLite, не полная перезагрузка процесса.

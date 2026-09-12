@@ -45,8 +45,8 @@ Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` �
    - Stage-2 onboarding starts `PAUSED` (`allow_new_entries=False`); legacy CLI `import-wallet` keeps old unpaused default.
    - Resuming requires `SystemState.READY`, fresh snapshot, and single-use confirmation token (TTL 60s).
    - Unknown leverage blocks `MARKET_OPEN` (`LEVERAGE_NOT_READY`) while allowing `MARKET_CLOSE` and cancellations.
-   - An authoritative follower `non-zero→flat` without a newer confirmed engine close covering the prior quantity or linked protective fill latches an episode-bound external-close block; same-episode `MARKET_OPEN` is forbidden across reconcile/restart.
-   - ExecutionPlan DAG (`depends_on_action_id`): authoritative master `marginType` mirrors to the follower through `SET_MARGIN_TYPE → SET_LEVERAGE → MARKET_OPEN`; unknown master mode blocks new exposure, while an already occupied symbol blocks a mode switch and growth but still permits closes/protection. ISOLATED collateral is at least 2× fee-buffered Stop loss, with the liquidation guard retained; account-wide Multi-Assets is not auto-switched.
+   - An authoritative follower `non-zero→flat` without a newer confirmed engine close whose *executed* quantity covers the prior quantity or a linked protective fill latches an episode-bound external-close block; same-episode manual reopen is closed, not adopted. Own Stop/TP `FILLED` proof is durable per episode; pre-#61 flat observations with linked protection are quarantined by #62 because old fill provenance was not stored.
+   - ExecutionPlan DAG (`depends_on_action_id`): authoritative master `marginType` mirrors to the follower through `SET_MARGIN_TYPE → SET_LEVERAGE → MARKET_OPEN`; unknown/conflicting master mode blocks new exposure. An occupied symbol blocks a mode switch, but growth in an already matching mode is allowed. ISOLATED collateral is at least 2× fee-buffered Stop loss before initial entry and growth, with the liquidation guard retained; account-wide Multi-Assets is not auto-switched.
   - Journal `PENDING→SENDING→SUBMITTED→CONFIRMED/UNKNOWN/FAILED`; UNKNOWN (HTTP 503/504, codes `-1000/-1006/-1007`, timeouts) resolved by exchange query before retry; `-5026` is the only authoritative Builder rejection (entry fail-closed, reduction single DIRECT retry).
 3. **Key Isolation & Security**:
    - Private keys and user signatures never logged or stored in plaintext. Credential blobs + builder attempts use AES-256-GCM (`CT_ENCRYPTION_KEY`, 32-byte hex).
@@ -54,7 +54,7 @@ Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` �
    - Uncommitted credentials in memory isolated via `EphemeralIdentityProvider` / `EphemeralKeyProvider`.
 4. **Concurrency & Storage**:
    - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, MiniApp, HistoryWorker.
-   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **61 migrations (indices 0..60)**.
+   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **63 migrations (indices 0..62)**.
    - Per-account `asyncio.Lock` serializes order/nonce/leverage pipelines; `FollowerRegistry` is copy-on-write (lock-free reads, CAS publish under mutation lock).
 5. **Presentation Is Not Authority**: `FollowerSnapshotStore` revisions, private-stream hints and mark-price quotes only invalidate Mini App DTOs — they never mutate trading target, admission or `captured_at` freshness. Mark ticks change presentation quotes/PnL only; REST snapshots and reconciliation stay authoritative.
 
@@ -75,7 +75,7 @@ copytradeaster/
 │   ├── risk/                  # RiskEngine: pure sizing math, 80% margin cap (MARGIN_SAFETY=0.8)
 │   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution, FollowerSnapshotStore (snapshots.py)
 │   ├── history/               # Durable fill import, trade episodes/events, reconciliation and replay
-│   ├── storage/               # SQLite Database, MIGRATIONS (0..60), async repositories
+│   ├── storage/               # SQLite Database, MIGRATIONS (0..62), async repositories
 │   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
 │   ├── notifications/         # NotificationRouter, SQLite outbox, TelegramOutboxWorker
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services

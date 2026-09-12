@@ -155,7 +155,7 @@ async def test_corrective_g1_upgrade_marks_retained_history_dirty(tmp_path: Path
         )
         await database.conn.commit()
 
-        assert await database.migrate() == 3
+        assert await database.migrate() == 5
         a = await database.fetchone(
             "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
             "WHERE account_id='a' AND environment='testnet' AND symbol='BTCUSDT'"
@@ -221,8 +221,8 @@ async def test_hardening_v33_lineage_keeps_recovery_context_and_adds_history(tmp
         await database.close()
 
 
-async def test_frontend_v58_lineage_adds_recovery_and_external_close_state(tmp_path: Path):
-    """A frontend-v58 DB receives the two later trading-core migrations."""
+async def test_frontend_v58_lineage_adds_recovery_and_close_proof_state(tmp_path: Path):
+    """A frontend-v58 DB receives the later trading-core migrations."""
     database = Database(tmp_path / "frontend-v58.sqlite3")
     await database.connect()
     try:
@@ -231,14 +231,15 @@ async def test_frontend_v58_lineage_adds_recovery_and_external_close_state(tmp_p
             "execution_commands", "recovery_context"
         )
 
-        assert await database.migrate() == 2
+        assert await database.migrate() == 4
         assert await database._column_exists(  # noqa: SLF001 - migration lineage proof
             "execution_commands", "recovery_context"
         )
         applied = await database.fetchone("SELECT MAX(version) AS version FROM schema_migrations")
         assert applied is not None
         assert RECOVERY_CONTEXT_INDEX_VERSION == 59
-        assert applied["version"] == EXTERNAL_CLOSE_INDEX_VERSION == 60
+        assert EXTERNAL_CLOSE_INDEX_VERSION == 60
+        assert applied["version"] == len(MIGRATIONS) - 1 == 62
         sync_columns = {
             row["name"] for row in await database.fetchall("PRAGMA table_info(sync_basis)")
         }
@@ -248,6 +249,64 @@ async def test_frontend_v58_lineage_adds_recovery_and_external_close_state(tmp_p
             "last_engine_close_key",
             "external_close_blocked",
             "external_close_reason",
+            "own_protective_filled",
         } <= sync_columns
+        assert await database._column_exists(  # noqa: SLF001 - migration lineage proof
+            "execution_commands", "executed_qty"
+        )
     finally:
         await database.close()
+
+
+async def test_legacy_flat_protective_episode_is_quarantined_from_v60_and_v61(
+    tmp_path: Path,
+):
+    """The baseline did not persist a FILLED order query result.
+
+    A flat observation with a linked protection on the current episode is
+    ambiguous after upgrade; it must not become fresh entry permission.
+    The data-only v62 step also repairs databases where v61 already ran.
+    """
+    for old_version in (60, 61):
+        database = Database(tmp_path / f"legacy-v{old_version}.sqlite3")
+        await database.connect()
+        try:
+            await _apply_through(database, old_version)
+            cases = (
+                (1, "BTCUSDT", "OPEN", "0", 0, True),  # old FILLED could be here
+                (2, "ETHUSDT", "OPEN", "0", 0, False),  # no bot-owned protection
+                (3, "SOLUSDT", "CLOSED", "0", 0, True),  # old episode ended
+                (4, "XRPUSDT", "OPEN", "0", 1, True),  # intentional dust flat
+                (5, "ADAUSDT", "OPEN", "0.005", 0, True),  # still occupied
+            )
+            for trade_id, symbol, status, qty, dust, linked in cases:
+                await database.execute_write(
+                    "INSERT INTO copy_trades(trade_id,symbol,pos_side,opened_at,status)"
+                    " VALUES (?,?,'BOTH','2026-09-12',?)",
+                    (trade_id, symbol, status),
+                )
+                await database.execute_write(
+                    "INSERT INTO sync_basis(account_id,symbol,pos_side,master_ref_abs,"
+                    "revision,updated_at,zero_target,episode_trade_id,last_observed_qty)"
+                    " VALUES ('copyc1',?,'BOTH','1',1,'2026-09-12',?,?,?)",
+                    (symbol, dust, trade_id, qty),
+                )
+                if linked:
+                    await database.execute_write(
+                        "INSERT INTO order_links(trade_id,account_id,kind,follower_client_order_id)"
+                        " VALUES (?,'copyc1','PLACE_STOP',?)",
+                        (trade_id, f"ct-stop-{trade_id}"),
+                    )
+
+            assert await database.migrate() == 62 - old_version
+            rows = {
+                row["symbol"]: row
+                for row in await database.fetchall("SELECT * FROM sync_basis ORDER BY symbol")
+            }
+            assert rows["BTCUSDT"]["external_close_blocked"] == 1
+            assert rows["BTCUSDT"]["external_close_reason"] == "UPGRADE_FLAT_CAUSE_UNKNOWN"
+            for symbol in ("ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"):
+                assert rows[symbol]["external_close_blocked"] == 0
+            assert await database.migrate() == 0
+        finally:
+            await database.close()

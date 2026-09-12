@@ -140,6 +140,9 @@ def test_format_skips():
     external = format_skip_reason("BTCUSDT", SkipReason.EXTERNAL_FOLLOWER_CLOSE, PosSide.LONG)
     assert "закрыта вне копитрейдинга" in external
     assert "следующую сделку мастера" in external
+    legacy = format_skip_reason("BTCUSDT", SkipReason.UPGRADE_FLAT_CAUSE_UNKNOWN, PosSide.LONG)
+    assert "причина не подтверждена" in legacy.lower()
+    assert "следующей сделки мастера" in legacy
     assert "режим маржи мастера" in format_skip_reason(
         "BTCUSDT", SkipReason.MARGIN_TYPE_UNKNOWN, PosSide.LONG
     )

@@ -1089,7 +1089,8 @@ async def test_unknown_master_margin_mode_skips_new_entry(env):
     assert followers[0].client.placed == []
 
 
-async def test_conflicting_master_hedge_margin_modes_skip_new_entry(env):
+@pytest.mark.parametrize("short_qty, expected_skips", [(D("1"), 2), (D("0"), 1)])
+async def test_conflicting_master_hedge_margin_modes_skip_new_entry(env, short_qty, expected_skips):
     coordinator, followers, db, _ = env
     policy = await SettingsRepo(db).get_policy("copyc1")
     assert policy is not None
@@ -1100,7 +1101,7 @@ async def test_conflicting_master_hedge_margin_modes_skip_new_entry(env):
     master.positions[long_key].key = long_key
     master.positions[short_key] = PositionState(
         key=short_key,
-        qty=D("1"),
+        qty=short_qty,
         entry_price=D("65000"),
         leverage=20,
         mark_price=D("65000"),
@@ -1125,7 +1126,10 @@ async def test_conflicting_master_hedge_margin_modes_skip_new_entry(env):
     )
     targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
     assert targets == []
-    assert len([skip for skip in skips if skip.reason is SkipReason.MARGIN_TYPE_UNKNOWN]) == 2
+    assert (
+        len([skip for skip in skips if skip.reason is SkipReason.MARGIN_TYPE_UNKNOWN])
+        == expected_skips
+    )
     assert followers[0].client.placed == []
 
 
@@ -1163,6 +1167,60 @@ async def test_isolated_entry_rejects_when_one_x_cannot_cover_double_stop_loss(e
     targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
     assert targets == []
     assert any(skip.reason is SkipReason.INSUFFICIENT_MARGIN for skip in skips)
+
+
+async def test_isolated_growth_downshifts_leverage_before_market_open(env):
+    coordinator, _followers, db, _ = env
+    coordinator._basis = SyncBasisRepo(db)
+    await coordinator._basis.upsert_ref("copyc1", "BTCUSDT", "BOTH", D("1"))
+    policy = await SettingsRepo(db).get_policy("copyc1")
+    assert policy is not None
+    key = PositionKey("BTCUSDT")
+    master = master_state(qty=D("2"), stop=D("63000"))
+    master.positions[key].margin_type = "ISOLATED"
+    actual = AccountState(
+        account_id="copyc1",
+        available_usdt=D("10000"),
+        positions={
+            key: PositionState(
+                key=key,
+                qty=D("0.01"),
+                entry_price=D("65000"),
+                leverage=20,
+                mark_price=D("65000"),
+                liquidation_price=D("30000"),
+                margin_type="ISOLATED",
+                stop=ProtectiveOrder(
+                    client_order_id="ct-existing-stop",
+                    order_id=9,
+                    type="STOP_MARKET",
+                    side=Side.SELL,
+                    stop_price=D("63000"),
+                    reduce_only=True,
+                    close_position=False,
+                    working_type="MARK_PRICE",
+                ),
+            )
+        },
+        symbol_margin_types={"BTCUSDT": "ISOLATED"},
+        symbol_leverages={"BTCUSDT": 20},
+    )
+    targets, skips = await coordinator.targets_for("copyc1", master, actual, policy)
+    assert skips == []
+    assert targets[0].qty > D("0.01")
+    assert targets[0].leverage == 16
+    from copytradeaster.trading.planner import build_plan
+
+    plan = build_plan(
+        actual,
+        TargetState(account_id="copyc1", targets=targets),
+        filters_provider(),
+        coordinator._coid_factory(),
+    )
+    leverage = next(action for action in plan.actions if action.kind is ActionKind.SET_LEVERAGE)
+    growth = next(action for action in plan.actions if action.kind is ActionKind.MARKET_OPEN)
+    assert leverage.payload["leverage"] == "16"
+    assert growth.depends_on_action_id == leverage.action_id
 
 
 async def test_open_growth_is_clamped_until_follower_mode_matches_master(env):

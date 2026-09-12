@@ -511,6 +511,38 @@ MIGRATIONS: list[str | tuple[str, ...]] = [
         "ALTER TABLE sync_basis ADD COLUMN external_close_blocked INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE sync_basis ADD COLUMN external_close_reason TEXT",
     ),
+    # A requested close is not fill evidence: -2022 can confirm with zero
+    # executed, and a terminal MARKET order may fill only part of its request.
+    # Protective fills need their own episode-bound durable entry refusal.
+    (
+        "ALTER TABLE execution_commands ADD COLUMN executed_qty TEXT",
+        "ALTER TABLE sync_basis ADD COLUMN own_protective_filled INTEGER NOT NULL DEFAULT 0",
+    ),
+    # #61 cannot reconstruct a protective FILLED result already observed by
+    # e6f0d0f: that query result was never stored. Quarantine its possible
+    # episodes instead of treating a legacy observed flat as fresh entry
+    # permission when the next order-history read is unavailable. This is a
+    # separate migration because #61 may already have run on local databases.
+    """
+    UPDATE sync_basis SET external_close_blocked=1,
+      external_close_reason='UPGRADE_FLAT_CAUSE_UNKNOWN'
+    WHERE episode_trade_id IS NOT NULL
+      AND last_observed_qty IS NOT NULL
+      AND CAST(last_observed_qty AS REAL)=0
+      AND zero_target=0 AND external_close_blocked=0 AND own_protective_filled=0
+      AND EXISTS (
+        SELECT 1 FROM copy_trades AS trade
+        WHERE trade.trade_id=sync_basis.episode_trade_id
+          AND trade.symbol=sync_basis.symbol AND trade.pos_side=sync_basis.pos_side
+          AND trade.status='OPEN'
+      )
+      AND EXISTS (
+        SELECT 1 FROM order_links AS link
+        WHERE link.trade_id=sync_basis.episode_trade_id
+          AND link.account_id=sync_basis.account_id
+          AND link.kind IN ('PLACE_STOP','PLACE_TP')
+      )
+    """,
 ]
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version

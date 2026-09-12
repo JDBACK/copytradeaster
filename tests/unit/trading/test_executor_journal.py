@@ -492,6 +492,23 @@ async def test_reduceonly_close_rejected_after_fill_is_confirmed_flat(env):
     row = await commands.get(results[0].command_key)
     assert row["status"] == "CONFIRMED"
     assert row["last_error"].startswith("already-flat:-2022")
+    assert row["executed_qty"] == "0"
+
+
+@pytest.mark.parametrize("filled", ["0.01", "0.05"])
+async def test_confirmed_close_records_exchange_fill_not_requested_quantity(env, filled):
+    executor, client, commands, _, _ = env
+
+    async def exchange_result(account_id, req):
+        del account_id
+        return SimpleOrder(coid=req.new_client_order_id, status="FILLED", executed_qty=filled)
+
+    client.place_order = exchange_result  # type: ignore[method-assign]
+    results = await executor.submit(plan_of(close_action()))
+    assert results[0].status == "CONFIRMED"
+    row = await commands.get(results[0].command_key)
+    assert row["executed_qty"] == filled
+    assert json.loads(row["payload"])["quantity"] == "0.05"
 
 
 async def test_conditional_confirmed_via_open_orders(env):

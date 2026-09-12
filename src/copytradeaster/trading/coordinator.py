@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from copytradeaster.aster.trading_api import AsterClient
 from copytradeaster.domain.models import (
@@ -921,7 +921,8 @@ class Coordinator:
                 master_still_open = mpos is not None and mpos.qty != 0
                 if (
                     t.hold_flat_until_episode_end
-                    and t.zero_reason is ZeroReason.EXTERNAL_FOLLOWER_CLOSE
+                    and t.zero_reason
+                    in (ZeroReason.EXTERNAL_FOLLOWER_CLOSE, ZeroReason.OWN_PROTECTIVE_FILLED)
                     and master_still_open
                 ):
                     # The episode observation row owns this separate durable
@@ -1087,7 +1088,7 @@ class Coordinator:
         entries_allowed = await self._entries_allowed(policy)
         master_modes_by_symbol: dict[str, set[str | None]] = {}
         for position in master.positions.values():
-            if position.qty == 0 or position.key.symbol not in self._whitelist:
+            if position.key.symbol not in self._whitelist:
                 continue
             master_modes_by_symbol.setdefault(position.key.symbol, set()).add(
                 normalize_margin_type(position.margin_type)
@@ -1134,29 +1135,56 @@ class Coordinator:
 
             follower_pos = actual.positions.get(key)
 
-            if follower_pos is None or follower_pos.qty == 0:
-                if await self._external_close_blocked(account_id, key):
-                    # Keep a zero target in the plan so bot-owned protection
-                    # left behind by the external MARKET close is canceled.
-                    # The separate durable marker (not zero_target) survives
-                    # this convergence and every later same-episode sweep.
-                    targets.append(
-                        TargetPosition(
-                            key=key,
-                            qty=Decimal(0),
-                            stop_price=None,
-                            tp_price=None,
-                            leverage=(
-                                follower_pos.leverage
-                                if follower_pos is not None
-                                else actual.symbol_leverages.get(key.symbol, 0)
-                            ),
-                            hold_flat_until_episode_end=True,
-                            zero_reason=ZeroReason.EXTERNAL_FOLLOWER_CLOSE,
-                        )
+            close_block_reason = await self._external_close_block_reason(account_id, key)
+            if close_block_reason is not None:
+                # The latch is an episode-wide refusal, not a flat-only entry
+                # check. A manual same-episode reopen is converged back to
+                # zero and any bot-owned protection is canceled.
+                targets.append(
+                    TargetPosition(
+                        key=key,
+                        qty=Decimal(0),
+                        stop_price=None,
+                        tp_price=None,
+                        leverage=(
+                            follower_pos.leverage
+                            if follower_pos is not None
+                            else actual.symbol_leverages.get(key.symbol, 0)
+                        ),
+                        hold_flat_until_episode_end=True,
+                        zero_reason=ZeroReason.EXTERNAL_FOLLOWER_CLOSE,
                     )
-                    skips.append(await self._skip_record(key, SkipReason.EXTERNAL_FOLLOWER_CLOSE))
-                    continue
+                )
+                skips.append(
+                    await self._skip_record(
+                        key,
+                        SkipReason.UPGRADE_FLAT_CAUSE_UNKNOWN
+                        if close_block_reason == "UPGRADE_FLAT_CAUSE_UNKNOWN"
+                        else SkipReason.EXTERNAL_FOLLOWER_CLOSE,
+                    )
+                )
+                continue
+
+            if self._basis is not None and await self._own_protective_filled(account_id, key):
+                targets.append(
+                    TargetPosition(
+                        key=key,
+                        qty=Decimal(0),
+                        stop_price=None,
+                        tp_price=None,
+                        leverage=(
+                            follower_pos.leverage
+                            if follower_pos is not None
+                            else actual.symbol_leverages.get(key.symbol, 0)
+                        ),
+                        hold_flat_until_episode_end=True,
+                        zero_reason=ZeroReason.OWN_PROTECTIVE_FILLED,
+                    )
+                )
+                skips.append(await self._skip_record(key, SkipReason.OWN_PROTECTIVE_FILLED))
+                continue
+
+            if follower_pos is None or follower_pos.qty == 0:
                 if master_margin_type is None:
                     skips.append(await self._skip_record(key, SkipReason.MARGIN_TYPE_UNKNOWN))
                     continue
@@ -1492,6 +1520,38 @@ class Coordinator:
                         policy,
                         client=client,
                     )
+                if master_margin_type == "ISOLATED":
+                    # Growth is a fresh risk-increasing mutation. Recheck the
+                    # 2x collateral gate before opening, including the old
+                    # entry and the new fill price (the worse distance binds).
+                    expected = (
+                        follower_pos.mark_price
+                        if follower_pos.mark_price > 0
+                        else master_pos.mark_price
+                        if master_pos.mark_price > 0
+                        else follower_pos.entry_price
+                    )
+                    stop = target_stop
+                    if stop is None or min(expected, follower_pos.entry_price) < (
+                        Decimal(2)
+                        * max(abs(expected - stop), abs(follower_pos.entry_price - stop))
+                        * (1 + self._fee_buffer)
+                    ):
+                        target_abs = current_abs
+                        skips.append(await self._skip_record(key, SkipReason.INSUFFICIENT_MARGIN))
+                    else:
+                        leverage = min(
+                            self._entry_leverage_for_stop(
+                                expected, stop, policy, leverage, master_margin_type
+                            ),
+                            self._entry_leverage_for_stop(
+                                follower_pos.entry_price,
+                                stop,
+                                policy,
+                                leverage,
+                                master_margin_type,
+                            ),
+                        )
             qty = target_abs if master_qty > 0 else -target_abs
             targets.append(
                 TargetPosition(
@@ -1786,19 +1846,18 @@ class Coordinator:
         if close_row is None:
             return False
         try:
-            payload = json.loads(str(close_row["payload"]))
-            close_qty = Decimal(str(payload["quantity"]))
-        except (KeyError, TypeError, ValueError):
+            close_qty = Decimal(str(close_row["executed_qty"]))
+        except (InvalidOperation, KeyError, TypeError, ValueError):
             return False
-        return close_qty >= abs(previous_qty) > 0
+        return close_qty.is_finite() and close_qty >= abs(previous_qty) > 0
 
-    async def _external_close_blocked(self, account_id: str, key: PositionKey) -> bool:
+    async def _external_close_block_reason(self, account_id: str, key: PositionKey) -> str | None:
         if self._basis is None:
-            return False
+            return None
         trade = await self._trades.active_trade(key.symbol, key.pos_side.value)
         if trade is None:
-            return False
-        return await self._basis.is_external_close_blocked(
+            return None
+        return await self._basis.external_close_block_reason(
             account_id,
             key.symbol,
             key.pos_side.value,
@@ -1812,7 +1871,12 @@ class Coordinator:
         trade = await self._trades.active_trade(key.symbol, key.pos_side.value)
         if trade is None:
             return False
-        rows = await self._links.by_trade(int(trade["trade_id"]))
+        trade_id = int(trade["trade_id"])
+        if self._basis is not None and await self._basis.is_own_protective_filled(
+            account_id, key.symbol, key.pos_side.value, trade_id
+        ):
+            return True
+        rows = await self._links.by_trade(trade_id)
         links = [
             r
             for r in rows
@@ -1831,8 +1895,20 @@ class Coordinator:
                 log.warning("protective query failed for %s: %s", coid, exc)
                 continue
             if order is not None and order.status == "FILLED":
+                if self._basis is not None:
+                    await self._basis.mark_own_protective_filled(
+                        account_id, key.symbol, key.pos_side.value, trade_id
+                    )
                 return True
         return False
+
+    async def _own_protective_filled(self, account_id: str, key: PositionKey) -> bool:
+        if self._basis is None:
+            return False
+        trade = await self._trades.active_trade(key.symbol, key.pos_side.value)
+        return trade is not None and await self._basis.is_own_protective_filled(
+            account_id, key.symbol, key.pos_side.value, int(trade["trade_id"])
+        )
 
     def _client_for(self, account_id: str):
         for fr in self._registry.snapshot():

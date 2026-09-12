@@ -247,6 +247,24 @@ def _resolution_from_order(order: object, source: str, *, market: bool = False) 
     )
 
 
+def _close_fill_proof(action_kind: ActionKind, order: object | None) -> Decimal | None:
+    """Only an exchange order's executed quantity can prove an engine close.
+
+    A position delta without order provenance may be a concurrent manual close;
+    the requested payload quantity and an already-flat -2022 are never proof.
+    """
+    if action_kind != ActionKind.MARKET_CLOSE or order is None:
+        return None
+    status = str(_order_field(order, "status", "UNKNOWN")).upper()
+    if status not in {"FILLED", *NO_FILL_TERMINAL_STATUSES}:
+        return None
+    try:
+        qty = Decimal(str(_order_field(order, "executed_qty")))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return qty if qty.is_finite() and qty >= 0 else None
+
+
 async def _read_position_amount(
     client: object,
     account_id: str,
@@ -1071,7 +1089,9 @@ class Executor:
                     # an authoritative positionRisk read; a non-flat leg
                     # remains a genuine FAILED command.
                     message = f"already-flat:-2022:{_safe_error_category(exc)}"
-                    await self._commands.set_status(key, "CONFIRMED", last_error=message)
+                    await self._commands.set_status(
+                        key, "CONFIRMED", last_error=message, executed_qty=Decimal(0)
+                    )
                     await self._notify_confirmed(plan.account_id, action, key)
                     return CommandResult(key, "CONFIRMED", message), builder_invalidated
                 if not _is_unknown_error(exc):
@@ -1253,7 +1273,12 @@ class Executor:
             if resolution.outcome == ResolutionOutcome.PROVEN_NOT_EXECUTED:
                 await self._commands.set_status(key, "FAILED", last_error=resolution.reason)
                 return CommandResult(key, "FAILED", resolution.reason)
-            await self._commands.set_status(key, "CONFIRMED", client_order_id=coid)
+            await self._commands.set_status(
+                key,
+                "CONFIRMED",
+                client_order_id=coid,
+                executed_qty=_close_fill_proof(action.kind, resolution.order),
+            )
             await self._record_link(plan, action, coid)
             await self._notify_confirmed(plan.account_id, action, key)
             return CommandResult(key, "CONFIRMED", None)
@@ -1286,6 +1311,7 @@ class Executor:
             "CONFIRMED",
             client_order_id=coid,
             last_error=f"{prefix}:{resolution.reason}",
+            executed_qty=_close_fill_proof(action.kind, resolution.order),
         )
         await self._record_link(plan, action, coid)
         await self._notify_confirmed(plan.account_id, action, key)
@@ -1413,6 +1439,7 @@ async def resolve_boot_unknowns(
                 "CONFIRMED",
                 client_order_id=str(coid),
                 last_error=f"boot-resolved:{resolution.reason}",
+                executed_qty=_close_fill_proof(kind, resolution.order),
             )
             if links is not None:
                 trade_id = row["trade_id"]

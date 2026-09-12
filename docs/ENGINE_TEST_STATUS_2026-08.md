@@ -4,6 +4,51 @@
 кампания зафиксирована в `feature/frontend`; ветка Stage 3 части 2
 `codex/stage-3-mini-app-part2` смержена ранее.
 
+> **P1 #3 upgrade-continuity corrective (2026-09-13, accepted):** второй
+> reviewer принял 5/6 P1, но воспроизвёл re-entry для pre-#61 protective fill
+> после обновления с `e6f0d0f`. Добавлена data migration #62: active episode
+> с прежним flat-наблюдением и linked Stop/TP без сохранённой причины получает
+> durable `UPGRADE_FLAT_CAUSE_UNKNOWN` и zero-target до нового master `trade_id`.
+> Причина не выдаётся за доказанный `FILLED`; консервативно могут блокироваться
+> и старые flat иной природы. Upgrade с #60 и с уже применённой #61, временная
+> ошибка `query_order` и новый episode покрыты offline. Полный backend gate:
+> **1604 passed / 2 skipped / 94 deselected за 45.83s**; целевой пакет
+> **60 passed**. Signed Testnet smoke на дереве с #62:
+> `test_external_follower_close_stays_flat_until_next_master_episode` —
+> **1 passed за 81.30s**; это live-регрессия обычного пути, не воспроизведение
+> старого потерянного `FILLED`. Независимый signed REST-аудит всех пяти REAL
+> аккаунтов после теста: `FLAT-ALL` (`positions=0`, `open_orders=0`); старый
+> dev-бот после `SIGCONT` вновь пишет `READY` (лог `01:47:35`). Он не
+> перезапускался и не загрузил corrective-код. P2 по полному
+> `App`/OS-process restart остаётся открытым как P2 proof gap, но не блокирует
+> фиксацию пакета. Независимый re-review #62: **GO, P1 #1–#6 закрыты**;
+> прицельные сценарии 6 passed, полный offline 1604 passed / 2 skipped /
+> 94 deselected, Ruff и `git diff --check e6f0d0f` — PASS. Reviewer не
+> повторял signed Testnet и не вносил изменений.
+
+> **Предыдущий corrective до второго ревью (2026-09-13, worktree поверх
+> `e6f0d0f`):** внесены исправления по 6 P1; на втором ревью пять были
+> приняты, а upgrade-continuity #3 потребовала #62. Same-episode reopen
+> теперь закрывается; для
+> engine-close учитывается только биржевой `executed_qty` (#61), а не
+> requested quantity/нулевой `-2022`; linked protective `FILLED` хранится
+> durable по episode; existing `ISOLATED` growth проходит предварительный
+> 2× collateral cap и `SET_LEVERAGE → MARKET_OPEN`; конфликт HEDGE-режимов
+> включает flat-строки; matched-mode HEDGE growth разрешён, занятому символу
+> запрещена именно смена режима. Полный offline backend после дополнительной
+> проверки частичного exchange-result: **1602 passed / 2 skipped / 94
+> deselected за 44.94s**; ruff
+> check/format и `git diff --check` чисты. Эксклюзивный signed Aster Testnet:
+> **2 passed за 185.20s**, включая ручной same-episode reopen→engine close,
+> оба margin-mode перехода и isolated collateral. Тесты завершили очистку
+> `main/copyc1`; независимый signed read-only аудит всех 5 REAL-аккаунтов:
+> `FLAT-ALL` (`positions=0`, `open_orders=0`); dev bot возобновлён после
+> `SIGCONT` и вновь `READY` (последний проверенный лог `01:21:30`).
+> Запущенный до правок bot-процесс не перезапускался и пока не загрузил
+> corrective-код. P2: полный
+> `App`/OS-process restart пока не доказан — только пересборка ядра на той
+> же SQLite; live-сертификацию полного restart не заявляем.
+
 > **Margin-mode mirroring (2026-09-12):** ядро копирует master
 > `CROSSED`/`ISOLATED` через авторитетный `positionRisk`, выставляет
 > `SET_MARGIN_TYPE → SET_LEVERAGE → MARKET_OPEN` с fail-closed зависимостями
@@ -25,7 +70,7 @@
 > Durable observation/latch хранится в `sync_basis` migration #60 и различает
 > внешний `non-zero → flat`, подтверждённую `MARKET_CLOSE` движка, linked
 > Stop/TP fill и dust-flat; новый master `trade_id` снимает старый запрет.
-> Offline backend gate текущего дерева: **1596 passed / 2 skipped / 94
+> Offline backend gate baseline `e6f0d0f`: **1596 passed / 2 skipped / 94
 > deselected** за 43.03s; targeted margin/external engine package — **210
 > passed**, storage/notification/acceptance add-on — **51 passed**. Подписанный
 > REAL Aster Testnet сценарий

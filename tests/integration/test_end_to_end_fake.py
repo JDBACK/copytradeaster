@@ -19,11 +19,12 @@ from copytradeaster.domain.models import (
     PosSide,
     RiskPolicy,
     Side,
+    SkipReason,
     TargetPosition,
     TargetState,
 )
 from copytradeaster.master.projector import MasterDelta, MasterProjector, MasterState
-from copytradeaster.storage.database import Database
+from copytradeaster.storage.database import MIGRATIONS, Database
 from copytradeaster.storage.repositories import (
     AccountRepo,
     CommandRepo,
@@ -787,7 +788,55 @@ class TestPauseAndWhitelist:
 
 
 class TestSelfStopGuard:
-    async def test_follower_stop_fill_blocks_reentry_same_episode(self, env):
+    async def test_upgrade_quarantines_pre_v61_protective_fill_when_query_fails(
+        self, env, monkeypatch
+    ):
+        projector, coordinator, fake, db, _deltas, _fids = env
+        await open_master_long(projector, fake)
+        fake.trigger_stop_fill("copyc2")
+        fr = next(f for f in coordinator.followers if f.account_id == "copyc2")
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        observed = await SyncBasisRepo(db).get("copyc2", "BTCUSDT", "BOTH")
+        assert observed is not None
+        assert observed["last_observed_qty"] == "0"
+        assert observed["own_protective_filled"] == 1
+
+        # The e6f0d0f process saw FILLED but stored only the flat observation.
+        # Recreate that legacy row and run the data-only upgrade step.
+        await db.execute_write(
+            "UPDATE sync_basis SET own_protective_filled=0"
+            " WHERE account_id='copyc2' AND symbol='BTCUSDT' AND pos_side='BOTH'"
+        )
+        await db.execute_write(MIGRATIONS[62])
+        quarantined = await SyncBasisRepo(db).get("copyc2", "BTCUSDT", "BOTH")
+        assert quarantined is not None
+        assert quarantined["external_close_reason"] == "UPGRADE_FLAT_CAUSE_UNKNOWN"
+        actual = await coordinator.snapshot_follower(fr)
+        policy = await SettingsRepo(db).get_policy("copyc2")
+        assert policy is not None
+        targets, skips = await coordinator.targets_for("copyc2", projector.state, actual, policy)
+        assert any(t.key.symbol == "BTCUSDT" and t.qty == 0 for t in targets)
+        assert any(s.reason is SkipReason.UPGRADE_FLAT_CAUSE_UNKNOWN for s in skips)
+
+        async def unavailable(*args, **kwargs):
+            del args, kwargs
+            raise TimeoutError("order history unavailable after upgrade")
+
+        monkeypatch.setattr(fake, "query_order", unavailable)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        assert follower_qty(fake, "copyc2") == 0
+        assert not resting_conditionals(fake, "copyc2")
+
+        trade = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert trade is not None
+        await CopyTradeRepo(db).close_trade(int(trade["trade_id"]))
+        await CopyTradeRepo(db).open_trade("BTCUSDT", "BOTH", None)
+        rearmed = await SyncBasisRepo(db).get("copyc2", "BTCUSDT", "BOTH")
+        assert rearmed is not None
+        assert rearmed["external_close_blocked"] == 0
+        assert rearmed["last_observed_qty"] is None
+
+    async def test_follower_stop_fill_blocks_reentry_same_episode(self, env, monkeypatch):
         projector, coordinator, fake, db, deltas, fids = env
         await open_master_long(projector, fake)
         # copyc2's stop is touched manually (price reached its stop)
@@ -800,6 +849,22 @@ class TestSelfStopGuard:
         own_stop_row = await SyncBasisRepo(db).get("copyc2", "BTCUSDT", "BOTH")
         assert own_stop_row is not None
         assert int(own_stop_row["external_close_blocked"]) == 0
+        assert int(own_stop_row["own_protective_filled"]) == 1
+
+        # Exchange order-history lookup may fail on later sweeps. The first
+        # FILLED proof is durable and also rejects a same-episode manual reopen.
+        async def unavailable(*args, **kwargs):
+            del args, kwargs
+            raise TimeoutError("protective history unavailable")
+
+        original_query_order = fake.query_order
+        monkeypatch.setattr(fake, "query_order", unavailable)
+        fake.positions[("copyc2", "BTCUSDT:BOTH")] = D("0.005")
+        fake.entry_prices[("copyc2", "BTCUSDT:BOTH")] = D("65000")
+        fr = next(f for f in coordinator.followers if f.account_id == "copyc2")
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        assert follower_qty(fake, "copyc2") == 0
+        monkeypatch.setattr(fake, "query_order", original_query_order)
 
         # master closes and opens a NEW episode -> copyc2 may enter again
         await projector.apply_raw(
@@ -1211,6 +1276,14 @@ class TestDustReductionNoReentry:
         assert int(row["external_close_blocked"]) == 1
         assert row["external_close_reason"] == "EXTERNAL_OR_UNKNOWN"
 
+        # Same-episode manual reopen must be flattened, not adopted and
+        # protected by the engine as a new follower leg.
+        fake.positions[(fid, "BTCUSDT:BOTH")] = D("0.005")
+        fake.entry_prices[(fid, "BTCUSDT:BOTH")] = D("65000")
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        assert follower_qty(fake, fid) == 0
+        assert resting_conditionals(fake, fid) == []
+
         # Periodic reconciliation and an unrelated-symbol master event retain
         # the same episode latch and create no new MARKET_OPEN generation.
         for changed in ({"*"}, {"ETHUSDT"}, {"*"}):
@@ -1352,3 +1425,33 @@ class TestDustReductionNoReentry:
         assert row is not None
         assert int(row["external_close_blocked"]) == 1
         assert follower_qty(fake, fid) == 0
+
+    @pytest.mark.parametrize("executed", [D("0"), D("0.001")])
+    async def test_requested_full_close_does_not_hide_external_flat_when_fill_short(
+        self, env, executed
+    ):
+        projector, coordinator, fake, db, _deltas, _fids = env
+        fid = "copyc1"
+        await open_master_long(projector, fake)
+        held = follower_qty(fake, fid)
+        trade = await CopyTradeRepo(db).active_trade("BTCUSDT", "BOTH")
+        assert trade is not None
+        commands = CommandRepo(db)
+        await commands.insert(
+            "synthetic-full-request-short-fill",
+            fid,
+            int(trade["trade_id"]),
+            "MARKET_CLOSE",
+            json.dumps({"quantity": format(held, "f"), "symbol": "BTCUSDT"}),
+            1,
+            "ct-short-fill",
+        )
+        await commands.set_status(
+            "synthetic-full-request-short-fill", "CONFIRMED", executed_qty=executed
+        )
+        fake.positions.pop((fid, "BTCUSDT:BOTH"), None)
+        fake.entry_prices.pop((fid, "BTCUSDT:BOTH"), None)
+        fr = next(f for f in coordinator.followers if f.account_id == fid)
+        await coordinator.recompute_follower(fr, MasterDelta(frozenset({"*"}), projector.state))
+        row = await SyncBasisRepo(db).get(fid, "BTCUSDT", "BOTH")
+        assert row is not None and int(row["external_close_blocked"]) == 1

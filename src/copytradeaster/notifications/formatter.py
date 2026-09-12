@@ -180,6 +180,12 @@ def format_skip_reason(
             "Повторный вход в этой сделке отключён; ожидаем следующую сделку мастера."
         )
 
+    if reason_enum == SkipReason.UPGRADE_FLAT_CAUSE_UNKNOWN:
+        return (
+            f"ℹ️ Позиция {symbol}{side_suffix} была закрыта до обновления движка.\n"
+            "Причина не подтверждена; повторный вход отключён до следующей сделки мастера."
+        )
+
     if reason_enum == SkipReason.LEVERAGE_NOT_READY:
         return (
             f"⏳ Пропуск сделки {symbol}{side_suffix}\n"

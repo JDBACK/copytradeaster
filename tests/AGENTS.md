@@ -24,8 +24,8 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | File | What it pins |
 |---|---|
 | `trading/test_planner_transitions.py` | Exhaustive `build_plan` table: open/reduce/stop-replace/margin-mode→leverage gate/hedge/idempotency/Rule-9; exact `(kind, priority)`, payloads, coids, `depends_on_action_id` |
-| `trading/test_executor_journal.py` | Journal/idempotency: UNKNOWN resolution (503/timeout/query), reduceOnly/−2011, P0 margin-mode/leverage gates (`BLOCKED`), `command_key` stability, SENDING/UNKNOWN boot resolver |
-| `trading/test_coordinator_routing.py` | 4-follower fan-out: error isolation/degraded, pause barriers, generation-safe hot-add/replace, stale-master, self-stop/re-entry, durable external-close latch, no-stop/whitelist, margin-mode and leverage gating |
+| `trading/test_executor_journal.py` | Journal/idempotency: UNKNOWN resolution (503/timeout/query), reduceOnly/−2011, actual `MARKET_CLOSE.executed_qty` (incl. −2022/partial), P0 margin-mode/leverage gates (`BLOCKED`), `command_key` stability, SENDING/UNKNOWN boot resolver |
+| `trading/test_coordinator_routing.py` | 4-follower fan-out: error isolation/degraded, pause barriers, generation-safe hot-add/replace, stale-master, self-stop/re-entry, durable external-close latch, no-stop/whitelist, flat HEDGE margin conflict and pre-growth isolated leverage gate |
 | `trading/test_leverage_manager.py` | `LeverageManager` with no HTTP: candidate catalog, singleflight, generation invalidation, `observe()` restore, bounded worker, read-before-write |
 | `trading/test_builder_attribution.py` | P2.7 payload (`builder`/`feeRate`, 0.001 cap, Decimal canonicalization) + `BuilderAttributionProvider` routing (strict tri-state permissions, expiry) + `time_in_force` |
 | `trading/test_builder_executor.py` | P2.7 in executor: attribution on the wire only (journal clean), entry fail-closed, close/Stop/TP fallback, snapshot/race isolation, no-secrets |
@@ -62,7 +62,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | `storage/test_wp1.py` | Migrations, casefold owners, policies, access requests, outbox lease/retry |
 | `storage/test_account_builder_identity.py` | Builder-snapshot primitives: set/clear/invalidation (P2.6) |
 | `storage/test_episode_allocations.py` | Allocation index (C2): HEDGE/flip shares sum to source, rebuild from payloads |
-| `storage/test_database_upgrade.py` | Ghost-v33/fresh-schema convergence plus G1 corrective, hardening-v33 and frontend-v58 lineages |
+| `storage/test_database_upgrade.py` | Ghost-v33/fresh-schema convergence plus G1 corrective, hardening-v33/frontend-v58 lineages and v60/v61 legacy-flat quarantine backfill |
 
 ## unit/history — projection, capture, events (S1 remediation C1–C5)
 
@@ -145,7 +145,7 @@ cd miniapp && pnpm test                                 # frontend Vitest; count
 | File | What it pins |
 |---|---|
 | `fake_aster.py` | In-memory Aster V3 (no HTTP): balances, fills, STOP_MARKET triggers, leverage, 503/timeout/−2019 injection; `btc_filters`/`FakeOrder` |
-| `test_end_to_end_fake.py` | Copy E2E matrix (copy/reduce/stops/failures/protection/flip/dust); `order_trade`/`stop_new` builders reused by other files |
+| `test_end_to_end_fake.py` | Copy E2E matrix (copy/reduce/stops/failures/protection/flip/dust), same-episode manual reopen→flat, durable protective-fill proof incl. upgrade-query failure, partial-close classifier; `order_trade`/`stop_new` builders reused by other files |
 | `test_acceptance_gate.py` | Adversarial Stage 1 invariants over the real engine + SQLite |
 | `test_boot_fail_closed.py` | Unresolved SENDING blocks READY and mutes order POSTs, 0 mutations |
 | `test_miniapp_builder_flow.py` | Builder onboarding over the real HTTP stack (aiohttp TestServer + httpx MockTransport) down to encrypted paused-commit |
@@ -189,7 +189,7 @@ Format per block (parser: `src/copytradeaster/cli/main.py:parse_wallet_file`, ty
 | File | Scenario |
 |---|---|
 | `test_signed_scenarios.py` | Checklist: clock drift, reads, listenKey, master cycle, margin error + REAL-01/04/05/06 and idempotency |
-| `test_one_way_engine_e2e.py` | Full ONE_WAY engine cycle (open/stop-move/partial/TP/flat/dust/reversal), external follower close no-reentry across restart/new episode, real CROSSED/ISOLATED mirror + 2× collateral/boot proof, + HEDGE-resize proof |
+| `test_one_way_engine_e2e.py` | Full ONE_WAY engine cycle (open/stop-move/partial/TP/flat/dust/reversal), external follower close and same-episode manual reopen→flat across core re-compose/new episode, real CROSSED/ISOLATED mirror + 2× collateral/boot proof, + HEDGE-resize proof |
 | `test_leverage_control_plane_live.py` | Leverage live: −4028 fallback, fail-closed unready, P0 executor gate, durable downshift |
 | `test_builder_onboarding_recovery_live.py` | Builder lifecycle L1–L4: reads, happy path, lost response, commit/activation recovery |
 | `test_builder_mini_app_e2e.py` | Part 1 e2e: onboarding commit, feeRate round-trip trade, over-cap rejection |

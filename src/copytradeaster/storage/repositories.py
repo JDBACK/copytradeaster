@@ -473,7 +473,8 @@ class CopyTradeRepo:
         await self.db.execute_write(
             "UPDATE sync_basis SET zero_target=0, episode_trade_id=?,"
             " last_observed_qty=NULL, last_engine_close_key=NULL,"
-            " external_close_blocked=0, external_close_reason=NULL, updated_at=?"
+            " external_close_blocked=0, external_close_reason=NULL,"
+            " own_protective_filled=0, updated_at=?"
             " WHERE symbol=? AND pos_side=?",
             (trade_id, _now_iso(), symbol, pos_side),
         )
@@ -586,6 +587,7 @@ class CommandRepo:
         bump_attempts: bool = False,
         client_order_id: str | None = None,
         recovery_context: str | None = None,
+        executed_qty: Decimal | None = None,
     ) -> None:
         sets = ["status=?", "updated_at=?", "last_error=?"]
         params: list[Any] = [status, _now_iso(), last_error]
@@ -597,6 +599,9 @@ class CommandRepo:
         if recovery_context is not None:
             sets.append("recovery_context=?")
             params.append(recovery_context)
+        if executed_qty is not None:
+            sets.append("executed_qty=?")
+            params.append(format(executed_qty, "f"))
         params.append(command_key)
         await self.db.execute_write(
             f"UPDATE execution_commands SET {', '.join(sets)} WHERE command_key=?", tuple(params)
@@ -703,7 +708,7 @@ class CommandRepo:
         lookup compatible with SQLite builds where JSON1 is unavailable.
         """
         rows = await self.db.fetchall(
-            "SELECT command_key, payload FROM execution_commands"
+            "SELECT command_key, payload, executed_qty FROM execution_commands"
             " WHERE account_id=? AND trade_id=? AND kind='MARKET_CLOSE'"
             " AND status='CONFIRMED' ORDER BY rowid DESC",
             (account_id, trade_id),
@@ -893,6 +898,9 @@ class SyncBasisRepo:
             " external_close_reason=CASE"
             " WHEN sync_basis.episode_trade_id=excluded.episode_trade_id"
             " THEN sync_basis.external_close_reason ELSE NULL END,"
+            " own_protective_filled=CASE"
+            " WHEN sync_basis.episode_trade_id=excluded.episode_trade_id"
+            " THEN sync_basis.own_protective_filled ELSE 0 END,"
             " updated_at=excluded.updated_at",
             (
                 account_id,
@@ -931,6 +939,29 @@ class SyncBasisRepo:
     ) -> bool:
         row = await self.episode_observation(account_id, symbol, pos_side, trade_id)
         return row is not None and bool(row["external_close_blocked"])
+
+    async def external_close_block_reason(
+        self, account_id: str, symbol: str, pos_side: str, trade_id: int
+    ) -> str | None:
+        row = await self.episode_observation(account_id, symbol, pos_side, trade_id)
+        if row is None or not row["external_close_blocked"]:
+            return None
+        return str(row["external_close_reason"] or "EXTERNAL_OR_UNKNOWN")
+
+    async def mark_own_protective_filled(
+        self, account_id: str, symbol: str, pos_side: str, trade_id: int
+    ) -> None:
+        await self.db.execute_write(
+            "UPDATE sync_basis SET own_protective_filled=1, updated_at=?"
+            " WHERE account_id=? AND symbol=? AND pos_side=? AND episode_trade_id=?",
+            (_now_iso(), account_id, symbol, pos_side, trade_id),
+        )
+
+    async def is_own_protective_filled(
+        self, account_id: str, symbol: str, pos_side: str, trade_id: int
+    ) -> bool:
+        row = await self.episode_observation(account_id, symbol, pos_side, trade_id)
+        return row is not None and bool(row["own_protective_filled"])
 
     async def rearm_external_close(
         self,

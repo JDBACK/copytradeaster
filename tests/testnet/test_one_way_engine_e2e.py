@@ -932,6 +932,34 @@ async def test_external_follower_close_stays_flat_until_next_master_episode(stac
         assert opens_after is not None
         assert int(opens_after["n"]) == int(opens_before["n"])
 
+        # A direct same-episode reopen is still the follower's opt-out, not
+        # a new engine-managed leg. The durable latch must close it again.
+        reopen_qty = follower_qty
+        await _place(
+            client,
+            fr_id,
+            PlaceOrderRequest(
+                symbol=SYMBOL,
+                side=Side.BUY,
+                type="MARKET",
+                quantity=reopen_qty,
+                position_side=PosSide.BOTH,
+                new_order_resp_type="RESULT",
+                new_client_order_id=f"ext-user-reopen-{base}"[:36],
+            ),
+        )
+        assert await _position_qty(client, fr_id) > 0
+        await drive()
+        await wait_for(follower_flat, "manual follower reopen re-flattened")
+        assert not await _conditionals(client, fr_id)
+        close_proof = await db.fetchone(
+            "SELECT executed_qty FROM execution_commands"
+            " WHERE account_id=? AND trade_id=? AND kind='MARKET_CLOSE'"
+            " AND status='CONFIRMED' ORDER BY rowid DESC LIMIT 1",
+            (fr_id, first_trade_id),
+        )
+        assert close_proof is not None and D(str(close_proof["executed_qty"])) >= reopen_qty
+
         restarted_fr = FollowerRuntime(account_id=fr_id, client=client, identity=None)
         restarted = Coordinator(
             followers=[restarted_fr],

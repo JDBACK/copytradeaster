@@ -57,6 +57,7 @@ class SkipReason(StrEnum):
     OWN_PROTECTIVE_FILLED = "OWN_PROTECTIVE_FILLED"
     INTENTIONAL_FLAT = "INTENTIONAL_FLAT"  # dust target=0 inside an open episode
     EXTERNAL_FOLLOWER_CLOSE = "EXTERNAL_FOLLOWER_CLOSE"
+    UPGRADE_FLAT_CAUSE_UNKNOWN = "UPGRADE_FLAT_CAUSE_UNKNOWN"
     LEVERAGE_NOT_READY = "LEVERAGE_NOT_READY"
     MARGIN_TYPE_UNKNOWN = "MARGIN_TYPE_UNKNOWN"
     MARGIN_TYPE_MISMATCH = "MARGIN_TYPE_MISMATCH"
@@ -66,8 +67,8 @@ class ZeroReason(StrEnum):
     """WHY a TargetPosition quantity is zero (explicit per PM-B5).
 
     ``PROPORTIONAL_REDUCTION_DUST`` latches the existing dust marker;
-    ``EXTERNAL_FOLLOWER_CLOSE`` preserves a separate episode-bound external
-    close marker.  Every other zero is transient or terminal and MUST allow
+    ``EXTERNAL_FOLLOWER_CLOSE`` and ``OWN_PROTECTIVE_FILLED`` preserve separate
+    episode-bound entry refusals. Every other zero is transient or terminal and MUST allow
     same-episode re-entry once its cause clears: risk-cap / stop-move
     recomputes, flip closes (the reversed leg opens next pass), master-closed
     legs, and safety flattens (naked unprotected legs, unprotected fresh
@@ -85,6 +86,7 @@ class ZeroReason(StrEnum):
     ISOLATED_MARGIN_SHORTFALL = "ISOLATED_MARGIN_SHORTFALL"
     MARGIN_MODE_VIOLATION = "MARGIN_MODE_VIOLATION"
     EXTERNAL_FOLLOWER_CLOSE = "EXTERNAL_FOLLOWER_CLOSE"
+    OWN_PROTECTIVE_FILLED = "OWN_PROTECTIVE_FILLED"
 
 
 class _DecimalStrict:
