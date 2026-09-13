@@ -155,7 +155,7 @@ async def test_corrective_g1_upgrade_marks_retained_history_dirty(tmp_path: Path
         )
         await database.conn.commit()
 
-        assert await database.migrate() == 5
+        assert await database.migrate() == len(MIGRATIONS) - 58
         a = await database.fetchone(
             "SELECT facts_revision,dirty_from_ms FROM history_scope_state "
             "WHERE account_id='a' AND environment='testnet' AND symbol='BTCUSDT'"
@@ -231,7 +231,7 @@ async def test_frontend_v58_lineage_adds_recovery_and_close_proof_state(tmp_path
             "execution_commands", "recovery_context"
         )
 
-        assert await database.migrate() == 4
+        assert await database.migrate() == len(MIGRATIONS) - 59
         assert await database._column_exists(  # noqa: SLF001 - migration lineage proof
             "execution_commands", "recovery_context"
         )
@@ -239,7 +239,7 @@ async def test_frontend_v58_lineage_adds_recovery_and_close_proof_state(tmp_path
         assert applied is not None
         assert RECOVERY_CONTEXT_INDEX_VERSION == 59
         assert EXTERNAL_CLOSE_INDEX_VERSION == 60
-        assert applied["version"] == len(MIGRATIONS) - 1 == 62
+        assert applied["version"] == len(MIGRATIONS) - 1 == 64
         sync_columns = {
             row["name"] for row in await database.fetchall("PRAGMA table_info(sync_basis)")
         }
@@ -298,7 +298,7 @@ async def test_legacy_flat_protective_episode_is_quarantined_from_v60_and_v61(
                         (trade_id, f"ct-stop-{trade_id}"),
                     )
 
-            assert await database.migrate() == 62 - old_version
+            assert await database.migrate() == len(MIGRATIONS) - 1 - old_version
             rows = {
                 row["symbol"]: row
                 for row in await database.fetchall("SELECT * FROM sync_basis ORDER BY symbol")

@@ -195,7 +195,10 @@ async def live_app_stack(tmp_path):
 
     users = TelegramUserRepo(app.db)
     owner_row = await users.by_account(FOLLOWER_ACCOUNT)
-    if owner_row is None or int(owner_row["telegram_user_id"]) != TEST_USER_ID:
+    if owner_row is None:
+        await db.close()
+        pytest.skip(f"no owner row for {FOLLOWER_ACCOUNT}")
+    if int(owner_row["telegram_user_id"]) != TEST_USER_ID:
         await db.close()
         pytest.skip(f"user {TEST_USER_ID} must own {FOLLOWER_ACCOUNT} for delivery routing")
     original_enabled = bool(owner_row["notifications_enabled"])

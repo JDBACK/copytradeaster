@@ -28,6 +28,8 @@ from copytradeaster.storage.repositories import NotificationOutboxRepo, Telegram
 
 log = get_logger(__name__)
 BotSender = Callable[[int, str], Awaitable[Any]]
+# Renders one stored user event again at send time; None keeps the stored text.
+UserEventRenderer = Callable[[Any, str], Awaitable[str | None]]
 
 OPEN_TRADE_BUTTON_TEXT = "Открыть сделку"
 
@@ -85,6 +87,7 @@ class TelegramOutboxWorker:
         trade_links_enabled: bool = False,
         user_events_only: bool = False,
         maintenance_interval: float = 3600.0,
+        user_event_renderer: UserEventRenderer | None = None,
     ) -> None:
         if bot is None and sender is None:
             raise ValueError("bot or sender is required")
@@ -124,6 +127,7 @@ class TelegramOutboxWorker:
         self._retry_jitter = retry_jitter
         self._drain_timeout = drain_timeout
         self._maintenance_interval = maintenance_interval
+        self._user_event_renderer = user_event_renderer
         self._stop_event = asyncio.Event()
         self._lifecycle_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
@@ -277,6 +281,26 @@ class TelegramOutboxWorker:
             self._chat_locks[chat_id] = lock
         return lock
 
+    async def _render_user_event(self, row: Any) -> str | None:
+        """Fresh card text for a durable user-event row, or None to keep stored.
+
+        Any failure here is presentation-only: the already-stored text is a
+        valid card, so a broken lookup must never block or fail a delivery.
+        """
+        renderer = self._user_event_renderer
+        if renderer is None:
+            return None
+        keys = set(row.keys()) if hasattr(row, "keys") else set()
+        event_key = str(row["event_key"]) if "event_key" in keys else ""
+        account_id = str(row["account_id"]) if "account_id" in keys else ""
+        if not event_key.startswith("user-event:") or not account_id:
+            return None
+        try:
+            return await renderer(row, str(row["text"]))
+        except Exception:  # noqa: BLE001 - stored text stays the fallback
+            log.warning("user-event re-render failed account_id=%s", account_id)
+            return None
+
     async def _deliver(self, row: Any, *, worker_id: str | None = None) -> None:
         worker_id = worker_id or self._worker_id
         if self._user_events_only and row["kind"] == "execution.confirmed":
@@ -296,10 +320,23 @@ class TelegramOutboxWorker:
             if self._trade_links_enabled and chat_id == user_id
             else None
         )
+        text = str(row["text"])
+        if self._user_event_renderer is not None:
+            # The row was formatted when the event was enqueued; costs proven
+            # since then (a commission or funding import that landed after the
+            # first sweep) must still reach the message, so the card is rendered
+            # once more right before the send. The stored text is the fallback.
+            fresh = await self._render_user_event(row)
+            if fresh is not None:
+                text = fresh
         async with self._chat_lock(chat_id):
             await self._pace(chat_id)
             try:
-                await self._send(chat_id, clip_plain_text(str(row["text"])), markup)
+                delivered = clip_plain_text(text)
+                await self._send(chat_id, delivered, markup)
+                if delivered != str(row["text"]):
+                    with contextlib.suppress(Exception):
+                        await self._outbox.update_text(row["id"], delivered)
             except TelegramRetryAfter as exc:
                 delay = max(1, int(exc.retry_after))
                 await self._outbox.retry(

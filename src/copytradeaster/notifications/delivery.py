@@ -176,7 +176,7 @@ async def recover_user_events_durable(
                     last_considered = stored.seq
                     continue
                 try:
-                    planned = await router.prepare_user_event_notification(stored)
+                    planned = await router.prepare_user_event_notification(stored, scope=scope)
                 except ValueError:
                     log.warning(
                         "blocking unrenderable user event (kind=%s account_id=%s seq=%s)",

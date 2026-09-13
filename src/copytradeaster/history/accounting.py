@@ -318,8 +318,35 @@ async def load_episode_money(
         }
     )
     fills = await history_repo.fills_by_trade_ids(scope, all_keys) if all_keys else []
-    cashflows = await history_repo.cashflows_for_symbols(scope, all_symbols) if all_symbols else []
-    income_rows = await history_repo.windows(scope, "income", "")
+    # P4: bound the two history scans to the span the accountant can actually
+    # use. A flow outside every episode interval is only inspected, never
+    # attributed, and a sync window that does not overlap a requested episode
+    # cannot change that episode's coverage, so the bounded read gives the same
+    # result at a fraction of the materialized rows. The bound also has to cover
+    # the matched flows themselves: the exchange stamps a fill's COMMISSION
+    # (and its REALIZED_PNL sibling) up to about a second off the fill, so an
+    # episode-edge bound alone drops the commission of the episode's own
+    # opening fill and reports ``commission_missing``. A side without a proven
+    # bound stays unbounded instead of inventing a limit.
+    spans = [_money_span(all_episodes)]
+    matched = (
+        await history_repo.cashflows_span_for_trades(scope, [trade for _, trade in all_keys])
+        if all_keys
+        else None
+    )
+    if matched is not None:
+        spans.append(matched)
+    span_start, span_end = _merge_spans(spans)
+    cashflows = (
+        await history_repo.cashflows_for_symbols(
+            scope, all_symbols, start_ms=span_start, end_ms=span_end
+        )
+        if all_symbols
+        else []
+    )
+    income_rows = await history_repo.windows(
+        scope, "income", "", start_ms=span_start, end_ms=span_end
+    )
     policy_raw = await history_repo.builder_policy(scope)
     policy: Literal["unknown", "included_in_commission", "separate"] = (
         policy_raw if policy_raw in ("unknown", "included_in_commission", "separate") else "unknown"
@@ -384,6 +411,27 @@ def _contains(episode: Episode, moment_ms: int) -> bool:
     return (episode.opened_at is None or moment_ms >= episode.opened_at) and (
         episode.closed_at is None or moment_ms <= episode.closed_at
     )
+
+
+def _money_span(episodes: Sequence[Episode]) -> tuple[int | None, int | None]:
+    """Inclusive epoch-ms span covered by the episodes under account.
+
+    ``None`` on a side means "no proven bound there" (an episode without an
+    open time, or no episodes at all), and the caller then leaves that side of
+    the history read unbounded rather than guessing one.
+    """
+    starts = [int(episode.opened_at) for episode in episodes if episode.opened_at is not None]
+    ends = [int(episode.closed_at) for episode in episodes if episode.closed_at is not None]
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
+def _merge_spans(
+    spans: Sequence[tuple[int | None, int | None]],
+) -> tuple[int | None, int | None]:
+    """Widest span that covers every given span; a None side stays unbounded."""
+    lower = [start for start, _ in spans if start is not None]
+    upper = [end for _, end in spans if end is not None]
+    return (min(lower) if lower else None, max(upper) if upper else None)
 
 
 def _income_covers_all(rows: Sequence[Any], episodes: Sequence[Episode]) -> bool:

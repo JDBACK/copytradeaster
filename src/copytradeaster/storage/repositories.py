@@ -204,13 +204,32 @@ class AccountRepo:
         )
 
     async def set_identity_direct(self, id_: str) -> None:
-        """Mark an account direct and atomically drop any Builder proof."""
+        """Mark an account direct and atomically drop any Builder proof.
+
+        The Builder fee policy goes with it: it describes how the exchange
+        charges *this* identity, so a direct account must not inherit it.
+        """
         await self.db.execute_write(
             "UPDATE accounts SET identity_source='direct', builder_address=NULL, "
-            "builder_name=NULL, "
-            "builder_max_fee_rate=NULL, builder_agent_expires_at_ms=NULL, builder_verified_at=NULL "
+            "builder_name=NULL, builder_max_fee_rate=NULL, "
+            "builder_agent_expires_at_ms=NULL, builder_verified_at=NULL, "
+            "builder_fee_policy=NULL "
             "WHERE id=?",
             (id_,),
+        )
+
+    async def set_builder_fee_policy(self, id_: str, policy: str) -> None:
+        """Record the measured Builder fee policy (``<policy>:<environment>``).
+
+        Written only by a signed exchange proof (never by configuration): the
+        money layer reads it back through ``HistoryRepository.builder_policy``
+        and unlocks the net trade result only where it was measured.
+        """
+        if not isinstance(policy, str) or not policy.strip():
+            raise ValueError("builder fee policy is required")
+        await self.db.execute_write(
+            "UPDATE accounts SET builder_fee_policy=? WHERE id=?",
+            (policy.strip(), id_),
         )
 
     async def clear_builder_snapshot(self, id_: str) -> None:
@@ -1765,6 +1784,19 @@ class NotificationOutboxRepo:
             params += (worker_id,)
         rowcount, _ = await self.db.execute_write(sql, params)
         return rowcount == 1
+
+    async def update_text(self, row_id: int, text: str) -> None:
+        """Persist the text that was actually delivered for one row.
+
+        The card is rendered again at send time (costs proven after the enqueue
+        must still reach the message), so the durable log has to keep what the
+        recipient really received rather than the earlier rendering.
+        """
+        now = _now_iso()
+        await self.db.execute_write(
+            "UPDATE notification_outbox SET text=?, updated_at=? WHERE id=?",
+            (str(text), now, int(row_id)),
+        )
 
     async def retry(
         self,

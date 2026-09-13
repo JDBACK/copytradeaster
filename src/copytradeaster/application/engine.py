@@ -37,12 +37,14 @@ from copytradeaster.notifications.delivery import (
     ensure_user_event_rollout_floor,
     recover_user_events_durable,
 )
+from copytradeaster.notifications.money import SqliteEpisodeMoneyReader
 from copytradeaster.notifications.protocol import Notifier
 from copytradeaster.notifications.router import NotificationRouter
-from copytradeaster.notifications.worker import TelegramOutboxWorker
+from copytradeaster.notifications.worker import TelegramOutboxWorker, UserEventRenderer
 from copytradeaster.storage.database import Database
+from copytradeaster.storage.episodes import EpisodeRepository
 from copytradeaster.storage.events import EventRepository
-from copytradeaster.storage.history import HistoryScope
+from copytradeaster.storage.history import HistoryRepository, HistoryScope
 from copytradeaster.storage.repositories import (
     AccountRepo,
     CommandRepo,
@@ -106,6 +108,58 @@ def _build_telegram(settings: Settings, application: ApplicationProtocol) -> Tel
     return TelegramRuntime.build(settings, application)
 
 
+def build_user_event_renderer(db: Database) -> UserEventRenderer:
+    """Re-render one durable user-event row right before its Telegram send.
+
+    The outbox row is formatted when the event is published, and publication
+    happens as soon as the close is observed — before the history worker has
+    imported the commissions and funding of that very trade. Rendering again at
+    send time lets the close card carry the proven net. Nothing is guessed: a
+    row keeps the text it was enqueued with unless the net is actually proven,
+    and any lookup failure is presentation-only.
+    """
+    episodes = EpisodeRepository(db)
+    history = HistoryRepository(db)
+
+    async def render(row: Any, stored_text: str) -> str | None:
+        keys = set(row.keys()) if hasattr(row, "keys") else set()
+        account_id = str(row["account_id"]) if "account_id" in keys else ""
+        kind = str(row["kind"]) if "kind" in keys else ""
+        trade_ref = str(row["trade_ref"] or "") if "trade_ref" in keys else ""
+        # The router prefixes the notification kind (`user.`), the plain event
+        # kind has no prefix: both spellings reach this seam.
+        if kind.removeprefix("user.") != "POSITION_CLOSED" or not account_id or not trade_ref:
+            return None
+        scope_row = await db.fetchone(
+            "SELECT environment FROM user_activity_events WHERE account_id=? LIMIT 1",
+            (account_id,),
+        )
+        environment = (
+            str(scope_row["environment"])
+            if scope_row is not None
+            else "mainnet"
+            if "mainnet" in db.path.name
+            else "testnet"
+        )
+        reader = SqliteEpisodeMoneyReader(episodes, history)
+        money = (await reader.money_for(HistoryScope(account_id, environment), trade_ref)).get(
+            trade_ref
+        )
+        if money is None or money.result_state != "net_complete" or money.net is None:
+            return None
+        # Only the result line is rewritten: the stored card already carries the
+        # symbol, the average entry/exit and the duration of the trade.
+        lines = [
+            line for line in stored_text.splitlines() if not line.startswith("PnL до комиссий")
+        ]
+        if not lines:
+            return None
+        lines.append(f"Итог сделки: {money.net} USDT")
+        return "\n".join(lines)
+
+    return render
+
+
 def _build_worker(
     bot: Any, db: Database, settings: Settings, *, user_events_only: bool = False
 ) -> TelegramOutboxWorker:
@@ -121,6 +175,7 @@ def _build_worker(
         webapp_base_url=settings.miniapp_public_url or None,
         trade_links_enabled=settings.miniapp_enabled,
         user_events_only=user_events_only,
+        user_event_renderer=build_user_event_renderer(db) if user_events_only else None,
     )
 
 
@@ -354,6 +409,9 @@ class Stage2Process:
                     self.db,
                     admin_ids=self.settings.telegram_admin_ids,
                     user_events_only=self._enable_user_event_delivery,
+                    money=SqliteEpisodeMoneyReader(
+                        EpisodeRepository(self.db), HistoryRepository(self.db)
+                    ),
                 )
                 self.notifier = notifier
                 await recover_notification_outbox(

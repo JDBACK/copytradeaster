@@ -195,3 +195,56 @@ def test_keyboard_action_only_for_trade_kinds():
     assert event_notification_action("POSITION_CLOSED") == "open_trade"
     assert event_notification_action("RISK_CHANGED") is None
     assert event_notification_action("COPY_PAUSED") is None
+
+
+def test_closed_card_prints_the_proven_net_as_one_result():
+    """A proven composition replaces the gross headline; no second number."""
+    money = _money_view(net="17.04", result_state="net_complete")
+    text = format_user_event(
+        _event(
+            "POSITION_CLOSED",
+            {"symbol": "BTCUSDT", "side": "LONG", "realized_gross": "18.42"},
+        ),
+        money=money,
+    )
+    lines = text.splitlines()
+    assert "Итог сделки: 17,04 USDT" in lines
+    assert not any("до комиссий" in line for line in lines), lines
+
+
+def test_closed_card_stays_honest_while_costs_are_unproven():
+    money = _money_view(net=None, result_state="gross_only")
+    text = format_user_event(
+        _event(
+            "POSITION_CLOSED",
+            {"symbol": "BTCUSDT", "side": "LONG", "realized_gross": "18.42"},
+        ),
+        money=money,
+    )
+    lines = text.splitlines()
+    assert "Итог уточняется: начисления ещё сверяются" in lines
+    assert not any("до комиссий" in line for line in lines), lines
+
+
+def test_closed_card_keeps_gross_when_no_money_reader_is_wired():
+    text = format_user_event(
+        _event(
+            "POSITION_CLOSED",
+            {"symbol": "BTCUSDT", "side": "LONG", "realized_gross": "18.42"},
+        )
+    )
+    assert "PnL до комиссий: 18,42 USDT" in text.splitlines()
+
+
+def _money_view(*, net: str | None, result_state: str):
+    from copytradeaster.application.models import EpisodeMoneyView, MoneyComponent, MoneyState
+
+    component = MoneyComponent(known_amount="0", state=MoneyState.COMPLETE)
+    return EpisodeMoneyView(
+        gross="18.42",
+        net=net,
+        commission=component,
+        funding=component,
+        builder=component,
+        result_state=result_state,
+    )

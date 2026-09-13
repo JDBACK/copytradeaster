@@ -17,12 +17,14 @@ from copytradeaster.notifications.models import (
     NotificationSeverity,
     clip_plain_text,
 )
+from copytradeaster.notifications.money import EpisodeMoneyReader
 from copytradeaster.notifications.protocol import Notifier, as_notifier
 from copytradeaster.notifications.trade_cards import (
     event_notification_action,
     format_user_event,
 )
 from copytradeaster.storage.events import StoredEvent
+from copytradeaster.storage.history import HistoryScope
 from copytradeaster.storage.repositories import (
     CommandRepo,
     NotificationOutboxRepo,
@@ -75,12 +77,14 @@ class NotificationRouter:
         users: TelegramUserRepo | None = None,
         outbox: NotificationOutboxRepo | None = None,
         user_events_only: bool = False,
+        money: EpisodeMoneyReader | None = None,
     ) -> None:
         self._user_events_only = user_events_only
         self._users = users or TelegramUserRepo(db)
         self._outbox = outbox or NotificationOutboxRepo(db)
         self._admin_ids = frozenset(int(value) for value in admin_ids)
         self._console = as_notifier(console or ConsoleNotifier())
+        self._money = money
 
     @staticmethod
     def _deliverable(row: Any | None) -> bool:
@@ -136,18 +140,28 @@ class NotificationRouter:
         ]
 
     async def prepare_user_event_notification(
-        self, stored: StoredEvent
+        self, stored: StoredEvent, *, scope: HistoryScope | None = None
     ) -> tuple[NotificationEvent, list[Any]] | None:
         """Format one stored event and resolve recipients before any commit.
 
-        Returns ``None`` for an explicit deliberate skip: no deliverable
-        recipient exists, so enabling notifications later must never
-        retroactively send it. Raises ``ValueError`` for an unrenderable
-        eligible row (unknown kind, action/ref mismatch); the durable sweep
-        keeps such rows blocking instead of advancing past them silently.
+        ``scope`` supplies the history scope whose proven episode money may be
+        attached to a close card. Without it (or without a money reader) the
+        card keeps the honest gross copy. Returns ``None`` for an explicit
+        deliberate skip: no deliverable recipient exists, so enabling
+        notifications later must never retroactively send it. Raises
+        ``ValueError`` for an unrenderable eligible row (unknown kind, action/ref
+        mismatch); the durable sweep keeps such rows blocking instead of
+        advancing past them silently.
         """
         record = stored.event
-        text = format_user_event(record)
+        money = None
+        if self._money is not None and record.trade_ref and scope is not None:
+            try:
+                money = (await self._money.money_for(scope, record.trade_ref)).get(record.trade_ref)
+            except Exception:  # noqa: BLE001 - money is presentation only
+                log.warning("episode money lookup failed account_id=%s", scope.account_id)
+                money = None
+        text = format_user_event(record, money=money)
         event = NotificationEvent(
             event_key=f"user-event:{record.event_ref}",
             account_id=stored.scope.account_id,

@@ -533,8 +533,8 @@ async def test_toggle_between_prepare_and_commit_skips_muted_rows(tmp_path: Path
 
         original = router.prepare_user_event_notification
 
-        async def prepare_then_toggle(stored):
-            planned = await original(stored)
+        async def prepare_then_toggle(stored, *, scope=None):
+            planned = await original(stored, scope=scope)
             await users.set_notifications_enabled(1, False)
             return planned
 
@@ -551,8 +551,8 @@ async def test_toggle_between_prepare_and_commit_skips_muted_rows(tmp_path: Path
         await _seed_closed(events, scope, "race-2", recorded_ms=base_ms + 1_000)
         router.prepare_user_event_notification = original  # type: ignore[method-assign]
 
-        async def prepare_then_cycle(stored):
-            planned = await original(stored)
+        async def prepare_then_cycle(stored, *, scope=None):
+            planned = await original(stored, scope=scope)
             await users.set_notifications_enabled(1, False)
             await users.set_notifications_enabled(1, True)
             return planned

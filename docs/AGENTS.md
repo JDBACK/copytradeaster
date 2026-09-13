@@ -125,6 +125,7 @@ Handoff и сохранённые промпты — контекст своей
 | `MINIAPP_RISK_RULER_2026-09.md` | Шкала риска — vertical slice S2.5 lifecycle + S3.4 motion: browser 15/15 PASS и независимая перепроверка; итоговый touch/keyboard/WebKit проход выполнен на iPhone Mirroring в S3 §26 |
 | `MINIAPP_S1_REVIEW_2026-09.md` | Исторический независимый verdict `REQUEST CHANGES` (`f77a3fd`, повторный проход `9a0dd98`): источник N1–N6 и baseline reproductions. Обязательные для G1 N1–N3 затем закрыты corrective-пакетом; текущий статус брать из ENGINE_TEST_STATUS / журнала шага 30 |
 | `MINIAPP_S1_FIX_HANDOFF_2026-09.md` | Выполненный corrective handoff масштаба 10–30: N1–N3, T1–T6 и §6 закрыты на tested `84cabfb`; G1 CLOSED 2026-09-07. Отложенные там N4–N6 позднее закрыты в S3/G3 |
+| `PNL_NET_FEES_PLAN_2026-09.md` | Кампания «PnL с учётом комиссий» (Mini App + Telegram): границы владельца, **измеренный факт** — комиссия Builder списывается внутри обычного `COMMISSION` (0,05% против 0,04%, разница ровно `feeRate`), тому же замеру подчинён bound чтения денег (комиссия филла приходит на 0,5–0,9 с раньше филла), durable-штамп политики, единое число результата сделки. **P0–P4 закрыты**, net-карточка доставлена живым Bot API; открыты Mini App HTTP live-проверка и продуктовое решение по не-USDT комиссии |
 
 ## docs/reviews/ — дословные тексты внешних ревью
 

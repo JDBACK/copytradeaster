@@ -40,8 +40,13 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
   if (!trade || !data) return <div className="screen"><h1 className="h1">Детали сделки</h1>{detail.error ? <><ErrorBox {...describeError(detail.error)} /><button type="button" className="btn btn-ghost" onClick={() => onOpen({ kind: 'trade-list', state: 'open', period: 'all' })}>Мои позиции</button></> : <div className="skeleton" style={{ minHeight: 300 }} />}</div>
   const live = positions.snapshot.data?.positions.find(p => p.trade_ref === trade.trade_ref)
   const liveStale = positions.snapshot.data?.is_stale === true && !railOwnsOutage
+  // One number per trade: as soon as every cost is proven, the net replaces the
+  // gross on the headline and in the breakdown. Two competing results on one
+  // screen made the reader reconcile them; the components below still name what
+  // was deducted.
   const net = trade.result_state === 'net_complete' && trade.net_pnl_usdt !== null
-  const pnl = formatPnl(trade.state === 'open' ? live?.unrealized_profit : net ? trade.net_pnl_usdt : trade.realized_pnl_gross_usdt)
+  const headline = trade.state === 'open' ? live?.unrealized_profit : net ? trade.net_pnl_usdt : trade.realized_pnl_gross_usdt
+  const pnl = formatPnl(headline)
   return <div className="screen">
     <h1 className="h1">{trade.symbol} · {trade.side ?? 'Направление уточняется'}</h1>
     <p className="lede">{trade.state === 'open' ? 'Открыта' : 'Закрыта'} · {{ copy: 'Копирование', external: 'Внешние операции', mixed: 'Смешанные операции', unknown: 'Источник уточняется' }[trade.source]}</p>
@@ -60,9 +65,9 @@ export function TradeDetailScreen({ resources, tradeRef, onOpen, active = true, 
     {trade.quality !== 'complete' && <p className="info-box">Начало истории восстановлено не полностью. Неизвестные цены и объёмы не включены в расчёт.</p>}
     {trade.state === 'open' && (live ? <PositionCard position={live} /> : <p className="info-box">Связь с актуальным снимком позиции уточняется. Статус защиты не подтверждён этим экраном.</p>)}
     <h2 className="h2">Финансовый результат</h2><section className="panel account-summary">
-      <div className="summary-row"><span>{trade.state === 'open' ? 'PnL закрытой части до комиссий' : 'PnL до комиссий'}</span><strong className="num">{formatPnl(trade.realized_pnl_gross_usdt).text}</strong></div>
+      <div className="summary-row"><span>{net ? (trade.state === 'open' ? 'PnL с начислениями' : 'Итог сделки') : trade.state === 'open' ? 'PnL закрытой части до комиссий' : 'PnL до комиссий'}</span><strong className="num">{formatPnl(net ? trade.net_pnl_usdt : trade.realized_pnl_gross_usdt).text}</strong></div>
       {data.money && (['commission', 'funding', 'builder'] as const).map(key => { const component = data.money![key]; return <div className="summary-row" key={key}><span>{{ commission: 'Торговые начисления', funding: 'Funding', builder: 'Комиссия Builder' }[key]}</span><strong className="num">{component.state === 'unavailable' ? 'Не проверено' : formatUsdt(component.known_amount)}{component.state === 'partial' ? ' · частично' : ''}</strong></div> })}
-      <div className="summary-row"><span>Итог с начислениями</span><strong className="num">{net ? formatPnl(trade.net_pnl_usdt).text : 'Уточняется'}</strong></div>
+      {!net && <div className="summary-row"><span>Итог с начислениями</span><strong className="num">Уточняется</strong></div>}
     </section>
     {data.money?.issues.length ? <ul className="money-issues">{data.money.issues.map(issue => <li key={issue}>{moneyIssue(issue)}</li>)}</ul> : !net && <p className="info-box">Состав начислений ещё не подтверждён.</p>}
     <p className="freshness">Сверка начислений: {formatDateTime(data.money?.as_of)}</p>

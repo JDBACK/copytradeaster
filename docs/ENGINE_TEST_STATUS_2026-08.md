@@ -2108,3 +2108,252 @@ live-regression. REAL Aster Testnet и ручной Telegram Mini App acceptance
 position без manual refresh, живой PnL, `FLAT-ALL` после закрытия, 53 tab
 transitions без роста sockets, 0 orphan tasks): live mode объявлен
 **ACCEPTED** в объёме §6 live-плана.
+
+## PnL с комиссиями: измеренный источник Builder fee и единое число результата
+
+Кампания 2026-09-13 (план: `docs/reports/PNL_NET_FEES_PLAN_2026-09.md`).
+Задача: показывать PnL с учётом комиссий в Mini App и Telegram, не выдумывая
+чисел.
+
+**Измерено на REAL Aster Testnet** (`scripts/probe_builder_fee_source.py`,
+`copyc2/BTCUSDT`, две пары round-trip, 2026-09-13):
+
+- заказ с `builder`+`feeRate=0.0001` → эффективная ставка `0.000500`;
+- тот же заказ без attribution → `0.000400`;
+- разница ровно `feeRate` (0.0001 от ноционала), отдельных `incomeType` не
+  появилось: вся сумма идёт одним `COMMISSION`, и по каждому `tradeId`
+  `userTrades.commission == |income COMMISSION|`.
+
+Вывод: `net = gross + COMMISSION + FUNDING_FEE` полон и для Builder-аккаунтов,
+отдельной компоненты Builder не требуется.
+
+**Формализовано живым тестом** `tests/testnet/test_builder_fee_accounting_live.py`
+(marker `testnet`, `CT_TESTNET=1`): attributed-раунд и контрольный матчатся по
+order id, проверяются ровно те же три утверждения. Прогон 2026-09-13 —
+**1 passed** (24.16s), аккаунт оставлен flat.
+
+**Закрытие gate.** `storage/history.py:builder_policy` больше не блокирует
+Builder-аккаунты безусловно: политика `included_in_commission` принимается
+только при durable-штампе `accounts.builder_fee_policy`
+(`policy:environment:measured_at`, migration #63), выставленном CLI
+`copytradeaster prove-builder-fee`; штамп другого environment не действует.
+Тесты политики: `tests/unit/history/test_builder_fee_policy.py` (7 cases).
+
+**Презентация.** `TradeDetailScreen` показывает одно число результата: при
+`net_complete` — итог с начислениями, иначе честный gross без второго
+конкурирующего значения рядом. Frontend-контракт:
+`miniapp/src/tradeResult.test.tsx`.
+
+**Гейты после правок.** Backend offline: **1611 passed, 2 skipped, 95
+deselected**. Frontend: **36 files / 415 passed**, Oxlint 0 warnings/0 errors,
+`tsc -b` + Vite build PASS. `ruff check .` и `ruff format --check .` — clean
+(325 files). Doc-гейты: `check_doc_facts.py` 13 passed / 1 skipped,
+`check_doc_links.py` OK, `check_doc_budgets.py` в потолках.
+
+**Остаётся открытым.** (1) Backfill income старше 7 дней — без него старые
+эпизоды остаются `gross_only`; (2) строка net в Telegram-карточке закрытия
+требует читателя денег в outbox-пути (сейчас карточка печатает gross и
+«до комиссий»); (3) `plan §P4` — ограничить выборку `load_episode_money`
+интервалом эпизода вместе с backfill'ом.
+
+### Раунд 2: backfill income и net в Telegram-карточке
+
+**Backfill income (снимает 7-дневное окно).** `GET /fapi/v3/income` отдаёт не
+более 7 дней на запрос, а воркер всегда идёт от «сейчас−7 дней»: начисления
+старше этого окна недостижимы. `history/backfill.py` + CLI
+`copytradeaster backfill-income --account <id> [--days N]` проходят старые окна
+явно, коммитят их через ту же durable-таблицу покрытия и добивают недобранные
+подокна внутри одного прохода (живой воркер старый диапазон не обходит — иначе
+pending остался бы навсегда). Диапазон, целиком лежащий внутри живого окна,
+отвергается до обращения к бирже.
+
+Живой прогон (REAL Aster Testnet, `copyc2`, 2026-09-13):
+
+```
+income window 1788494015806-1788666815805 rows=410  requests=2 complete=False
+income window 1788580415806-1788666815805 rows=0    requests=2 complete=False
+income window 1788580415806-1788602015805 rows=816  requests=1 complete=True
+income window 1788602015806-1788623615805 rows=816  requests=1 complete=True
+income window 1788623615806-1788666815805 rows=748  requests=1 complete=True
+covered 1788494015806-1788666815805 rows=2790 requests=7 stopped_at=None reason=None
+```
+
+То есть старые окна реально доезжают (2790 строк начислений в
+`follower_cash_flows`), дробление подокон завершается `complete=True`, стоп без
+остатка. Юнит-контракт: `tests/unit/history/test_backfill.py` (5 cases:
+чанкинг, отказ вне живого окна, отказ биржи, добивание pending, бюджет окон).
+
+**Telegram: одно число результата.** `notifications/money.py` —
+`SqliteEpisodeMoneyReader` читает доказанный `EpisodeMoneyView` эпизода;
+`NotificationRouter` (новый порт `money`) приклеивает его к карточке, поэтому
+закрытая сделка печатает `Итог сделки: <net> USDT`, а при неполной сверке —
+`Итог уточняется: начисления ещё сверяются` вместо gross, который читался бы как
+финальный. Без денежного ридера карточка сохраняет прежний gross-текст.
+`prepare_user_event_notification` принимает `scope` (его передаёт durable-sweep).
+Контракты: `tests/unit/notifications/test_money_reader.py` (3 cases: proven net,
+гэп без выдуманного нуля, неизвестный ref) и 3 новых кейса в
+`tests/unit/notifications/test_trade_cards.py`.
+
+**Гейты после правок.** Backend offline: **1622 passed, 2 skipped, 95
+deselected**. Frontend: **36 files / 415 passed**. `ruff check .` и
+`ruff format --check .` — clean (329 files). `check_doc_facts.py` 13 passed /
+1 skipped, `check_doc_links.py` OK.
+
+**Остаётся открытым.** (1) Живая доставка Telegram-карточки с net на тестнете
+(бот-токен + привязанный пользователь) — контракт закреплён юнит-тестами, живой
+прогон ещё нет; (2) `P4` — ограничить выборку `load_episode_money` интервалом
+эпизода (после массового backfill чтение денег станет шире, чем нужно);
+(3) funding по-прежнему не распределяется между двумя HEDGE-ногами (осознанно).
+
+**Проверка на живых данных продакшн-БД** (`data/copytrade.sqlite3`, `copyc2`,
+эпизод `b92207ba1e794a8f845cb5467e1d3a96`): `SqliteEpisodeMoneyReader` вернул
+`result_state=net_complete`, `gross=-0.0001`, `net=-0.06185172` — то есть
+gross минус реально списанная комиссия, за 0.02 с. Это тот же путь, которым
+закрытая сделка теперь показывает одно число в Mini App и в Telegram-карточке.
+
+### Раунд 3: send-time перерендер карточки и живой факт про ASTER-комиссию
+
+**Архитектурная правка.** Outbox-строка форматируется в момент публикации
+события, то есть сразу после закрытия — до того, как history worker импортирует
+комиссии и funding этой сделки. Поэтому карточка рендерится ещё раз прямо перед
+отправкой: `TelegramOutboxWorker` принимает `user_event_renderer`, движок
+собирает его из `build_user_event_renderer(db)` (тот же `SqliteEpisodeMoneyReader`),
+а фактически отправленный текст сохраняется в строке (`NotificationOutboxRepo.update_text`) —
+durable-лог теперь держит то, что реально получил пользователь. Любая ошибка
+перерендера — presentation-only: уходит ранее сохранённый текст.
+
+**Живой факт (REAL Testnet, `tg-8264892202`).** Комиссия этого аккаунта
+списывается **в ASTER**, а не в USDT (528 филлов из 8493 в БД). Учёт не
+конвертирует валюту без исторического курса и честно ставит `non_usdt_cost`,
+поэтому net по таким сделкам не публикуется — вместо gross карточка пишет
+`Итог уточняется: начисления ещё сверяются`. Это не дефект: правило «не-USDT
+издержки не конвертируем по текущему курсу» зафиксировано в
+`MINIAPP_FUNCTIONAL_UX_PLAN_2026-09.md §10.5`. Для аккаунтов с USDT-комиссией
+(напр. `copyc2`) тот же путь даёт `net_complete` — проверено на живых данных
+прод-БД (эпизод `b92207ba…`: gross −0.0001 → net −0.06185172).
+
+**Живая проверка доставки.** Прямая отправка ботом в чат владельца проходит
+(`getMe` = `aster_copytrade_bot`, `send_message` → message_id 318). Полный
+автоматический сценарий `tests/testnet/test_live_net_close_card_acceptance.py`
+написан и собирается, но в текущем окружении упирается в состояние копии БД:
+старые строки `execution.confirmed` получают 403 от Bot API, и воркер по
+продуктовой реакции отключает получателя (`notifications_enabled=0`,
+`blocked_at`), после чего карточке уже некуда доставляться. Сценарий требует
+копии без этого бэклога — зафиксировано в карте `tests/AGENTS.md`.
+
+**Проверки.** Backend offline: **1622 passed, 2 skipped, 95 deselected**.
+Frontend: 36 files / 415 passed. `ruff check .` / `ruff format --check .` clean.
+
+### Раунд 4: живой Telegram-сценарий закрыт (REAL Bot API)
+
+`tests/testnet/test_live_net_close_card_acceptance.py` — **1 passed (36.29s)**,
+команда `CT_TESTNET=1 uv run pytest tests/testnet/test_live_net_close_card_acceptance.py -v`
+(REAL Aster Testnet + REAL Telegram Bot API, 2026-09-13). Сценарий целиком на
+живом контуре:
+
+1. реальный master round-trip (вход + защитный стоп + закрытие) копируется на
+   аккаунт владельца `tg-8264892202`;
+2. продакшн history worker публикует эпизод, `POSITION_CLOSED` и импортирует
+   начисления;
+3. продакшн durable-sweep (`recover_user_events_durable`) создаёт outbox-строку;
+4. карточка перерендеривается в момент отправки и уходит через реальный Bot API
+   (строка доходит до `SENT`).
+
+**Найденный и исправленный живой баг.** Рендерер в `build_user_event_renderer`
+сверял `kind` со `"user.POSITION_CLOSED"`, тогда как в строке outbox лежит
+`"POSITION_CLOSED"` (префикс `user.` добавляет только `NotificationKind` роутера).
+Из-за этого карточка **никогда** не перерендеривалась бы в проде: снятие бага
+подтверждено живым прогоном. Проверка теперь принимает оба написания
+(`kind.removeprefix("user.")`).
+
+**Остаточная граница (честно).** Аккаунт владельца платит комиссию в ASTER
+(`non_usdt_cost`), поэтому его карточка несёт честный gross «PnL до комиссий»,
+а не net — и живой прогон это подтвердил (доставленный текст совпал с
+сохранённым). Полный net-путь по USDT-аккаунту (`copyc2`) прогнан на живых
+данных в раунде 2 (`net_complete`), но повторный живой прогон с
+`NET_CARD_ACCOUNT=copyc2` упирается в продуктовый guard
+`OwnershipConflictError`: пользователь уже владеет другим аккаунтом, и тест не
+перепривязывает его (правильное поведение продукта, не дефект).
+
+**Проверки после правок.** Backend offline: **1622 passed, 2 skipped, 96
+deselected**. `ruff check .` / `ruff format --check .` — clean (330 files).
+
+### Раунд 5: P4 — чтение денег ограничено интервалом, значение не изменилось
+
+**Задача.** После backfill `follower_cash_flows` вырос (на `copyc1` 5436 строк
+`COMMISSION`, у BTCUSDT - 5411), а `load_episode_money` читал **всю** историю
+символа плюс все income-окна: 108 200 строк и 100 SQL-запросов на страницу из
+20 эпизодов. Для массового backfill это латентность прода.
+
+**Что сделано.**
+
+1. `HistoryRepository.cashflows_for_symbols(..., start_ms=, end_ms=)` и
+   `windows(..., start_ms=, end_ms=)` принимают необязательные границы;
+   по умолчанию поведение прежнее (без границ), поэтому доказательства, которым
+   нужна вся история, её и получают.
+2. `HistoryRepository.cashflows_span_for_trades(scope, trade_ids)` возвращает
+   фактический временной промежуток начислений по конкретным `exchange_trade_id`.
+3. `load_episode_money` считает bound как **объединение** интервала эпизодов и
+   промежутка начислений по matched-сделкам; незакрытая сторона остаётся без
+   границы, а не получает выдуманный предел.
+4. Миграция #65: индекс `idx_follower_cash_trade`
+   (`account_id, environment, exchange_trade_id`) под этот поиск.
+
+**Живой факт, который поймала проба (REAL Testnet-данные, 2026-09-13).** Биржа
+пишет `COMMISSION` филла **раньше самого филла** — измерено 500-850 мс (пример:
+эпизод `5ac943f5…` открыт `1789209755850`, а комиссия его входного филла лежит
+`1789209755000`). Поэтому bound «по интервалу эпизода» отбрасывал комиссию
+собственного входного филла и давал `commission_missing` и `net=None`:
+19 расхождений из 20 эпизодов. Промежуток matched-начислений снимает это
+полностью - **0 расхождений** на 20 эпизодах `copyc1`, 30 `copyc3` и 30
+`tg-8264892202`: bounded-чтение вернуло байт-в-байт те же `money` и `proof`,
+что и полное чтение (`scripts/verify_episode_money_bounds.py`).
+
+**Цифры (копия прод-БД, `scripts/benchmark_episode_money.py`).**
+страница из 20 закрытых эпизодов `copyc1` считается **одним батчем** (так её
+читает Mini App): было 100 SQL-запросов / 132 707 строк / ~0.62 с, стало
+**5 запросов / 1415 строк / 0.015 с**. Последовательное чтение по одному:
+31.2 → 12.1 мс на эпизод.
+
+**Регрессия.** `tests/unit/history/test_accounting_bounds.py` (3 теста): комиссия
+раньше открытия эпизода всё равно считается; чтение действительно ограничено;
+история вне промежутка на результат не влияет. Живая приёмка не изменилась -
+`tests/testnet/test_live_net_close_card_acceptance.py` **1 passed (37.31s)**.
+
+**Проверки.** Backend offline: **1625 passed, 2 skipped, 96 deselected**.
+`ruff check .` / `ruff format --check .` — clean.
+
+### Раунд 6: net-строка реально доставлена (USDT-комиссия, REAL Bot API)
+
+Закрыт последний честный пробел раунда 4: до сих пор ни один живой прогон не
+показывал **доставленную** строку с net — аккаунт владельца платит комиссию в
+ASTER, а карточка в этом случае по правилу не публикует net.
+
+**Живой факт (REAL Testnet + REAL Bot API, 2026-09-13).** Вариант
+`NET_CARD_ACCOUNT=copyc2` (комиссия в USDT) — **1 passed (45.1s)**: реальный
+master round-trip копируется на follower, продакшн history worker публикует
+эпизод, durable sweep создаёт строку outbox, карточка перерендеривается в момент
+отправки и уходит через реальный Bot API до `SENT`. В доставленном тексте есть
+строка `Итог сделки: <net> USDT` **и отсутствует** `PnL до комиссий`, то есть
+send-time перерендер действительно отработал, а не отдал сохранённый при
+постановке текст. Дефолтный вариант (владелец, ASTER-комиссия) —
+**1 passed (46.6s)**: та же цепочка, но карточка несёт честный gross-фолбэк.
+
+**Три дефекта тестовой обвязки, каждый давал ложную зелень.** Раунд 4 «прошёл»
+именно из-за них — ветка gross-фолбэка терпима к `None`:
+
+1. Строка outbox читалась проекцией из шести колонок, а рендереру нужны
+   `account_id` и `trade_ref`; без них он молча возвращал `None` (сохранённый
+   текст). Продакшн-lease отдаёт полную строку — теперь `SELECT *`.
+2. Эпизод выбирался как «самый новый `POSITION_CLOSED` аккаунта», а один
+   catch-up sweep публикует сразу несколько уже опубликованных пар
+   OPENED/CLOSED: тест брал чужой эпизод (`c987c805…`) и сравнивал его net с
+   карточкой своего (`358db816…`). Привязка теперь идёт по собственному
+   close-филлу follower'а (`trade_ref` из `follower_episode_allocations`).
+3. При ретаргете follower'а общий fixture выравнивает только свой аккаунт:
+   оставшийся 0.001 плюс скопированные 0.002 дали close 0.003. Добавлен
+   предварительный `_flatten_account`.
+
+**Проверки.** Backend offline: **1625 passed, 2 skipped, 96 deselected**.
+Живой тестнет: обе ветки — по **1 passed** (45.1s и 46.6s).
+`ruff check .` / `ruff format --check .` — clean.

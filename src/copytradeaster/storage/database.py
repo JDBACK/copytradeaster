@@ -543,6 +543,19 @@ MIGRATIONS: list[str | tuple[str, ...]] = [
           AND link.kind IN ('PLACE_STOP','PLACE_TP')
       )
     """,
+    # The Builder fee's real source is an exchange fact, not a configuration
+    # guess: the signed testnet campaign proved it is charged inside the
+    # ordinary COMMISSION flow (attributed fills carry exactly `feeRate` more
+    # than unattributed ones and no extra income type appears). Store the
+    # proven policy together with the environment it was proven on, so a net
+    # result is unlocked only where the fact was actually measured.
+    "ALTER TABLE accounts ADD COLUMN builder_fee_policy TEXT",
+    # The money read matches a fill's cost by exchange trade id. Without this
+    # index that lookup scans the whole per-account cashflow history, which the
+    # P4 bound would then have to compensate for by reading more rows than the
+    # accountant can use.
+    "CREATE INDEX IF NOT EXISTS idx_follower_cash_trade "
+    "ON follower_cash_flows(account_id, environment, exchange_trade_id)",
 ]
 CASEFOLD_ADDRESS_INDEX_VERSION = next(
     version

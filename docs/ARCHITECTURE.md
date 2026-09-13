@@ -785,6 +785,14 @@ notification_outbox
 latch; #61 — `MARKET_CLOSE.executed_qty` и episode-bound `own_protective_filled`;
 #62 блокирует старый flat с linked Stop/TP без доказанной причины; `nonce_store` выдаёт nonces.
 
+Результат сделки считается только по доказанным фактам: закрытый эпизод
+показывает одно число (gross + `COMMISSION` + `FUNDING_FEE`), а при непроверенном
+слагаемом, не-USDT комиссии или непокрытом income-окне остаётся честный gross;
+политику Builder fee открывает только durable-штамп замера, привязанный к среде
+(миграция #64), а чтение денег ограничено интервалом эпизода и совпавших
+начислений (индекс #65). Детали и живое evidence —
+`reports/PNL_NET_FEES_PLAN_2026-09.md`.
+
 ## 14. Ошибки и safety state
 
 Ошибка одного follower не должна останавливать остальных.
@@ -823,15 +831,7 @@ credentials; replacement делает старую кнопку недейств
 4. integration через fake Aster adapter;
 5. signed testnet scenarios отдельным test marker.
 
-Особенно важный инвариант:
-
-```text
-reconcile()
-reconcile()
-reconcile()
-
-если actual == target → новых команд нет
-```
+Особенно важный инвариант: повторный `reconcile()` при `actual == target` не порождает новых команд (проверяется трёхкратным прогоном в `trading/test_reconciler_idempotent.py`).
 
 ## 16. Этапы развития без смены архитектуры
 

@@ -54,7 +54,7 @@ Boot (`App.start`): migrate → shadow-boot validation → `credentials.load` �
    - Uncommitted credentials in memory isolated via `EphemeralIdentityProvider` / `EphemeralKeyProvider`.
 4. **Concurrency & Storage**:
    - Single Python process. `Stage2Process` (`application/engine.py`) orchestrates Database, App, Telegram, Outbox, MiniApp, HistoryWorker.
-   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **63 migrations (indices 0..62)**.
+   - SQLite WAL + `busy_timeout=30000` + process-local `Database.write_lock`; **65 migrations (indices 0..64)**.
    - Per-account `asyncio.Lock` serializes order/nonce/leverage pipelines; `FollowerRegistry` is copy-on-write (lock-free reads, CAS publish under mutation lock).
 5. **Presentation Is Not Authority**: `FollowerSnapshotStore` revisions, private-stream hints and mark-price quotes only invalidate Mini App DTOs — they never mutate trading target, admission or `captured_at` freshness. Mark ticks change presentation quotes/PnL only; REST snapshots and reconciliation stay authoritative.
 
@@ -75,14 +75,14 @@ copytradeaster/
 │   ├── risk/                  # RiskEngine: pure sizing math, 80% margin cap (MARGIN_SAFETY=0.8)
 │   ├── trading/               # Coordinator, Planner, Executor, Reconciler, LeverageManager, FollowerRegistry, BuilderAttribution, FollowerSnapshotStore (snapshots.py)
 │   ├── history/               # Durable fill import, trade episodes/events, reconciliation and replay
-│   ├── storage/               # SQLite Database, MIGRATIONS (0..62), async repositories
+│   ├── storage/               # SQLite Database, MIGRATIONS (0..64), async repositories
 │   ├── credentials/           # SqliteCredentials with AES-256-GCM encryption (crypto.py)
 │   ├── notifications/         # NotificationRouter, SQLite outbox, TelegramOutboxWorker
 │   ├── onboarding/            # Direct & Builder (4-state lifecycle) onboarding services
 │   ├── application/           # UserApplicationService, Stage2Process (engine.py), control.py
 │   ├── telegram/              # aiogram 3.30 runtime, menu engine, access captcha, FSM flows, routers/
 │   ├── miniapp/               # aiohttp server (HMAC initData auth, 27 POST /miniapp/api/*, single-use-ticket live WebSocket, static host)
-│   └── cli/                   # main.py CLI dispatcher (11 subcommands)
+│   └── cli/                   # main.py CLI dispatcher (13 subcommands)
 ├── miniapp/                   # Frontend SPA (Vite 8 + React 19 + TS ~6 + Oxlint + Vitest); map: miniapp/AGENTS.md
 │   ├── src/screens/           # Home, Positions, TradeList (open/closed), TradeDetail, Activity, Settings, Notifications, Risk, SystemStatus, AccountBuilder, BuilderWizard, BuilderAttemptRecovery, SessionGate, SuccessScreen, InfoScreens (Security/Help)
 │   ├── src/components/        # AppShell.tsx + ui.tsx (Brand/TrustRail/Sheet/Row/ErrorBox; SVG icons inline) + PositionSummaryCard.tsx, TradeSummaryCard.tsx, TradeEventRow.tsx, RiskRuler.tsx, LiveStatus.tsx (stale rail), PullToRefresh.tsx
@@ -90,7 +90,7 @@ copytradeaster/
 │   ├── src/wallet.ts          # Injected EIP-1193 + lazy WalletConnect provider
 │   └── src/api.ts             # Typed API client with 15s AbortController timeout
 ├── tests/                     # unit/, integration/, replay/, testnet/; map: tests/AGENTS.md
-├── scripts/                   # dev-up.sh, detach_process.py, preview_miniapp_engine.py, verify_menu_button.py, audit_miniapp_browser.mjs, check_mark_stream.py, check_doc_links.py, check_doc_budgets.py, doc-budgets.json, check_doc_facts.py, benchmark_history.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py; map: scripts/AGENTS.md
+├── scripts/                   # dev-up.sh, detach_process.py, preview_miniapp_engine.py, verify_menu_button.py, audit_miniapp_browser.mjs, check_mark_stream.py, check_doc_links.py, check_doc_budgets.py, doc-budgets.json, check_doc_facts.py, benchmark_history.py, benchmark_episode_money.py, verify_episode_money_bounds.py, probe_builder_fee_source.py, manual_master_order.py, hybrid_load_test.py, testnet_soak.py, capture_stream.py; map: scripts/AGENTS.md
 ├── docs/                      # AGENTS.md (docs map), ARCHITECTURE.md, DEV_PLAN_SKELETON.md, ENGINE_TEST_STATUS_2026-08.md, reports/ (plan_live_test.md, stage journals + acceptance-s3/ + acceptance-p27/), reviews/, history/, ASTER_API_RESEARCH_2026-08.md
 └── data/                      # Local SQLite databases, logs, test artifacts (git-ignored)
 ```
@@ -150,6 +150,8 @@ copytradeaster emergency-close-all --yes                # emergency flat liquida
 copytradeaster telegram-user add <id> [--chat-id <id>]|list|block|unblock <id> # manage authorized Telegram users
 copytradeaster import-wallet wallet.txt [--wipe]        # import credentials from wallet.txt
 copytradeaster approve-builder [--accounts all|<id1..>] [--max-fee-rate <rate>] # batch EIP-712 builder approval
+copytradeaster prove-builder-fee --account <id> --yes # measure the Builder fee source on testnet and stamp the money policy
+copytradeaster backfill-income --account <id> [--days 30] # import commissions/funding older than the live 7-day window
 ```
 
 ### 4. Testing & QA
@@ -221,6 +223,9 @@ node scripts/audit_miniapp_browser.mjs smoke|series|nested|jitter|churn|swipe|st
 |`scripts/audit_miniapp_browser.mjs`|Read-only Chromium/CDP acceptance over the running Mini App (smoke/series/nested/jitter/churn/swipe/status/shot)|
 |`scripts/hybrid_load_test.py`|Hybrid signed-testnet + ShadowExchange load campaign|
 |`scripts/testnet_soak.py`|Signed testnet soak runner (requires `CT_TESTNET=1` + `CT_SOAK=1`)|
+|`scripts/benchmark_episode_money.py`|Trade-result read cost on a real DB copy: per-episode and page-batch `load_episode_money` with SQL calls/rows per statement|
+|`scripts/probe_builder_fee_source.py`|Signed testnet proof of where the Builder fee is charged (attributed vs control round trip); CLI twin `prove-builder-fee` writes the durable policy stamp|
+|`scripts/verify_episode_money_bounds.py`|Proves the money-read range bounds return identical money/issues/proof (bounds honoured vs stripped) on a real DB copy|
 |`docs/AGENTS.md`|Docs map: central navigation for all project documentation (what lives where, what is live vs history, reading order)|
 |`docs/ENGINE_TEST_STATUS_2026-08.md`|Single source of truth for test status, counters, and bug registry (#1–27)|
 |`docs/ARCHITECTURE.md`|Authoritative system architecture reference (§§1–20; §19 Footprint Ladder for new capabilities, §20 live presentation)|

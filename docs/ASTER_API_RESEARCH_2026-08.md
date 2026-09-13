@@ -758,3 +758,43 @@ close дополнительно закрыта migration #62. Текущие im
 счётчики находятся в `docs/ARCHITECTURE.md` и
 `docs/ENGINE_TEST_STATUS_2026-08.md`; перед mainnet потребуется отдельная
 актуализация API и owner-разрешение.
+
+## 12. Fee/PnL факты, измеренные на живом Testnet 2026-09-13
+
+Раздел фиксирует то, что понадобилось для отображения PnL с комиссиями
+(`docs/reports/PNL_NET_FEES_PLAN_2026-09.md`). Источники: официальный V3
+reference (raw GitHub), веб-версия `futures-v3/account&trades`, продуктовые
+доки Aster (fees / funding rate / mark price / user tutorial) и два signed
+round-trip прогона на `fapi.asterdex-testnet.com`.
+
+- `GET /fapi/v3/positionRisk` → `unRealizedProfit` считается по маркировочной
+  цене: формула Aster `PNL = Size of position × (Mark Price − Entry Price) ×
+  Direction`. Комиссии и funding в неё **не входят**, отдельных fee-полей в
+  ответе нет. То же и у account-level `totalUnrealizedProfit` / `crossUnPnl`.
+- `GET /fapi/v3/userTrades` → `realizedPnl` без комиссии; `commission` приходит
+  **положительным** числом (проверено), а парный `income` `COMMISSION` —
+  отрицательным с тем же модулем. Одна комиссия = один источник, суммировать
+  оба нельзя.
+- `GET /fapi/v3/income` → канонический подписанный cashflow; `incomeType`
+  включает `COMMISSION` и `FUNDING_FEE`. Ограничения: **не более 7 дней на
+  запрос**, по умолчанию последние 7 дней; `limit` до 1000; пагинации нет —
+  только разбиение окна, насыщенный миллисекунд остаётся gap.
+- Builder fee: при заказе с `builder`+`feeRate` эффективная ставка taker
+  поднимается ровно на `feeRate` (измерено: 0.000400 → 0.000500 при
+  `feeRate=0.0001`; разница на паре round-trip = 0.0001 ноционала), при этом
+  **отдельного `incomeType` не появляется** — вся сумма идёт одним
+  `COMMISSION`. Значит `net = gross + COMMISSION + FUNDING_FEE` полон и для
+  Builder-аккаунтов.
+- `GET /fapi/v3/builder/approvedUserList` и `/builder/userTrades` требуют
+  **агентского** кошелька: у Builder-аккаунта без Agent они отвечают
+  `-1000 No agent found`, а через агента follower'а — `Internal error: 1`.
+  Факт одобрения Builder читается надёжнее со стороны follower'а:
+  `GET /fapi/v3/builder`.
+- В Hedge mode Aster отвергает `reduceOnly` (`-1106 Parameter 'reduceOnly' sent
+  when not required`); сокращение задаётся конкретным `positionSide`.
+
+- Комиссия может списываться **не в USDT**: у аккаунта с включённой оплатой в
+  ASTER `userTrades.commissionAsset` и `income.asset` приходят как `ASTER`
+  (измерено: 528 филлов у одного аккаунта). Исторический курс в API не отдаётся,
+  поэтому точный net по таким сделкам без внешнего источника курса недоказуем —
+  учёт ставит `non_usdt_cost` и не публикует net.

@@ -68,6 +68,22 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("resume", help="allow new entries again")
     p_close = sub.add_parser("emergency-close-all", help="flatten every follower")
     p_close.add_argument("--yes", action="store_true", required=True)
+    p_fee = sub.add_parser(
+        "prove-builder-fee",
+        help="measure the Builder fee source on a signed testnet account and stamp the policy",
+    )
+    p_fee.add_argument("--account", required=True, help="follower account id or label")
+    p_fee.add_argument("--symbol", default="BTCUSDT")
+    p_fee.add_argument("--quantity", default="0.001")
+    p_fee.add_argument("--yes", action="store_true", required=True)
+    p_backfill = sub.add_parser(
+        "backfill-income",
+        help="import income (commissions/funding) older than the live 7-day window",
+    )
+    p_backfill.add_argument("--account", required=True, help="follower account id or label")
+    p_backfill.add_argument(
+        "--days", type=int, default=30, help="how many days back from the live window to import"
+    )
     return parser
 
 
@@ -119,6 +135,13 @@ async def _dispatch(args) -> int:
             print("refusing without --yes", file=sys.stderr)
             return 2
         return await _emergency_close_all()
+    if args.command == "backfill-income":
+        return await _backfill_income(args.account, args.days)
+    if args.command == "prove-builder-fee":
+        if not args.yes:
+            print("refusing without --yes", file=sys.stderr)
+            return 2
+        return await _prove_builder_fee(args.account, args.symbol, args.quantity)
     print(f"unknown command {args.command}", file=sys.stderr)
     return 2
 
@@ -537,6 +560,154 @@ async def _reconcile(account: str | None) -> int:
     finally:
         await app.stop()
     return 0
+
+
+async def _backfill_income(account: str, days: int) -> int:
+    """One resumable pass over income windows the live worker never reaches.
+
+    Testnet and mainnet both allowed: this reads history only, never places an
+    order. The pass stops at the exchange's live 7-day boundary, so it cannot
+    race the running worker.
+    """
+    import time
+
+    from copytradeaster.app import App
+    from copytradeaster.history.backfill import backfill_income
+    from copytradeaster.history.reader import HistoryReader
+    from copytradeaster.storage.history import HistoryScope
+
+    if not 1 <= days <= 365:
+        print("refusing: --days must be between 1 and 365", file=sys.stderr)
+        return 2
+    app = App(_load_settings())
+    try:
+        await app.db.connect()
+        await app.db.migrate()
+        await app.credentials.load()
+        row = await app.db.fetchone(
+            "SELECT id, role FROM accounts WHERE id=? OR label=?", (account, account)
+        )
+        if row is None or str(row["role"]) != "follower":
+            print(f"unknown follower account {account!r}", file=sys.stderr)
+            return 2
+        account_id = str(row["id"])
+        scope = HistoryScope(account_id, app.cfg.network_profile.name.lower())
+        now_ms = int(time.time() * 1000)
+        # The history reader signs with the follower's own credentials; the
+        # registry is populated exactly like `reconcile` does so an unknown
+        # account can never fall back to the master client.
+        for follower in await app.db.fetchall(
+            "SELECT * FROM accounts WHERE role='follower' AND enabled=1 ORDER BY id"
+        ):
+            await app.follower_registry.publish_new(app.runtime_for_row(follower))
+        reader = HistoryReader(app._client_for(account_id))
+        report = await backfill_income(
+            reader,
+            app.history,
+            scope,
+            start_ms=now_ms - (7 + days) * 86_400_000,
+            end_ms=now_ms,
+            now_ms=now_ms,
+        )
+        for step in report.steps:
+            print(
+                f"income window {step.start_ms}-{step.end_ms} rows={step.rows} "
+                f"requests={step.requests} complete={step.complete}"
+            )
+        print(
+            f"covered {report.covered_from_ms}-{report.covered_to_ms} rows={report.rows} "
+            f"requests={report.requests} stopped_at={report.stopped_at_ms} "
+            f"reason={report.reason}"
+        )
+        return 0 if report.stopped_at_ms is None else 1
+    finally:
+        await app.stop()
+
+
+async def _prove_builder_fee(account: str, symbol: str, quantity: str) -> int:
+    """Measure the Builder fee on a signed testnet account; stamp it only on proof.
+
+    The measurement places real (test-funds) orders, so it is testnet-only and
+    refuses a Builder account that this exchange account has not approved.
+    """
+    from decimal import Decimal as _D
+
+    from copytradeaster.app import App
+    from copytradeaster.history.builder_fee_proof import (
+        BuilderFeeProofError,
+        measure_builder_fee_policy,
+        policy_stamp,
+    )
+    from copytradeaster.storage.repositories import AccountRepo
+
+    cfg = _load_settings()
+    if "asterdex-testnet" not in cfg.rest_base_url:
+        print("refusing: builder-fee proof is a testnet measurement", file=sys.stderr)
+        return 2
+    builder_address = str(cfg.builder_address or "").strip()
+    if not builder_address.startswith("0x"):
+        print("refusing: CT_BUILDER_ADDRESS is not configured", file=sys.stderr)
+        return 2
+    app = App(cfg)
+    try:
+        await app.db.connect()
+        await app.db.migrate()
+        await app.credentials.load()
+        row = await app.db.fetchone(
+            "SELECT id, label, identity_source FROM accounts WHERE id=? OR label=?",
+            (account, account),
+        )
+        if row is None:
+            print(f"unknown account {account!r}", file=sys.stderr)
+            return 2
+        account_id = str(row["id"])
+        if str(row["identity_source"] or "") != "builder":
+            print(
+                f"account {account_id} is not a Builder account; nothing to measure",
+                file=sys.stderr,
+            )
+            return 2
+        client = app._client_for(account_id)
+        builders = await client.builder(account_id)
+        if not any(
+            str(entry.builder_address or "").casefold() == builder_address.casefold()
+            for entry in builders
+        ):
+            print(
+                f"account {account_id} has not approved builder {builder_address[:10]}…",
+                file=sys.stderr,
+            )
+            return 2
+        hedge = await client.get_position_mode(account_id)
+        try:
+            proof = await measure_builder_fee_policy(
+                client=client,
+                account_id=account_id,
+                symbol=symbol,
+                quantity=_D(quantity),
+                builder_address=builder_address,
+                fee_rate=_D(cfg.max_fee_rate),
+                hedge=hedge,
+            )
+        except BuilderFeeProofError as exc:
+            print(f"measurement failed: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"policy={proof.policy} attributed={proof.attributed_rate} "
+            f"control={proof.control_rate} feeRate={proof.fee_rate} "
+            f"fills={proof.attributed_fills}/{proof.control_fills} "
+            f"income={','.join(proof.income_types)}"
+        )
+        print(f"detail: {proof.detail}")
+        if proof.policy != "included_in_commission" or not proof.matches_fee_rate:
+            print("policy not stamped: the measurement did not prove the expected delta")
+            return 1
+        stamp = policy_stamp(proof, app.cfg.network_profile.name.lower())
+        await AccountRepo(app.db).set_builder_fee_policy(account_id, stamp)
+        print(f"stamped account_id={account_id} policy={stamp}")
+        return 0
+    finally:
+        await app.stop()
 
 
 async def _set_pause(paused: bool) -> int:

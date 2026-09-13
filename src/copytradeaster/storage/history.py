@@ -233,11 +233,29 @@ class HistoryRepository:
 
         await _compact_coverage(conn, scope, stream, symbol)
 
-    async def windows(self, scope: HistoryScope, stream: str, symbol: str) -> list:
+    async def windows(
+        self,
+        scope: HistoryScope,
+        stream: str,
+        symbol: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> list:
+        """Sync windows for one stream, optionally only those overlapping a range.
+
+        ``start_ms``/``end_ms`` bound the *overlap* (a window touching the range
+        at either edge is returned), which is what a coverage proof over that
+        range needs; both default to unbounded so existing callers keep the full
+        per-symbol history.
+        """
+        clauses = ["account_id=?", "environment=?", "stream=?", "symbol=?"]
+        params: list[object] = [scope.account_id, scope.environment, stream, symbol]
+        _bound_overlap(clauses, params, start_ms, end_ms)
         return await self._db.fetchall(
             "SELECT start_ms,end_ms,state,checked_at FROM history_sync_state "
-            "WHERE account_id=? AND environment=? AND stream=? AND symbol=? ORDER BY start_ms",
-            (scope.account_id, scope.environment, stream, symbol),
+            f"WHERE {' AND '.join(clauses)} ORDER BY start_ms",
+            tuple(params),
         )
 
     async def capture_state(self, scope: HistoryScope, symbol: str) -> dict | None:
@@ -554,8 +572,39 @@ class HistoryRepository:
             for row in rows
         ]
 
+    async def cashflows_span_for_trades(
+        self, scope: HistoryScope, trade_ids: Sequence[str]
+    ) -> tuple[int, int] | None:
+        """Time span of the cashflows carrying the given exchange trade ids.
+
+        C5 money read (plan §23.6): the accountant matches a fill's commission
+        by ``(symbol, trade_id)``, and the exchange stamps that COMMISSION
+        flow up to about a second off the fill itself, so no interval around
+        the fill is a safe bound. The durable flows that will actually be
+        matched define their own span; ``None`` means there is none (the caller
+        then keeps its other bounds instead of inventing a limit). Without the
+        trade-id index this is one indexed lookup per id.
+        """
+        wanted = tuple(dict.fromkeys(str(trade) for trade in trade_ids if str(trade)))
+        if not wanted:
+            return None
+        marks = ",".join("?" for _ in wanted)
+        row = await self._db.fetchone(
+            "SELECT MIN(occurred_at) AS lo, MAX(occurred_at) AS hi FROM follower_cash_flows "
+            f"WHERE account_id=? AND environment=? AND exchange_trade_id IN ({marks})",
+            (scope.account_id, scope.environment, *wanted),
+        )
+        if row is None or row["lo"] is None or row["hi"] is None:
+            return None
+        return (int(row["lo"]), int(row["hi"]))
+
     async def cashflows_for_symbols(
-        self, scope: HistoryScope, symbols: Sequence[str]
+        self,
+        scope: HistoryScope,
+        symbols: Sequence[str],
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> list[IncomeDTO]:
         """Owned cashflows for the requested symbols, oldest first.
 
@@ -563,6 +612,10 @@ class HistoryRepository:
         commissions, funding and builder flows. Symbol-empty global rows are
         included so no proven flow is silently dropped; callers attribute
         them explicitly and never treat a non-empty response as complete.
+
+        ``start_ms``/``end_ms`` bound ``occurred_at`` for callers that only
+        attribute flows inside a known episode span; the default stays
+        unbounded so a proof that depends on the whole symbol history keeps it.
         """
         wanted = tuple(symbols)
         if not wanted:
@@ -572,11 +625,17 @@ class HistoryRepository:
         if len(set(wanted)) != len(wanted):
             raise ValueError("cashflow symbols must be unique")
         marks = ",".join("?" for _ in wanted)
+        clauses = [
+            "account_id=?",
+            "environment=?",
+            f"(symbol IN ({marks}) OR symbol='')",
+        ]
+        params: list[object] = [scope.account_id, scope.environment, *wanted]
+        _bound_span(clauses, params, "occurred_at", start_ms, end_ms)
         rows = await self._db.fetchall(
-            "SELECT * FROM follower_cash_flows WHERE account_id=? AND environment=? "
-            f"AND (symbol IN ({marks}) OR symbol='') "
+            f"SELECT * FROM follower_cash_flows WHERE {' AND '.join(clauses)} "
             "ORDER BY occurred_at, income_type, tran_id",
-            (scope.account_id, scope.environment, *wanted),
+            tuple(params),
         )
         return [
             IncomeDTO(
@@ -625,13 +684,16 @@ class HistoryRepository:
         """Durable fee policy for money proof; the cap never becomes an expense.
 
         C5 money read (plan §23.6): ``direct`` accounts prove
-        ``included_in_commission`` (no separate builder flow expected);
-        ``builder`` accounts and unknown rows stay ``unknown`` so their net
-        keeps a concrete gap instead of an invented zero. Only proven USDT
-        flows ever count as costs.
+        ``included_in_commission`` (no separate builder flow expected).
+        ``builder`` accounts prove it only through the measured stamp written
+        by a signed exchange proof — the signed testnet campaign showed the
+        Builder fee is charged inside the ordinary COMMISSION flow, so a
+        Builder account whose stamp names *this* environment may claim the
+        same policy. Everything else stays ``unknown`` and keeps a concrete
+        gap instead of an invented zero. Only proven USDT flows count as costs.
         """
         row = await self._db.fetchone(
-            "SELECT identity_source FROM accounts WHERE id=?",
+            "SELECT identity_source, builder_fee_policy FROM accounts WHERE id=?",
             (scope.account_id,),
         )
         if row is None:
@@ -640,11 +702,21 @@ class HistoryRepository:
             source = str(row["identity_source"] or "direct").strip().lower()
         except (TypeError, ValueError, AttributeError):
             return "unknown"
-        if source == "builder":
-            return "unknown"
         if source == "direct":
             return "included_in_commission"
-        return "unknown"
+        if source != "builder":
+            return "unknown"
+        try:
+            measured = str(row["builder_fee_policy"] or "").strip()
+        except (TypeError, ValueError, AttributeError, IndexError):
+            return "unknown"
+        parts = measured.split(":")
+        if len(parts) != 3:
+            return "unknown"
+        policy, environment, _measured_at = parts
+        if policy != "included_in_commission" or environment != scope.environment:
+            return "unknown"
+        return policy
 
 
 def _iso_to_ms(value: object) -> int | None:
@@ -658,6 +730,37 @@ def _iso_to_ms(value: object) -> int | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return int(parsed.timestamp() * 1000)
+
+
+def _bound_span(
+    clauses: list[str],
+    params: list[object],
+    column: str,
+    start_ms: int | None,
+    end_ms: int | None,
+) -> None:
+    """Append an inclusive ``column`` range for callers that know their span."""
+    if start_ms is not None:
+        clauses.append(f"{column}>=?")
+        params.append(int(start_ms))
+    if end_ms is not None:
+        clauses.append(f"{column}<=?")
+        params.append(int(end_ms))
+
+
+def _bound_overlap(
+    clauses: list[str],
+    params: list[object],
+    start_ms: int | None,
+    end_ms: int | None,
+) -> None:
+    """Append an interval-overlap filter over ``start_ms``/``end_ms`` columns."""
+    if start_ms is not None:
+        clauses.append("end_ms>=?")
+        params.append(int(start_ms))
+    if end_ms is not None:
+        clauses.append("start_ms<=?")
+        params.append(int(end_ms))
 
 
 def _decimal_text(value: Decimal) -> str:

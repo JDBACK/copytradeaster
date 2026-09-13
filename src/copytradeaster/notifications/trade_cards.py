@@ -108,12 +108,20 @@ def _slot_word(slot: Any) -> str:
     return "Тейк-профит" if str(slot) == "take_profit" else "Стоп"
 
 
-def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) -> str:
+def format_user_event(
+    event: UserEvent,
+    *,
+    quantity_asset: str | None = None,
+    money: Any | None = None,
+) -> str:
     """Render one stored user event as Russian plain text.
 
     ``quantity_asset`` supplies the base-asset unit when the caller knows
     it (service layer); without it quantities render unitless rather than
-    guessed. Raises ValueError on an unknown kind.
+    guessed. ``money`` is the optional proven :class:`EpisodeMoneyView` of the
+    event's episode: a closed trade prints one net result when every cost is
+    proven, and says so when they are not — never a gross figure the reader
+    would take for final. Raises ValueError on an unknown kind.
     """
     facts = dict(event.facts)
     quantity_asset = quantity_asset or facts.get("quantity_asset")
@@ -153,6 +161,8 @@ def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) ->
             lines.append(f"Осталось: {remaining}")
         gross = _num(facts.get("realized_gross"))
         if gross is not None:
+            # The closed share keeps its own gross: an episode-level net would
+            # also absorb the entry costs of the still-open remainder.
             lines.append(f"PnL закрытой части: {gross} USDT до комиссий")
         return "\n".join(lines)
     if kind == "POSITION_CLOSED":
@@ -163,11 +173,20 @@ def format_user_event(event: UserEvent, *, quantity_asset: str | None = None) ->
         exit_price = _num(facts.get("exit_price"))
         if exit_price is not None:
             lines.append(f"Средний выход: {exit_price}")
-        gross = _num(facts.get("realized_gross"))
-        if gross is not None:
-            lines.append(f"PnL до комиссий: {gross} USDT")
+        # One result per trade: the proven net replaces the gross headline, and
+        # an unproven composition says so instead of printing gross as final.
+        if money is not None and getattr(money, "result_state", None) == "net_complete":
+            net = _num(getattr(money, "net", None))
+            if net is not None:
+                lines.append(f"Итог сделки: {net} USDT")
+        elif money is not None:
+            lines.append("Итог уточняется: начисления ещё сверяются")
         else:
-            lines.append("Результат уточняется")
+            gross = _num(facts.get("realized_gross"))
+            if gross is not None:
+                lines.append(f"PnL до комиссий: {gross} USDT")
+            else:
+                lines.append("Результат уточняется")
         duration = _duration(facts.get("duration_ms"))
         if duration is not None:
             lines.append(f"В позиции: {duration}")
