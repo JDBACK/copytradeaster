@@ -112,6 +112,7 @@ Handoff и сохранённые промпты — контекст своей
 | `ENGINE_MARGIN_AND_EXTERNAL_CLOSE_REVIEW_GUIDE_2026-09.md` | Гайд ревьюеру: новая семантика follower-close и mirror CROSSED/ISOLATED, карта diff, live-доказательства и ограничения |
 | `PRE_MAINNET_HARDENING_PROGRESS_2026-09.md` | Append-only исторический журнал pre-mainnet hardening: Packages A–G, corrective qualification, signed REAL Aster Testnet и load evidence; текущий disposition — в финальной секции и `ENGINE_TEST_STATUS_2026-08.md` |
 | `PRE_MAINNET_HARDENING_HANDOFF_2026-09.md` | Исторический handoff от 2026-09-04 с исходными требованиями REAL Aster Testnet; закрытые «следующие пакеты» не запускать по этому файлу |
+| `POST_HIATUS_VERIFICATION_2026-11.md` | Фактическое восстановление и проверка стека после ~2 месяцев простоя: expired-агенты всех 5 аккаунтов, рецепт delAgent→approveAgent→faucet→swap-creds, live copy-циклы, Mini App в Telegram WebView, диагноз непроходимого сока (PERCENT_PRICE -4131 на больной книге) и открытые хвосты |
 | `acceptance-p27/` | Owner Telegram WebView acceptance P2.7: 9/9 PASS, 12 current-HEAD скриншотов всех табов и Pause/Resume (2026-09-03) |
 | `acceptance-s3/` | S3 browser evidence: 20 скриншотов production bundle, включая Home, history alias/split/partial, nested screens и risk states; итог — S3 progress §§19–26 |
 | `assets/stage3-mini-app/` | 18 файлов: `reference-templates/` (8 screen-эталонов `01–08` + 8 `.prompt.txt`) и `current-head-a9d67a6/` (2 current-HEAD скрина: recovery + wallet) |
