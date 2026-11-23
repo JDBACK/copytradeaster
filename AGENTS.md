@@ -259,3 +259,13 @@ node scripts/audit_miniapp_browser.mjs smoke|series|nested|jitter|churn|swipe|st
 
 - **Language & Scope**: Keep user communications in Russian, technical, direct, and scoped to API/code facts without marketing filler.
 - **Plan Maintenance**: Update `docs/DEV_PLAN_SKELETON.md` when stage milestones change and the relevant `docs/reports/` journal when campaign progress changes. Routine instruction/copy edits do not require a new campaign report or milestone. Update `docs/AGENTS.md` (docs map) when introducing new documentation files.
+
+---
+
+## Bend
+
+When using Bend:
+- run `bend guide` to learn it
+- use `LAWS.bend` to keep important rules
+- run `bend PROOF.bend` before committing
+- parallelize the code whenever possible
